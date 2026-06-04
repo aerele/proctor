@@ -3,12 +3,24 @@ export type StudentForm = {
   name: string;
   roll_number: string;
   email: string;
-  proctor_passcode: string;
+  room: string;
   consent_accepted: boolean;
 };
 
+// Lifecycle status of the session as reported by the backend (Phase 2). Distinct
+// from the client UI `SessionStatus` below: this is the server-side session doc
+// state, the UI status is the recorder/screen state.
+export type ServerSessionStatus = "active" | "pending_approval" | "locked" | "ended";
+
 export type SessionStartResponse = {
   session_id: string;
+  status?: ServerSessionStatus;
+  hackerrank_username?: string;
+  name?: string;
+  room?: string;
+  contest_slug?: string;
+  storage_prefix?: string;
+  blocked_by_session_id?: string | null;
   start_ip?: string;
   contest_url?: string;
   upload_config: {
@@ -60,6 +72,8 @@ export type ProctorSettings = {
   start_at: string;
   end_at: string;
   contest_url?: string;
+  // Passcodes are removed (Phase 2). These remain optional/backward-compatible so
+  // an older settings doc still parses; the start/end flow no longer reads them.
   passcode?: string;
   end_code?: string;
   passcode_set?: boolean;
@@ -67,6 +81,36 @@ export type ProctorSettings = {
   end_code_set?: boolean;
   end_code_preview?: string;
   updated_at?: string;
+};
+
+// Live counts by session status for the admin dashboard (GET /api/admin/stats).
+export type AdminStats = {
+  live: number;
+  locked: number;
+  pending_approval: number;
+  finished: number;
+  total: number;
+  not_started_or_total?: number;
+};
+
+export type AdminStatsResponse = {
+  contest_slug: string | null;
+  stats: AdminStats;
+};
+
+export type SessionAction = "approve" | "lock" | "unlock" | "bypass" | "end";
+
+export type SessionActionRequest = {
+  action: SessionAction;
+  session_id?: string;
+  usernames?: string[];
+  contest_slug?: string;
+};
+
+export type SessionActionResponse = {
+  ok: boolean;
+  action: SessionAction;
+  updated: Array<Record<string, unknown>>;
 };
 
 // ALERT CONTRACT — shared JSON shape across proctor, contest-eval, and the admin console.

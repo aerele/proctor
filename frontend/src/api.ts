@@ -1,8 +1,24 @@
-import type { Alert, AlertFilters, HeartbeatResponse, ProctorEvent, ProctorSettings, ReviewNature, SessionStartResponse, StudentForm, UploadManifestItem, UploadUrlResponse } from "./types";
+import type {
+  AdminStatsResponse,
+  Alert,
+  AlertFilters,
+  HeartbeatResponse,
+  ProctorEvent,
+  ProctorSettings,
+  ReviewNature,
+  ServerSessionStatus,
+  SessionActionRequest,
+  SessionActionResponse,
+  SessionStartResponse,
+  StudentForm,
+  UploadManifestItem,
+  UploadUrlResponse
+} from "./types";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 const demoSettingsKey = "aerele-proctor-demo-settings";
+const demoSessionsKey = "aerele-proctor-demo-sessions";
 export const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD ?? "";
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
@@ -40,42 +56,173 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export async function startSession(form: StudentForm): Promise<SessionStartResponse> {
+// ---- Demo session store ---------------------------------------------------
+// In demo mode there is no backend, so the student start/resume/end lifecycle is
+// modelled in localStorage. Each record mirrors the relevant backend session-doc
+// fields so resume can rebuild the same SessionStartResponse, and a second start
+// for an already-active username reproduces the pending_approval path.
+
+type DemoSession = {
+  session_id: string;
+  status: ServerSessionStatus;
+  hackerrank_username: string;
+  username_norm: string;
+  name: string;
+  room: string;
+  contest_slug: string;
+  storage_prefix: string;
+  blocked_by_session_id: string | null;
+  start_ip: string;
+};
+
+function readDemoSessions(): DemoSession[] {
+  const raw = window.localStorage.getItem(demoSessionsKey);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as DemoSession[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeDemoSessions(sessions: DemoSession[]) {
+  window.localStorage.setItem(demoSessionsKey, JSON.stringify(sessions));
+}
+
+function upsertDemoSession(session: DemoSession) {
+  const sessions = readDemoSessions().filter((item) => item.session_id !== session.session_id);
+  sessions.push(session);
+  writeDemoSessions(sessions);
+}
+
+function normalizeUsername(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "_").slice(0, 120);
+}
+
+function demoStoragePrefix(contestSlug: string, usernameNorm: string, sessionId: string) {
+  if (contestSlug) return `contests/${contestSlug}/sessions/${usernameNorm}/${sessionId}/`;
+  return `sessions/${usernameNorm}/${sessionId}/`;
+}
+
+function contestSlugFromUrl(contestUrl?: string) {
+  if (!contestUrl) return "";
+  try {
+    const segments = new URL(contestUrl).pathname.split("/").filter(Boolean);
+    if (!segments.length) return "";
+    return segments[segments.length - 1].replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  } catch {
+    return "";
+  }
+}
+
+function demoSessionResponse(session: DemoSession, contestUrl: string): SessionStartResponse {
+  return {
+    session_id: session.session_id,
+    status: session.status,
+    hackerrank_username: session.hackerrank_username,
+    name: session.name,
+    room: session.room,
+    contest_slug: session.contest_slug,
+    storage_prefix: session.storage_prefix,
+    blocked_by_session_id: session.blocked_by_session_id,
+    start_ip: session.start_ip,
+    contest_url: contestUrl,
+    upload_config: {
+      chunk_seconds: 20,
+      video_bits_per_second: 750_000,
+      media_bits_per_second: 180_000,
+      audio_bits_per_second: 32_000,
+      max_width: 1280,
+      max_frame_rate: 5
+    },
+    heartbeat_interval_seconds: 15
+  };
+}
+
+export async function startSession(form: StudentForm, existingSessionId?: string): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(250);
     const settings = getDemoSettings();
-    if (!settings?.passcode) {
-      throw new Error("Proctoring is not configured yet. Ask the administrator to set the schedule and passcode.");
+    // Phase 3: no passcode. Start is gated by configured-and-valid time window only.
+    if (!settings?.start_at || !settings?.end_at) {
+      throw new Error("Proctoring is not configured yet. Ask the administrator to set the schedule.");
     }
     const now = Date.now();
-    if (settings.start_at && now < Date.parse(settings.start_at)) {
+    if (now < Date.parse(settings.start_at)) {
       throw new Error("Proctoring has not started yet.");
     }
-    if (settings.end_at && now > Date.parse(settings.end_at)) {
+    if (now > Date.parse(settings.end_at)) {
       throw new Error("Proctoring has ended.");
     }
-    if (form.proctor_passcode !== settings.passcode) {
-      throw new Error("Invalid proctoring passcode.");
+
+    const contestUrl = settings.contest_url || "";
+    const contestSlug = contestSlugFromUrl(contestUrl);
+    const usernameNorm = normalizeUsername(form.hackerrank_username);
+
+    // Idempotent replay: same session_id this browser already owns → return it.
+    if (existingSessionId) {
+      const replay = readDemoSessions().find((item) => item.session_id === existingSessionId);
+      if (replay && replay.username_norm === usernameNorm && replay.contest_slug === contestSlug) {
+        return demoSessionResponse(replay, contestUrl);
+      }
     }
-    return {
-      session_id: crypto.randomUUID(),
-      start_ip: "demo.local",
-      contest_url: settings.contest_url || "",
-      upload_config: {
-        chunk_seconds: 20,
-        video_bits_per_second: 750_000,
-        media_bits_per_second: 180_000,
-        audio_bits_per_second: 32_000,
-        max_width: 1280,
-        max_frame_rate: 5
-      },
-      heartbeat_interval_seconds: 15
+
+    // Single-session reconciliation: a non-ended session for the same
+    // (username, contest) forces the new one to pending_approval.
+    const existingLive = readDemoSessions().find(
+      (item) => item.username_norm === usernameNorm && item.contest_slug === contestSlug && item.status !== "ended"
+    );
+    const sessionId = crypto.randomUUID();
+    const hasConflict = Boolean(existingLive);
+    const session: DemoSession = {
+      session_id: sessionId,
+      status: hasConflict ? "pending_approval" : "active",
+      hackerrank_username: form.hackerrank_username.trim(),
+      username_norm: usernameNorm,
+      name: form.name.trim(),
+      room: form.room.trim(),
+      contest_slug: contestSlug,
+      storage_prefix: demoStoragePrefix(contestSlug, usernameNorm, sessionId),
+      blocked_by_session_id: hasConflict ? existingLive!.session_id : null,
+      start_ip: "demo.local"
     };
+    upsertDemoSession(session);
+    return demoSessionResponse(session, contestUrl);
   }
 
   return request<SessionStartResponse>("/api/session/start", {
     method: "POST",
-    body: JSON.stringify(form)
+    body: JSON.stringify({
+      hackerrank_username: form.hackerrank_username,
+      name: form.name,
+      roll_number: form.roll_number,
+      email: form.email,
+      room: form.room,
+      consent_accepted: form.consent_accepted,
+      ...(existingSessionId ? { session_id: existingSessionId } : {})
+    })
+  });
+}
+
+export async function resumeSession(sessionId: string, hackerrankUsername?: string): Promise<SessionStartResponse> {
+  if (demoMode) {
+    await wait(150);
+    const session = readDemoSessions().find((item) => item.session_id === sessionId);
+    if (!session) throw new Error("Session not found");
+    if (hackerrankUsername && session.username_norm !== normalizeUsername(hackerrankUsername)) {
+      throw new Error("Session not found");
+    }
+    const contestUrl = getDemoSettings()?.contest_url || "";
+    return demoSessionResponse(session, contestUrl);
+  }
+
+  return request<SessionStartResponse>("/api/session/resume", {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: sessionId,
+      ...(hackerrankUsername ? { hackerrank_username: hackerrankUsername } : {})
+    })
   });
 }
 
@@ -84,7 +231,17 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
     await wait(100);
     assertDemoAdmin(password);
     const settings = getDemoSettings();
-    return settings ? { ...settings, passcode: "", end_code: "", passcode_set: Boolean(settings.passcode), passcode_preview: maskPasscode(settings.passcode), end_code_set: Boolean(settings.end_code), end_code_preview: maskPasscode(settings.end_code) } : { start_at: "", end_at: "", passcode_set: false, end_code_set: false };
+    return settings
+      ? {
+          ...settings,
+          passcode: "",
+          end_code: "",
+          passcode_set: Boolean(settings.passcode),
+          passcode_preview: maskPasscode(settings.passcode),
+          end_code_set: Boolean(settings.end_code),
+          end_code_preview: maskPasscode(settings.end_code)
+        }
+      : { start_at: "", end_at: "", passcode_set: false, end_code_set: false };
   }
 
   return request<ProctorSettings>("/api/admin/settings", {
@@ -103,15 +260,29 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       start_at: settings.start_at,
       end_at: settings.end_at,
       contest_url: settings.contest_url || "",
+      // Passcodes are removed from the start/end flow, but we keep persisting any
+      // value an older field still sends so the stored doc stays compatible.
       passcode: settings.passcode || getDemoSettings()?.passcode || "",
       end_code: settings.end_code || getDemoSettings()?.end_code || "",
       updated_at: new Date().toISOString()
     };
-    if (!next.start_at || !next.end_at || !next.passcode || !next.end_code) {
-      throw new Error("Start time, end time, passcode, and end code are required.");
+    // Phase 3: only the time window is required to save the gate.
+    if (!next.start_at || !next.end_at) {
+      throw new Error("Start time and end time are required.");
+    }
+    if (Date.parse(next.start_at) >= Date.parse(next.end_at)) {
+      throw new Error("Start time must be before end time.");
     }
     window.localStorage.setItem(demoSettingsKey, JSON.stringify(next));
-    return { ...next, passcode: "", end_code: "", passcode_set: true, passcode_preview: maskPasscode(next.passcode), end_code_set: true, end_code_preview: maskPasscode(next.end_code) };
+    return {
+      ...next,
+      passcode: "",
+      end_code: "",
+      passcode_set: Boolean(next.passcode),
+      passcode_preview: maskPasscode(next.passcode),
+      end_code_set: Boolean(next.end_code),
+      end_code_preview: maskPasscode(next.end_code)
+    };
   }
 
   return request<ProctorSettings>("/api/admin/settings", {
@@ -204,16 +375,15 @@ export async function heartbeat(params: {
   });
 }
 
-export async function endSession(params: { sessionId: string; manifest: UploadManifestItem[]; endCode: string; assuranceAccepted: boolean }): Promise<void> {
+export async function endSession(params: { sessionId: string; manifest: UploadManifestItem[]; assuranceAccepted: boolean }): Promise<void> {
   if (demoMode) {
     await wait(250);
-    const settings = getDemoSettings();
     if (!params.assuranceAccepted) {
       throw new Error("Integrity assurance is required before ending the test.");
     }
-    if (!settings?.end_code || params.endCode !== settings.end_code) {
-      throw new Error("Invalid proctoring end code.");
-    }
+    // Mark the demo session ended so it stops blocking new starts and reflects in stats.
+    const session = readDemoSessions().find((item) => item.session_id === params.sessionId);
+    if (session) upsertDemoSession({ ...session, status: "ended", blocked_by_session_id: null });
     return;
   }
 
@@ -222,21 +392,16 @@ export async function endSession(params: { sessionId: string; manifest: UploadMa
     body: JSON.stringify({
       session_id: params.sessionId,
       manifest: params.manifest,
-      end_proctor_code: params.endCode,
       assurance_accepted: params.assuranceAccepted
     })
   });
 }
 
-export async function validateEndSession(params: { sessionId: string; endCode: string; assuranceAccepted: boolean }): Promise<void> {
+export async function validateEndSession(params: { sessionId: string; assuranceAccepted: boolean }): Promise<void> {
   if (demoMode) {
     await wait(100);
-    const settings = getDemoSettings();
     if (!params.assuranceAccepted) {
       throw new Error("Integrity assurance is required before ending the test.");
-    }
-    if (!settings?.end_code || params.endCode !== settings.end_code) {
-      throw new Error("Invalid proctoring end code.");
     }
     return;
   }
@@ -245,7 +410,6 @@ export async function validateEndSession(params: { sessionId: string; endCode: s
     method: "POST",
     body: JSON.stringify({
       session_id: params.sessionId,
-      end_proctor_code: params.endCode,
       assurance_accepted: params.assuranceAccepted
     })
   });
@@ -255,7 +419,11 @@ export async function fetchAdminSessions(username: string, password: string) {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    return { sessions: [] };
+    const usernameNorm = normalizeUsername(username);
+    const sessions = readDemoSessions()
+      .filter((item) => item.username_norm === usernameNorm)
+      .map((item) => ({ ...item, evidence: [] as Array<Record<string, unknown>> }));
+    return { sessions: sessions as Array<Record<string, unknown>> };
   }
 
   return request<{
@@ -266,6 +434,104 @@ export async function fetchAdminSessions(username: string, password: string) {
       "x-admin-password": password
     }
   });
+}
+
+export async function fetchAdminStats(password: string, contestSlug?: string): Promise<AdminStatsResponse> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const sessions = readDemoSessions();
+    // Derive live counts from the demo session store so the dashboard reflects
+    // whatever the student flow created. Fall back to canned numbers when empty.
+    if (!sessions.length) {
+      return {
+        contest_slug: contestSlug || null,
+        stats: { live: 6, locked: 1, pending_approval: 2, finished: 14, total: 23, not_started_or_total: 23 }
+      };
+    }
+    const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, total: 0, not_started_or_total: 0 };
+    for (const session of sessions) {
+      if (contestSlug && session.contest_slug !== contestSlug) continue;
+      stats.total += 1;
+      if (session.status === "active") stats.live += 1;
+      else if (session.status === "locked") stats.locked += 1;
+      else if (session.status === "pending_approval") stats.pending_approval += 1;
+      else if (session.status === "ended") stats.finished += 1;
+    }
+    stats.not_started_or_total = stats.total;
+    return { contest_slug: contestSlug || null, stats };
+  }
+
+  const query = contestSlug ? `?contest_slug=${encodeURIComponent(contestSlug)}` : "";
+  return request<AdminStatsResponse>(`/api/admin/stats${query}`, {
+    method: "GET",
+    headers: {
+      "x-admin-password": password
+    }
+  });
+}
+
+export async function sessionAction(password: string, body: SessionActionRequest): Promise<SessionActionResponse> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const updated = applyDemoSessionAction(body);
+    return { ok: true, action: body.action, updated };
+  }
+
+  return request<SessionActionResponse>("/api/admin/session-action", {
+    method: "POST",
+    headers: {
+      "x-admin-password": password
+    },
+    body: JSON.stringify(body)
+  });
+}
+
+// Mirror the backend applySessionAction semantics against the demo store so the
+// admin console behaves identically in VITE_DEMO_MODE.
+function applyDemoSessionAction(body: SessionActionRequest): Array<Record<string, unknown>> {
+  const sessions = readDemoSessions();
+  const targets: DemoSession[] = [];
+  if (body.session_id) {
+    const found = sessions.find((item) => item.session_id === body.session_id);
+    if (found) targets.push(found);
+  } else if (body.usernames?.length) {
+    for (const username of body.usernames) {
+      const usernameNorm = normalizeUsername(username);
+      const live = sessions
+        .filter((item) => item.username_norm === usernameNorm && item.status !== "ended" && (!body.contest_slug || item.contest_slug === body.contest_slug));
+      if (live.length) targets.push(live[0]);
+    }
+  }
+
+  const updated: Array<Record<string, unknown>> = [];
+  for (const target of targets) {
+    if (body.action === "approve") {
+      if (target.blocked_by_session_id) {
+        const conflict = sessions.find((item) => item.session_id === target.blocked_by_session_id);
+        if (conflict && conflict.status !== "ended") {
+          upsertDemoSession({ ...conflict, status: "ended", blocked_by_session_id: null });
+          updated.push({ ...conflict, status: "ended" });
+        }
+      }
+      upsertDemoSession({ ...target, status: "active", blocked_by_session_id: null });
+      updated.push({ ...target, status: "active", blocked_by_session_id: null });
+    } else if (body.action === "lock") {
+      upsertDemoSession({ ...target, status: "locked" });
+      updated.push({ ...target, status: "locked" });
+    } else if (body.action === "unlock") {
+      upsertDemoSession({ ...target, status: "active" });
+      updated.push({ ...target, status: "active" });
+    } else if (body.action === "bypass") {
+      upsertDemoSession({ ...target, status: "active", blocked_by_session_id: null });
+      updated.push({ ...target, status: "active", blocked_by_session_id: null });
+    } else if (body.action === "end") {
+      upsertDemoSession({ ...target, status: "ended", blocked_by_session_id: null });
+      updated.push({ ...target, status: "ended" });
+    }
+  }
+  return updated;
 }
 
 export async function fetchAlerts(password: string, filters?: AlertFilters): Promise<{ alerts: Alert[] }> {
