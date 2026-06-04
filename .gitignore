@@ -11,3 +11,10 @@ coverage/
 backend/.aws-sam/
 backend/build/
 frontend/dist/
+
+# overnight-run scratch + secrets + build artifacts
+night-run/verdict-queue/
+*.pem
+spike/proctor-extension.crx
+spike/iframe-test/proctor-extension.crx
+spike/iframe-test/proctor-extension.zip
