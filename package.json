@@ -1,0 +1,17 @@
+{
+  "name": "aerele-proctor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HackerRank companion proctoring app for screen recording and evidence collection.",
+  "scripts": {
+    "dev": "npm --workspace frontend run dev",
+    "build": "npm --workspace frontend run build",
+    "lint": "npm --workspace frontend run lint",
+    "backend:test": "npm --workspace backend run test"
+  },
+  "workspaces": [
+    "frontend",
+    "backend",
+    "video-worker"
+  ]
+}

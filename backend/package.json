@@ -1,0 +1,16 @@
+{
+  "name": "@aerele-proctor/backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "start": "functions-framework --target=api"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.11.0",
+    "@google-cloud/functions-framework": "^3.4.6",
+    "@google-cloud/storage": "^7.16.0"
+  }
+}
