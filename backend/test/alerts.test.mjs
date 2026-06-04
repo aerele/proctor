@@ -384,13 +384,47 @@ test("adminAlerts filters by contest_slug / severity / source", async () => {
   await call(makeReq({ method: "POST", path: "/api/alerts", headers, body: validAlert({ id: "p1", contest_slug: "alpha", severity: "critical", source: "proctor" }) }));
   await call(makeReq({ method: "POST", path: "/api/alerts", headers, body: validAlert({ id: "p2", contest_slug: "beta", severity: "warning", source: "contest-eval", type: "web_paste" }) }));
 
-  const res = await call(makeReq({
+  const byContest = await call(makeReq({
     method: "GET",
     path: "/api/admin/alerts",
     headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
     query: { contest_slug: "beta" }
   }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.alerts.length, 1);
-  assert.equal(res.body.alerts[0].id, "p2");
+  assert.equal(byContest.statusCode, 200);
+  assert.equal(byContest.body.alerts.length, 1);
+  assert.equal(byContest.body.alerts[0].id, "p2");
+
+  // B6: severity / source are filtered in memory (no composite index needed).
+  const bySeverity = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/alerts",
+    headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
+    query: { severity: "warning" }
+  }));
+  assert.deepEqual(bySeverity.body.alerts.map((a) => a.id), ["p2"], "in-memory severity filter");
+
+  const bySource = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/alerts",
+    headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
+    query: { source: "proctor" }
+  }));
+  assert.deepEqual(bySource.body.alerts.map((a) => a.id), ["p1"], "in-memory source filter");
+
+  // B6: all three at once — one server-side (contest_slug) + two in memory.
+  const combined = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/alerts",
+    headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
+    query: { contest_slug: "beta", severity: "warning", source: "contest-eval" }
+  }));
+  assert.deepEqual(combined.body.alerts.map((a) => a.id), ["p2"], "combined filter, no composite index");
+
+  const combinedMiss = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/alerts",
+    headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
+    query: { contest_slug: "beta", severity: "critical" }
+  }));
+  assert.equal(combinedMiss.body.alerts.length, 0, "no alert matches beta+critical");
 });

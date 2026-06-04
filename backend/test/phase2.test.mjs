@@ -415,10 +415,18 @@ test("single-session: a NEW start for an already-active username → pending_app
 // 2.3 — Sure-shot proctor alerts → proctor_alerts
 // =====================================================================
 
-async function startedSession(firestore, storage) {
+async function startedSession(firestore, storage, { mergedVideoKey } = {}) {
   seedSettings(firestore);
   const res = await start(firestore, storage);
-  return res.body.session_id;
+  const sessionId = res.body.session_id;
+  // B4: simulate the video-worker having written merged_video_key back onto the
+  // session doc after a successful merge, so sure-shot alerts get a deep-link.
+  if (mergedVideoKey !== null) {
+    const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+    const existing = store.get(sessionId);
+    store.set(sessionId, { ...existing, merged_video_key: mergedVideoKey || `${existing.storage_prefix}alice-${sessionId}.webm` });
+  }
+  return sessionId;
 }
 
 for (const type of ["recording_stopped", "screen_share_stopped", "invalid_share_surface", "recording_error"]) {
@@ -445,6 +453,45 @@ for (const type of ["recording_stopped", "screen_share_stopped", "invalid_share_
   });
 }
 
+test("B4: sure-shot alert without a merged video has NO video_key (no broken folder link)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  // mergedVideoKey:null → do NOT write merged_video_key onto the session doc.
+  const sessionId = await startedSession(firestore, storage, { mergedVideoKey: null });
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: { session_id: sessionId, events: [{ type: "recording_error", timestamp: "2026-06-05T10:00:00Z" }] }
+  }));
+
+  const alerts = firestore._collections.get(process.env.ALERTS_COLLECTION);
+  const alert = [...alerts.values()][0];
+  assert.ok(alert, "alert raised");
+  assert.equal(alert.video_key, undefined, "no merged video → no video_key (link hidden, not a broken folder prefix)");
+
+  // And on READ the admin listing resolves download_url to null (link hidden).
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/alerts", headers: ADMIN_HEADERS }));
+  assert.equal(res.body.alerts[0].download_url, null, "no video_key → download_url null");
+});
+
+test("B4: sure-shot alert WITH a merged video deep-links to merged_video_key", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage, { mergedVideoKey: "contests/c/sessions/alice/s1/alice-s1.webm" });
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: { session_id: sessionId, events: [{ type: "recording_error", timestamp: "2026-06-05T10:00:00Z" }] }
+  }));
+
+  const alerts = firestore._collections.get(process.env.ALERTS_COLLECTION);
+  const alert = [...alerts.values()][0];
+  assert.equal(alert.video_key, "contests/c/sessions/alice/s1/alice-s1.webm", "deep-links to the merged video object");
+  assert.ok(!alert.video_key.endsWith("/"), "never a folder prefix");
+});
+
 test("noisy events (focus/blur/visibility/clipboard) → NO proctor alerts", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
@@ -467,30 +514,75 @@ test("noisy events (focus/blur/visibility/clipboard) → NO proctor alerts", asy
   assert.equal(alerts === undefined || alerts.size === 0, true, "noisy events must not create alerts");
 });
 
-test("sure-shot: heartbeat with recording_state=stopped → critical proctor alert", async () => {
+test("sure-shot: heartbeat with COMPOSITE stopped recording_state → critical proctor alert", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   const sessionId = await startedSession(firestore, storage);
 
+  // B2: the REAL recorder sends a composite, not a bare 'stopped'. The core
+  // capture (combined:inactive / screen:stopped) must trip the sure-shot.
   await call(makeReq({
     method: "POST",
     path: "/api/heartbeat",
-    body: { session_id: sessionId, recording_state: "stopped", visibility_state: "visible" }
+    body: {
+      session_id: sessionId,
+      recording_state: "combined:inactive;screen:stopped;camera:recording;microphone:stopped",
+      visibility_state: "visible"
+    }
   }));
   const alerts = firestore._collections.get(process.env.ALERTS_COLLECTION);
   const recAlert = [...alerts.values()].find((a) => a.type === "recording_stopped");
-  assert.ok(recAlert, "recording_stopped alert raised from heartbeat");
+  assert.ok(recAlert, "recording_stopped alert raised from composite heartbeat");
   assert.equal(recAlert.severity, "critical");
   assert.equal(recAlert.source, "proctor");
 
-  // A 'recording' heartbeat must NOT add another alert.
+  // A fully-recording composite must NOT add another alert.
   await call(makeReq({
+    method: "POST",
+    path: "/api/heartbeat",
+    body: {
+      session_id: sessionId,
+      recording_state: "combined:recording;screen:recording;camera:recording;microphone:recording",
+      visibility_state: "visible"
+    }
+  }));
+  const after = [...alerts.values()].filter((a) => a.type === "recording_stopped");
+  assert.equal(after.length, 1, "a fully-recording composite adds no new stopped alert");
+});
+
+test("B2: a composite where ONLY camera/mic stopped does NOT fire recording_stopped", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+
+  // Core capture still recording; only optional tracks dropped → no sure-shot.
+  await call(makeReq({
+    method: "POST",
+    path: "/api/heartbeat",
+    body: {
+      session_id: sessionId,
+      recording_state: "combined:recording;screen:recording;camera:stopped;microphone:stopped",
+      visibility_state: "visible"
+    }
+  }));
+  const alerts = firestore._collections.get(process.env.ALERTS_COLLECTION);
+  const recAlert = [...(alerts?.values() || [])].find((a) => a.type === "recording_stopped");
+  assert.ok(!recAlert, "optional-track stop alone must not fire recording_stopped");
+});
+
+test("B1: heartbeat response carries the live session status", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+
+  // An active session reports status:'active' so the recorder keeps going.
+  const active = await call(makeReq({
     method: "POST",
     path: "/api/heartbeat",
     body: { session_id: sessionId, recording_state: "recording", visibility_state: "visible" }
   }));
-  const after = [...alerts.values()].filter((a) => a.type === "recording_stopped");
-  assert.equal(after.length, 1, "a recording heartbeat adds no new stopped alert");
+  assert.equal(active.statusCode, 200);
+  assert.equal(active.body.status, "active", "active session heartbeat reports status:active");
 });
 
 test("sure-shot: heartbeat IP change → warning ip_changed proctor alert", async () => {

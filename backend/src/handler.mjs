@@ -508,7 +508,10 @@ async function recordHeartbeat(req) {
     });
   }
 
-  return { ok: true, start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged };
+  // B1: surface the session lifecycle status so the recorder can self-stop if a
+  // proctor locked/ended the session (requireWritableSession already 403/409s a
+  // non-active session, but an active heartbeat returns the live status too).
+  return { ok: true, status: session.status || "active", start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged };
 }
 
 async function validateEndSession(req) {
@@ -794,8 +797,33 @@ const SURE_SHOT_EVENT_TYPES = {
 // Recorder states that mean "not recording" for the heartbeat sure-shot.
 const STOPPED_RECORDING_STATES = new Set(["stopped", "inactive", "ended", "error"]);
 
+// B2: the recorder sends a COMPOSITE recording_state like
+//   "combined:inactive;screen:stopped;camera:recording;microphone:stopped"
+// (one segment per media track). The sure-shot fires when the CORE capture
+// (the combined MediaRecorder or the screen track) is not recording — a stopped
+// camera/microphone alone is not a recording_stopped signal. A bare legacy
+// string ("stopped") is still honoured for backward compatibility.
 function isRecordingStopped(recordingState) {
-  return STOPPED_RECORDING_STATES.has(String(recordingState || "").toLowerCase());
+  const raw = String(recordingState || "").toLowerCase().trim();
+  if (!raw) return false;
+  if (raw.includes(":")) {
+    const segments = parseRecordingStateSegments(raw);
+    // Only the core capture tracks gate the sure-shot. If the payload doesn't
+    // name them (unexpected shape), fall back to "any segment stopped".
+    const core = ["combined", "screen"].filter((key) => key in segments);
+    const gates = core.length ? core.map((key) => segments[key]) : Object.values(segments);
+    return gates.some((state) => STOPPED_RECORDING_STATES.has(state));
+  }
+  return STOPPED_RECORDING_STATES.has(raw);
+}
+
+function parseRecordingStateSegments(raw) {
+  const segments = {};
+  for (const part of raw.split(";")) {
+    const [key, value] = part.split(":");
+    if (key && value !== undefined) segments[key.trim()] = value.trim();
+  }
+  return segments;
 }
 
 async function raiseSureShotAlertsFromEvents(session, events) {
@@ -865,12 +893,14 @@ async function upsertProctorAlert(session, { type, severity, timestamp, title, d
   return item;
 }
 
-// Deep-link target for a sure-shot alert: the merged review video if the worker
-// already produced one (manifest_key implies the merge ran), else the raw
-// screen-chunk prefix so the console can still navigate to the evidence folder.
+// Deep-link target for a sure-shot alert: the merged review video the worker
+// wrote back onto the session doc (merged_video_key) once a merge succeeded.
+// B4: if no merged video exists yet, return null rather than a `…/screen/`
+// FOLDER prefix — a folder prefix signs a nonexistent object and renders a
+// broken link. With null, the console simply hides the link until the merge
+// runs and merged_video_key is populated.
 function sureShotVideoKey(session) {
-  if (session.merged_video_key) return session.merged_video_key;
-  return `${sessionPrefix(session)}screen/`;
+  return session.merged_video_key || null;
 }
 
 function isoOrNow(value) {
@@ -967,14 +997,19 @@ async function adminAlerts(req) {
   const severity = req.query?.severity;
   const source = req.query?.source;
 
+  // B6: applying ALL THREE equality filters server-side (contest_slug + severity
+  // + source) would need a composite Firestore index that doesn't exist. To stay
+  // index-free (lower risk than relying on a deployed composite index), we push
+  // AT MOST ONE equality filter to Firestore — the most selective, contest_slug —
+  // and filter the remaining fields in memory. ALERTS_QUERY_LIMIT bounds the scan.
   let query = firestore.collection(ALERTS_COLLECTION);
   if (contestSlug) query = query.where("contest_slug", "==", String(contestSlug));
-  if (severity) query = query.where("severity", "==", String(severity));
-  if (source) query = query.where("source", "==", String(source));
 
   const snapshot = await query.limit(ALERTS_QUERY_LIMIT).get();
   const alerts = snapshot.docs
     .map((doc) => doc.data())
+    .filter((alert) => !severity || alert.severity === String(severity))
+    .filter((alert) => !source || alert.source === String(source))
     .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
     .slice(0, ALERTS_QUERY_LIMIT);
 

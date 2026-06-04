@@ -337,6 +337,23 @@ function StudentApp() {
           speakWarning("Screen sharing stopped. Return to the proctor app immediately.");
         }
       },
+      // B1: the server locked/ended/paused this session — the recorder has
+      // already stopped itself. Flip the gate to the matching blocked screen so
+      // the UI stops claiming "recording".
+      onStatusChange: (serverStatus) => {
+        if (serverStatus === "ended") {
+          setStatus("ended");
+          setGate("ended");
+          window.localStorage.removeItem(sessionStorageKey);
+        } else if (serverStatus === "locked") {
+          setStatus("idle");
+          setGate("locked");
+          speakWarning("Your test has been locked by a proctor. Recording has stopped.");
+        } else if (serverStatus === "pending_approval") {
+          setStatus("idle");
+          setGate("pending_approval");
+        }
+      },
       onMediaStateChange: setMediaCapture,
       onIpStatusChange: (ipStatus) => {
         setStartIp(ipStatus.startIp);
@@ -931,7 +948,8 @@ function AdminApp() {
     setStatsLoading(true);
     setError("");
     try {
-      const response = await fetchAdminStats(password);
+      // B7: scope the live counts to the same contest the admin filtered alerts by.
+      const response = await fetchAdminStats(password, alertFilters.contest_slug);
       setStats(response.stats);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -942,7 +960,7 @@ function AdminApp() {
 
   // Auto-load alerts the first time the unlocked admin opens the alerts tab.
   useEffect(() => {
-    if (!unlocked || view !== "alerts" || alertsLoaded || alertsLoading) return;
+    if (!unlocked || view !== "alerts" || alertsLoaded) return;
     let cancelled = false;
     void (async () => {
       setAlertsLoading(true);
@@ -963,17 +981,17 @@ function AdminApp() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unlocked, view, alertsLoaded, alertsLoading, password]);
+  }, [unlocked, view, alertsLoaded, password]);
 
   // Auto-load stats the first time the unlocked admin opens the stats tab.
   useEffect(() => {
-    if (!unlocked || view !== "stats" || stats !== null || statsLoading) return;
+    if (!unlocked || view !== "stats" || stats !== null) return;
     let cancelled = false;
     void (async () => {
       setStatsLoading(true);
       setError("");
       try {
-        const response = await fetchAdminStats(password);
+        const response = await fetchAdminStats(password, alertFilters.contest_slug);
         if (!cancelled) setStats(response.stats);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -985,7 +1003,7 @@ function AdminApp() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unlocked, view, stats, statsLoading, password]);
+  }, [unlocked, view, stats, password]);
 
   const unlockAdmin = () => {
     setError("");
@@ -1216,12 +1234,13 @@ function StatsDashboard({ stats, loading, onRefresh }: { stats: AdminStats | nul
       {stats === null ? (
         <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading stats…" : "No stats loaded yet."}</div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
           <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} />
           <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} />
           <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} />
           <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} />
           <StatCard label="Total" value={stats.total} tone="ink" icon={<Users size={18} />} />
+          <StatCard label="Not started / total" value={stats.not_started_or_total ?? stats.total} tone="muted" icon={<Users size={18} />} />
         </div>
       )}
     </section>

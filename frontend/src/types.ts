@@ -43,6 +43,8 @@ export type ProctorEvent = {
 
 export type HeartbeatResponse = {
   ok: boolean;
+  /** Server-side session lifecycle status; recorder self-stops when not 'active'. */
+  status?: ServerSessionStatus;
   start_ip?: string;
   current_ip?: string;
   ip_changed?: boolean;
