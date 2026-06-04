@@ -15,6 +15,11 @@ export function __setClientsForTest({ firestore: fakeFirestore, storage: fakeSto
 const SESSION_COLLECTION = process.env.SESSION_COLLECTION || "proctor_sessions";
 const SETTINGS_COLLECTION = process.env.SETTINGS_COLLECTION || "proctor_settings";
 const ALERTS_COLLECTION = process.env.ALERTS_COLLECTION || "proctor_alerts";
+// H1: per-(username_norm, contest_slug) live-slot lock. A start atomically
+// .create()s the lock doc; exactly one concurrent writer wins the slot and goes
+// active, the rest fall to pending_approval. Released when the owning session
+// ends so a later legitimate restart can re-acquire it.
+const LIVE_LOCK_COLLECTION = process.env.LIVE_LOCK_COLLECTION || "proctor_live_locks";
 const EVIDENCE_BUCKET = process.env.EVIDENCE_BUCKET;
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
@@ -68,12 +73,19 @@ export const api = async (req, res) => {
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
+    // Always log the real error server-side for debugging.
     console.error(error);
     const statusCode = error?.statusCode || 500;
-    return send(res, statusCode, {
-      error: statusCode === 500 ? "Internal server error" : String(error?.message || error),
-      detail: String(error?.message || error)
-    });
+    // M3: only intentional 4xx httpError cases (those carrying an explicit
+    // statusCode) get their message echoed to the client via `detail`.
+    // Unexpected 500s return a generic body with NO `detail`, so an internal
+    // stack/message (DB names, paths, library internals) never leaks to callers.
+    const isIntentional = Boolean(error?.statusCode);
+    if (isIntentional) {
+      const message = String(error?.message || error);
+      return send(res, statusCode, { error: message, detail: message });
+    }
+    return send(res, 500, { error: "Internal server error" });
   }
 };
 
@@ -112,8 +124,19 @@ async function startSession(req) {
 
   const sessionId = randomUUID();
   const room = body.room !== undefined && body.room !== null ? sanitizeRoom(body.room) : "";
-  const hasConflict = Boolean(existingActive && existingActive.session_id !== sessionId);
-  const status = hasConflict ? "pending_approval" : "active";
+
+  // H1 (TOCTOU fix): decide active-vs-pending ATOMICALLY by acquiring the
+  // live-slot lock rather than trusting the `existingActive` pre-read (which is
+  // racy: two concurrent starts can both read "no active session" and both go
+  // active). acquireLiveSlot re-reads live sessions INSIDE the lock decision, so
+  // exactly one concurrent start wins the slot. existingActive is still used as
+  // a best-effort hint for the conflict pointer, but the authoritative
+  // blocked_by id comes from the lock owner.
+  const slot = await acquireLiveSlot(usernameNorm, contestSlug, sessionId);
+  const status = slot.acquired ? "active" : "pending_approval";
+  const blockedBy = slot.acquired
+    ? null
+    : (slot.ownerSessionId || (existingActive && existingActive.session_id) || null);
 
   const item = {
     session_id: sessionId,
@@ -133,7 +156,7 @@ async function startSession(req) {
     ip_change_count: 0,
     consent_accepted: true,
     status,
-    blocked_by_session_id: hasConflict ? existingActive.session_id : null,
+    blocked_by_session_id: blockedBy,
     created_at: now,
     updated_at: now,
     event_count: 0,
@@ -206,6 +229,111 @@ async function findLiveSessionFor(usernameNorm, contestSlug) {
   return live.find((doc) => doc.status === "active") || live[0];
 }
 
+// H1: deterministic id for the per-(username, contest) live-slot lock.
+function liveLockId(usernameNorm, contestSlug) {
+  return `live:${usernameNorm}:${contestSlug || "_"}`;
+}
+
+function liveLockRef(usernameNorm, contestSlug) {
+  return firestore.collection(LIVE_LOCK_COLLECTION).doc(liveLockId(usernameNorm, contestSlug));
+}
+
+// H1 — atomically acquire the live slot for (username_norm, contest_slug).
+//
+// The slot is owned by a lock doc whose id is deterministic, so two
+// near-simultaneous starts contend on the SAME doc. `.create()` is atomic in
+// Firestore: exactly one concurrent writer succeeds; the rest get ALREADY_EXISTS
+// and become pending_approval. The decision is NEVER derived from the racy
+// `existingActive` pre-read.
+//
+// On a create-collision we read the LOCK DOC (not a session collection query,
+// which would race with a concurrent winner whose session doc is not yet
+// written) to find the current owner, and consult the owner's session by id:
+//   - owner session is genuinely live (not ended)  → real conflict → pending.
+//   - owner session does not exist yet              → a concurrent winner is
+//                                                     mid-flight → yield, pending.
+//   - owner session exists and is already `ended`   → stale lock (crash / the
+//                                                     previous taker finished) →
+//                                                     take the slot over → active.
+//
+// Returns { acquired: true } on win, or
+// { acquired: false, ownerSessionId } when another live session holds the slot.
+async function acquireLiveSlot(usernameNorm, contestSlug, sessionId) {
+  const ref = liveLockRef(usernameNorm, contestSlug);
+  const now = new Date().toISOString();
+  const lockBody = { username_norm: usernameNorm, contest_slug: contestSlug || "", session_id: sessionId, acquired_at: now };
+
+  try {
+    await ref.create(lockBody);
+    return { acquired: true };
+  } catch (error) {
+    // Anything other than an already-exists collision is unexpected; rethrow.
+    if (!isAlreadyExists(error)) throw error;
+  }
+
+  // Lock is held — read it to find the current owner.
+  const lockDoc = await ref.get();
+  const ownerSessionId = lockDoc.exists ? lockDoc.data()?.session_id : null;
+
+  // No owner recorded (shouldn't happen, but be safe): treat the lock as stale.
+  if (!ownerSessionId || ownerSessionId === sessionId) {
+    await ref.set(lockBody);
+    return { acquired: true };
+  }
+
+  // Only an OWNER session that already ended makes the lock stale. A missing
+  // owner doc means a concurrent winner hasn't persisted yet — we must yield.
+  const owner = await getSessionOrNull(ownerSessionId);
+  if (owner && owner.status === "ended") {
+    await ref.set(lockBody);
+    return { acquired: true };
+  }
+
+  return { acquired: false, ownerSessionId };
+}
+
+function isAlreadyExists(error) {
+  // Firestore signals an existing-doc create collision with gRPC code 6
+  // (ALREADY_EXISTS); the fake test Firestore mirrors this. Match on code or
+  // message so both real and mocked clients are handled.
+  return error?.code === 6 || /ALREADY_EXISTS/i.test(String(error?.message || ""));
+}
+
+// H1 — release the live slot when its owning session is no longer live, so a
+// later legitimate start for the same (username, contest) can re-acquire it.
+// Best-effort: a failure here must never break the end/lock flow, and we only
+// clear the lock when it still points at THIS session (avoid stomping a lock a
+// newer winner already took over).
+async function releaseLiveSlot(session) {
+  if (!session?.username_norm) return;
+  try {
+    const ref = liveLockRef(session.username_norm, session.contest_slug);
+    const doc = await ref.get();
+    if (doc.exists && doc.data()?.session_id === session.session_id) {
+      await ref.delete();
+    }
+  } catch (error) {
+    console.warn(`Failed to release live slot for ${session.session_id}: ${error?.message || error}`);
+  }
+}
+
+// H1 — make `session` the owner of its (username, contest) live slot. Used when
+// an admin action (approve/bypass) promotes a session to live outside the
+// normal acquire path. Best-effort; overwrites any prior owner.
+async function takeOverLiveSlot(session) {
+  if (!session?.username_norm) return;
+  try {
+    await liveLockRef(session.username_norm, session.contest_slug).set({
+      username_norm: session.username_norm,
+      contest_slug: session.contest_slug || "",
+      session_id: session.session_id,
+      acquired_at: new Date().toISOString()
+    });
+  } catch (error) {
+    console.warn(`Failed to take over live slot for ${session.session_id}: ${error?.message || error}`);
+  }
+}
+
 async function validateProctorGate() {
   const settings = await getSettings();
   if (!settings?.start_at || !settings?.end_at) {
@@ -226,7 +354,7 @@ async function validateProctorGate() {
 async function createUploadUrl(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "kind", "chunk_index", "content_type"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   const kind = sanitizeSegment(body.kind);
   const chunkIndex = Number(body.chunk_index);
   if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
@@ -259,7 +387,7 @@ async function createUploadUrl(req) {
 async function recordEvents(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "events"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   if (!Array.isArray(body.events)) return badRequest("events must be an array");
 
   const cleanedEvents = body.events.slice(0, 100).map((item) => ({
@@ -296,7 +424,7 @@ async function recordEvents(req) {
 async function recordReviewFile(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "nature", "records"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   if (!["clipboard", "tabs", "cookies"].includes(body.nature)) return badRequest("nature must be clipboard, tabs, or cookies");
   if (!Array.isArray(body.records)) return badRequest("records must be an array");
 
@@ -320,7 +448,7 @@ async function recordReviewFile(req) {
 async function recordHeartbeat(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "recording_state", "visibility_state"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   const now = new Date().toISOString();
   const currentIp = getClientIp(req);
   const startIp = session.start_ip || currentIp;
@@ -389,7 +517,7 @@ async function validateEndSession(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id"]);
   if (body.assurance_accepted !== true) return badRequest("Integrity assurance is required before ending the test.");
-  await getSession(body.session_id);
+  requireWritableSession(await getSession(body.session_id));
   return { ok: true };
 }
 
@@ -397,7 +525,10 @@ async function endSession(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id"]);
   if (body.assurance_accepted !== true) return badRequest("Integrity assurance is required before ending the test.");
-  const session = await getSession(body.session_id);
+  // H3: a locked or pending session cannot be self-ended by the client; only an
+  // already-ended session is rejected (idempotency handled below via 409). An
+  // active session ends normally (the happy path).
+  const session = requireWritableSession(await getSession(body.session_id));
   const manifest = Array.isArray(body.manifest) ? body.manifest : [];
   const now = new Date().toISOString();
   const manifestKey = `${sessionPrefix(session)}manifest.json`;
@@ -413,6 +544,10 @@ async function endSession(req) {
     manifest_key: manifestKey,
     uploaded_manifest_count: manifest.length
   });
+
+  // H1: the session is over — free its live slot so a later legitimate start for
+  // the same (username, contest) can re-acquire it instead of being parked.
+  await releaseLiveSlot(session);
 
   return { ok: true, manifest_key: manifestKey };
 }
@@ -602,10 +737,14 @@ async function applySessionAction(action, session) {
       const conflict = await getSessionOrNull(session.blocked_by_session_id);
       if (conflict && conflict.status !== "ended") {
         await sessionRef(conflict.session_id).update({ status: "ended", ended_at: now, updated_at: now, ended_reason: "superseded_by_approval" });
+        // H1: the conflicting session no longer holds the live slot.
+        await releaseLiveSlot(conflict);
         out.push({ ...conflict, status: "ended", ended_at: now, updated_at: now, ended_reason: "superseded_by_approval" });
       }
     }
     await sessionRef(session.session_id).update({ status: "active", blocked_by_session_id: null, approved_at: now, updated_at: now });
+    // H1: the approved session now OWNS the live slot — point the lock at it.
+    await takeOverLiveSlot(session);
     out.push({ ...session, status: "active", blocked_by_session_id: null, approved_at: now, updated_at: now });
     return out;
   }
@@ -624,11 +763,16 @@ async function applySessionAction(action, session) {
     // Clear a pending/locked block: make the session live and drop the conflict
     // pointer WITHOUT ending the other session (contingency override).
     await sessionRef(session.session_id).update({ status: "active", blocked_by_session_id: null, bypassed_at: now, updated_at: now });
+    // H1: this session is now live by override — point the slot lock at it so a
+    // later fresh start sees a coherent owner.
+    await takeOverLiveSlot(session);
     return { ...session, status: "active", blocked_by_session_id: null, bypassed_at: now, updated_at: now };
   }
 
   if (action === "end") {
     await sessionRef(session.session_id).update({ status: "ended", ended_at: now, updated_at: now, ended_reason: "admin_action" });
+    // H1: free the live slot so a legitimate restart can re-acquire it.
+    await releaseLiveSlot(session);
     return { ...session, status: "ended", ended_at: now, updated_at: now, ended_reason: "admin_action" };
   }
 
@@ -871,6 +1015,21 @@ async function getSession(sessionId) {
   return doc.data();
 }
 
+// H3: gate every client WRITE endpoint on session status so admin lock/end and
+// the pending-approval hold actually stop the browser instead of silently
+// accepting more evidence/heartbeats:
+//   ended  → 409 session_ended (the test is over; no further writes)
+//   locked → 403 session_locked (admin paused it; needs unlock)
+//   pending_approval → 403 waiting_for_approval (second device, not yet live)
+// active (and any unknown/legacy status) is allowed so happy paths are unchanged.
+function requireWritableSession(session) {
+  const status = session?.status;
+  if (status === "ended") throw httpError(409, "session_ended");
+  if (status === "locked") throw httpError(403, "session_locked");
+  if (status === "pending_approval") throw httpError(403, "waiting_for_approval");
+  return session;
+}
+
 // Like getSession but returns null instead of throwing — used by resume and
 // single-session reconciliation where "not found" is a normal control-flow path.
 async function getSessionOrNull(sessionId) {
@@ -950,7 +1109,15 @@ function bucket() {
 
 function parseBody(req) {
   if (!req.body) return {};
-  return typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  if (typeof req.body !== "string") return req.body;
+  // N3: malformed JSON is a client error, not a server crash. Catch the
+  // SyntaxError and surface a clean 400 instead of falling through to the
+  // catch-all (which would otherwise report it as a 500).
+  try {
+    return JSON.parse(req.body);
+  } catch {
+    throw httpError(400, "invalid_json");
+  }
 }
 
 function requireFields(body, fields) {
@@ -1029,7 +1196,12 @@ function normalizeUsername(value) {
 }
 
 function sanitizeSegment(value) {
-  return String(value).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  const cleaned = String(value).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  // M1: a segment that is empty or all-dots (e.g. "", ".", "..") is a path
+  // traversal / blank-key hazard once it lands in a GCS object key. Substitute a
+  // safe token so a username like ".." can never become a ".." path component.
+  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
+  return cleaned;
 }
 
 function sanitizeObject(value) {
