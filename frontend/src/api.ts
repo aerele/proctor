@@ -36,10 +36,28 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(parseErrorMessage(errorText) || `Request failed: ${response.status}`);
+    const e = new Error(parseErrorMessage(errorText) || `Request failed: ${response.status}`) as ApiError;
+    e.status = response.status;
+    e.code = parseErrorCode(errorText);
+    throw e;
   }
 
   return response.json() as Promise<T>;
+}
+
+// An Error carrying the HTTP status and the backend's machine-readable error
+// code (e.g. "session_locked"), so callers can react to lock/end/pending without
+// string-matching the human message.
+export type ApiError = Error & { status?: number; code?: string };
+
+function parseErrorCode(errorText: string): string | undefined {
+  if (!errorText) return undefined;
+  try {
+    const parsed = JSON.parse(errorText) as { error?: unknown };
+    return parsed.error != null ? String(parsed.error) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function parseErrorMessage(errorText: string) {
@@ -368,7 +386,22 @@ export async function heartbeat(params: {
   client_time: string;
   network_online: boolean;
 }): Promise<HeartbeatResponse> {
-  if (demoMode) return { ok: true, start_ip: "demo.local", current_ip: "demo.local", ip_changed: false, newly_changed: false };
+  if (demoMode) {
+    // B8: mirror the backend H3 write-guard so the lock-stop UX is testable in
+    // demo mode. If a proctor has locked/ended this demo session (e.g. from a
+    // second tab acting as admin), throw the same 403/409-tagged error the real
+    // backend would — driving useProctorRecorder's onStatusChange.
+    const session = readDemoSessions().find((item) => item.session_id === params.session_id);
+    if (session && session.status !== "active") {
+      const status = session.status;
+      const code = status === "ended" ? "session_ended" : status === "locked" ? "session_locked" : "waiting_for_approval";
+      const e = new Error(code) as ApiError;
+      e.status = status === "ended" ? 409 : 403;
+      e.code = code;
+      throw e;
+    }
+    return { ok: true, status: session?.status ?? "active", start_ip: "demo.local", current_ip: "demo.local", ip_changed: false, newly_changed: false };
+  }
   return request<HeartbeatResponse>("/api/heartbeat", {
     method: "POST",
     body: JSON.stringify(params)

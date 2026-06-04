@@ -41,6 +41,11 @@ gcloud storage buckets add-iam-policy-binding "gs://${DEST_BUCKET}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/storage.objectAdmin" >/dev/null
 
+# B4: the worker writes merged_video_key back onto the session doc in Firestore.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role="roles/datastore.user" >/dev/null
+
 gcloud builds submit video-worker --tag "$IMAGE"
 
 gcloud run deploy "$SERVICE_NAME" \
@@ -54,7 +59,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --max-instances 2 \
   --concurrency 1 \
   --timeout 3600s \
-  --set-env-vars="SOURCE_BUCKET=${SOURCE_BUCKET},DEST_BUCKET=${DEST_BUCKET},MAX_USERNAMES_PER_REQUEST=25,WORKER_TOKEN=${WORKER_TOKEN}"
+  --set-env-vars="SOURCE_BUCKET=${SOURCE_BUCKET},DEST_BUCKET=${DEST_BUCKET},SESSION_COLLECTION=${SESSION_COLLECTION:-proctor_sessions},MAX_USERNAMES_PER_REQUEST=25,WORKER_TOKEN=${WORKER_TOKEN}"
 
 echo "Video worker URL:"
 gcloud run services describe "$SERVICE_NAME" --region="$REGION" --format="value(status.url)"

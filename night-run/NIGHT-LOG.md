@@ -50,4 +50,16 @@ Student flow: passcodes removed, room capture, persistent-session resume, promin
 ### Backend security pass — DONE ✅ (front-loaded Phase 4 gate)
 Read-only audit found real issues. **Fixed tonight:** H1 single-session start race → atomic lock doc (`proctor_live_locks`); H3 locked/ended/pending sessions now reject writes (lock/end actually stop the client); M1 pure-dot segment sanitize; M3 500s no longer leak exception messages; N3 malformed JSON → 400. **81/81 backend tests.** **Escalated to MORNING-REVIEW:** C1 (admin password in public bundle — critical, pre-existing, needs real auth), H2 (session_id sole bearer → session_token), M2/M4/L1/L2.
 
+### Phase 4 — audit (in progress)
+- **Triple review** (3 lenses: frontend-correctness, repo-invariants, e2e-integration) + **live visual verification** in demo mode.
+- Storage-prefix invariant holds across all 7 key sites + admin-evidence; contest-eval monitoring tool confirmed **usable end-to-end** (fixtures demo green, Alert shapes match exactly).
+- **Real bugs found (all on the proctor side; dispatched one fix agent):**
+  - **B0 (critical, caught by visual verify):** admin console stuck "Loading…" forever — alerts/stats effect lists its own loading flag in deps → re-fires → cancels its in-flight load → never clears. Console unusable. (build was green + types compiled — only a live click-through caught it.)
+  - **B1 (high):** admin lock/end doesn't stop the student recorder (api.ts request() drops HTTP status; recorder ignores 403/409).
+  - **B2/B3 (high):** `recording_state` composite + `invalid_screen_share_surface` name mismatches silently disable proctor sure-shot alerts in prod.
+  - **B4 (med):** sure-shot video deep-link unresolved (merged_video_key never written back).
+  - **B5 (med):** video-worker username normalizer diverges from backend.
+  - **B6 (low):** missing Firestore composite index for alert filters.
+- Backend security pass (earlier) already fixed H1/H3/M1/M3/N3; C1/H2 escalated.
+
 _(appended as phases complete.)_
