@@ -1,15 +1,17 @@
-import { AlertTriangle, Bell, Camera, CheckCircle2, ClipboardList, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, Video } from "lucide-react";
+import { AlertTriangle, Bell, Camera, CheckCircle2, ClipboardList, Clock, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, endSession, fetchAdminSessions, fetchAlerts, fetchProctorSettings, saveProctorSettings, sendEvents, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { adminPassword, endSession, fetchAdminSessions, fetchAdminStats, fetchAlerts, fetchProctorSettings, resumeSession, saveProctorSettings, sendEvents, sessionAction, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { createProctorRecorder, type MediaCaptureState } from "./useProctorRecorder";
-import type { Alert, AlertSeverity, ProctorEvent, ProctorSettings, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, Alert, AlertFilters, AlertSeverity, AlertSource, ProctorEvent, ProctorSettings, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+
+const sessionStorageKey = "aerele-proctor-session-id";
 
 const initialForm: StudentForm = {
   hackerrank_username: "",
   name: "",
   roll_number: "",
   email: "",
-  proctor_passcode: "",
+  room: "",
   consent_accepted: false
 };
 
@@ -47,11 +49,18 @@ export function App() {
   return isAdmin ? <AdminApp /> : <StudentApp />;
 }
 
+// Student gate state — the server-reported lifecycle status, separate from the
+// recorder UI status. "form" is the very first screen (no session yet).
+type StudentGate = "form" | "pending_approval" | "locked" | "ended" | "running";
+
 function StudentApp() {
   const [form, setForm] = useState<StudentForm>(initialForm);
   const [status, setStatus] = useState<SessionStatus>("idle");
+  const [gate, setGate] = useState<StudentGate>("form");
+  const [resuming, setResuming] = useState(true);
   const [sessionId, setSessionId] = useState("");
   const [sessionConfig, setSessionConfig] = useState<SessionStartResponse | null>(null);
+  const [identity, setIdentity] = useState<{ name: string; username: string; room: string } | null>(null);
   const [contestUrl, setContestUrl] = useState("");
   const [startIp, setStartIp] = useState("");
   const [currentIp, setCurrentIp] = useState("");
@@ -70,7 +79,6 @@ function StudentApp() {
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [endRequested, setEndRequested] = useState(false);
-  const [endCode, setEndCode] = useState("");
   const [assuranceAccepted, setAssuranceAccepted] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
@@ -80,7 +88,14 @@ function StudentApp() {
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const canStart = useMemo(() => {
-    return form.hackerrank_username.trim() && form.name.trim() && form.roll_number.trim() && form.email.trim() && form.proctor_passcode.trim() && form.consent_accepted;
+    return Boolean(
+      form.hackerrank_username.trim() &&
+      form.name.trim() &&
+      form.roll_number.trim() &&
+      form.email.trim() &&
+      form.room.trim() &&
+      form.consent_accepted
+    );
   }, [form]);
 
   const addEvent = (event: ProctorEvent) => {
@@ -102,6 +117,59 @@ function StudentApp() {
     utterance.volume = 1;
     window.speechSynthesis.speak(utterance);
   };
+
+  // Apply the lifecycle status returned by start/resume to the student gate.
+  // active → resume/continue recording; pending/locked/ended → blocked screens.
+  const applyServerStatus = (session: SessionStartResponse) => {
+    setSessionConfig(session);
+    setSessionId(session.session_id);
+    setContestUrl(session.contest_url || "");
+    setIdentity({
+      name: session.name || form.name.trim(),
+      username: session.hackerrank_username || form.hackerrank_username.trim(),
+      room: session.room || form.room.trim()
+    });
+    const serverStatus: ServerSessionStatus = session.status || "active";
+    if (serverStatus === "pending_approval") setGate("pending_approval");
+    else if (serverStatus === "locked") setGate("locked");
+    else if (serverStatus === "ended") setGate("ended");
+    else setGate("running");
+    return serverStatus;
+  };
+
+  // On load: if a stored session_id exists, resume it WITHOUT re-collecting
+  // details (Epic 2). Recording itself is not auto-restarted (getDisplayMedia
+  // needs a fresh user gesture) — the student presses "Resume recording".
+  useEffect(() => {
+    const stored = window.localStorage.getItem(sessionStorageKey);
+    if (!stored) {
+      setResuming(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const session = await resumeSession(stored);
+        if (cancelled) return;
+        const serverStatus = applyServerStatus(session);
+        setStartIp(session.start_ip || "unavailable");
+        setCurrentIp(session.start_ip || "unavailable");
+        if (serverStatus === "ended") {
+          setStatus("ended");
+          window.localStorage.removeItem(sessionStorageKey);
+        }
+      } catch {
+        // Unknown/expired token — drop it and fall back to the form.
+        window.localStorage.removeItem(sessionStorageKey);
+      } finally {
+        if (!cancelled) setResuming(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (status !== "recording") return;
@@ -201,7 +269,7 @@ function StudentApp() {
 
       event.preventDefault();
       event.stopPropagation();
-      const message = "Reload is blocked during proctoring. Use End test with the proctoring end code before closing or refreshing.";
+      const message = "Reload is blocked during proctoring. If you reload by accident, your session resumes automatically — just press Resume recording.";
       setReloadWarning(message);
       const reloadEvent = createUiEvent("reload_shortcut_blocked", {
         key: event.key,
@@ -245,6 +313,56 @@ function StudentApp() {
     }
   };
 
+  // Bring up the recorder for an active session. Shared by first-start and by
+  // "Resume recording" after a reload (both need a fresh getDisplayMedia gesture).
+  const beginRecording = async (session: SessionStartResponse) => {
+    setStartIp(session.start_ip || "unavailable");
+    setCurrentIp(session.start_ip || "unavailable");
+    setIpChanged(false);
+    await collectEntryReviewEvidence(session.session_id);
+
+    const recorder = createProctorRecorder({
+      sessionId: session.session_id,
+      config: session.upload_config,
+      heartbeatSeconds: session.heartbeat_interval_seconds,
+      onEvent: addEvent,
+      onUploadChange: (depth, uploaded) => {
+        setQueueDepth(depth);
+        setUploadedCount(uploaded);
+      },
+      onFatalError: (message) => {
+        setError(message);
+        setStatus("error");
+        if (message.includes("Screen sharing stopped")) {
+          speakWarning("Screen sharing stopped. Return to the proctor app immediately.");
+        }
+      },
+      onMediaStateChange: setMediaCapture,
+      onIpStatusChange: (ipStatus) => {
+        setStartIp(ipStatus.startIp);
+        setCurrentIp(ipStatus.currentIp);
+        setIpChanged(ipStatus.ipChanged);
+        if (ipStatus.newlyChanged) speakIpChangeWarning();
+      },
+      onCameraStream: (stream) => {
+        setCameraStream(stream);
+        const video = cameraVideoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          if (stream) {
+            setPipAvailable("requestPictureInPicture" in HTMLVideoElement.prototype);
+          }
+        }
+      }
+    });
+    recorderRef.current = recorder;
+    await recorder.start();
+    const startedAt = Date.now();
+    setRecordingStartedAt(startedAt);
+    setElapsedSeconds(0);
+    setStatus("recording");
+  };
+
   const start = async () => {
     setError("");
     setStatus("starting");
@@ -255,65 +373,60 @@ function StudentApp() {
         name: form.name.trim(),
         roll_number: form.roll_number.trim(),
         email: form.email.trim(),
-        proctor_passcode: form.proctor_passcode.trim()
+        room: form.room.trim()
       });
-      setSessionId(session.session_id);
-      setSessionConfig(session);
-      setContestUrl(session.contest_url || "");
-      setStartIp(session.start_ip || "unavailable");
-      setCurrentIp(session.start_ip || "unavailable");
-      setIpChanged(false);
-      await collectEntryReviewEvidence(session.session_id);
-
-      const recorder = createProctorRecorder({
-        sessionId: session.session_id,
-        config: session.upload_config,
-        heartbeatSeconds: session.heartbeat_interval_seconds,
-        onEvent: addEvent,
-        onUploadChange: (depth, uploaded) => {
-          setQueueDepth(depth);
-          setUploadedCount(uploaded);
-        },
-        onFatalError: (message) => {
-          setError(message);
-          setStatus("error");
-          if (message.includes("Screen sharing stopped")) {
-            speakWarning("Screen sharing stopped. Return to the proctor app immediately.");
-          }
-        },
-        onMediaStateChange: setMediaCapture,
-        onIpStatusChange: (ipStatus) => {
-          setStartIp(ipStatus.startIp);
-          setCurrentIp(ipStatus.currentIp);
-          setIpChanged(ipStatus.ipChanged);
-          if (ipStatus.newlyChanged) speakIpChangeWarning();
-        },
-        onCameraStream: (stream) => {
-          setCameraStream(stream);
-          const video = cameraVideoRef.current;
-          if (video) {
-            video.srcObject = stream;
-            if (stream) {
-              setPipAvailable("requestPictureInPicture" in HTMLVideoElement.prototype);
-            }
-          }
-        }
-      });
-      recorderRef.current = recorder;
-      await recorder.start();
-      const startedAt = Date.now();
-      setRecordingStartedAt(startedAt);
-      setElapsedSeconds(0);
-      setStatus("recording");
+      // Persist the token so a reload resumes the same session (Epic 2).
+      window.localStorage.setItem(sessionStorageKey, session.session_id);
+      const serverStatus = applyServerStatus(session);
+      if (serverStatus !== "active") {
+        // pending_approval / locked / ended — do not start the recorder.
+        setStatus("idle");
+        return;
+      }
+      await beginRecording(session);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
-      if (message.toLowerCase().includes("end code")) {
-        setStatus("recording");
-        setEndRequested(true);
+      setStatus("idle");
+    }
+  };
+
+  // Resume recording for an already-active session restored on reload. Re-checks
+  // the server status (in case a proctor locked/ended it) before recording.
+  const resumeRecording = async () => {
+    if (!sessionConfig) return;
+    setError("");
+    setStatus("starting");
+    try {
+      const session = await resumeSession(sessionConfig.session_id);
+      const serverStatus = applyServerStatus(session);
+      if (serverStatus !== "active") {
+        setStatus("idle");
+        if (serverStatus === "ended") window.localStorage.removeItem(sessionStorageKey);
         return;
       }
-      setStatus("recording");
+      await beginRecording(session);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      setStatus("idle");
+    }
+  };
+
+  // Re-poll the server status from a blocked screen (pending/locked) so the
+  // student can self-serve once a proctor acts, without staff intervention.
+  const refreshStatus = async () => {
+    if (!sessionConfig) return;
+    setError("");
+    try {
+      const session = await resumeSession(sessionConfig.session_id);
+      const serverStatus = applyServerStatus(session);
+      if (serverStatus === "ended") {
+        setStatus("ended");
+        window.localStorage.removeItem(sessionStorageKey);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -399,43 +512,27 @@ function StudentApp() {
       setError("Integrity assurance is required before ending the test.");
       return;
     }
-    if (!endCode.trim()) {
-      setError("Enter the proctoring end code before ending the test.");
-      return;
-    }
     setStatus("ending");
     setError("");
     let recorderStopped = false;
     try {
       if (sessionId) {
-        await validateEndSession({
-          sessionId,
-          endCode: endCode.trim(),
-          assuranceAccepted
-        });
+        await validateEndSession({ sessionId, assuranceAccepted });
       }
       const finalManifest = await recorderRef.current?.stop();
       recorderStopped = true;
       const uploads = finalManifest ?? [];
       setManifest(uploads);
       if (sessionId) {
-        await endSession({
-          sessionId,
-          manifest: uploads,
-          endCode: endCode.trim(),
-          assuranceAccepted
-        });
+        await endSession({ sessionId, manifest: uploads, assuranceAccepted });
       }
+      window.localStorage.removeItem(sessionStorageKey);
       setStatus("ended");
+      setGate("ended");
       setEndRequested(false);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
-      if (!recorderStopped && message.toLowerCase().includes("end code")) {
-        setStatus("recording");
-        setEndRequested(true);
-        return;
-      }
       setStatus(recorderStopped ? "error" : "recording");
     }
   };
@@ -452,11 +549,87 @@ function StudentApp() {
     setCheckpoint(null);
   };
 
+  // ---- Blocked / non-running gate screens -------------------------------
+  if (resuming) {
+    return (
+      <Shell>
+        <section className="mx-auto max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
+          <RefreshCw size={22} className="mx-auto animate-spin text-accent" />
+          <p className="mt-3 text-sm text-muted">Restoring your proctoring session…</p>
+        </section>
+      </Shell>
+    );
+  }
+
+  if (gate === "pending_approval") {
+    return (
+      <Shell>
+        <StudentStepBanner gate={gate} status={status} />
+        {identity ? <IdentityCard identity={identity} /> : null}
+        <BlockedScreen
+          tone="warning"
+          icon={<Clock size={22} />}
+          title="Waiting for proctor approval"
+          lines={[
+            "Another session is already active for your HackerRank username.",
+            "A proctor must approve this device before you can begin — or you can wait for the other session to be unlocked.",
+            "Stay on this page. When the proctor approves you, press Check again to continue."
+          ]}
+          onRefresh={refreshStatus}
+          error={error}
+        />
+      </Shell>
+    );
+  }
+
+  if (gate === "locked") {
+    return (
+      <Shell>
+        <StudentStepBanner gate={gate} status={status} />
+        {identity ? <IdentityCard identity={identity} /> : null}
+        <BlockedScreen
+          tone="danger"
+          icon={<Lock size={22} />}
+          title="Your test is locked"
+          lines={[
+            "A proctor has locked this session. You cannot record until it is unlocked.",
+            "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
+          ]}
+          onRefresh={refreshStatus}
+          error={error}
+        />
+      </Shell>
+    );
+  }
+
+  if (gate === "ended" || status === "ended") {
+    return (
+      <Shell>
+        <StudentStepBanner gate="ended" status="ended" />
+        {identity ? <IdentityCard identity={identity} /> : null}
+        <section className="mx-auto max-w-xl rounded-lg border border-accent/30 bg-accent/5 p-6 text-center shadow-subtle">
+          <CheckCircle2 size={28} className="mx-auto text-accent" />
+          <h1 className="mt-3 text-2xl font-semibold text-ink">Test ended</h1>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            Your proctoring session is complete and the recording has been submitted for review. You may now close this tab.
+          </p>
+          {manifest.length ? <p className="mt-3 text-xs text-muted">{manifest.length} recording segment(s) uploaded.</p> : null}
+        </section>
+      </Shell>
+    );
+  }
+
+  // gate === "form" (no session yet) or "running" (active session)
+  const isFormStage = gate === "form" && status !== "recording" && status !== "ending";
+
   return (
     <Shell>
-      {status === "recording" || status === "ending" || status === "ended" ? (
+      <StudentStepBanner gate={gate} status={status} />
+      {status === "recording" || status === "ending" ? (
         <TimerBar status={status} elapsedSeconds={elapsedSeconds} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
       ) : null}
+      {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
+
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
           <div className="mb-5 flex items-start justify-between gap-4">
@@ -470,26 +643,29 @@ function StudentApp() {
             <StatusPill status={status} />
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Proctoring passcode" type="password" value={form.proctor_passcode} onChange={(value) => setForm({ ...form, proctor_passcode: value })} disabled={status !== "idle"} />
-            <Field label="HackerRank username" value={form.hackerrank_username} onChange={(value) => setForm({ ...form, hackerrank_username: value })} disabled={status !== "idle"} />
-            <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} disabled={status !== "idle"} />
-            <Field label="Roll number" value={form.roll_number} onChange={(value) => setForm({ ...form, roll_number: value })} disabled={status !== "idle"} />
-            <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} disabled={status !== "idle"} />
-          </div>
+          {isFormStage ? (
+            <>
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="HackerRank username" value={form.hackerrank_username} onChange={(value) => setForm({ ...form, hackerrank_username: value })} />
+                <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+                <Field label="Roll number" value={form.roll_number} onChange={(value) => setForm({ ...form, roll_number: value })} />
+                <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+                <Field label="Room number" value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+              </div>
 
-          <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
-            <input
-              className="mt-1 h-4 w-4 accent-accent"
-              type="checkbox"
-              checked={form.consent_accepted}
-              disabled={status !== "idle"}
-              onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
-            />
-            <span>
-              I consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
-            </span>
-          </label>
+              <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
+                <input
+                  className="mt-1 h-4 w-4 accent-accent"
+                  type="checkbox"
+                  checked={form.consent_accepted}
+                  onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
+                />
+                <span>
+                  I consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
+                </span>
+              </label>
+            </>
+          ) : null}
 
           {error ? (
             <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
@@ -508,9 +684,15 @@ function StudentApp() {
           ) : null}
 
           <div className="mt-5 flex flex-wrap gap-3">
-            {status === "idle" || status === "error" ? (
-              <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!canStart} onClick={start}>
-                <MonitorUp size={16} /> Start proctoring
+            {isFormStage ? (
+              <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!canStart || status === "starting"} onClick={start}>
+                <MonitorUp size={16} /> {status === "starting" ? "Starting…" : "Start proctoring"}
+              </button>
+            ) : null}
+            {/* Active session restored on reload but recorder not yet running. */}
+            {gate === "running" && status !== "recording" && status !== "ending" ? (
+              <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={status === "starting"} onClick={resumeRecording}>
+                <MonitorUp size={16} /> {status === "starting" ? "Resuming…" : "Resume recording"}
               </button>
             ) : null}
             {status === "recording" && pipAvailable ? (
@@ -537,9 +719,7 @@ function StudentApp() {
 
           {endRequested && status === "recording" ? (
             <EndTestPanel
-              endCode={endCode}
               assuranceAccepted={assuranceAccepted}
-              onEndCodeChange={setEndCode}
               onAssuranceChange={setAssuranceAccepted}
               onCancel={() => setEndRequested(false)}
               onEnd={stop}
@@ -577,6 +757,99 @@ function createUiEvent(type: string, detail?: Record<string, unknown>): ProctorE
   };
 }
 
+// Guided step indicator (Epic 3): always shows the student where they are and
+// what the next action is, so they do not need to ask a proctor.
+function StudentStepBanner({ gate, status }: { gate: StudentGate; status: SessionStatus }) {
+  const steps = [
+    { key: "details", label: "Enter details" },
+    { key: "record", label: "Record + take test" },
+    { key: "end", label: "End test" }
+  ];
+  let activeIndex = 0;
+  let hint = "Fill in your details and consent, then start proctoring.";
+  if (status === "recording" || status === "ending") {
+    activeIndex = 1;
+    hint = "Recording is active. Open HackerRank with the Start test button and keep this tab running. End the test here when you submit.";
+  } else if (gate === "running") {
+    activeIndex = 1;
+    hint = "Your session was restored. Press Resume recording to share your screen again and continue.";
+  } else if (gate === "pending_approval") {
+    activeIndex = 1;
+    hint = "Waiting for a proctor to approve this device. Stay on this page.";
+  } else if (gate === "locked") {
+    activeIndex = 1;
+    hint = "Your session is locked. Call a proctor to unlock you.";
+  } else if (gate === "ended" || status === "ended") {
+    activeIndex = 2;
+    hint = "Your test is complete. You may close this tab.";
+  }
+
+  return (
+    <section className="mb-5 rounded-lg border border-line bg-panel p-4 shadow-subtle">
+      <div className="flex flex-wrap items-center gap-2">
+        {steps.map((step, index) => (
+          <div key={step.key} className="flex items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${
+                index < activeIndex
+                  ? "border-accent/30 bg-accent/10 text-accent"
+                  : index === activeIndex
+                    ? "border-ink bg-ink text-white"
+                    : "border-line bg-white text-muted"
+              }`}
+            >
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-white/20 text-[10px]">{index + 1}</span>
+              {step.label}
+            </span>
+            {index < steps.length - 1 ? <span className="text-muted">›</span> : null}
+          </div>
+        ))}
+      </div>
+      <p className="mt-3 text-sm leading-6 text-muted">{hint}</p>
+    </section>
+  );
+}
+
+// Prominent identity confirmation (Epic 3): the student sees exactly who the
+// session is registered to before and during the test.
+function IdentityCard({ identity }: { identity: { name: string; username: string; room: string } }) {
+  return (
+    <section className="mb-5 rounded-lg border border-accent/40 bg-accent/5 p-5 shadow-subtle">
+      <div className="flex flex-wrap items-center gap-3">
+        <UserCheck size={22} className="text-accent" />
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-accent">You are taking the test as</p>
+          <p className="mt-1 text-lg font-semibold text-ink">
+            {identity.name} <span className="font-mono text-base text-muted">({identity.username})</span>
+          </p>
+          <p className="mt-1 text-sm text-muted">Room {identity.room || "—"} · Confirm this is you. If anything is wrong, call a proctor before continuing.</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Shared blocked-state screen for pending_approval and locked. Self-service:
+// the student can re-check status without staff once a proctor acts.
+function BlockedScreen({ tone, icon, title, lines, onRefresh, error }: { tone: "warning" | "danger"; icon: React.ReactNode; title: string; lines: string[]; onRefresh: () => void; error: string }) {
+  const toneStyles = tone === "danger" ? "border-danger/30 bg-danger/5 text-danger" : "border-warning/40 bg-warning/5 text-warning";
+  return (
+    <section className={`mx-auto max-w-xl rounded-lg border p-6 text-center shadow-subtle ${toneStyles}`}>
+      <div className="mx-auto flex items-center justify-center">{icon}</div>
+      <h1 className="mt-3 text-2xl font-semibold text-ink">{title}</h1>
+      <div className="mt-3 space-y-2 text-sm leading-6 text-muted">
+        {lines.map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </div>
+      <button className="focus-ring mt-5 inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white" onClick={onRefresh}>
+        <RefreshCw size={16} /> Check again
+      </button>
+      {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
+    </section>
+  );
+}
+
 function TimerBar({ status, elapsedSeconds, startIp, currentIp, ipChanged }: { status: SessionStatus; elapsedSeconds: number; startIp: string; currentIp: string; ipChanged: boolean }) {
   return (
     <div className={`sticky top-0 z-10 mb-5 rounded-lg border px-4 py-3 text-white shadow-subtle ${ipChanged ? "border-danger/40 bg-danger" : "border-ink/10 bg-ink"}`}>
@@ -595,20 +868,17 @@ function TimerBar({ status, elapsedSeconds, startIp, currentIp, ipChanged }: { s
   );
 }
 
-function EndTestPanel({ endCode, assuranceAccepted, onEndCodeChange, onAssuranceChange, onCancel, onEnd }: { endCode: string; assuranceAccepted: boolean; onEndCodeChange: (value: string) => void; onAssuranceChange: (value: boolean) => void; onCancel: () => void; onEnd: () => void }) {
+function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }: { assuranceAccepted: boolean; onAssuranceChange: (value: boolean) => void; onCancel: () => void; onEnd: () => void }) {
   return (
     <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4">
       <p className="text-sm font-semibold text-danger">End test confirmation</p>
-      <p className="mt-1 text-sm leading-6 text-ink">End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session.</p>
+      <p className="mt-1 text-sm leading-6 text-ink">End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below.</p>
       <label className="mt-4 flex gap-3 rounded-md border border-line bg-white/70 p-3 text-sm leading-6 text-muted">
         <input className="mt-1 h-4 w-4 accent-danger" type="checkbox" checked={assuranceAccepted} onChange={(event) => onAssuranceChange(event.target.checked)} />
         <span>I assure that I worked independently, did not copy, did not use AI/external help, and submitted only my own solution.</span>
       </label>
-      <div className="mt-4 max-w-sm">
-        <Field label="Proctoring end code" type="password" value={endCode} onChange={onEndCodeChange} />
-      </div>
       <div className="mt-4 flex flex-wrap gap-3">
-        <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-danger px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!assuranceAccepted || !endCode.trim()} onClick={onEnd}>
+        <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-danger px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!assuranceAccepted} onClick={onEnd}>
           <Square size={16} /> End and close session
         </button>
         <button className="focus-ring rounded-md border border-line px-4 py-2 text-sm font-medium" onClick={onCancel}>
@@ -619,15 +889,15 @@ function EndTestPanel({ endCode, assuranceAccepted, onEndCodeChange, onAssurance
   );
 }
 
-type AdminView = "alerts" | "review" | "settings";
+type AdminView = "stats" | "alerts" | "review" | "settings";
 
 function AdminApp() {
-  const [view, setView] = useState<AdminView>("alerts");
+  const [view, setView] = useState<AdminView>("stats");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [unlocked, setUnlocked] = useState(false);
-  const [settings, setSettings] = useState<ProctorSettings>({ start_at: "", end_at: "", passcode: "", end_code: "" });
+  const [settings, setSettings] = useState<ProctorSettings>({ start_at: "", end_at: "" });
   const [settingsMessage, setSettingsMessage] = useState("");
   const [result, setResult] = useState<Array<Record<string, unknown>>>([]);
   const [error, setError] = useState("");
@@ -636,12 +906,17 @@ function AdminApp() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsLoaded, setAlertsLoaded] = useState(false);
+  const [alertFilters, setAlertFilters] = useState<AlertFilters>({});
+  const [stats, setStats] = useState<AdminStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [actionMessage, setActionMessage] = useState("");
 
-  const loadAlerts = async () => {
+  const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
     setError("");
     try {
-      const response = await fetchAlerts(password);
+      const response = await fetchAlerts(password, filters ?? alertFilters);
       const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
       setAlerts(sorted);
       setAlertsLoaded(true);
@@ -652,8 +927,20 @@ function AdminApp() {
     }
   };
 
+  const loadStats = async () => {
+    setStatsLoading(true);
+    setError("");
+    try {
+      const response = await fetchAdminStats(password);
+      setStats(response.stats);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
   // Auto-load alerts the first time the unlocked admin opens the alerts tab.
-  // Subsequent refreshes are manual via the Refresh button.
   useEffect(() => {
     if (!unlocked || view !== "alerts" || alertsLoaded || alertsLoading) return;
     let cancelled = false;
@@ -661,7 +948,7 @@ function AdminApp() {
       setAlertsLoading(true);
       setError("");
       try {
-        const response = await fetchAlerts(password);
+        const response = await fetchAlerts(password, alertFilters);
         if (cancelled) return;
         const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
         setAlerts(sorted);
@@ -675,7 +962,30 @@ function AdminApp() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, alertsLoaded, alertsLoading, password]);
+
+  // Auto-load stats the first time the unlocked admin opens the stats tab.
+  useEffect(() => {
+    if (!unlocked || view !== "stats" || stats !== null || statsLoading) return;
+    let cancelled = false;
+    void (async () => {
+      setStatsLoading(true);
+      setError("");
+      try {
+        const response = await fetchAdminStats(password);
+        if (!cancelled) setStats(response.stats);
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        if (!cancelled) setStatsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, view, stats, statsLoading, password]);
 
   const unlockAdmin = () => {
     setError("");
@@ -698,15 +1008,9 @@ function AdminApp() {
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
-        passcode: "",
-        end_code: "",
-        passcode_set: response.passcode_set,
-        passcode_preview: response.passcode_preview,
-        end_code_set: response.end_code_set,
-        end_code_preview: response.end_code_preview,
         updated_at: response.updated_at
       });
-      setSettingsMessage(response.passcode_set ? `Current passcode: ${response.passcode_preview}; end code: ${response.end_code_preview || "not set"}` : "No passcode set yet.");
+      setSettingsMessage("Loaded current gate.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -722,23 +1026,15 @@ function AdminApp() {
       const response = await saveProctorSettings(password, {
         start_at: localInputToIso(settings.start_at),
         end_at: localInputToIso(settings.end_at),
-        contest_url: settings.contest_url,
-        passcode: settings.passcode,
-        end_code: settings.end_code
+        contest_url: settings.contest_url
       });
       setSettings({
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
-        passcode: "",
-        end_code: "",
-        passcode_set: response.passcode_set,
-        passcode_preview: response.passcode_preview,
-        end_code_set: response.end_code_set,
-        end_code_preview: response.end_code_preview,
         updated_at: response.updated_at
       });
-      setSettingsMessage(`Saved. Current passcode: ${response.passcode_preview}; end code: ${response.end_code_preview}`);
+      setSettingsMessage("Saved. The time window is now the only start gate (no passcode).");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -757,6 +1053,36 @@ function AdminApp() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Per-candidate or bulk remote action against the backend session-action API.
+  // After it runs we refresh whatever data the current view is showing.
+  const runAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await sessionAction(password, {
+        action,
+        ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
+        ...(opts.usernames ? { usernames: opts.usernames } : {})
+      });
+      setActionMessage(`${action} applied to ${response.updated.length} session(s).`);
+      await loadStats();
+      if (view === "alerts") await loadAlerts();
+      if (view === "review" && username) await search();
+      setSelected(new Set());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const toggleSelected = (key: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   if (!unlocked) {
@@ -783,15 +1109,34 @@ function AdminApp() {
   return (
     <Shell>
       <nav className="mb-5 flex flex-wrap gap-2" aria-label="Admin views">
+        <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
         <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
         <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
       </nav>
 
       {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
+      {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
+
+      {view === "stats" ? (
+        <StatsDashboard stats={stats} loading={statsLoading} onRefresh={loadStats} />
+      ) : null}
 
       {view === "alerts" ? (
-        <AlertsConsole alerts={alerts} loading={alertsLoading} loaded={alertsLoaded} onRefresh={loadAlerts} />
+        <AlertsConsole
+          alerts={alerts}
+          loading={alertsLoading}
+          loaded={alertsLoaded}
+          filters={alertFilters}
+          selected={selected}
+          onToggleSelected={toggleSelected}
+          onFiltersChange={(next) => {
+            setAlertFilters(next);
+            void loadAlerts(next);
+          }}
+          onRefresh={() => loadAlerts()}
+          onAction={runAction}
+        />
       ) : null}
 
       {view === "settings" ? (
@@ -800,20 +1145,18 @@ function AdminApp() {
           <Lock size={20} />
           <div>
             <h1 className="text-2xl font-semibold">Proctoring gate</h1>
-            <p className="mt-1 text-sm text-muted">Set the allowed window and passcode. Student sessions cannot start outside this gate.</p>
+            <p className="mt-1 text-sm text-muted">Set the allowed window and contest URL. The time window is the only start gate — there is no passcode and no end code.</p>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr]">
           <Field label="Start time" type="datetime-local" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
           <Field label="End time" type="datetime-local" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
-          <Field label={settings.passcode_set ? "New passcode (optional)" : "Proctoring passcode"} type="password" value={settings.passcode ?? ""} onChange={(value) => setSettings({ ...settings, passcode: value })} />
-          <Field label={settings.end_code_set ? "New end code (optional)" : "Proctoring end code"} type="password" value={settings.end_code ?? ""} onChange={(value) => setSettings({ ...settings, end_code: value })} />
-          <div className="mt-6 flex flex-wrap gap-3 md:col-span-2">
+          <div className="mt-6 flex flex-wrap gap-3 md:col-span-3">
             <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={loadSettings} disabled={settingsLoading}>
               Load current
             </button>
-            <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={saveSettings} disabled={settingsLoading || !settings.start_at || !settings.end_at || (!settings.passcode_set && !settings.passcode) || (!settings.end_code_set && !settings.end_code)}>
+            <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={saveSettings} disabled={settingsLoading || !settings.start_at || !settings.end_at}>
               Save gate
             </button>
           </div>
@@ -830,7 +1173,7 @@ function AdminApp() {
           <Search size={20} />
           <div>
             <h1 className="text-2xl font-semibold">Review dashboard</h1>
-            <p className="mt-1 text-sm text-muted">Search by HackerRank username to inspect sessions, events, and uploaded evidence.</p>
+            <p className="mt-1 text-sm text-muted">Search by HackerRank username to inspect sessions, events, and uploaded evidence — and run remote actions.</p>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
@@ -843,21 +1186,117 @@ function AdminApp() {
 
       <section className="mt-5 space-y-3">
         {result.map((session, index) => (
-          <div key={String(session.session_id ?? index)} className="rounded-lg border border-line bg-panel p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="font-mono text-xs text-muted">{String(session.session_id ?? "")}</p>
-                <h2 className="mt-1 text-lg font-semibold">{String(session.hackerrank_username ?? "")}</h2>
-              </div>
-              <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{String(session.status ?? "unknown")}</span>
-            </div>
-            <pre className="mt-4 max-h-96 overflow-auto rounded-md bg-ink p-4 text-xs text-white">{JSON.stringify(session, null, 2)}</pre>
-          </div>
+          <ReviewSessionCard key={String(session.session_id ?? index)} session={session} onAction={runAction} />
         ))}
       </section>
       </>
       ) : null}
     </Shell>
+  );
+}
+
+function StatsDashboard({ stats, loading, onRefresh }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void }) {
+  return (
+    <section className="space-y-5">
+      <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <ShieldCheck size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">Live stats</h1>
+              <p className="mt-1 text-sm text-muted">Current session counts by status across the contest. Refresh to update.</p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {stats === null ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading stats…" : "No stats loaded yet."}</div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} />
+          <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} />
+          <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} />
+          <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} />
+          <StatCard label="Total" value={stats.total} tone="ink" icon={<Users size={18} />} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StatCard({ label, value, tone, icon }: { label: string; value: number; tone: "accent" | "danger" | "warning" | "muted" | "ink"; icon: React.ReactNode }) {
+  const toneStyles: Record<typeof tone, string> = {
+    accent: "border-accent/30 bg-accent/5 text-accent",
+    danger: "border-danger/30 bg-danger/5 text-danger",
+    warning: "border-warning/40 bg-warning/5 text-warning",
+    muted: "border-line bg-white text-muted",
+    ink: "border-ink/20 bg-ink/5 text-ink"
+  };
+  return (
+    <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wide">{label}</span>
+        {icon}
+      </div>
+      <p className="mt-3 text-3xl font-semibold text-ink">{value}</p>
+    </div>
+  );
+}
+
+const ACTION_LABELS: Array<{ action: SessionAction; label: string; destructive: boolean }> = [
+  { action: "approve", label: "Approve", destructive: false },
+  { action: "unlock", label: "Unlock", destructive: false },
+  { action: "lock", label: "Lock", destructive: true },
+  { action: "bypass", label: "Bypass", destructive: false },
+  { action: "end", label: "End", destructive: true }
+];
+
+// Compact per-candidate remote-action buttons. Destructive actions confirm first.
+function ActionButtons({ onAction, sessionId, username, actions = ACTION_LABELS }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions?: typeof ACTION_LABELS }) {
+  const run = (action: SessionAction, destructive: boolean) => {
+    if (destructive) {
+      const target = sessionId ? `session ${sessionId.slice(0, 8)}…` : `${username}`;
+      if (!window.confirm(`Apply "${action}" to ${target}? This affects the live session.`)) return;
+    }
+    onAction(action, sessionId ? { sessionId } : username ? { usernames: [username] } : {});
+  };
+  return (
+    <div className="flex flex-wrap gap-2">
+      {actions.map((item) => (
+        <button
+          key={item.action}
+          type="button"
+          onClick={() => run(item.action, item.destructive)}
+          className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${item.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ReviewSessionCard({ session, onAction }: { session: Record<string, unknown>; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void }) {
+  const sessionId = session.session_id ? String(session.session_id) : undefined;
+  return (
+    <div className="rounded-lg border border-line bg-panel p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-xs text-muted">{sessionId ?? ""}</p>
+          <h2 className="mt-1 text-lg font-semibold">{String(session.hackerrank_username ?? "")}</h2>
+          {session.room ? <p className="text-xs text-muted">Room {String(session.room)}</p> : null}
+        </div>
+        <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{String(session.status ?? "unknown")}</span>
+      </div>
+      <div className="mt-4">
+        <ActionButtons onAction={onAction} sessionId={sessionId} />
+      </div>
+      <pre className="mt-4 max-h-96 overflow-auto rounded-md bg-ink p-4 text-xs text-white">{JSON.stringify(session, null, 2)}</pre>
+    </div>
   );
 }
 
@@ -886,7 +1325,26 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, loading, loaded, onRefresh }: { alerts: Alert[]; loading: boolean; loaded: boolean; onRefresh: () => void }) {
+function AlertsConsole({ alerts, loading, loaded, filters, selected, onToggleSelected, onFiltersChange, onRefresh, onAction }: {
+  alerts: Alert[];
+  loading: boolean;
+  loaded: boolean;
+  filters: AlertFilters;
+  selected: Set<string>;
+  onToggleSelected: (key: string) => void;
+  onFiltersChange: (filters: AlertFilters) => void;
+  onRefresh: () => void;
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
+}) {
+  // Unique candidate usernames in the current (selected) alert set, for bulk actions.
+  const selectedUsernames = useMemo(() => {
+    const usernames = new Set<string>();
+    for (const alert of alerts) {
+      if (selected.has(alert.id)) usernames.add(alert.hackerrank_username);
+    }
+    return [...usernames];
+  }, [alerts, selected]);
+
   return (
     <>
       <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -902,38 +1360,119 @@ function AlertsConsole({ alerts, loading, loaded, onRefresh }: { alerts: Alert[]
             <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
           </button>
         </div>
+
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <FilterSelect
+            label="Source"
+            value={filters.source ?? ""}
+            options={[{ value: "", label: "All sources" }, { value: "proctor", label: "Proctor" }, { value: "contest-eval", label: "Contest-eval" }]}
+            onChange={(value) => onFiltersChange({ ...filters, source: value ? (value as AlertSource) : undefined })}
+          />
+          <FilterSelect
+            label="Severity"
+            value={filters.severity ?? ""}
+            options={[{ value: "", label: "All severities" }, { value: "critical", label: "Critical" }, { value: "warning", label: "Warning" }, { value: "info", label: "Info" }]}
+            onChange={(value) => onFiltersChange({ ...filters, severity: value ? (value as AlertSeverity) : undefined })}
+          />
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">Contest slug</span>
+            <input
+              className="focus-ring mt-1 h-10 w-48 rounded-md border border-line bg-white px-3 text-sm"
+              value={filters.contest_slug ?? ""}
+              placeholder="all contests"
+              onChange={(event) => onFiltersChange({ ...filters, contest_slug: event.target.value || undefined })}
+            />
+          </label>
+        </div>
+
         <div className="mt-4 flex flex-wrap gap-3 text-sm">
           <Metric icon={<Bell size={16} />} label="Total" value={String(alerts.length)} />
           <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(alerts.filter((alert) => alert.severity === "critical").length)} />
           <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(alerts.filter((alert) => alert.severity === "warning").length)} />
         </div>
+
+        {selectedUsernames.length ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
+            <span className="text-sm font-medium">{selectedUsernames.length} candidate(s) selected:</span>
+            <span className="font-mono text-xs text-muted">{selectedUsernames.join(", ")}</span>
+            <BulkActionButtons usernames={selectedUsernames} onAction={onAction} />
+          </div>
+        ) : null}
       </section>
 
       <section className="space-y-3">
         {!loaded && loading ? (
           <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">Loading alerts…</div>
         ) : alerts.length === 0 ? (
-          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No alerts yet. New proctoring and contest-eval signals appear here as they arrive.</div>
+          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive.</div>
         ) : (
-          alerts.map((alert) => <AlertRow key={alert.id} alert={alert} />)
+          alerts.map((alert) => (
+            <AlertRow
+              key={alert.id}
+              alert={alert}
+              selected={selected.has(alert.id)}
+              onToggleSelected={() => onToggleSelected(alert.id)}
+              onAction={onAction}
+            />
+          ))
         )}
       </section>
     </>
   );
 }
 
-function AlertRow({ alert }: { alert: Alert }) {
+// Bulk actions operate on the live session of each selected candidate username.
+function BulkActionButtons({ usernames, onAction }: { usernames: string[]; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
+  const run = (action: SessionAction, destructive: boolean) => {
+    if (destructive && !window.confirm(`Apply "${action}" to ${usernames.length} candidate(s)? This affects their live sessions.`)) return;
+    onAction(action, { usernames });
+  };
   return (
-    <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.severity === "critical" ? "border-danger/40" : "border-line"}`}>
+    <div className="flex flex-wrap gap-2">
+      {ACTION_LABELS.map((item) => (
+        <button
+          key={item.action}
+          type="button"
+          onClick={() => run(item.action, item.destructive)}
+          className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${item.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
+        >
+          Bulk {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function FilterSelect({ label, value, options, onChange }: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
+      <select className="focus-ring mt-1 h-10 w-44 rounded-md border border-line bg-white px-3 text-sm" value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function AlertRow({ alert, selected, onToggleSelected, onAction }: { alert: Alert; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasData = alert.data && Object.keys(alert.data).length > 0;
+  return (
+    <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <SeverityPill severity={alert.severity} />
-            <span className="rounded-full border border-line px-2.5 py-1 text-xs font-medium capitalize text-muted">{alert.source}</span>
-            <span className="rounded-full border border-line px-2.5 py-1 font-mono text-xs text-muted">{alert.type}</span>
+        <div className="flex min-w-0 gap-3">
+          <input className="mt-1.5 h-4 w-4 shrink-0 accent-accent" type="checkbox" checked={selected} onChange={onToggleSelected} aria-label={`Select ${alert.hackerrank_username}`} />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <SeverityPill severity={alert.severity} />
+              <span className="rounded-full border border-line px-2.5 py-1 text-xs font-medium capitalize text-muted">{alert.source}</span>
+              <span className="rounded-full border border-line px-2.5 py-1 font-mono text-xs text-muted">{alert.type}</span>
+            </div>
+            <h2 className="mt-2 text-lg font-semibold">{alert.title}</h2>
+            {alert.detail ? <p className="mt-1 text-sm leading-6 text-muted">{alert.detail}</p> : null}
           </div>
-          <h2 className="mt-2 text-lg font-semibold">{alert.title}</h2>
-          {alert.detail ? <p className="mt-1 text-sm leading-6 text-muted">{alert.detail}</p> : null}
         </div>
         <time className="shrink-0 font-mono text-xs text-muted" dateTime={alert.timestamp}>{new Date(alert.timestamp).toLocaleString()}</time>
       </div>
@@ -946,20 +1485,32 @@ function AlertRow({ alert }: { alert: Alert }) {
         {alert.verdict ? <AlertField label="Verdict" value={alert.verdict.status} /> : null}
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        {alert.download_url ? (
-          <a
-            className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40"
-            href={alert.download_url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <Video size={14} /> Open evidence clip <ExternalLink size={12} />
-          </a>
-        ) : (
-          <span className="text-xs text-muted">No recording attached.</span>
-        )}
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {alert.download_url ? (
+            <a
+              className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40"
+              href={alert.download_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <Video size={14} /> Open evidence clip <ExternalLink size={12} />
+            </a>
+          ) : (
+            <span className="text-xs text-muted">No recording attached.</span>
+          )}
+          {hasData ? (
+            <button type="button" onClick={() => setExpanded((value) => !value)} className="focus-ring rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40">
+              {expanded ? "Hide details" : "Show details"}
+            </button>
+          ) : null}
+        </div>
+        <ActionButtons onAction={onAction} username={alert.hackerrank_username} sessionId={alert.session_id} actions={ACTION_LABELS} />
       </div>
+
+      {expanded && hasData ? (
+        <pre className="mt-4 max-h-72 overflow-auto rounded-md bg-ink p-4 text-xs text-white">{JSON.stringify(alert.data, null, 2)}</pre>
+      ) : null}
     </div>
   );
 }
@@ -1143,7 +1694,7 @@ function RulesPanel() {
         <li>Screen sharing is mandatory and is recorded directly for reliability. Microphone is included when available.</li>
         <li>If a camera is available, keep the camera preview or pop-out visible when you move to HackerRank.</li>
         <li>Do not stop screen sharing until the assessment is fully submitted.</li>
-        <li>Keep this proctor app open. Focus changes and interruptions are logged.</li>
+        <li>Keep this proctor app open. If you reload by accident, your session resumes automatically.</li>
         <li>Copied code, AI-assisted answers, or unexplained anomalies may lead to disqualification.</li>
         <li>Shortlisted candidates must explain and modify their code live.</li>
       </ul>

@@ -16,6 +16,18 @@ _Last updated: 2026-06-04 (goal-set)._
 
 ---
 
+## 🔒 SECURITY FINDINGS (backend audit) — READ THIS
+
+**🔴 CRITICAL — C1: the admin password is baked into the public student bundle.** `VITE_ADMIN_PASSWORD` is embedded in the JS every student downloads, and it's the *only* gate on `/api/admin/*` — including `/api/admin/sessions`, which returns **signed download URLs to every student's screen + webcam recording + PII**. Any test-taker can extract it (view-source) and pull all evidence + lock/end/approve any session. **This is pre-existing (not introduced tonight), but it collapses the whole admin authorization model — fix before any real contest.** Proper fix = serve the admin app from a separate origin behind real staff auth (Cloud Run + IAP, or Firebase/Google SSO); do not ship a long-lived shared secret to students. **This is an architecture call for you — I did NOT re-architect auth autonomously.**
+
+**🟠 H2 (escalated) — `session_id` is the sole bearer for all write endpoints** and resume's ownership check is optional (and "ownership" = knowing the public username). A leaked session_id (it appears in the admin UI + alerts) lets anyone resume/inject events/end a session. Recommended fix = a separate high-entropy `session_token` (hashed on the doc, timing-safe checked on every write/resume), distinct from `session_id`. Spans backend+frontend → flagged for a deliberate pass, not guessed overnight.
+
+**Other hardening (escalated, not blocking):** M2 client can spoof/suppress sure-shot alerts (tag client-origin alerts, trust server-derived) · M4 `PUBLIC_APP_ORIGIN` defaults to `*` (make required at deploy) · L1 `/api/admin/stats` truncates >2000 sessions (use Firestore `.count()`) · L2 `/api/admin/sessions` bulk-signs up to 1000 1-hour read URLs (shorten/lazy-sign).
+
+**Fixed tonight (correctness bugs in the Phase-2 code):** H1 single-session start race → Firestore transaction/lock-doc; H3 `locked`/`ended` sessions still accepted uploads/events (lock was cosmetic) → status-gated write paths; M1 `sanitizeSegment` now rejects pure-dot segments; M3 500s no longer echo internal exception messages; N3 malformed body → 400 not 500. (Verified by the audit as the safe-to-auto-fix set; details in NIGHT-LOG.)
+
+---
+
 ## ❓ OPEN DECISIONS — I proceeded on a sensible DEFAULT; confirm or correct
 
 1. **Alert taxonomy (live console):** surface **deterministic** `clone_analysis.json` flags (peer-copy clusters, recurring pairs, web-paste artifacts) live; **defer the LLM verdict layer** (it was an interactive agent workflow, not a committed script). → confirm you don't want per-poll LLM verdicts.

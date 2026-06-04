@@ -39,4 +39,15 @@ Dispatched one comprehensive backend agent (handler.mjs is monolithic → single
 - **Env/docs** — added `backend/firestore.indexes.json` (composite index username_norm+contest_slug) + idempotent index-create step in `deploy-gcp.sh`; README Phase-2 section (storage layout, session-doc shape, all new/changed endpoints, sure-shot table, index note); runbooks de-passcoded. No new secrets.
 - **Tests** — `backend/test/phase2.test.mjs` (29 tests, richer fake Firestore supporting create/update/FieldValue.increment + fake Storage). **Full suite 52/52 green (23 Phase-1 + 29 Phase-2).** Module + video-worker syntax-check clean; video-worker dual-layout parse validated.
 
+### Phase 2 — DONE ✅ (committed 18d815c, pushed) — 52/52 tests
+
+### Phase 3 — frontend roadmap completion (in progress)
+Dispatched one comprehensive frontend agent (App.tsx monolithic): student flow (remove passcodes, session resume, identity confirmation, room capture, guided UX, locked/pending states) + admin completion (live stats dashboard, remote actions, alerts console room+name/filters) consuming Phase-2 contracts; demo-mode kept working. Then verify + commit, then Phase 4 audit.
+
+### Phase 3 — DONE ✅ (frontend)
+Student flow: passcodes removed, room capture, persistent-session resume, prominent identity card, 3-step guided UX, pending_approval/locked/ended screens. Admin: live stats dashboard, remote actions (per-candidate + bulk approve/lock/unlock/bypass/end), alerts polish (filters, room+name, expandable data, video deep-link). Demo-mode works throughout. lint + build green. N4 (XSS) safe — no dangerouslySetInnerHTML.
+
+### Backend security pass — DONE ✅ (front-loaded Phase 4 gate)
+Read-only audit found real issues. **Fixed tonight:** H1 single-session start race → atomic lock doc (`proctor_live_locks`); H3 locked/ended/pending sessions now reject writes (lock/end actually stop the client); M1 pure-dot segment sanitize; M3 500s no longer leak exception messages; N3 malformed JSON → 400. **81/81 backend tests.** **Escalated to MORNING-REVIEW:** C1 (admin password in public bundle — critical, pre-existing, needs real auth), H2 (session_id sole bearer → session_token), M2/M4/L1/L2.
+
 _(appended as phases complete.)_
