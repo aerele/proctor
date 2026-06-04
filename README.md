@@ -130,6 +130,61 @@ The frontend URL remains the student URL. The admin page is the same URL with `/
 5. Keep recording active while using HackerRank.
 6. After HackerRank submission, click `End test`, accept the assurance, enter the end code, and close only after the session ends.
 
+## Alerts Ingestion API
+
+The backend exposes a shared alerts pipeline so the proctor recorder and the
+contest-eval cheating pipeline can push integrity alerts into one place for
+admin review.
+
+- `POST /api/alerts` — ingest one alert (a bare alert object) or a batch
+  (`{ "alerts": [ ... ] }`). Authenticated with the `x-api-key` header, compared
+  against `ALERTS_INGEST_API_KEY` using a timing-safe comparison. **If
+  `ALERTS_INGEST_API_KEY` is unset the endpoint rejects every request**
+  (closed-by-default). Alerts are written to the `ALERTS_COLLECTION` Firestore
+  collection keyed on `alert.id` (idempotent merge), with a server `received_at`
+  stamp added. Required fields: `source`, `type`, `severity`, `timestamp`,
+  `hackerrank_username`, `title`.
+- `GET /api/admin/alerts` — list alerts newest-first (capped at 500), with
+  optional `contest_slug`, `severity`, and `source` query-param filters.
+  Authenticated with the `x-admin-password` header (same as `/api/admin/sessions`).
+  Alerts that carry a `video_key` get a short-lived signed read `download_url`
+  resolved at read time (never stored); signing failures degrade to `null`.
+
+Shared alert shape (all producers and the backend must agree):
+
+```json
+{
+  "id": "<source>:<type>:<username_norm>:<contest_slug>:<dedupe>",
+  "source": "proctor | contest-eval",
+  "type": "recording_stopped | screen_share_stopped | invalid_share_surface | recording_error | ip_changed | peer_copy_cluster | recurring_pair | web_paste | fast_solve",
+  "severity": "critical | warning | info",
+  "timestamp": "ISO 8601",
+  "contest_slug": "optional",
+  "hackerrank_username": "required",
+  "username_norm": "optional lowercase/sanitized",
+  "session_id": "optional",
+  "room": "optional",
+  "title": "short headline",
+  "detail": "optional human-readable explanation",
+  "data": { "optional": "structured payload" },
+  "video_key": "optional GCS object key; resolved to download_url on read",
+  "verdict": { "status": "pending | real | false_positive | inconclusive", "reason": "optional", "by": "optional" }
+}
+```
+
+`download_url` is filled by `GET /api/admin/alerts` and is never persisted.
+
+### Alerts env vars
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `ALERTS_INGEST_API_KEY` | Yes | none | Shared secret for `POST /api/alerts` (`x-api-key`). Unset = reject all ingest. Karthi sets the real value at deploy time; the test suite uses a throwaway placeholder. Generate with `openssl rand -base64 32`. |
+| `ALERTS_COLLECTION` | No | `proctor_alerts` | Firestore collection for ingested alerts. |
+
+> Never commit a real `ALERTS_INGEST_API_KEY`. The deploy script and
+> `.env.deploy.example` carry placeholders only; Karthi supplies the real key
+> via the deployment environment.
+
 ## Capacity Notes
 
 The default deployment is tuned for cost: Cloud Functions and Cloud Run use zero minimum instances, recordings use low-bitrate screen capture, chunks are 30 seconds, and evidence objects auto-delete after 3 days. At 800 students for 90 minutes, still expect meaningful Google Cloud Storage usage because video is inherently large. Test with 20-30 devices before the drive.

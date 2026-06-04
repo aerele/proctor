@@ -12,6 +12,7 @@ _Last updated: 2026-06-04 (goal-set)._
 1. **GCS contest-folder storage change — UNTESTED against a live bucket.** No GCP access overnight. Change is surgical + backward-compatible (slug prefix only, legacy fallback when no contest URL). **Verify a real upload lands at `contests/<contest-slug>/sessions/<username>/<session_id>/…`** and that the existing upload/signing/admin-evidence flow is intact. Also confirm `video-worker` still finds chunks (its merge path was updated to match).
 2. **Live HackerRank polling** — coded + validated against fixtures; live-validated against your `:9222` session only if it stayed open. Re-run a live poll cycle to confirm leaderboard/people/submissions fetch + the 429-safe code-fetch behave on real data.
 3. **Backend deploy** — alerts API + contest-folder change need `./backend/deploy-gcp.sh` with your authenticated gcloud + the new `ALERTS_INGEST_API_KEY` env var (see below). Nothing was deployed overnight.
+4. **Real backend alert routes couldn't run offline** — `/api/alerts` + `/api/admin/alerts` hit Firestore (`new Firestore()`), and there's no gcloud/emulator/creds here, so a real `functions-framework` run 500s on those routes. They're **fully unit-tested (23/23, mocked Firestore)** and the end-to-end demo passes against `monitoring/mock_alert_server.py` (mirrors the contract exactly). **In the morning, validate against the real backend** (set `FIRESTORE_EMULATOR_HOST`, or deploy) so a real POST→Firestore→GET round-trip is confirmed.
 
 ---
 
@@ -37,4 +38,10 @@ _Last updated: 2026-06-04 (goal-set)._
 
 ## 🟢 DECISIONS I MADE AND PROCEEDED ON (FYI — reversible, flag if you disagree)
 
-_(appended during the night)_
+**Phase 1 (monitoring slice):**
+- **Unattended live acquisition** — built `monitoring/cdp.py` (hand-rolled stdlib WebSocket CDP client) so the poller drives Chrome on `:9222` ITSELF (deterministic loop, no agent-in-the-loop), per your "just keep looping and fetching" intent. Tested live: 291 participants / 1569 subs, your tabs untouched (opens + closes its own background tab).
+- **`requireApiKey` is timing-safe** (crypto.timingSafeEqual). I left the existing `requireAdmin` as-is (plain `!==`) to not change current behavior — say if you want it hardened too (one-liner).
+- **Poller heuristics** (sensible defaults, confirm): lazy code-fetch only for single-attempt HARD solves or zero-iteration ≥3 solves; severity — `recurring_pair` critical if 2+ shared problems else warning, `peer_copy_cluster` critical on HARD / warning on MED / dropped on EASY, `web_paste` warning, `fast_solve` info. Ambiguous cases (web_paste, single-hard recurring_pair, MED cluster) route to the LLM verdict seam; conclusive criticals skip it.
+- **`frontend/public/sample.webm`** is a 2s ffmpeg placeholder clip for the demo video link — swap for a real clip if desired.
+
+_(more appended as phases complete)_

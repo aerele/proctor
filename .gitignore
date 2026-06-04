@@ -2,6 +2,8 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+__pycache__/
+*.pyc
 .DS_Store
 .env
 .env.local
@@ -15,6 +17,14 @@ frontend/dist/
 # overnight-run scratch + secrets + build artifacts
 night-run/verdict-queue/
 *.pem
+
+# contest-eval monitoring: live/PII output (alerts carry candidate usernames + code)
+monitoring/.data/
+# never commit fixtures or candidate PII pulled from contest-eval into this repo
+monitoring/**/data/raw/
+monitoring/**/data/processed/
+monitoring/**/code_*.json
+monitoring/**/contest_*_meta.json
 spike/proctor-extension.crx
 spike/iframe-test/proctor-extension.crx
 spike/iframe-test/proctor-extension.zip
