@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { width: 460px; font: 13px/1.5 system-ui, sans-serif; margin: 0; color: #0f172a; }
+  header { padding: 12px 14px; background: #0f172a; color: #fff; }
+  header h1 { font-size: 15px; margin: 0; }
+  header p { margin: 2px 0 0; font-size: 11px; color: #cbd5e1; }
+  .sec { padding: 10px 14px; border-bottom: 1px solid #e2e8f0; }
+  .sec h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 6px; color: #475569; }
+  .can { color: #15803d; } .cannot { color: #b91c1c; }
+  button { font: inherit; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; cursor: pointer; }
+  ul { margin: 4px 0 0; padding-left: 16px; }
+  li { margin: 1px 0; }
+  .tab { font-size: 12px; }
+  .tab .u { color: #64748b; word-break: break-all; }
+  .win { margin-top: 6px; font-weight: 600; color: #334155; }
+  .count { font-weight: 700; }
+  code { background:#f1f5f9; padding:1px 4px; border-radius:4px; font-size:11px;}
+</style>
+</head>
+<body>
+<header>
+  <h1>Proctor Extension Spike</h1>
+  <p>What a proctoring extension can &amp; cannot see — live proof.</p>
+</header>
+
+<div class="sec">
+  <h2>✅ CAN see — every tab in every window <button id="scan">Scan now</button></h2>
+  <div id="tabs">Click "Scan now".</div>
+</div>
+
+<div class="sec">
+  <h2 class="can">✅ CAN also see (browser-wide)</h2>
+  <ul>
+    <li>Which tab is <b>active</b>, and every <b>tab switch / new tab / closed tab</b> (incl. the URL).</li>
+    <li>When focus <b>leaves the browser</b> entirely (alt-tab to another app).</li>
+    <li>Every <b>navigation</b> (URL changes) in any tab.</li>
+    <li>With a content script + permission: read/observe the <b>contents of the HackerRank tab itself</b> (paste, typing, fullscreen) — not shown here.</li>
+  </ul>
+  <p style="margin:6px 0 0; color:#64748b">→ Open <code>chrome://extensions</code> → this extension → <b>service worker</b> (Inspect) and watch the console while you switch tabs / alt-tab.</p>
+</div>
+
+<div class="sec">
+  <h2 class="cannot">⛔ CANNOT see (no extension API exists)</h2>
+  <ul>
+    <li><b>Other programs / the Windows Task Manager / Linux processes.</b> No browser-extension API exposes the OS process list.</li>
+    <li>Apps outside the browser, a transparent overlay window (e.g. Cluely), a second device/phone, a VM.</li>
+    <li>Tabs in a <b>different browser</b> (e.g. a second Chrome profile, Firefox, Edge) — each browser is isolated.</li>
+  </ul>
+  <p style="margin:6px 0 0; color:#64748b">→ Seeing OS processes/other apps requires a <b>Native Messaging host</b>: a separate native binary you install on the machine that the extension talks to. That's a real app install, not "just an extension."</p>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>
