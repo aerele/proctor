@@ -100,6 +100,11 @@ function makeFakeFirestore() {
               }
               store.set(id, applyUpdate(existing, patch));
             },
+            async delete() {
+              // H1: live-slot lock release. Idempotent — deleting a missing doc
+              // is a no-op, matching Firestore's delete semantics.
+              store.delete(id);
+            },
             async get() {
               const data = store.get(id);
               return { exists: Boolean(data), data: () => data };
@@ -656,4 +661,226 @@ test("session-action: requires admin password", async () => {
   __setClientsForTest({ firestore, storage });
   const res = await call(makeReq({ method: "POST", path: "/api/admin/session-action", headers: {}, body: { action: "end", session_id: "x" } }));
   assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
+// Security / correctness hardening (H1, H3, M1, M3, N3)
+// =====================================================================
+
+// ---- H1: single-session start race (TOCTOU) ----
+// Two near-simultaneous starts for the SAME (username_norm, contest_slug) must
+// resolve to EXACTLY ONE active session; the loser falls to pending_approval.
+// We fire both via Promise.all so their internal awaits interleave — this is the
+// race the deterministic live-slot lock has to win. Before the fix both starts'
+// pre-reads see "no active session" and both go active.
+test("H1: two concurrent starts → exactly one active, the other pending_approval", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  __setClientsForTest({ firestore, storage });
+
+  const body = detailsBody(); // same username_norm for both
+  const [a, b] = await Promise.all([
+    call(makeReq({ method: "POST", path: "/api/session/start", body: { ...body } })),
+    call(makeReq({ method: "POST", path: "/api/session/start", body: { ...body } }))
+  ]);
+
+  assert.equal(a.statusCode, 200);
+  assert.equal(b.statusCode, 200);
+  const statuses = [a.body.status, b.body.status].sort();
+  assert.deepEqual(statuses, ["active", "pending_approval"], "exactly one active under the race");
+
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  const docStatuses = [...store.values()].map((s) => s.status).sort();
+  assert.deepEqual(docStatuses, ["active", "pending_approval"], "persisted docs agree: only one active");
+
+  // The pending one must point at the real winner's session_id.
+  const active = [a, b].find((r) => r.body.status === "active");
+  const pending = [a, b].find((r) => r.body.status === "pending_approval");
+  assert.equal(pending.body.blocked_by_session_id, active.body.session_id);
+});
+
+test("H1: the live slot is released on end so a fresh start re-acquires it (active)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const first = await start(firestore, storage);
+  assert.equal(first.body.status, "active");
+
+  // End the active session, then a brand-new start should win the freed slot.
+  const endRes = await call(makeReq({
+    method: "POST",
+    path: "/api/session/end",
+    body: { session_id: first.body.session_id, assurance_accepted: true }
+  }));
+  assert.equal(endRes.statusCode, 200);
+
+  const fresh = await start(firestore, storage);
+  assert.equal(fresh.body.status, "active", "slot freed on end → fresh start re-acquires it");
+});
+
+// ---- H3: write endpoints check session status ----
+// Helper: directly set a session's status in the fake store (simulates an admin
+// lock/end having already happened).
+function setSessionStatus(firestore, sessionId, status) {
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  const existing = store.get(sessionId);
+  store.set(sessionId, { ...existing, status });
+}
+
+const WRITE_ENDPOINTS = [
+  { path: "/api/upload-url", body: (sid) => ({ session_id: sid, kind: "screen", chunk_index: 0, content_type: "video/webm" }) },
+  { path: "/api/events", body: (sid) => ({ session_id: sid, events: [{ type: "x", timestamp: "2026-06-05T10:00:00Z" }] }) },
+  { path: "/api/heartbeat", body: (sid) => ({ session_id: sid, recording_state: "recording", visibility_state: "visible" }) },
+  { path: "/api/review-file", body: (sid) => ({ session_id: sid, nature: "clipboard", records: [{ a: 1 }] }) },
+  { path: "/api/session/validate-end", body: (sid) => ({ session_id: sid, assurance_accepted: true }) },
+  { path: "/api/session/end", body: (sid) => ({ session_id: sid, assurance_accepted: true }) }
+];
+
+for (const { status, code, signal } of [
+  { status: "locked", code: 403, signal: "session_locked" },
+  { status: "ended", code: 409, signal: "session_ended" },
+  { status: "pending_approval", code: 403, signal: "waiting_for_approval" }
+]) {
+  for (const ep of WRITE_ENDPOINTS) {
+    test(`H3: ${status} session → ${ep.path} rejected (${code} ${signal})`, async () => {
+      const firestore = makeFakeFirestore();
+      const storage = makeFakeStorage();
+      const sessionId = await startedSession(firestore, storage);
+      setSessionStatus(firestore, sessionId, status);
+
+      const res = await call(makeReq({ method: "POST", path: ep.path, body: ep.body(sessionId) }));
+      assert.equal(res.statusCode, code, `${ep.path} on ${status} should be ${code}`);
+      assert.equal(res.body.error, signal, `${ep.path} on ${status} should signal ${signal}`);
+    });
+  }
+}
+
+test("H3: an active session still allows writes (happy path unchanged)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  for (const ep of WRITE_ENDPOINTS.filter((e) => e.path !== "/api/session/end")) {
+    const res = await call(makeReq({ method: "POST", path: ep.path, body: ep.body(sessionId) }));
+    assert.equal(res.statusCode, 200, `${ep.path} on an active session must succeed`);
+  }
+});
+
+// ---- M1: sanitizeSegment pure-dot / empty segments ----
+// A pure-dot username ('.', '..', '...') is a non-empty string so it passes the
+// required-field check and DOES reach sanitizeSegment — it must never become a
+// '..' (or '.') path component once it lands in the GCS storage_prefix.
+for (const username of ["..", ".", "..."]) {
+  test(`M1: username '${username}' → safe segment, never '..' in the key`, async () => {
+    const firestore = makeFakeFirestore();
+    const storage = makeFakeStorage();
+    seedSettings(firestore);
+    const res = await start(firestore, storage, { hackerrank_username: username });
+    assert.equal(res.statusCode, 200);
+    const prefix = res.body.storage_prefix;
+    // The username segment sits between .../sessions/ and the next slash.
+    const match = prefix.match(/sessions\/([^/]+)\//);
+    assert.ok(match, `expected a sessions/<user>/ segment in ${prefix}`);
+    const userSegment = match[1];
+    assert.ok(!/^\.+$/.test(userSegment), `username segment must not be all dots, got '${userSegment}'`);
+    assert.ok(userSegment.length > 0, "username segment must not be empty");
+    assert.ok(!prefix.includes("/../"), "no traversal segment in the key");
+    assert.ok(!prefix.includes("/./"), "no '.' segment in the key");
+  });
+}
+
+// An EMPTY username is rejected upstream by the required-field check (it never
+// reaches key-building) — assert that contract so the empty case is covered too.
+test("M1: empty username is rejected at the contract (400), never key-built", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, { hackerrank_username: "" });
+  assert.equal(res.statusCode, 400);
+});
+
+// A pure-dot value on a NON-username segment (upload `kind`) also reaches
+// sanitizeSegment and must not produce a traversal in the object key.
+test("M1: upload kind '..' → safe segment, no traversal in the storage_key", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const res = await call(makeReq({
+    method: "POST",
+    path: "/api/upload-url",
+    body: { session_id: sessionId, kind: "..", chunk_index: 0, content_type: "video/webm" }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.ok(!res.body.storage_key.includes("/../"), `no traversal in ${res.body.storage_key}`);
+  assert.ok(res.body.storage_key.includes("/_/"), "pure-dot kind became the safe '_' token");
+});
+
+// ---- M3: 500s must not leak internal messages ----
+// Force an UNEXPECTED error from deep inside an endpoint (a storage save that
+// throws a non-httpError) and assert the client gets a generic 500 with NO
+// `detail` echoing the internal message.
+test("M3: an unexpected 500 returns a generic error with no internal detail", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+
+  const SECRET = "INTERNAL_SECRET_STACK_DETAIL_xyz";
+  // Swap the bucket so file().save() throws a plain (non-httpError) Error.
+  const brokenStorage = {
+    bucket() {
+      return {
+        file() {
+          return {
+            async save() { throw new Error(SECRET); },
+            async getSignedUrl() { return ["https://signed.example/x"]; }
+          };
+        }
+      };
+    }
+  };
+  __setClientsForTest({ firestore, storage: brokenStorage });
+
+  // Silence the expected server-side console.error during this test.
+  const originalError = console.error;
+  console.error = () => {};
+  let res;
+  try {
+    res = await call(makeReq({
+      method: "POST",
+      path: "/api/events",
+      body: { session_id: sessionId, events: [{ type: "x", timestamp: "2026-06-05T10:00:00Z" }] }
+    }));
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.body.error, "Internal server error");
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body, "detail"), false, "500 must NOT include a detail field");
+  assert.ok(!JSON.stringify(res.body).includes(SECRET), "internal message must never reach the client");
+});
+
+test("M3: intentional 4xx still includes its detail (contract unchanged)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // Missing required field → 400 httpError, which should still carry detail.
+  const res = await call(makeReq({ method: "POST", path: "/api/events", body: { events: [] } }));
+  assert.equal(res.statusCode, 400);
+  assert.ok(res.body.detail, "intentional 4xx keeps its detail for the client");
+});
+
+// ---- N3: malformed JSON body → 400, not 500 ----
+test("N3: malformed JSON string body → 400 invalid_json (not a 500)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // req.body is a raw string (as a non-parsing runtime would deliver it).
+  const res = await call(makeReq({
+    method: "POST",
+    path: "/api/session/end",
+    body: "{ not valid json :"
+  }));
+  assert.equal(res.statusCode, 400, "malformed JSON is a client 400, not a server 500");
+  assert.equal(res.body.error, "invalid_json");
 });
