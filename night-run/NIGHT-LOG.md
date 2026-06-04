@@ -62,4 +62,13 @@ Read-only audit found real issues. **Fixed tonight:** H1 single-session start ra
   - **B6 (low):** missing Firestore composite index for alert filters.
 - Backend security pass (earlier) already fixed H1/H3/M1/M3/N3; C1/H2 escalated.
 
+### Phase 4 — DONE ✅ (committed 6395c88, pushed)
+Triple review + live visual verification; all real bugs (B0–B8) fixed and **re-verified live** — admin Live stats (6/1/2/14/23/23) and Live alerts (5 alerts, both sources, remote actions) render correctly in demo mode; B0 stuck-loading gone. 85 backend / 30 monitoring / build green. PR prepared (`PR-BODY.md`; gh not installed → open manually, base `master`).
+
+**Roadmap (minus iframe) + contest-eval monitoring COMPLETE and usable.** Remaining: stretch goals.
+
+### Stretch goals (starting)
+- S1: local logo-missing → tab-away detection — build scaffold + matcher interface (tuning needs a sample recording, held for Karthi).
+- S2: extension — BLOCKED on Karthi's morning input (job/permissions). Last.
+
 _(appended as phases complete.)_

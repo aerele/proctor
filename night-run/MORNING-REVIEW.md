@@ -7,6 +7,11 @@ _Last updated: 2026-06-04 (goal-set)._
 
 ---
 
+## 📦 OPEN THE PR (gh not installed overnight)
+Branch `feat/roadmap-and-contest-eval` is pushed (6 commits). **Open:** https://github.com/aerele/proctor/pull/new/feat/roadmap-and-contest-eval — **base = `master`** (repo default, clean fork; `main` is divergent). PR body is ready in `night-run/PR-BODY.md` (paste it). The monitoring tool + admin console are usable in demo mode now; `night-run/HOW-TO-RUN.md` has the run steps.
+
+---
+
 ## ⚠️ MUST TEST IN THE MORNING (cannot be verified autonomously)
 
 1. **GCS contest-folder storage change — UNTESTED against a live bucket.** No GCP access overnight. Change is surgical + backward-compatible (slug prefix only, legacy fallback when no contest URL). **Verify a real upload lands at `contests/<contest-slug>/sessions/<username>/<session_id>/…`** and that the existing upload/signing/admin-evidence flow is intact. Also confirm `video-worker` still finds chunks (its merge path was updated to match).
