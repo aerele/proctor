@@ -1,4 +1,4 @@
-import type { HeartbeatResponse, ProctorEvent, ProctorSettings, ReviewNature, SessionStartResponse, StudentForm, UploadManifestItem, UploadUrlResponse } from "./types";
+import type { Alert, AlertFilters, HeartbeatResponse, ProctorEvent, ProctorSettings, ReviewNature, SessionStartResponse, StudentForm, UploadManifestItem, UploadUrlResponse } from "./types";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
@@ -266,6 +266,125 @@ export async function fetchAdminSessions(username: string, password: string) {
       "x-admin-password": password
     }
   });
+}
+
+export async function fetchAlerts(password: string, filters?: AlertFilters): Promise<{ alerts: Alert[] }> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const alerts = filterDemoAlerts(demoAlerts(), filters);
+    return { alerts };
+  }
+
+  const query = new URLSearchParams();
+  if (filters?.source) query.set("source", filters.source);
+  if (filters?.severity) query.set("severity", filters.severity);
+  if (filters?.contest_slug) query.set("contest_slug", filters.contest_slug);
+  const suffix = query.toString();
+
+  return request<{ alerts: Alert[] }>(`/api/admin/alerts${suffix ? `?${suffix}` : ""}`, {
+    method: "GET",
+    headers: {
+      "x-admin-password": password
+    }
+  });
+}
+
+function filterDemoAlerts(alerts: Alert[], filters?: AlertFilters): Alert[] {
+  if (!filters) return alerts;
+  return alerts.filter((alert) => {
+    if (filters.source && alert.source !== filters.source) return false;
+    if (filters.severity && alert.severity !== filters.severity) return false;
+    if (filters.contest_slug && alert.contest_slug !== filters.contest_slug) return false;
+    return true;
+  });
+}
+
+function demoAlerts(): Alert[] {
+  // A small placeholder clip lives at /sample.webm so the video link is demoable.
+  const sampleVideo = "/sample.webm";
+  return [
+    {
+      id: "proctor:recording_stopped:asha_r:mcet-june-2026:1",
+      source: "proctor",
+      type: "recording_stopped",
+      severity: "critical",
+      timestamp: "2026-06-05T09:42:11.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Asha_R",
+      username_norm: "asha_r",
+      session_id: "sess-9f2a",
+      room: "Lab A-1",
+      title: "Recording stopped mid-assessment",
+      detail: "MediaRecorder stopped 18m before submission with no end-session event. Possible deliberate stop.",
+      data: { gap_seconds: 1080, last_chunk_index: 54 },
+      video_key: "mcet-june-2026/asha_r/sess-9f2a.webm",
+      download_url: sampleVideo
+    },
+    {
+      id: "contest-eval:peer_copy_cluster:karan_v:mcet-june-2026:c3",
+      source: "contest-eval",
+      type: "peer_copy_cluster",
+      severity: "critical",
+      timestamp: "2026-06-05T09:31:54.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Karan_V",
+      username_norm: "karan_v",
+      room: "Lab B-2",
+      title: "Peer-copy cluster (3 candidates, 97% similar)",
+      detail: "Near-identical submissions for 'Balanced Brackets' across Karan_V, Neha_S, and Imran_K within a 4-minute window.",
+      data: { cluster: ["karan_v", "neha_s", "imran_k"], similarity_pct: 97, problem: "balanced-brackets" },
+      download_url: sampleVideo
+    },
+    {
+      id: "proctor:screen_share_stopped:neha_s:mcet-june-2026:1",
+      source: "proctor",
+      type: "screen_share_stopped",
+      severity: "warning",
+      timestamp: "2026-06-05T09:25:03.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Neha_S",
+      username_norm: "neha_s",
+      session_id: "sess-71b4",
+      room: "Lab B-2",
+      title: "Screen share stopped",
+      detail: "Candidate ended screen share for 42s, then resumed. Logged for review.",
+      data: { interruptions: 1, gap_seconds: 42 },
+      video_key: "mcet-june-2026/neha_s/sess-71b4.webm",
+      download_url: sampleVideo
+    },
+    {
+      id: "contest-eval:web_paste:imran_k:mcet-june-2026:p2",
+      source: "contest-eval",
+      type: "web_paste",
+      severity: "warning",
+      timestamp: "2026-06-05T09:18:40.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Imran_K",
+      username_norm: "imran_k",
+      room: "Lab B-2",
+      title: "Web/editorial paste suspected",
+      detail: "Submission matches a known editorial for 'Two Sum' with identical variable naming and comment structure.",
+      data: { source_match: "editorial", similarity_pct: 88, problem: "two-sum" },
+      download_url: sampleVideo
+    },
+    {
+      id: "proctor:ip_changed:asha_r:mcet-june-2026:1",
+      source: "proctor",
+      type: "ip_changed",
+      severity: "info",
+      timestamp: "2026-06-05T09:05:22.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Asha_R",
+      username_norm: "asha_r",
+      session_id: "sess-9f2a",
+      room: "Lab A-1",
+      title: "Network IP changed",
+      detail: "Source IP changed once early in the session (likely a Wi-Fi handoff). Informational only.",
+      data: { start_ip: "10.4.1.18", current_ip: "10.4.2.7" },
+      download_url: sampleVideo
+    }
+  ];
 }
 
 function assertDemoAdmin(password: string) {

@@ -1,16 +1,26 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 
-const firestore = new Firestore();
-const storage = new Storage();
+let firestore = new Firestore();
+let storage = new Storage();
+
+// Dependency-injection seam for unit tests only. Production code never calls
+// these; tests inject fake Firestore/Storage objects so no real GCP is touched.
+export function __setClientsForTest({ firestore: fakeFirestore, storage: fakeStorage } = {}) {
+  if (fakeFirestore) firestore = fakeFirestore;
+  if (fakeStorage) storage = fakeStorage;
+}
 
 const SESSION_COLLECTION = process.env.SESSION_COLLECTION || "proctor_sessions";
 const SETTINGS_COLLECTION = process.env.SETTINGS_COLLECTION || "proctor_settings";
+const ALERTS_COLLECTION = process.env.ALERTS_COLLECTION || "proctor_alerts";
 const EVIDENCE_BUCKET = process.env.EVIDENCE_BUCKET;
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
+const ALERTS_QUERY_LIMIT = 500;
 const SETTINGS_ID = "active";
 
 const uploadConfig = {
@@ -41,6 +51,8 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
+    if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
+    if (req.method === "GET" && path === "/api/admin/alerts") return send(res, 200, await adminAlerts(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
@@ -378,6 +390,137 @@ async function adminSessions(req) {
   return { sessions };
 }
 
+const ALERT_SOURCES = ["proctor", "contest-eval"];
+const ALERT_SEVERITIES = ["critical", "warning", "info"];
+const ALERT_VERDICT_STATUSES = ["pending", "real", "false_positive", "inconclusive"];
+const ALERT_REQUIRED_FIELDS = ["source", "type", "severity", "timestamp", "hackerrank_username", "title"];
+
+async function ingestAlerts(req) {
+  requireApiKey(req);
+  const body = parseBody(req);
+  const rawAlerts = Array.isArray(body?.alerts) ? body.alerts : [body];
+  if (!rawAlerts.length) return badRequest("No alerts provided");
+  if (rawAlerts.length > 500) return badRequest("Too many alerts in one request (max 500)");
+
+  const now = new Date().toISOString();
+  const normalized = rawAlerts.map((alert, index) => normalizeAlert(alert, index, now));
+
+  // Idempotent merge keyed on alert.id so retried deliveries do not duplicate.
+  await Promise.all(normalized.map((alert) => alertRef(alert.id).set(alert, { merge: true })));
+
+  return { ok: true, ingested: normalized.length, ids: normalized.map((alert) => alert.id) };
+}
+
+function normalizeAlert(alert, index, receivedAt) {
+  if (!alert || typeof alert !== "object" || Array.isArray(alert)) {
+    throw httpError(400, `alerts[${index}] must be an object`);
+  }
+  for (const field of ALERT_REQUIRED_FIELDS) {
+    const value = alert[field];
+    if (value === undefined || value === null || value === "") {
+      throw httpError(400, `alerts[${index}].${field} is required`);
+    }
+  }
+  if (!ALERT_SOURCES.includes(alert.source)) {
+    throw httpError(400, `alerts[${index}].source must be one of ${ALERT_SOURCES.join(", ")}`);
+  }
+  if (!ALERT_SEVERITIES.includes(alert.severity)) {
+    throw httpError(400, `alerts[${index}].severity must be one of ${ALERT_SEVERITIES.join(", ")}`);
+  }
+  if (Number.isNaN(Date.parse(alert.timestamp))) {
+    throw httpError(400, `alerts[${index}].timestamp must be a valid ISO 8601 date`);
+  }
+
+  const username = String(alert.hackerrank_username).trim();
+  const usernameNorm = alert.username_norm ? normalizeUsername(alert.username_norm) : normalizeUsername(username);
+  // Derive a stable, deterministic id when the client did not supply one so the
+  // doc id stays idempotent across retries instead of minting a random UUID.
+  const id = alert.id !== undefined && alert.id !== null && alert.id !== ""
+    ? String(alert.id)
+    : `${alert.source}:${alert.type}:${usernameNorm}:${alert.contest_slug || "_"}:${alert.timestamp}`;
+
+  const item = {
+    id,
+    source: String(alert.source),
+    type: String(alert.type),
+    severity: String(alert.severity),
+    timestamp: String(alert.timestamp),
+    hackerrank_username: username,
+    username_norm: usernameNorm,
+    title: String(alert.title),
+    received_at: receivedAt
+  };
+
+  if (alert.contest_slug) item.contest_slug = String(alert.contest_slug);
+  if (alert.session_id) item.session_id = String(alert.session_id);
+  if (alert.room) item.room = String(alert.room);
+  if (alert.detail) item.detail = String(alert.detail);
+  if (alert.data && typeof alert.data === "object") item.data = sanitizeObject(alert.data);
+  if (alert.video_key) item.video_key = String(alert.video_key);
+  if (alert.verdict && typeof alert.verdict === "object") {
+    item.verdict = normalizeVerdict(alert.verdict);
+  }
+
+  // download_url is resolved on read and never persisted.
+  return item;
+}
+
+function normalizeVerdict(verdict) {
+  const status = ALERT_VERDICT_STATUSES.includes(verdict.status) ? verdict.status : "pending";
+  const out = { status };
+  if (verdict.reason) out.reason = String(verdict.reason).slice(0, 2000);
+  if (verdict.by) out.by = String(verdict.by).slice(0, 200);
+  return out;
+}
+
+async function adminAlerts(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+  const severity = req.query?.severity;
+  const source = req.query?.source;
+
+  let query = firestore.collection(ALERTS_COLLECTION);
+  if (contestSlug) query = query.where("contest_slug", "==", String(contestSlug));
+  if (severity) query = query.where("severity", "==", String(severity));
+  if (source) query = query.where("source", "==", String(source));
+
+  const snapshot = await query.limit(ALERTS_QUERY_LIMIT).get();
+  const alerts = snapshot.docs
+    .map((doc) => doc.data())
+    .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
+    .slice(0, ALERTS_QUERY_LIMIT);
+
+  const withUrls = await Promise.all(alerts.map(async (alert) => {
+    if (!alert.video_key) return { ...alert, download_url: null };
+    const downloadUrl = await resolveSignedReadUrl(alert.video_key);
+    return { ...alert, download_url: downloadUrl };
+  }));
+
+  return { alerts: withUrls };
+}
+
+async function resolveSignedReadUrl(objectKey) {
+  // Best-effort: a missing bucket or a signing failure must not break the whole
+  // admin listing, so we degrade to null instead of throwing.
+  try {
+    const [downloadUrl] = await bucket()
+      .file(String(objectKey))
+      .getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: Date.now() + URL_EXPIRY_SECONDS * 1000
+      });
+    return downloadUrl;
+  } catch (error) {
+    console.warn(`Failed to sign read URL for ${objectKey}: ${error?.message || error}`);
+    return null;
+  }
+}
+
+function alertRef(alertId) {
+  return firestore.collection(ALERTS_COLLECTION).doc(String(alertId));
+}
+
 async function getSession(sessionId) {
   const doc = await sessionRef(sessionId).get();
   if (!doc.exists) throw httpError(404, "Session not found");
@@ -426,6 +569,34 @@ function requireAdmin(req) {
   if (!ADMIN_PASSWORD || password !== ADMIN_PASSWORD) {
     throw httpError(401, "Unauthorized");
   }
+}
+
+let warnedMissingApiKey = false;
+
+function requireApiKey(req) {
+  // Closed-by-default: if no ingest key is configured, reject every request so
+  // a misconfigured deploy never accepts unauthenticated alert writes.
+  if (!ALERTS_INGEST_API_KEY) {
+    if (!warnedMissingApiKey) {
+      console.warn("ALERTS_INGEST_API_KEY is not set; rejecting all /api/alerts ingest requests.");
+      warnedMissingApiKey = true;
+    }
+    throw httpError(401, "Unauthorized");
+  }
+  const provided = req.get?.("x-api-key") || req.headers?.["x-api-key"] || "";
+  if (!safeEqual(provided, ALERTS_INGEST_API_KEY)) {
+    throw httpError(401, "Unauthorized");
+  }
+}
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a), "utf8");
+  const bufB = Buffer.from(String(b), "utf8");
+  // timingSafeEqual requires equal-length buffers; comparing lengths first would
+  // leak length but bail out, so hash both to a fixed width and compare those.
+  const hashA = createHash("sha256").update(bufA).digest();
+  const hashB = createHash("sha256").update(bufB).digest();
+  return timingSafeEqual(hashA, hashB);
 }
 
 function publicSettings(settings) {
@@ -498,7 +669,7 @@ function httpError(statusCode, message) {
 function setCors(res) {
   res.set("access-control-allow-origin", PUBLIC_APP_ORIGIN);
   res.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  res.set("access-control-allow-headers", "content-type,x-admin-password");
+  res.set("access-control-allow-headers", "content-type,x-admin-password,x-api-key");
 }
 
 function send(res, statusCode, body) {

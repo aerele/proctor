@@ -1,8 +1,8 @@
-import { AlertTriangle, Camera, CheckCircle2, ClipboardList, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, Search, ShieldCheck, Square, UploadCloud } from "lucide-react";
+import { AlertTriangle, Bell, Camera, CheckCircle2, ClipboardList, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, endSession, fetchAdminSessions, fetchProctorSettings, saveProctorSettings, sendEvents, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { adminPassword, endSession, fetchAdminSessions, fetchAlerts, fetchProctorSettings, saveProctorSettings, sendEvents, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { createProctorRecorder, type MediaCaptureState } from "./useProctorRecorder";
-import type { ProctorEvent, ProctorSettings, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { Alert, AlertSeverity, ProctorEvent, ProctorSettings, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
 const initialForm: StudentForm = {
   hackerrank_username: "",
@@ -619,7 +619,10 @@ function EndTestPanel({ endCode, assuranceAccepted, onEndCodeChange, onAssurance
   );
 }
 
+type AdminView = "alerts" | "review" | "settings";
+
 function AdminApp() {
+  const [view, setView] = useState<AdminView>("alerts");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
@@ -630,6 +633,49 @@ function AdminApp() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(false);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [alertsLoaded, setAlertsLoaded] = useState(false);
+
+  const loadAlerts = async () => {
+    setAlertsLoading(true);
+    setError("");
+    try {
+      const response = await fetchAlerts(password);
+      const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+      setAlerts(sorted);
+      setAlertsLoaded(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAlertsLoading(false);
+    }
+  };
+
+  // Auto-load alerts the first time the unlocked admin opens the alerts tab.
+  // Subsequent refreshes are manual via the Refresh button.
+  useEffect(() => {
+    if (!unlocked || view !== "alerts" || alertsLoaded || alertsLoading) return;
+    let cancelled = false;
+    void (async () => {
+      setAlertsLoading(true);
+      setError("");
+      try {
+        const response = await fetchAlerts(password);
+        if (cancelled) return;
+        const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+        setAlerts(sorted);
+        setAlertsLoaded(true);
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        if (!cancelled) setAlertsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [unlocked, view, alertsLoaded, alertsLoading, password]);
 
   const unlockAdmin = () => {
     setError("");
@@ -736,7 +782,20 @@ function AdminApp() {
 
   return (
     <Shell>
-      <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <nav className="mb-5 flex flex-wrap gap-2" aria-label="Admin views">
+        <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
+        <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
+        <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
+      </nav>
+
+      {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
+
+      {view === "alerts" ? (
+        <AlertsConsole alerts={alerts} loading={alertsLoading} loaded={alertsLoaded} onRefresh={loadAlerts} />
+      ) : null}
+
+      {view === "settings" ? (
+      <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
         <div className="mb-5 flex items-center gap-3">
           <Lock size={20} />
           <div>
@@ -762,7 +821,10 @@ function AdminApp() {
         {settingsMessage ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{settingsMessage}</div> : null}
         {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
       </section>
+      ) : null}
 
+      {view === "review" ? (
+      <>
       <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
         <div className="mb-5 flex items-center gap-3">
           <Search size={20} />
@@ -777,7 +839,6 @@ function AdminApp() {
             <Search size={16} /> Search
           </button>
         </div>
-        {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
       </section>
 
       <section className="mt-5 space-y-3">
@@ -794,7 +855,121 @@ function AdminApp() {
           </div>
         ))}
       </section>
+      </>
+      ) : null}
     </Shell>
+  );
+}
+
+function AdminTab({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: number }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      className={`focus-ring inline-flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium ${active ? "border-ink bg-ink text-white" : "border-line bg-panel text-ink hover:border-ink/40"}`}
+    >
+      {icon}
+      {label}
+      {badge ? <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${active ? "bg-white/20 text-white" : "bg-ink/10 text-ink"}`}>{badge}</span> : null}
+    </button>
+  );
+}
+
+const severityStyles: Record<AlertSeverity, string> = {
+  critical: "border-danger/30 bg-danger/10 text-danger",
+  warning: "border-warning/30 bg-warning/10 text-warning",
+  info: "border-accent/30 bg-accent/10 text-accent"
+};
+
+function SeverityPill({ severity }: { severity: AlertSeverity }) {
+  return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
+}
+
+function AlertsConsole({ alerts, loading, loaded, onRefresh }: { alerts: Alert[]; loading: boolean; loaded: boolean; onRefresh: () => void }) {
+  return (
+    <>
+      <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Bell size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">Live alerts console</h1>
+              <p className="mt-1 text-sm text-muted">Proctoring and contest-eval signals across all rooms, newest first. Click a clip to open the recorded evidence.</p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-3 text-sm">
+          <Metric icon={<Bell size={16} />} label="Total" value={String(alerts.length)} />
+          <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(alerts.filter((alert) => alert.severity === "critical").length)} />
+          <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(alerts.filter((alert) => alert.severity === "warning").length)} />
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        {!loaded && loading ? (
+          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">Loading alerts…</div>
+        ) : alerts.length === 0 ? (
+          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No alerts yet. New proctoring and contest-eval signals appear here as they arrive.</div>
+        ) : (
+          alerts.map((alert) => <AlertRow key={alert.id} alert={alert} />)
+        )}
+      </section>
+    </>
+  );
+}
+
+function AlertRow({ alert }: { alert: Alert }) {
+  return (
+    <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.severity === "critical" ? "border-danger/40" : "border-line"}`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <SeverityPill severity={alert.severity} />
+            <span className="rounded-full border border-line px-2.5 py-1 text-xs font-medium capitalize text-muted">{alert.source}</span>
+            <span className="rounded-full border border-line px-2.5 py-1 font-mono text-xs text-muted">{alert.type}</span>
+          </div>
+          <h2 className="mt-2 text-lg font-semibold">{alert.title}</h2>
+          {alert.detail ? <p className="mt-1 text-sm leading-6 text-muted">{alert.detail}</p> : null}
+        </div>
+        <time className="shrink-0 font-mono text-xs text-muted" dateTime={alert.timestamp}>{new Date(alert.timestamp).toLocaleString()}</time>
+      </div>
+
+      <div className="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
+        <AlertField label="Candidate" value={alert.hackerrank_username} mono />
+        {alert.room ? <AlertField label="Room" value={alert.room} /> : null}
+        {alert.contest_slug ? <AlertField label="Contest" value={alert.contest_slug} mono /> : null}
+        {alert.session_id ? <AlertField label="Session" value={alert.session_id} mono /> : null}
+        {alert.verdict ? <AlertField label="Verdict" value={alert.verdict.status} /> : null}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        {alert.download_url ? (
+          <a
+            className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40"
+            href={alert.download_url}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <Video size={14} /> Open evidence clip <ExternalLink size={12} />
+          </a>
+        ) : (
+          <span className="text-xs text-muted">No recording attached.</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AlertField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-line pb-1.5 last:border-0">
+      <span className="text-xs uppercase tracking-wide text-muted">{label}</span>
+      <span className={`truncate font-medium ${mono ? "font-mono text-xs" : ""}`}>{value}</span>
+    </div>
   );
 }
 
