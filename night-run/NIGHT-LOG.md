@@ -25,4 +25,18 @@ Append-only log of what was done, one step at a time. Curated decisions live in 
 - **contest-eval poller + LLM verdict-queue seam** (monitoring/): deterministic poller, wrapper-over-fork of the contest-eval analysis (originals untouched), file-queue verdict seam + `/loop` responder prompt. **Reproduces committed clone_analysis.json byte-for-byte (both MCET slots); POST to backend works; verdict round-trip works; live read-only acquisition CONFIRMED against :9222 (leaderboard 291, submissions 1569) non-disruptively.**
 - Consolidation agent dispatched: unattended CDP driver (deterministic live loop) + monitoring tests + `HOW-TO-RUN.md` + one-command demo, then commit Phase 1.
 
+### Phase 1 — DONE ✅ (committed 142d80b, pushed)
+Monitoring tool usable unattended: alerts API (23/23) + admin console (build green) + poller/cdp driver (30/30, live :9222 confirmed) + one-command demo + HOW-TO-RUN.
+
+### Phase 2 — backend roadmap completion (in progress)
+Dispatched one comprehensive backend agent (handler.mjs is monolithic → single coherent agent): GCS contest-foldering, session model (persistent/resume + single-session + remove passcodes + admin approve/lock/unlock), sure-shot proctor alerts → proctor_alerts, stats + remote-action endpoints. Then verify + commit, then Phase 3 frontend.
+
+### Phase 2 — backend roadmap completion DONE ✅ (handler.mjs + video-worker + tests, NOT yet committed)
+- **2.1 GCS contest-foldering** — added `contestSlugFromUrl()` (last path segment → `sanitizeSegment`; empty/invalid → legacy, no `contests//`), `buildStoragePrefix()`, `sessionPrefix()`. Persisted `contest_slug`+`storage_prefix` on the session doc at start; all 7 key-build sites + admin-evidence listing now read the persisted prefix (zero extra reads). `video-worker/src/server.mjs` scans BOTH layouts and writes merged output beside the chunks. New shape `contests/<slug>/sessions/<username_norm>/<session_id>/...`.
+- **2.2 Session model** — removed entry passcode (start gated by time window only) + exit end-code (only assurance checkbox). Added `status` (active/locked/pending_approval/ended), `POST /api/session/resume`, idempotent same-`session_id` start, single-active-session → `pending_approval` on a different session_id, admin unlock path.
+- **2.3 Sure-shot proctor alerts** — `/api/events` (recording_stopped/screen_share_stopped/invalid_share_surface/recording_error = critical) + heartbeat (recording_state stopped = critical; ip_changed = warning) upsert idempotent `source:'proctor'` alerts into `proctor_alerts` with `video_key` deep-link; noisy events not surfaced; they appear in `GET /api/admin/alerts` automatically.
+- **2.4 Stats + remote actions** — `GET /api/admin/stats` (live/locked/pending_approval/finished/total, optional `?contest_slug=`); `POST /api/admin/session-action` (approve/lock/unlock/bypass/end; per-session or bulk usernames[]).
+- **Env/docs** — added `backend/firestore.indexes.json` (composite index username_norm+contest_slug) + idempotent index-create step in `deploy-gcp.sh`; README Phase-2 section (storage layout, session-doc shape, all new/changed endpoints, sure-shot table, index note); runbooks de-passcoded. No new secrets.
+- **Tests** — `backend/test/phase2.test.mjs` (29 tests, richer fake Firestore supporting create/update/FieldValue.increment + fake Storage). **Full suite 52/52 green (23 Phase-1 + 29 Phase-2).** Module + video-worker syntax-check clean; video-worker dual-layout parse validated.
+
 _(appended as phases complete.)_

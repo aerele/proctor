@@ -112,23 +112,31 @@ The frontend URL remains the student URL. The admin page is the same URL with `/
 
 ## Admin Runbook
 
+> **Phase 2 change:** the entry passcode and exit end-code are **removed**. Start
+> is gated only by the contest time window; a single active session per
+> HackerRank username (per contest) replaces the passcode as the integrity gate.
+
 1. Open `/admin`.
 2. Unlock with the configured admin password.
-3. Set start time and end time.
-4. Set the contest URL.
-5. Set proctoring passcode for students to start.
-6. Set proctoring end code for students to finish.
-7. Share the student URL and start passcode.
-8. At the end, give the end code only after HackerRank submission.
+3. Set start time and end time (this time window is now the only start gate).
+4. Set the contest URL (its last path segment becomes the storage `contest_slug`).
+5. Share the student URL. No passcode to announce.
+6. Watch live stats (`/api/admin/stats`) and alerts (`/api/admin/alerts`).
+7. When a student logs in on a second device, their new session shows as
+   `pending_approval`; approve it (which ends the old one), bypass it, or leave
+   it waiting via the remote session actions (`/api/admin/session-action`).
+8. Use `lock`/`unlock` for contingencies; `end` to force-finish a session.
 
 ## Student Runbook
 
 1. Use latest Chrome or Edge on laptop/desktop.
 2. Open the proctor app URL.
-3. Enter proctoring passcode, HackerRank username, name, roll number, and email.
+3. Enter HackerRank username, name, roll number, email, and room (no passcode).
 4. Select `Entire screen` in the browser screen-share picker.
-5. Keep recording active while using HackerRank.
-6. After HackerRank submission, click `End test`, accept the assurance, enter the end code, and close only after the session ends.
+5. Keep recording active while using HackerRank. A reload **resumes** the same
+   session (details are not re-collected).
+6. After HackerRank submission, click `End test`, accept the assurance, and close
+   only after the session ends (no end code).
 
 ## Alerts Ingestion API
 
@@ -184,6 +192,119 @@ Shared alert shape (all producers and the backend must agree):
 > Never commit a real `ALERTS_INGEST_API_KEY`. The deploy script and
 > `.env.deploy.example` carry placeholders only; Karthi supplies the real key
 > via the deployment environment.
+
+## Session Model & Admin Controls (Phase 2)
+
+### Storage layout — contest foldering
+
+Every per-session GCS object is keyed off a single persisted `storage_prefix`.
+With a contest URL configured, the slug is the **last path segment** of
+`contest_url` (passed through the same `sanitizeSegment` as usernames):
+
+```
+contests/<contest_slug>/sessions/<username_norm>/<session_id>/...
+```
+
+When `contest_url` is empty/invalid the backend falls back to the **legacy**
+layout (no double `contests//`):
+
+```
+sessions/<username_norm>/<session_id>/...
+```
+
+`contest_slug` and `storage_prefix` are written to the session doc at start, so
+upload, signing, admin-evidence listing, and the video worker all build keys
+from the same prefix with **zero extra Firestore reads**. The change is
+backward-compatible: legacy session docs (no `storage_prefix`) resolve to their
+original legacy path. The `video-worker` scans **both** layouts.
+
+### Session document shape
+
+```json
+{
+  "session_id": "uuid",
+  "hackerrank_username": "Alice",
+  "username_norm": "alice",
+  "name": "Alice Example",
+  "roll_number": "R-1",
+  "email": "alice@example.com",
+  "room": "optional display label",
+  "contest_slug": "coding-contest-... | \"\"",
+  "storage_prefix": "contests/<slug>/sessions/<user>/<sid>/ | sessions/<user>/<sid>/",
+  "status": "active | pending_approval | locked | ended",
+  "blocked_by_session_id": "uuid | null (set when pending_approval)",
+  "start_ip": "x.x.x.x", "current_ip": "x.x.x.x", "ip_change_count": 0,
+  "created_at": "ISO", "updated_at": "ISO", "ended_at": "ISO?",
+  "event_count": 0, "heartbeat_count": 0, "chunk_count": 0,
+  "manifest_key": "…/manifest.json (after end)"
+}
+```
+
+### Endpoints (changed / new)
+
+- `POST /api/session/start` — body `{ hackerrank_username, name, roll_number,
+  email, consent_accepted:true, room?, session_id? }`. **No passcode.** Gated by
+  the contest time window only. Behaviour:
+  - Replaying the **same** `session_id` (browser already owns it) → returns that
+    session verbatim (idempotent resume, no duplicate doc).
+  - First start for `(username_norm, contest_slug)` → `status:"active"`.
+  - A start with **no/other** `session_id` while an active session already
+    exists for that `(username_norm, contest_slug)` → new doc created
+    `status:"pending_approval"` with `blocked_by_session_id` pointing at the live
+    one. Two `active` sessions never coexist.
+  - Response: `{ session_id, status, hackerrank_username, name, room,
+    contest_slug, storage_prefix, blocked_by_session_id, start_ip, contest_url,
+    upload_config, heartbeat_interval_seconds }`.
+- `POST /api/session/resume` — body `{ session_id, hackerrank_username? }`.
+  Returns the live session (same response shape as start) without re-collecting
+  details. `404` if the token is unknown or (when `hackerrank_username` is
+  supplied) does not belong to that user. Used by a browser reload.
+- `POST /api/session/validate-end` / `POST /api/session/end` — body
+  `{ session_id, assurance_accepted:true, manifest? }`. **No end code.** Only the
+  integrity-assurance checkbox is required. `end` marks the session `ended` and
+  writes `manifest.json` under `storage_prefix`.
+- `GET /api/admin/stats?contest_slug=` *(admin)* — counts by status:
+  `{ contest_slug, stats: { live, locked, pending_approval, finished, total,
+  not_started_or_total } }`. `not_started_or_total` equals `total` (no roster is
+  stored, so yet-to-start cannot be derived server-side; the frontend can
+  estimate it once a roster exists).
+- `POST /api/admin/session-action` *(admin)* — body
+  `{ action, session_id?, usernames?: string[], contest_slug? }` where `action ∈
+  approve | lock | unlock | bypass | end`. Targets one session (`session_id`) or
+  the live session of each username in `usernames[]` (optionally scoped to a
+  `contest_slug`). Semantics:
+  - `approve` → activate a pending session **and** end the conflicting active
+    one it was blocked behind (exactly one live afterward).
+  - `lock` / `unlock` → toggle `locked` ↔ `active`.
+  - `bypass` → clear a pending/locked block (set `active`, drop the conflict
+    pointer) **without** ending the other session.
+  - `end` → mark `ended`.
+  - Returns `{ ok, action, updated: [ …updated docs… ] }`.
+
+### Sure-shot proctor alerts
+
+Selected proctor signals are upserted as `source:"proctor"` alerts into
+`proctor_alerts` (same idempotent-id convention as ingested alerts:
+`proctor:<type>:<username_norm>:<contest_slug>:<dedupe>`), so they show up in
+`GET /api/admin/alerts` automatically with a `video_key` deep-link:
+
+| Signal | Source | Severity |
+|---|---|---|
+| `recording_stopped` / `screen_share_stopped` / `invalid_share_surface` / `recording_error` | `/api/events` event types | `critical` |
+| `recording_stopped` | `/api/heartbeat` with a stopped `recording_state` | `critical` |
+| `ip_changed` | server-derived on `/api/heartbeat` | `warning` |
+
+Noisy events (`focus` / `blur` / `visibility` / `clipboard`) are intentionally
+**not** surfaced. `video_key` is the merged review video if one exists, else the
+raw `…/screen/` chunk prefix.
+
+### Firestore composite index
+
+The single-session reconciliation, bulk session-action, and per-contest stats
+queries filter on **`username_norm` AND `contest_slug`**, which Firestore serves
+only with a composite index. `backend/firestore.indexes.json` declares it and
+`backend/deploy-gcp.sh` creates it idempotently. Without it the first such query
+returns an error containing a one-click console URL to create the index.
 
 ## Capacity Notes
 

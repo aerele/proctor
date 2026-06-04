@@ -71,19 +71,29 @@ function normalizeUsernames(body) {
 
 async function mergeUsername(username) {
   requireConfigured();
-  const [files] = await storage.bucket(SOURCE_BUCKET).getFiles({
+  // Phase 2 (2.1) contest-foldering: chunks may live under either the legacy
+  // layout `sessions/<username>/<session_id>/screen/...` OR the new contest
+  // layout `contests/<slug>/sessions/<username>/<session_id>/screen/...`. We scan
+  // the legacy prefix directly and the `contests/` tree (filtered to this
+  // username) so the worker keeps finding chunks regardless of layout.
+  const [legacyFiles] = await storage.bucket(SOURCE_BUCKET).getFiles({
     prefix: `sessions/${username}/`,
   });
+  const [contestFiles] = await storage.bucket(SOURCE_BUCKET).getFiles({
+    prefix: `contests/`,
+  });
 
-  const chunks = files
+  const chunks = [...legacyFiles, ...contestFiles]
     .map((file) => parseChunk(username, file.name))
     .filter(Boolean)
-    .sort((a, b) => a.sessionId.localeCompare(b.sessionId) || a.chunkIndex - b.chunkIndex);
+    // Key sessions by their full prefix so the same session_id under two
+    // different contests never collides.
+    .sort((a, b) => a.sessionKey.localeCompare(b.sessionKey) || a.chunkIndex - b.chunkIndex);
 
   const sessions = new Map();
   for (const chunk of chunks) {
-    if (!sessions.has(chunk.sessionId)) sessions.set(chunk.sessionId, []);
-    sessions.get(chunk.sessionId).push(chunk);
+    if (!sessions.has(chunk.sessionKey)) sessions.set(chunk.sessionKey, []);
+    sessions.get(chunk.sessionKey).push(chunk);
   }
 
   if (sessions.size === 0) {
@@ -91,14 +101,19 @@ async function mergeUsername(username) {
   }
 
   const results = [];
-  for (const [sessionId, sessionChunks] of sessions.entries()) {
-    const result = await mergeSession(username, sessionId, sessionChunks);
+  for (const sessionChunks of sessions.values()) {
+    const result = await mergeSession(username, sessionChunks[0], sessionChunks);
     results.push(result);
   }
   return results;
 }
 
-async function mergeSession(username, sessionId, chunks) {
+async function mergeSession(username, descriptor, chunks) {
+  const sessionId = descriptor.sessionId;
+  // sessionPrefix is the full path up to and including `<session_id>/` — legacy
+  // or contest-foldered — so the merged output lands beside the chunks it came
+  // from (the contests/<slug>/... path when present).
+  const sessionPrefix = descriptor.sessionPrefix;
   const workDir = path.join(os.tmpdir(), "aerele-video-worker", randomUUID());
   const screenDir = path.join(workDir, "screen");
   await mkdir(screenDir, { recursive: true });
@@ -115,7 +130,7 @@ async function mergeSession(username, sessionId, chunks) {
     await remuxWebm(rawOutputPath, outputPath);
     const durationSeconds = await probeDuration(outputPath);
 
-    const outputObject = `sessions/${username}/${sessionId}/${username}-${sessionId}.webm`;
+    const outputObject = `${sessionPrefix}${username}-${sessionId}.webm`;
     const manifestObject = `${outputObject}.manifest.json`;
     await storage.bucket(DEST_BUCKET).upload(outputPath, {
       destination: outputObject,
@@ -126,6 +141,7 @@ async function mergeSession(username, sessionId, chunks) {
         {
           username,
           session_id: sessionId,
+          contest_slug: descriptor.contestSlug || "",
           output: `gs://${DEST_BUCKET}/${outputObject}`,
           generated_at: new Date().toISOString(),
           chunk_count: chunkNames.length,
@@ -142,6 +158,7 @@ async function mergeSession(username, sessionId, chunks) {
     return {
       username,
       session_id: sessionId,
+      contest_slug: descriptor.contestSlug || "",
       status: "merged",
       chunk_count: chunkNames.length,
       duration_seconds: durationSeconds,
@@ -154,13 +171,36 @@ async function mergeSession(username, sessionId, chunks) {
 }
 
 function parseChunk(username, objectName) {
-  const match = objectName.match(new RegExp(`^sessions/${escapeRegExp(username)}/([^/]+)/screen/chunk-(\\d+)\\.webm$`));
-  if (!match) return null;
-  return {
-    sessionId: match[1],
-    chunkIndex: Number(match[2]),
-    objectName,
-  };
+  const user = escapeRegExp(username);
+  // Contest-foldered layout (Phase 2): contests/<slug>/sessions/<user>/<sid>/screen/chunk-N.webm
+  const contestMatch = objectName.match(
+    new RegExp(`^contests/([^/]+)/sessions/${user}/([^/]+)/screen/chunk-(\\d+)\\.webm$`),
+  );
+  if (contestMatch) {
+    return {
+      contestSlug: contestMatch[1],
+      sessionId: contestMatch[2],
+      sessionPrefix: `contests/${contestMatch[1]}/sessions/${username}/${contestMatch[2]}/`,
+      sessionKey: `contests/${contestMatch[1]}/sessions/${username}/${contestMatch[2]}/`,
+      chunkIndex: Number(contestMatch[3]),
+      objectName,
+    };
+  }
+  // Legacy layout: sessions/<user>/<sid>/screen/chunk-N.webm
+  const legacyMatch = objectName.match(
+    new RegExp(`^sessions/${user}/([^/]+)/screen/chunk-(\\d+)\\.webm$`),
+  );
+  if (legacyMatch) {
+    return {
+      contestSlug: "",
+      sessionId: legacyMatch[1],
+      sessionPrefix: `sessions/${username}/${legacyMatch[1]}/`,
+      sessionKey: `sessions/${username}/${legacyMatch[1]}/`,
+      chunkIndex: Number(legacyMatch[2]),
+      objectName,
+    };
+  }
+  return null;
 }
 
 async function concatenateWebmFiles(screenDir, outputPath) {
