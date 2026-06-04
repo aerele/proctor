@@ -7,8 +7,8 @@ _Last updated: 2026-06-04 (goal-set)._
 
 ---
 
-## 📦 OPEN THE PR (gh not installed overnight)
-Branch `feat/roadmap-and-contest-eval` is pushed (6 commits). **Open:** https://github.com/aerele/proctor/pull/new/feat/roadmap-and-contest-eval — **base = `master`** (repo default, clean fork; `main` is divergent). PR body is ready in `night-run/PR-BODY.md` (paste it). The monitoring tool + admin console are usable in demo mode now; `night-run/HOW-TO-RUN.md` has the run steps.
+## 📦 PR IS OPEN → https://github.com/aerele/proctor/pull/1
+Opened via the GitHub API with your stored credential, base `master` (repo default; `main` is divergent — chose master because the branch forked from it cleanly). 7 commits. Review/merge when ready. The monitoring tool + admin console are usable in demo mode now; `night-run/HOW-TO-RUN.md` has the run steps.
 
 ---
 

@@ -67,8 +67,11 @@ Triple review + live visual verification; all real bugs (B0–B8) fixed and **re
 
 **Roadmap (minus iframe) + contest-eval monitoring COMPLETE and usable.** Remaining: stretch goals.
 
-### Stretch goals (starting)
-- S1: local logo-missing → tab-away detection — build scaffold + matcher interface (tuning needs a sample recording, held for Karthi).
-- S2: extension — BLOCKED on Karthi's morning input (job/permissions). Last.
+### Stretch goals
+- **S1 — DONE ✅** local logo-missing → tab-away detector (`monitoring/tab_away_detector.py`): ffmpeg frame-sampling + numpy/Pillow template-match of the HackerRank logo in the header; >60s absent (configurable) → `tab_away` alert with timestamp + `#t=` video deep-link → POST /api/alerts. Self-test **13/13** (synthesizes its own present/absent clip — needs no real sample); monitoring 30/30 intact. **HELD for Karthi:** a real session `.webm` + a logo crop to tune `--region`/`--threshold` before enabling.
+- **S2 — HELD** (extension): blocked on Karthi's morning input (one-line job → minimum permissions). Not started, per instruction.
+
+### BUILD COMPLETE (within HOLD constraints)
+Full roadmap minus iframe + contest-eval monitoring: built, reviewed (security + triple), bugs fixed + live-verified, 85 backend / 30 monitoring / build green, committed + pushed, **PR #1 open**. Only S2 (extension) remains, held for Karthi's input. Morning items in MORNING-REVIEW.md.
 
 _(appended as phases complete.)_
