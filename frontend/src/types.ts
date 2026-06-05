@@ -91,13 +91,19 @@ export type AdminStats = {
   locked: number;
   pending_approval: number;
   finished: number;
+  // Derived count of active sessions whose newest liveness signal is stale.
+  disconnected?: number;
   total: number;
   not_started_or_total?: number;
 };
 
 export type AdminStatsResponse = {
   contest_slug: string | null;
+  room?: string | null;
   stats: AdminStats;
+  // Distinct room labels for the console room dropdown (full contest scope).
+  rooms?: string[];
+  disconnected_staleness_ms?: number;
 };
 
 export type SessionAction = "approve" | "lock" | "unlock" | "bypass" | "end";
@@ -159,10 +165,61 @@ export type Alert = {
   /** Filled by backend GET /api/admin/alerts (never stored). */
   download_url?: string;
   verdict?: AlertVerdict;
+  /** Archive flag — archived alerts are hidden from the default list. */
+  archived?: boolean;
+  archived_at?: string | null;
 };
 
 export type AlertFilters = {
   source?: AlertSource;
   severity?: AlertSeverity;
   contest_slug?: string;
+  /** Room label filter (matches the session's stored room). */
+  room?: string;
+  /** Include archived alerts in the list (default excludes them). */
+  include_archived?: boolean;
 };
+
+// GET /api/admin/alerts now returns the alerts plus the distinct room labels
+// (from session docs) so the console can populate a room dropdown.
+export type AlertsResponse = {
+  alerts: Alert[];
+  rooms?: string[];
+};
+
+// POST /api/admin/alert-action — archive/unarchive a set of alert ids.
+export type AlertActionRequest = {
+  action: "archive" | "unarchive";
+  ids: string[];
+};
+
+export type AlertActionResponse = {
+  ok: boolean;
+  action: "archive" | "unarchive";
+  archived: boolean;
+  updated: string[];
+  missing: string[];
+};
+
+// Per-type proctor alert configuration (GET/POST /api/admin/alert-settings).
+export type ProctorAlertType =
+  | "recording_stopped"
+  | "screen_share_stopped"
+  | "invalid_share_surface"
+  | "recording_error"
+  | "ip_changed"
+  | "tab_hidden"
+  | "tab_away"
+  | "disconnected";
+
+export type ProctorAlertTypeConfig = {
+  enabled: boolean;
+  severity: AlertSeverity;
+};
+
+export type AlertSettings = {
+  proctor: Record<string, ProctorAlertTypeConfig>;
+};
+
+// POST /api/session/beacon — liveness beacon, no auth (sendBeacon-friendly).
+export type BeaconKind = "hidden" | "visible" | "closing";
