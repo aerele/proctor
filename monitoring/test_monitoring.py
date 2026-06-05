@@ -29,6 +29,7 @@ sys.path.insert(0, str(HERE))
 
 import contest_eval_core as core
 import alerts as alertmod
+import enrich as enrichmod
 from verdict_seam import VerdictSeam, is_ambiguous
 
 
@@ -545,6 +546,187 @@ def test_first_attempt_alerts(t):
     t.check(not bad, "first-attempt alert ids keep the 5-segment id format", detail=str(bad))
 
 
+# ---------------------------------------------------------------------------
+# 7. candidate name+room enrichment (POLLER-ONLY; mocked admin/sessions lookup)
+# ---------------------------------------------------------------------------
+def _enrich_alert(un, sev="critical", detail="orig detail.", username=None):
+    """A minimal contest-eval alert as build_alerts would emit (pre-enrichment)."""
+    username = username or un
+    return {
+        "id": f"contest-eval:web_paste:{un}:slug:dx",
+        "source": "contest-eval", "type": "web_paste", "severity": sev,
+        "timestamp": "2026-06-05T00:00:00Z",
+        "hackerrank_username": username, "username_norm": un,
+        "title": "t", "detail": detail, "data": {"ch": "x"},
+    }
+
+
+def test_enrichment(t):
+    t.section("7. candidate NAME+ROOM enrichment (mocked admin/sessions lookup)")
+
+    # A scripted lookup_fn: maps username -> a `sessions` list. Records every
+    # call so we can prove the cache prevents re-query and the cap is respected.
+    calls = []
+
+    def make_lookup(table):
+        def lookup(username):
+            calls.append(username)
+            return table.get(str(username), [])
+        return lookup
+
+    # --- resolved candidate: name+room baked into detail/room/data ---
+    table = {"alice": [{"name": "Alice Smith", "room": "Lab-3",
+                        "hackerrank_username": "alice", "username_norm": "alice"}]}
+    e = enrichmod.CandidateEnricher("http://x", "pw", rate_limit_s=0,
+                                    lookup_fn=make_lookup(table))
+    t.check(e.enabled, "enricher with api-base + password is enabled")
+    a = _enrich_alert("alice", detail="Web/editorial provenance signals.")
+    summary = e.enrich_alerts([a])
+    t.check(summary["applied"] == 1 and summary["new_lookups"] == 1,
+            "resolved candidate: one lookup, one applied", detail=str(summary))
+    t.check(a["room"] == "Lab-3", "alert.room set to the candidate's room", detail=a.get("room"))
+    t.check(a["detail"].startswith("Candidate: Alice Smith, alice, Lab-3 — "),
+            "detail leads with 'Candidate: {name}, {username}, {room} — '",
+            detail=a["detail"])
+    t.check(a["detail"].endswith("Web/editorial provenance signals."),
+            "original detail is preserved after the candidate prefix", detail=a["detail"])
+    t.check(a["data"].get("candidate_name") == "Alice Smith"
+            and a["data"].get("candidate_room") == "Lab-3",
+            "data carries candidate_name + candidate_room for API consumers",
+            detail=str(a.get("data")))
+    t.check(a["data"].get("ch") == "x",
+            "pre-existing data keys are preserved (not clobbered)", detail=str(a.get("data")))
+
+    # --- cache prevents re-query: a second cycle for alice does NOT call lookup ---
+    calls.clear()
+    a2 = _enrich_alert("alice", detail="another alert for alice.")
+    s2 = e.enrich_alerts([a2])
+    t.check(calls == [], "cached candidate is NOT looked up again (no live query)",
+            detail=str(calls))
+    t.check(a2["detail"].startswith("Candidate: Alice Smith, alice, Lab-3 — "),
+            "cached enrichment is applied to a NEW alert without re-query",
+            detail=a2["detail"])
+    t.check(s2["new_lookups"] == 0 and s2["applied"] == 1,
+            "second cycle: zero new lookups, still applied from cache", detail=str(s2))
+
+    # --- idempotent re-POST: re-enriching the SAME alert does not double the prefix ---
+    e.enrich_alerts([a])
+    t.check(a["detail"].count("Candidate: ") == 1,
+            "re-enriching an already-enriched alert does not double the prefix",
+            detail=a["detail"])
+
+    # --- empty sessions => resolved no-session => username-only, never re-queried ---
+    calls.clear()
+    e2 = enrichmod.CandidateEnricher("http://x", "pw", rate_limit_s=0,
+                                     lookup_fn=make_lookup({}))  # bob -> []
+    b = _enrich_alert("bob", detail="bob alert.")
+    sb = e2.enrich_alerts([b])
+    t.check("Candidate:" not in b["detail"] and b["detail"] == "bob alert.",
+            "empty sessions list => alert stays username-only (detail untouched)",
+            detail=b["detail"])
+    t.check("room" not in b and "candidate_name" not in b.get("data", {}),
+            "no-session candidate gets no room / candidate_name", detail=str(b))
+    t.check(sb["new_lookups"] == 1, "no-session candidate counts exactly one lookup",
+            detail=str(sb))
+    # second cycle: the None cache entry prevents a re-query
+    calls.clear()
+    e2.enrich_alerts([_enrich_alert("bob", detail="bob alert 2.")])
+    t.check(calls == [], "no-session result is cached (not re-queried next cycle)",
+            detail=str(calls))
+
+    # --- per-cycle CAP: only N new lookups happen; the rest stay username-only ---
+    big = {f"u{i}": [{"name": f"N{i}", "room": f"R{i}"}] for i in range(10)}
+    e3 = enrichmod.CandidateEnricher("http://x", "pw", rate_limit_s=0,
+                                     max_per_cycle=3, lookup_fn=make_lookup(big))
+    alerts = [_enrich_alert(f"u{i}", sev="info", detail=f"d{i}") for i in range(10)]
+    s3 = e3.enrich_alerts(alerts)
+    t.check(s3["new_lookups"] == 3,
+            "cap respected: exactly max_per_cycle (3) new lookups this cycle",
+            detail=str(s3))
+    t.check(s3["skipped_cap"] == 7, "remaining 7 candidates deferred to a later cycle",
+            detail=str(s3))
+    enriched = sum(1 for a in alerts if a["detail"].startswith("Candidate: "))
+    t.check(enriched == 3, "exactly the 3 looked-up candidates were enriched this cycle",
+            detail=str(enriched))
+    # a later cycle enriches more (cache keeps the first 3, looks up 3 new ones)
+    s3b = e3.enrich_alerts(alerts)
+    t.check(s3b["new_lookups"] == 3 and len(e3.cache) == 6,
+            "next cycle looks up 3 MORE (cap again); cache grows to 6", detail=str(s3b))
+
+    # --- severity priority: critical/warning are looked up BEFORE info ---
+    pr = {"crit": [{"name": "C", "room": "RC"}], "warn": [{"name": "W", "room": "RW"}],
+          "info1": [{"name": "I", "room": "RI"}]}
+    order = []
+
+    def lookup_order(username):
+        order.append(str(username))
+        return pr.get(str(username), [])
+    e4 = enrichmod.CandidateEnricher("http://x", "pw", rate_limit_s=0,
+                                     max_per_cycle=1, lookup_fn=lookup_order)
+    mixed = [_enrich_alert("info1", sev="info"),
+             _enrich_alert("crit", sev="critical"),
+             _enrich_alert("warn", sev="warning")]
+    e4.enrich_alerts(mixed)
+    t.check(order == ["crit"],
+            "with cap=1, the CRITICAL candidate is looked up first (before warning/info)",
+            detail=str(order))
+
+    # --- disabled enricher (no password) is a clean no-op ---
+    e5 = enrichmod.CandidateEnricher("http://x", "", lookup_fn=make_lookup(table))
+    a5 = _enrich_alert("alice", detail="should be untouched.")
+    s5 = e5.enrich_alerts([a5])
+    t.check(not e5.enabled and s5["applied"] == 0 and a5["detail"] == "should be untouched.",
+            "no admin password => enricher disabled, alerts untouched (no crash)",
+            detail=str(s5))
+
+    # --- non-contest-eval alerts are NEVER touched ---
+    e6 = enrichmod.CandidateEnricher("http://x", "pw", rate_limit_s=0,
+                                     lookup_fn=make_lookup({"alice": table["alice"]}))
+    proctor_alert = {"source": "proctor", "username_norm": "alice",
+                     "hackerrank_username": "alice", "severity": "critical",
+                     "detail": "proctor detail.", "data": {}}
+    e6.enrich_alerts([proctor_alert])
+    t.check(proctor_alert["detail"] == "proctor detail." and "room" not in proctor_alert,
+            "proctor-source alerts are never enriched (poller doesn't build those)",
+            detail=str(proctor_alert))
+
+    # --- transient (503) => retry once then skip, candidate stays UNcached ---
+    state = {"n": 0}
+
+    def always_503(username):
+        state["n"] += 1
+        raise enrichmod.CandidateEnricher.Transient("503")
+    e7 = enrichmod.CandidateEnricher("http://x", "pw", rate_limit_s=0,
+                                     lookup_fn=always_503)
+    a7 = _enrich_alert("zoe", detail="zoe alert.")
+    e7.enrich_alerts([a7])
+    t.check(state["n"] == 2, "a persistent 503 is retried exactly once (2 attempts)",
+            detail=str(state["n"]))
+    t.check("zoe" not in e7.cache and a7["detail"] == "zoe alert.",
+            "a transiently-failing candidate stays UNcached (retried a later cycle)",
+            detail=str((list(e7.cache), a7["detail"])))
+
+    # --- credential resolution precedence (no secret logged) ---
+    pw, src = enrichmod.resolve_admin_password(cli_value="cli-pw", env={})
+    t.check(pw == "cli-pw" and src == "--admin-password",
+            "credential precedence: --admin-password wins", detail=src)
+    pw2, src2 = enrichmod.resolve_admin_password(cli_value=None,
+                                                 env={"ADMIN_PASSWORD": "env-pw"})
+    t.check(pw2 == "env-pw" and "env" in src2,
+            "credential precedence: env ADMIN_PASSWORD used when no flag", detail=src2)
+    with tempfile.TemporaryDirectory() as tmp:
+        sl = Path(tmp) / "session.local"
+        sl.write_text("# comment\nADMIN_PASSWORD=file-pw\nOTHER=1\n")
+        pw3, src3 = enrichmod.resolve_admin_password(cli_value=None, env={},
+                                                     session_local=sl)
+        t.check(pw3 == "file-pw" and "ADMIN_PASSWORD" in src3,
+                "credential precedence: session.local read when no flag/env", detail=src3)
+    pw4, src4 = enrichmod.resolve_admin_password(
+        cli_value=None, env={}, session_local="/nonexistent/session.local")
+    t.check(pw4 is None and "disabled" in src4,
+            "no credential anywhere => None (enrichment disabled, no crash)", detail=src4)
+
+
 def main():
     t = T()
     test_core_reproduces_clone_analysis(t)
@@ -553,6 +735,7 @@ def main():
     test_cdp_importable(t)
     test_alert_config(t)
     test_first_attempt_alerts(t)
+    test_enrichment(t)
     print("\n" + "=" * 70)
     total = t.passed + t.failed
     print(f"RESULT: {t.passed}/{total} passed, {t.failed} failed")
