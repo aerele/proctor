@@ -143,6 +143,7 @@ function makeFakeStorage() {
             .filter((key) => !prefix || key.startsWith(prefix))
             .map((name) => ({
               name,
+              metadata: { size: 1, updated: "2026-06-05T00:00:00Z" },
               async getMetadata() { return [{ size: 1, updated: "2026-06-05T00:00:00Z" }]; },
               async getSignedUrl() { return [`https://signed.example/${name}`]; }
             }));
