@@ -14,7 +14,15 @@ import type {
   ProctorSettings,
   RecordingSession,
   RecordingSessionsResponse,
+  ReviewMineResponse,
   ReviewNature,
+  ReviewNextResponse,
+  ReviewRecord,
+  ReviewRosterSaveResponse,
+  ReviewRosterSummary,
+  ReviewsResponse,
+  ReviewVerdict,
+  ReviewVerdictResponse,
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
@@ -34,6 +42,8 @@ const demoSettingsKey = "aerele-proctor-demo-settings";
 const demoSessionsKey = "aerele-proctor-demo-sessions";
 const demoAlertsKey = "aerele-proctor-demo-alerts";
 const demoAlertSettingsKey = "aerele-proctor-demo-alert-settings";
+const demoReviewRosterKey = "aerele-proctor-demo-review-roster";
+const demoReviewVerdictsKey = "aerele-proctor-demo-review-verdicts";
 export const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD ?? "";
 // C1: when set, the unlock gate compares the sha256 hash of the typed password
 // to this embedded hash (so the plain password is never shipped in the bundle).
@@ -1190,6 +1200,312 @@ export function sendSessionBeacon(sessionId: string, kind: BeaconKind): void {
   } catch {
     // best-effort only
   }
+}
+
+// ===========================================================================
+// MULTI-REVIEWER RECORDING-REVIEW WORKFLOW
+// ===========================================================================
+// Six admin-gated endpoints (x-admin-password). 10 reviewers each enter a name
+// and are served students one-by-one to give a binary YES(1)/NO(0) verdict; an
+// operator pastes the roster and exports a CSV. Each endpoint degrades on a 404
+// (endpoint not deployed yet) so review mode can show "not deployed yet" instead
+// of hard-erroring. In demo mode all six are backed by a localStorage store that
+// implements the SAME serving priority the backend will, so the whole flow runs
+// offline against the existing demo students.
+
+// Split a pasted roster on commas OR newlines (and stray whitespace), trim each,
+// drop blanks, and dedupe case-insensitively while preserving first-seen casing.
+// Used by saveReviewRoster and mirrored in the Settings UI for the live count.
+export function parseRosterInput(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const token of raw.split(/[\n,]+/)) {
+    const name = token.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
+// GET /api/admin/review-roster → roster summary (coverage buckets + active
+// claims). Returns `null` on a 404 so the Settings/Review UI can show a clear
+// "review workflow is not deployed yet" note instead of erroring.
+export async function fetchReviewRoster(password: string): Promise<ReviewRosterSummary | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    return demoReviewRosterSummary();
+  }
+  try {
+    return await request<ReviewRosterSummary>("/api/admin/review-roster", {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/review-roster {usernames} → {ok,count}. Returns `null` on a
+// 404 (not deployed) so the Settings page can degrade gracefully.
+export async function saveReviewRoster(password: string, usernames: string[]): Promise<ReviewRosterSaveResponse | null> {
+  // Trim/dedupe client-side too (defense-in-depth; the textarea also pre-parses).
+  const cleaned = parseRosterInput(usernames.join("\n"));
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    writeDemoRoster(cleaned);
+    return { ok: true, count: cleaned.length };
+  }
+  try {
+    return await request<ReviewRosterSaveResponse>("/api/admin/review-roster", {
+      method: "POST",
+      headers: { "x-admin-password": password },
+      body: JSON.stringify({ usernames: cleaned })
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/review-next {reviewer_name} → {username} | {done:true}. The
+// SERVER picks who to serve (by priority); the UI just shows whoever comes back.
+// Returns `null` on a 404 so review mode can show "not deployed yet".
+export async function reviewNext(password: string, reviewerName: string): Promise<ReviewNextResponse | null> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    return demoReviewNext(reviewerName);
+  }
+  try {
+    return await request<ReviewNextResponse>("/api/admin/review-next", {
+      method: "POST",
+      headers: { "x-admin-password": password },
+      body: JSON.stringify({ reviewer_name: reviewerName })
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/review-verdict {username, reviewer_name, verdict} → {ok}.
+// Returns `null` on a 404 so the caller can surface "not deployed yet".
+export async function submitReviewVerdict(
+  password: string,
+  params: { username: string; reviewer_name: string; verdict: ReviewVerdict }
+): Promise<ReviewVerdictResponse | null> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    demoRecordVerdict(params.username, params.reviewer_name, params.verdict);
+    return { ok: true };
+  }
+  try {
+    return await request<ReviewVerdictResponse>("/api/admin/review-verdict", {
+      method: "POST",
+      headers: { "x-admin-password": password },
+      body: JSON.stringify(params)
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// GET /api/admin/review-mine?reviewer_name=X → this reviewer's own verdicts.
+// Returns `null` on a 404 so the header count/list can degrade gracefully.
+export async function fetchMyReviews(password: string, reviewerName: string): Promise<ReviewMineResponse | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    return demoReviewMine(reviewerName);
+  }
+  try {
+    return await request<ReviewMineResponse>(
+      `/api/admin/review-mine?reviewer_name=${encodeURIComponent(reviewerName)}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// GET /api/admin/reviews → every verdict record across all reviewers (CSV source).
+// Returns `null` on a 404 so the export button can show "not deployed yet".
+export async function fetchAllReviews(password: string): Promise<ReviewRecord[] | null> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    return readDemoVerdicts()
+      .slice()
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
+  try {
+    const response = await request<ReviewsResponse>("/api/admin/reviews", {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+    return response.reviews;
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// ---- Demo review store ----------------------------------------------------
+// localStorage-backed, persists across reloads. The roster defaults to the four
+// demo students that have recordings. Verdicts accumulate as reviewers act, and
+// the serving priority below mirrors the contract the backend implements.
+
+const DEMO_DEFAULT_ROSTER = ["Asha_R", "Karan_V", "Neha_S", "Vikram_T"];
+
+type DemoVerdict = {
+  username: string;
+  reviewer_name: string;
+  verdict: ReviewVerdict;
+  created_at: string;
+};
+
+function readDemoRoster(): string[] {
+  const raw = window.localStorage.getItem(demoReviewRosterKey);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as string[];
+    } catch {
+      // fall through to seed
+    }
+  }
+  writeDemoRoster(DEMO_DEFAULT_ROSTER);
+  return DEMO_DEFAULT_ROSTER.slice();
+}
+
+function writeDemoRoster(usernames: string[]) {
+  window.localStorage.setItem(demoReviewRosterKey, JSON.stringify(usernames));
+}
+
+function readDemoVerdicts(): DemoVerdict[] {
+  const raw = window.localStorage.getItem(demoReviewVerdictsKey);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as DemoVerdict[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeDemoVerdicts(verdicts: DemoVerdict[]) {
+  window.localStorage.setItem(demoReviewVerdictsKey, JSON.stringify(verdicts));
+}
+
+// Record one verdict, idempotent on (username, reviewer_name): a re-submit by the
+// same reviewer for the same student overwrites the prior verdict (matching the
+// backend's idempotent upsert), so re-watching never creates duplicate records.
+function demoRecordVerdict(username: string, reviewerName: string, verdict: ReviewVerdict) {
+  const verdicts = readDemoVerdicts();
+  const existing = verdicts.find(
+    (v) => v.username.toLowerCase() === username.toLowerCase() && v.reviewer_name.toLowerCase() === reviewerName.toLowerCase()
+  );
+  if (existing) {
+    existing.verdict = verdict;
+    existing.created_at = new Date().toISOString();
+  } else {
+    verdicts.push({ username, reviewer_name: reviewerName, verdict, created_at: new Date().toISOString() });
+  }
+  writeDemoVerdicts(verdicts);
+}
+
+// Per-username review tallies over ALL reviewers, used for the coverage buckets
+// and the serving priority.
+function demoReviewTallies(): Map<string, { count: number; positive: number }> {
+  const tallies = new Map<string, { count: number; positive: number }>();
+  for (const username of readDemoRoster()) {
+    tallies.set(username.toLowerCase(), { count: 0, positive: 0 });
+  }
+  for (const v of readDemoVerdicts()) {
+    const key = v.username.toLowerCase();
+    const entry = tallies.get(key) ?? { count: 0, positive: 0 };
+    entry.count += 1;
+    if (v.verdict === 1) entry.positive += 1;
+    tallies.set(key, entry);
+  }
+  return tallies;
+}
+
+function demoReviewRosterSummary(): ReviewRosterSummary {
+  const roster = readDemoRoster();
+  const tallies = demoReviewTallies();
+  let with0 = 0;
+  let with1 = 0;
+  let with2plus = 0;
+  for (const username of roster) {
+    const count = tallies.get(username.toLowerCase())?.count ?? 0;
+    if (count === 0) with0 += 1;
+    else if (count === 1) with1 += 1;
+    else with2plus += 1;
+  }
+  // Demo has no real server-side claim lease; report the distinct reviewers who
+  // have acted as a stand-in for "active reviewers" so the number is non-zero.
+  const reviewers = new Set(readDemoVerdicts().map((v) => v.reviewer_name.toLowerCase()));
+  return {
+    usernames: roster,
+    total: roster.length,
+    with_0_reviews: with0,
+    with_1_review: with1,
+    with_2plus_reviews: with2plus,
+    active_claims: reviewers.size
+  };
+}
+
+// SERVING PRIORITY (mirrors the backend contract): never serve a username this
+// reviewer already reviewed, then pick from the highest-priority non-empty
+// bucket. Bucket 0: students with 0 reviews. Bucket 1: 1-review POSITIVE.
+// Bucket 2: 1-review NEGATIVE. Bucket 3: 2+ reviews, by positive-score desc.
+function demoReviewNext(reviewerName: string): ReviewNextResponse {
+  const roster = readDemoRoster();
+  const verdicts = readDemoVerdicts();
+  const reviewedByMe = new Set(
+    verdicts.filter((v) => v.reviewer_name.toLowerCase() === reviewerName.toLowerCase()).map((v) => v.username.toLowerCase())
+  );
+  const tallies = demoReviewTallies();
+
+  const eligible = roster.filter((u) => !reviewedByMe.has(u.toLowerCase()));
+  if (!eligible.length) return { done: true };
+
+  const tally = (u: string) => tallies.get(u.toLowerCase()) ?? { count: 0, positive: 0 };
+
+  const bucket0 = eligible.filter((u) => tally(u).count === 0);
+  if (bucket0.length) return { username: bucket0[0] };
+
+  const bucket1pos = eligible.filter((u) => tally(u).count === 1 && tally(u).positive === 1);
+  if (bucket1pos.length) return { username: bucket1pos[0] };
+
+  const bucket2neg = eligible.filter((u) => tally(u).count === 1 && tally(u).positive === 0);
+  if (bucket2neg.length) return { username: bucket2neg[0] };
+
+  const bucket3 = eligible
+    .filter((u) => tally(u).count >= 2)
+    .sort((a, b) => tally(b).positive - tally(a).positive);
+  if (bucket3.length) return { username: bucket3[0] };
+
+  // Any remaining eligible (shouldn't happen given the buckets above cover all).
+  return { username: eligible[0] };
+}
+
+function demoReviewMine(reviewerName: string): ReviewMineResponse {
+  const reviews = readDemoVerdicts()
+    .filter((v) => v.reviewer_name.toLowerCase() === reviewerName.toLowerCase())
+    .map((v) => ({ username: v.username, verdict: v.verdict, created_at: v.created_at }))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  return { count: reviews.length, reviews };
 }
 
 function assertDemoAdmin(password: string) {

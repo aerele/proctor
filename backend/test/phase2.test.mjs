@@ -15,6 +15,9 @@ process.env.ALERTS_COLLECTION = "phase2_alerts";
 process.env.SUBMISSION_EVENTS_COLLECTION = "phase2_submission_events";
 process.env.SESSION_COLLECTION = "phase2_sessions";
 process.env.SETTINGS_COLLECTION = "phase2_settings";
+process.env.REVIEW_STATE_COLLECTION = "phase2_review_state";
+process.env.REVIEW_COLLECTION = "phase2_reviews";
+process.env.REVIEW_CLAIMS_COLLECTION = "phase2_review_claims";
 process.env.EVIDENCE_BUCKET = "phase2-bucket";
 process.env.ADMIN_PASSWORD = TEST_ADMIN_PASSWORD;
 
@@ -1179,4 +1182,369 @@ test("N3: malformed JSON string body → 400 invalid_json (not a 500)", async ()
   }));
   assert.equal(res.statusCode, 400, "malformed JSON is a client 400, not a server 500");
   assert.equal(res.body.error, "invalid_json");
+});
+
+// =====================================================================
+// Multi-reviewer recording review: roster, priority serving, claim
+// atomicity, verdicts. All through the public api() + the DI seam.
+// =====================================================================
+
+const REVIEW_STATE = process.env.REVIEW_STATE_COLLECTION;
+const REVIEW_REVIEWS = process.env.REVIEW_COLLECTION;
+const REVIEW_CLAIMS = process.env.REVIEW_CLAIMS_COLLECTION;
+
+function reviewEnv() {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  return { firestore, storage };
+}
+
+async function setRoster(usernames) {
+  return call(makeReq({
+    method: "POST", path: "/api/admin/review-roster",
+    headers: ADMIN_HEADERS, body: { usernames }
+  }));
+}
+
+async function getRosterSummary() {
+  return call(makeReq({ method: "GET", path: "/api/admin/review-roster", headers: ADMIN_HEADERS }));
+}
+
+async function reviewNext(reviewerName) {
+  return call(makeReq({
+    method: "POST", path: "/api/admin/review-next",
+    headers: ADMIN_HEADERS, body: { reviewer_name: reviewerName }
+  }));
+}
+
+async function reviewVerdict(username, reviewerName, verdict) {
+  return call(makeReq({
+    method: "POST", path: "/api/admin/review-verdict",
+    headers: ADMIN_HEADERS, body: { username, reviewer_name: reviewerName, verdict }
+  }));
+}
+
+// Seed a completed review directly into the fake reviews collection (id =
+// `<username_norm>::<reviewerKey>`), matching the handler's record shape. Used to
+// craft a precise priority state without driving the full claim→verdict flow.
+function seedReview(firestore, { username, reviewer, verdict, createdAt }) {
+  const norm = String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g, "_");
+  const reviewerKey = String(reviewer).trim().toLowerCase().replace(/[^a-z0-9._-]/g, "_");
+  const now = createdAt || new Date().toISOString();
+  firestore.collection(REVIEW_REVIEWS).doc(`${norm}::${reviewerKey}`).set({
+    username, username_norm: norm, reviewer_name: reviewer, verdict, created_at: now, updated_at: now
+  });
+}
+
+// Seed a claim doc directly (to simulate another reviewer holding/expiring it).
+function seedClaim(firestore, { username, reviewer, claimedAt }) {
+  const norm = String(username).trim().toLowerCase().replace(/[^a-z0-9._-]/g, "_");
+  firestore.collection(REVIEW_CLAIMS).doc(norm).set({
+    username_norm: norm, reviewer_name: reviewer, claimed_at: claimedAt
+  });
+}
+
+// ---- Roster set / replace / get + summary -------------------------------
+
+test("review roster: set normalizes (trim, drop blanks, dedupe by norm, keep order+display)", async () => {
+  reviewEnv();
+  const res = await setRoster(["  Alice ", "Bob", "", "  ", "alice", "Carol", "BOB"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.count, 3, "Alice/alice and Bob/BOB dedupe by norm; blanks dropped");
+
+  const summary = await getRosterSummary();
+  assert.deepEqual(summary.body.usernames, ["Alice", "Bob", "Carol"], "first-seen display form + roster order kept");
+  assert.equal(summary.body.total, 3);
+});
+
+test("review roster: POST replaces the roster wholesale (not append)", async () => {
+  reviewEnv();
+  await setRoster(["Alice", "Bob"]);
+  await setRoster(["Carol", "Dave"]);
+  const summary = await getRosterSummary();
+  assert.deepEqual(summary.body.usernames, ["Carol", "Dave"], "second set replaces the first");
+});
+
+test("review roster: summary counts derive from reviews + claims", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Alice", "Bob", "Carol", "Dave"]);
+  // Alice: 0 reviews. Bob: 1 review. Carol: 2 reviews. Dave: 1 review + active claim.
+  seedReview(firestore, { username: "Bob", reviewer: "R1", verdict: 1 });
+  seedReview(firestore, { username: "Carol", reviewer: "R1", verdict: 1 });
+  seedReview(firestore, { username: "Carol", reviewer: "R2", verdict: 0 });
+  seedReview(firestore, { username: "Dave", reviewer: "R1", verdict: 0 });
+  seedClaim(firestore, { username: "Dave", reviewer: "R2", claimedAt: new Date().toISOString() });
+
+  const summary = await getRosterSummary();
+  assert.equal(summary.body.with_0_reviews, 1, "Alice");
+  assert.equal(summary.body.with_1_review, 2, "Bob + Dave");
+  assert.equal(summary.body.with_2plus_reviews, 1, "Carol");
+  assert.equal(summary.body.active_claims, 1, "Dave's live claim");
+});
+
+test("review roster: GET empty roster → zeros, not an error", async () => {
+  reviewEnv();
+  const summary = await getRosterSummary();
+  assert.equal(summary.statusCode, 200);
+  assert.deepEqual(summary.body.usernames, []);
+  assert.equal(summary.body.total, 0);
+  assert.equal(summary.body.active_claims, 0);
+});
+
+// ---- Priority serving ----------------------------------------------------
+
+test("review priority: bucket 0 (unreviewed) is served before any 1-review student", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Alice", "Bob"]);
+  // Bob already has 1 (positive) review; Alice has 0 → Alice (bucket 0) wins.
+  seedReview(firestore, { username: "Bob", reviewer: "R1", verdict: 1 });
+  const res = await reviewNext("R2");
+  assert.equal(res.body.username, "Alice");
+});
+
+test("review priority: full bucket order 0 < 1(pos) < 2(neg) < 3, and bucket-3 highest-pos first", async () => {
+  const { firestore } = reviewEnv();
+  // Roster crafted so each student lands in a distinct bucket; A is the only
+  // bucket-0, so we verify order by serving, recording a verdict to advance, and
+  // re-serving. To isolate ordering we instead read the priority via sequential
+  // pulls by a reviewer who hasn't touched anyone.
+  await setRoster(["Zero", "OnePos", "OneNeg", "TwoLow", "TwoHigh"]);
+  // Zero: 0 reviews (bucket 0)
+  // OnePos: 1 review, pos==1 (bucket 1)
+  seedReview(firestore, { username: "OnePos", reviewer: "Ra", verdict: 1 });
+  // OneNeg: 1 review, pos==0 (bucket 2)
+  seedReview(firestore, { username: "OneNeg", reviewer: "Ra", verdict: 0 });
+  // TwoLow: 2 reviews, pos==0 (bucket 3, pos 0)
+  seedReview(firestore, { username: "TwoLow", reviewer: "Ra", verdict: 0 });
+  seedReview(firestore, { username: "TwoLow", reviewer: "Rb", verdict: 0 });
+  // TwoHigh: 2 reviews, pos==2 (bucket 3, pos 2 — top of bucket 3)
+  seedReview(firestore, { username: "TwoHigh", reviewer: "Ra", verdict: 1 });
+  seedReview(firestore, { username: "TwoHigh", reviewer: "Rb", verdict: 1 });
+
+  // Reviewer "Fresh" has reviewed nobody, so candidacy is unaffected; each pull
+  // claims the served username (blocking a re-serve), so a sequence of pulls by
+  // DISTINCT fresh reviewers reveals the global priority order.
+  const order = [];
+  for (const reviewer of ["F1", "F2", "F3", "F4", "F5"]) {
+    const res = await reviewNext(reviewer);
+    order.push(res.body.username);
+  }
+  assert.deepEqual(order, ["Zero", "OnePos", "OneNeg", "TwoHigh", "TwoLow"],
+    "0 < 1pos < 1neg < bucket3(highest pos first)");
+});
+
+test("review priority: within a bucket, roster order is the tiebreak", async () => {
+  reviewEnv();
+  await setRoster(["Charlie", "Alice", "Bob"]); // all bucket 0
+  const res = await reviewNext("R1");
+  assert.equal(res.body.username, "Charlie", "roster order, not alphabetical");
+});
+
+test("review priority: bucket 3 tiebreak is pos DESC then r ASC then roster order", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["P1R3", "P1R2", "P2R2"]);
+  // P1R3: pos1, r3
+  seedReview(firestore, { username: "P1R3", reviewer: "Ra", verdict: 1 });
+  seedReview(firestore, { username: "P1R3", reviewer: "Rb", verdict: 0 });
+  seedReview(firestore, { username: "P1R3", reviewer: "Rc", verdict: 0 });
+  // P1R2: pos1, r2
+  seedReview(firestore, { username: "P1R2", reviewer: "Ra", verdict: 1 });
+  seedReview(firestore, { username: "P1R2", reviewer: "Rb", verdict: 0 });
+  // P2R2: pos2, r2 — highest pos → first
+  seedReview(firestore, { username: "P2R2", reviewer: "Ra", verdict: 1 });
+  seedReview(firestore, { username: "P2R2", reviewer: "Rb", verdict: 1 });
+
+  const order = [];
+  for (const reviewer of ["F1", "F2", "F3"]) {
+    order.push((await reviewNext(reviewer)).body.username);
+  }
+  // P2R2 (pos2) first; then P1R2 vs P1R3 both pos1 → fewer reviews (r2) first.
+  assert.deepEqual(order, ["P2R2", "P1R2", "P1R3"]);
+});
+
+test("review priority: empty roster → {done:true}", async () => {
+  reviewEnv();
+  const res = await reviewNext("R1");
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.done, true);
+});
+
+test("review-next: missing/blank reviewer_name → 400", async () => {
+  reviewEnv();
+  await setRoster(["Alice"]);
+  const missing = await call(makeReq({ method: "POST", path: "/api/admin/review-next", headers: ADMIN_HEADERS, body: {} }));
+  assert.equal(missing.statusCode, 400);
+  const blank = await reviewNext("   ");
+  assert.equal(blank.statusCode, 400);
+});
+
+// ---- Never re-serve a username a reviewer already reviewed ----------------
+
+test("review: a reviewer is NEVER served a username they already reviewed", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Alice", "Bob"]);
+  // R1 already reviewed Alice → R1 must be served Bob (not Alice again), even
+  // though Alice (bucket 0... actually 1 review now) vs Bob (0) — Bob is bucket 0
+  // and Alice is excluded for R1 anyway.
+  seedReview(firestore, { username: "Alice", reviewer: "R1", verdict: 1 });
+  const res = await reviewNext("R1");
+  assert.equal(res.body.username, "Bob");
+
+  // Now R1 has reviewed Alice; if Bob also gets claimed-and-verdicted by R1,
+  // there is nothing left for R1.
+  await reviewVerdict("Bob", "R1", 0);
+  const next = await reviewNext("R1");
+  assert.equal(next.body.done, true, "R1 has reviewed everyone → done");
+});
+
+test("review: the SAME username is intentionally served to DIFFERENT reviewers", async () => {
+  reviewEnv();
+  await setRoster(["Solo"]);
+  const r1 = await reviewNext("R1");
+  assert.equal(r1.body.username, "Solo");
+  await reviewVerdict("Solo", "R1", 1); // releases claim
+  const r2 = await reviewNext("R2");
+  assert.equal(r2.body.username, "Solo", "a second reviewer still gets Solo");
+});
+
+// ---- Claim atomicity ------------------------------------------------------
+
+test("review claim: two concurrent review-next calls never get the same username", async () => {
+  reviewEnv();
+  await setRoster(["Solo"]); // only ONE candidate so both reviewers contend
+  // Fire both concurrently against the same fake firestore; the atomic .create()
+  // on the claim doc must let exactly one win Solo and the other get {done:true}.
+  const [a, b] = await Promise.all([reviewNext("R1"), reviewNext("R2")]);
+  const usernames = [a.body.username, b.body.username].filter(Boolean);
+  const dones = [a.body.done, b.body.done].filter(Boolean);
+  assert.equal(usernames.length, 1, "exactly one reviewer is served Solo");
+  assert.equal(usernames[0], "Solo");
+  assert.equal(dones.length, 1, "the other reviewer gets done:true");
+});
+
+test("review claim: an active claim by another reviewer hides the username; an EXPIRED claim is reclaimable", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Solo"]);
+  // Fresh claim by R1 → R2 sees nothing.
+  seedClaim(firestore, { username: "Solo", reviewer: "R1", claimedAt: new Date().toISOString() });
+  const blocked = await reviewNext("R2");
+  assert.equal(blocked.body.done, true, "live claim by R1 hides Solo from R2");
+
+  // Expire the claim (older than CLAIM_TTL_MS = 10 min) → R2 can reclaim.
+  seedClaim(firestore, { username: "Solo", reviewer: "R1", claimedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString() });
+  const reclaimed = await reviewNext("R2");
+  assert.equal(reclaimed.body.username, "Solo", "expired claim is free → R2 reclaims");
+});
+
+test("review claim: submitting a verdict releases (deletes) the claim", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Solo"]);
+  await reviewNext("R1"); // R1 claims Solo
+  // A second reviewer is blocked while the claim is live.
+  assert.equal((await reviewNext("R2")).body.done, true);
+  // R1 submits → claim released.
+  const verdict = await reviewVerdict("Solo", "R1", 1);
+  assert.equal(verdict.body.ok, true);
+  assert.equal(firestore._collections.get(REVIEW_CLAIMS)?.has("solo"), false, "claim doc deleted on verdict");
+  // Now R2 can be served Solo.
+  assert.equal((await reviewNext("R2")).body.username, "Solo");
+});
+
+// ---- Verdict validation + idempotency ------------------------------------
+
+test("review verdict: only roster usernames + verdict∈{0,1}; idempotent overwrite", async () => {
+  reviewEnv();
+  await setRoster(["Alice"]);
+  // Not on roster.
+  const offRoster = await reviewVerdict("Mallory", "R1", 1);
+  assert.equal(offRoster.statusCode, 400);
+  // Bad verdict.
+  assert.equal((await reviewVerdict("Alice", "R1", 2)).statusCode, 400);
+  assert.equal((await reviewVerdict("Alice", "R1", "yes")).statusCode, 400);
+
+  // Valid; then re-verdict overwrites (still one row for Alice::R1).
+  assert.equal((await reviewVerdict("Alice", "R1", 1)).body.ok, true);
+  assert.equal((await reviewVerdict("Alice", "R1", 0)).body.ok, true);
+  const all = await call(makeReq({ method: "GET", path: "/api/admin/reviews", headers: ADMIN_HEADERS }));
+  const aliceRows = all.body.reviews.filter((r) => r.username === "Alice");
+  assert.equal(aliceRows.length, 1, "re-verdict overwrites the same (username,reviewer) doc");
+  assert.equal(aliceRows[0].verdict, 0, "latest verdict wins");
+});
+
+test("review verdict: created_at is set once and preserved across a re-verdict", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Alice"]);
+  await reviewVerdict("Alice", "R1", 1);
+  const firstCreated = firestore.collection(REVIEW_REVIEWS).doc("alice::r1");
+  const created1 = (await firstCreated.get()).data().created_at;
+  await reviewVerdict("Alice", "R1", 0);
+  const created2 = (await firstCreated.get()).data().created_at;
+  assert.equal(created1, created2, "created_at preserved on re-verdict");
+});
+
+// ---- review-mine + reviews -----------------------------------------------
+
+test("review-mine: filters by reviewer, newest first", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Alice", "Bob", "Carol"]);
+  seedReview(firestore, { username: "Alice", reviewer: "R1", verdict: 1, createdAt: "2026-06-01T00:00:00Z" });
+  seedReview(firestore, { username: "Bob", reviewer: "R1", verdict: 0, createdAt: "2026-06-03T00:00:00Z" });
+  seedReview(firestore, { username: "Carol", reviewer: "R2", verdict: 1, createdAt: "2026-06-02T00:00:00Z" });
+
+  const mine = await call(makeReq({
+    method: "GET", path: "/api/admin/review-mine",
+    headers: ADMIN_HEADERS, query: { reviewer_name: "R1" }
+  }));
+  assert.equal(mine.body.count, 2, "only R1's reviews");
+  assert.deepEqual(mine.body.reviews.map((r) => r.username), ["Bob", "Alice"], "newest first");
+  assert.equal(mine.body.reviews.every((r) => r.username !== "Carol"), true, "R2's review excluded");
+});
+
+test("review-mine: missing reviewer_name → 400", async () => {
+  reviewEnv();
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/review-mine", headers: ADMIN_HEADERS, query: {} }));
+  assert.equal(res.statusCode, 400);
+});
+
+test("reviews: returns ALL rows incl. multiple per username; supports ?username filter", async () => {
+  const { firestore } = reviewEnv();
+  await setRoster(["Alice", "Bob"]);
+  seedReview(firestore, { username: "Alice", reviewer: "R1", verdict: 1 });
+  seedReview(firestore, { username: "Alice", reviewer: "R2", verdict: 0 });
+  seedReview(firestore, { username: "Bob", reviewer: "R1", verdict: 1 });
+
+  const all = await call(makeReq({ method: "GET", path: "/api/admin/reviews", headers: ADMIN_HEADERS }));
+  assert.equal(all.body.reviews.length, 3, "all rows returned");
+  assert.equal(all.body.reviews.filter((r) => r.username === "Alice").length, 2, "two reviewers for Alice");
+  // Shape suitable for the CSV username,reviewer_name,verdict.
+  for (const row of all.body.reviews) {
+    assert.ok("username" in row && "reviewer_name" in row && "verdict" in row);
+  }
+
+  const filtered = await call(makeReq({
+    method: "GET", path: "/api/admin/reviews",
+    headers: ADMIN_HEADERS, query: { username: "Alice" }
+  }));
+  assert.equal(filtered.body.reviews.length, 2, "?username filter scopes to Alice");
+  assert.equal(filtered.body.reviews.every((r) => r.username === "Alice"), true);
+});
+
+// ---- Auth: every review route requires admin -----------------------------
+
+test("review routes: all require x-admin-password", async () => {
+  reviewEnv();
+  const calls = [
+    makeReq({ method: "POST", path: "/api/admin/review-roster", body: { usernames: [] } }),
+    makeReq({ method: "GET", path: "/api/admin/review-roster" }),
+    makeReq({ method: "POST", path: "/api/admin/review-next", body: { reviewer_name: "R1" } }),
+    makeReq({ method: "POST", path: "/api/admin/review-verdict", body: { username: "A", reviewer_name: "R1", verdict: 1 } }),
+    makeReq({ method: "GET", path: "/api/admin/review-mine", query: { reviewer_name: "R1" } }),
+    makeReq({ method: "GET", path: "/api/admin/reviews" })
+  ];
+  for (const req of calls) {
+    const res = await call(req);
+    assert.equal(res.statusCode, 401, `${req.method} ${req.path} must require admin`);
+  }
 });
