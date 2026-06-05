@@ -1,9 +1,9 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, ExternalLink, Eye, Film, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, ListChecks, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchProctorSettings, resumeSession, saveAlertSettings, saveProctorSettings, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -1098,6 +1098,14 @@ function AdminApp() {
   const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
   const [alertSettingsLoading, setAlertSettingsLoading] = useState(false);
   const [alertSettingsMessage, setAlertSettingsMessage] = useState("");
+  // Review roster (multi-reviewer workflow): pasted usernames + the coverage
+  // summary. `rosterUnavailable` flags a 404 (endpoint not deployed yet).
+  const [rosterText, setRosterText] = useState("");
+  const [rosterSummary, setRosterSummary] = useState<ReviewRosterSummary | null>(null);
+  const [rosterLoading, setRosterLoading] = useState(false);
+  const [rosterMessage, setRosterMessage] = useState("");
+  const [rosterUnavailable, setRosterUnavailable] = useState(false);
+  const [exportingReviews, setExportingReviews] = useState(false);
 
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
@@ -1404,6 +1412,114 @@ function AdminApp() {
     }
   };
 
+  // ---- Review roster (multi-reviewer workflow) --------------------------
+  const loadReviewRoster = async () => {
+    setRosterLoading(true);
+    setRosterMessage("");
+    try {
+      const summary = await fetchReviewRoster(password);
+      if (summary === null) {
+        setRosterUnavailable(true);
+        setRosterSummary(null);
+        return;
+      }
+      setRosterUnavailable(false);
+      setRosterSummary(summary);
+      // Prefill the textarea with the existing roster so an operator edits in place.
+      setRosterText(summary.usernames.join("\n"));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRosterLoading(false);
+    }
+  };
+
+  const saveReviewRosterNow = async () => {
+    setRosterLoading(true);
+    setRosterMessage("");
+    setError("");
+    try {
+      // parseRosterInput splits on comma OR newline, trims, and dedupes.
+      const usernames = parseRosterInput(rosterText);
+      const result = await saveReviewRoster(password, usernames);
+      if (result === null) {
+        setRosterUnavailable(true);
+        return;
+      }
+      setRosterUnavailable(false);
+      setRosterMessage(`Saved roster with ${result.count} username${result.count === 1 ? "" : "s"}.`);
+      // Refresh the coverage summary after saving.
+      const summary = await fetchReviewRoster(password);
+      if (summary) {
+        setRosterSummary(summary);
+        setRosterText(summary.usernames.join("\n"));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRosterLoading(false);
+    }
+  };
+
+  // EXPORT REVIEWS CSV: GET all review records → build a CSV (header
+  // username,reviewer_name,verdict; verdict as 1/0; one row per record) and
+  // trigger a client download via a Blob + a temporary <a download>.
+  const exportReviewsCsv = async () => {
+    setExportingReviews(true);
+    setRosterMessage("");
+    setError("");
+    try {
+      const reviews = await fetchAllReviews(password);
+      if (reviews === null) {
+        setRosterUnavailable(true);
+        return;
+      }
+      setRosterUnavailable(false);
+      const csv = buildReviewsCsv(reviews);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "reviews.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setRosterMessage(`Exported ${reviews.length} review record${reviews.length === 1 ? "" : "s"} to reviews.csv.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExportingReviews(false);
+    }
+  };
+
+  // Auto-load the review roster summary the first time the Settings tab opens.
+  useEffect(() => {
+    if (!unlocked || view !== "settings" || rosterSummary !== null || rosterUnavailable) return;
+    let cancelled = false;
+    void (async () => {
+      setRosterLoading(true);
+      try {
+        const summary = await fetchReviewRoster(password);
+        if (cancelled) return;
+        if (summary === null) {
+          setRosterUnavailable(true);
+        } else {
+          setRosterSummary(summary);
+          setRosterText(summary.usernames.join("\n"));
+        }
+      } catch {
+        // Non-fatal — the operator can press Reload to retry.
+      } finally {
+        if (!cancelled) setRosterLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, view, rosterSummary, rosterUnavailable, password]);
+
   // Auto-load the proctor alert settings the first time the Settings tab opens.
   useEffect(() => {
     if (!unlocked || view !== "settings" || alertSettings !== null) return;
@@ -1520,6 +1636,19 @@ function AdminApp() {
         {settingsMessage ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{settingsMessage}</div> : null}
         {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
       </section>
+
+      <ReviewRosterSection
+        text={rosterText}
+        onTextChange={setRosterText}
+        summary={rosterSummary}
+        loading={rosterLoading}
+        exporting={exportingReviews}
+        message={rosterMessage}
+        unavailable={rosterUnavailable}
+        onSave={() => void saveReviewRosterNow()}
+        onReload={() => void loadReviewRoster()}
+        onExport={() => void exportReviewsCsv()}
+      />
 
       <ProctorAlertTypesSection
         settings={alertSettings}
@@ -1677,6 +1806,123 @@ function ContestEvalAlertTypesSection() {
           <span key={type} className="rounded-full border border-line bg-white px-3 py-1.5 font-mono text-xs text-muted">{type}</span>
         ))}
       </div>
+    </section>
+  );
+}
+
+// Escape one CSV field per RFC-4180: wrap in quotes and double any embedded quote
+// when it contains a comma, quote, or newline. Keeps usernames with odd chars safe.
+function csvField(value: string): string {
+  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
+// Build the reviews CSV: header `username,reviewer_name,verdict`, one row per
+// review record, verdict rendered as 1/0. Exported by the Settings page.
+function buildReviewsCsv(reviews: Array<{ username: string; reviewer_name: string; verdict: number }>): string {
+  const header = "username,reviewer_name,verdict";
+  const rows = reviews.map((r) => `${csvField(r.username)},${csvField(r.reviewer_name)},${r.verdict === 1 ? 1 : 0}`);
+  return [header, ...rows].join("\n");
+}
+
+// SETTINGS tab — REVIEW ROSTER. The operator pastes the usernames to be reviewed
+// (comma or newline separated; parsed/deduped client-side too), saves them, sees
+// a coverage summary, and exports all collected verdicts as a CSV. Degrades to a
+// clear "not deployed yet" note when the review endpoints 404.
+function ReviewRosterSection({
+  text,
+  onTextChange,
+  summary,
+  loading,
+  exporting,
+  message,
+  unavailable,
+  onSave,
+  onReload,
+  onExport
+}: {
+  text: string;
+  onTextChange: (value: string) => void;
+  summary: ReviewRosterSummary | null;
+  loading: boolean;
+  exporting: boolean;
+  message: string;
+  unavailable: boolean;
+  onSave: () => void;
+  onReload: () => void;
+  onExport: () => void;
+}) {
+  // Live client-side count of what's currently in the textarea (after split/dedupe).
+  const parsedCount = useMemo(() => parseRosterInput(text).length, [text]);
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <ListChecks size={20} />
+          <div>
+            <h2 className="text-2xl font-semibold">Review roster</h2>
+            <p className="mt-1 text-sm text-muted">Paste the HackerRank usernames to be reviewed (comma or newline separated). Reviewers open Recordings → Review mode and are served these students one-by-one.</p>
+          </div>
+        </div>
+        <button
+          className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50"
+          onClick={onReload}
+          disabled={loading}
+        >
+          <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> Reload
+        </button>
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          <AlertTriangle size={16} className="mr-2 inline" />
+          The review workflow endpoints are not deployed yet. Once the backend exposes the review-roster / reviews APIs, this section becomes active.
+        </div>
+      ) : (
+        <>
+          <textarea
+            className="focus-ring min-h-[140px] w-full rounded-md border border-line bg-white p-3 font-mono text-sm"
+            placeholder={"Asha_R, Karan_V, Neha_S\nVikram_T"}
+            value={text}
+            onChange={(event) => onTextChange(event.target.value)}
+          />
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
+              onClick={onSave}
+              disabled={loading || !parsedCount}
+            >
+              <ListChecks size={16} /> Save roster ({parsedCount})
+            </button>
+            <button
+              className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50"
+              onClick={onExport}
+              disabled={exporting}
+            >
+              <Download size={16} className={exporting ? "animate-pulse" : undefined} /> {exporting ? "Exporting…" : "Export reviews CSV"}
+            </button>
+          </div>
+
+          {/* SUMMARY LINE from GET review-roster. */}
+          {summary ? (
+            <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
+              <span className="font-semibold text-ink">{summary.total}</span> total
+              <span className="text-muted/50">·</span>
+              <span className="font-semibold text-ink">{summary.with_0_reviews}</span> with 0 reviews
+              <span className="text-muted/50">·</span>
+              <span className="font-semibold text-ink">{summary.with_1_review}</span> with 1
+              <span className="text-muted/50">·</span>
+              <span className="font-semibold text-ink">{summary.with_2plus_reviews}</span> with 2+
+              <span className="text-muted/50">·</span>
+              <span className="font-semibold text-ink">{summary.active_claims}</span> active reviewer{summary.active_claims === 1 ? "" : "s"}
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-muted">{loading ? "Loading roster…" : "No roster summary loaded yet."}</p>
+          )}
+
+          {message ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{message}</div> : null}
+        </>
+      )}
     </section>
   );
 }
