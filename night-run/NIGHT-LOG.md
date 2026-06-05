@@ -79,6 +79,7 @@ Dispatched workflow `ww6qefqbj`: **archive** (approve→archive, archived hidden
 **Queued (sequential, after round-2 frontend to avoid file conflicts):**
 - **Student-UX polish (batched, same page):** (a) invalid-share-surface (tab not entire screen) currently errors but STILL records → must refuse to record, clearly show not-recording, inline "Try again" (no reload); audit other dead-end error flows. (b) Content hierarchy: make important things look important; surface the **test rules** prominently so candidates read them; review all content placement on the student page.
 - **Alert taxonomy tweaks (Karthi review):** (a) REMOVE `invalid_share_surface` alert type — moot once the UX fix refuses invalid-surface recording (backend catalog + sure-shot + settings UI). (b) `tab_away` default 60s → **12s**, and add a configurable **seconds threshold** input in Settings that feeds the S1 detector.
+- **Contest-eval: first-attempt-solve alerts + manual tough-question marking (Karthi):** add a manual `tough_questions` list to the contest-eval config (he marks tough Qs, vs the auto ≤10-solver derivation); emit an alert on first-attempt/one-attempt accepted solves; **tough question + first-attempt → raised-severity flag** (not just info). Sharpens/promotes the existing `fast_solve`. (monitoring/ — queued after round-3 to avoid file conflicts.)
 - **S1 final tuning:** held for Karthi's real test recording + logo crop (logo confirmed top-left, white-on-dark).
 
 _(appended as phases complete.)_

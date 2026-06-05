@@ -31,6 +31,39 @@ export type MediaCaptureState = {
   microphone: "inactive" | "recording" | "stopped" | "error" | "permission_denied" | "unavailable";
 };
 
+// Thrown by recorder.start() BEFORE any MediaRecorder is created when the student
+// shares a tab/window/browser surface instead of the entire monitor. The caller
+// MUST treat this as "recording did NOT start" (no status flip to "recording")
+// and offer an inline retry. Distinct from a generic start failure so the host UI
+// can show the precise "share your ENTIRE SCREEN" guidance.
+export class InvalidShareSurfaceError extends Error {
+  /** The surface the student actually selected: 'window' | 'browser' | undefined. */
+  readonly displaySurface: string;
+  constructor(displaySurface: string) {
+    super("You must share your ENTIRE SCREEN — you selected a tab/window. Recording has not started.");
+    this.name = "InvalidShareSurfaceError";
+    this.displaySurface = displaySurface;
+  }
+}
+
+// Categorize a getDisplayMedia / getUserMedia rejection into a stable kind the
+// host can map to recoverable, human-readable copy. Permission-denied and the
+// user pressing Cancel both surface as NotAllowedError/AbortError on most
+// browsers; we keep them under one "share_cancelled" bucket because the recovery
+// (press Try again, pick Entire Screen, Allow) is identical.
+export type RecorderStartErrorKind = "unsupported" | "share_cancelled" | "invalid_surface" | "unknown";
+
+export function classifyStartError(error: unknown): RecorderStartErrorKind {
+  if (error instanceof InvalidShareSurfaceError) return "invalid_surface";
+  if (error instanceof Error) {
+    if (error.message.includes("Screen recording is not supported")) return "unsupported";
+    if (error.name === "NotAllowedError" || error.name === "AbortError" || error.name === "NotFoundError") {
+      return "share_cancelled";
+    }
+  }
+  return "unknown";
+}
+
 function createEvent(type: string, detail?: Record<string, unknown>): ProctorEvent {
   return {
     type,
@@ -255,21 +288,31 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
 
       const [screenTrack] = screenStream.getVideoTracks();
       const screenSettings = screenTrack?.getSettings() as MediaTrackSettings & { displaySurface?: string };
+
+      // INVALID-SURFACE GUARD — runs BEFORE we attach the ended-listener, start
+      // the camera/mic, build the combined stream, or create the MediaRecorder.
+      // If the student shared a tab/window/browser instead of the whole monitor,
+      // we stop the obtained stream and throw a typed error so the host keeps the
+      // UI in a clear NOT-RECORDING state and offers an inline retry. No recording
+      // is ever started for an invalid surface.
+      if (screenSettings?.displaySurface && screenSettings.displaySurface !== "monitor") {
+        emit("invalid_share_surface", {
+          display_surface: screenSettings.displaySurface,
+          required_surface: "monitor"
+        });
+        screenStream.getTracks().forEach((track) => track.stop());
+        screenStream = null;
+        throw new InvalidShareSurfaceError(screenSettings.displaySurface);
+      }
+
+      // Valid full-screen share confirmed — now it is safe to wire up the
+      // stop-detection and begin capture.
       screenTrack?.addEventListener("ended", () => {
         if (stopping) return;
         updateMediaState("screen", "stopped");
         emit("screen_share_stopped", { reason: "track_ended" });
         options.onFatalError("Screen sharing stopped. Return to the proctor app immediately.");
       });
-      if (screenSettings?.displaySurface && screenSettings.displaySurface !== "monitor") {
-        emit("invalid_share_surface", {
-          display_surface: screenSettings.displaySurface,
-          required_surface: "monitor"
-        });
-        options.onFatalError("You selected a tab or window. Restart and select Entire Screen for valid proctoring.");
-        screenStream.getTracks().forEach((track) => track.stop());
-        return;
-      }
 
       await startCameraAndMicrophone();
       startDirectScreenRecordingStream();

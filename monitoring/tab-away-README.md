@@ -18,7 +18,8 @@ OpenCV if present, else a pure numpy+Pillow normalized cross-correlation.
 2. **Template-match the logo** in the configurable header **region** (top-left band
    by default) on each frame → a score in `[0,1]` (1 == perfect match).
 3. **Detect absent runs**: continuous frames scoring **below `--threshold`** for
-   longer than `--min-gap-seconds` (production default **60s**).
+   longer than `--min-gap-seconds` (default **12s** — see *Threshold source of
+   truth* below).
 4. **Build + POST one `tab_away` Alert per run** with the gap start mapped to a
    wall-clock offset, a human `detail`, `data` (start/end offsets + per-frame
    scores), and `video_key` + `download_url` deep-linking the recording at the gap.
@@ -60,8 +61,31 @@ and `--json` to emit the full `{summary, alerts, posted}` to stdout. `--keep-fra
 | `--interval` | `5` | seconds between sampled frames. Smaller = finer gap resolution, more CPU. The Nth frame (1-based) is at offset `(N-1)*interval` s. |
 | `--threshold` | `0.6` | match score below this == logo **absent**. Raise if false "present" on busy headers; lower if real absences are missed. Inspect scores with `--json`. |
 | `--region` | `top-left` | header band to search. Presets: `top-left`, `top-band`, `top-center`, `full`. Or pass `x0,y0,x1,y1` **fractions** in `[0,1]`, e.g. `--region 0,0,0.25,0.10`. **The logo crop must fit inside this region.** |
-| `--min-gap-seconds` | `60` | minimum continuous absent span to flag. **Production = 60s.** Exposed as a knob so short test clips (and stricter/looser policies) are configurable. |
+| `--min-gap-seconds` | `12` | minimum continuous absent span to flag. **Default = 12s, sourced from the admin console** (see below). Exposed as a knob so short test clips (and stricter/looser policies) are configurable. |
+| `--admin-password` | — | when set with `--api-base` and **without** an explicit `--min-gap-seconds`, the threshold is read live from `GET /api/admin/alert-settings`. |
 | `--base-offset` | `0` | wall-clock offset (s) of sampling-time 0 into a longer **merged** recording, so offsets/deep-links map to the full review video. |
+
+### Threshold source of truth (`threshold_seconds`)
+
+The **admin console is the source of truth** for the tab-away threshold:
+**Settings → Proctor alert types → `tab_away` → threshold (seconds)** (default
+**12**, validated as a positive number, stored with the rest of the alert-settings
+and round-tripped through `GET`/`POST /api/admin/alert-settings` as
+`proctor.tab_away.threshold_seconds`).
+
+Wire it to the detector one of two ways:
+
+1. **Pass it explicitly** — read the value from the console and run with
+   `--min-gap-seconds <threshold_seconds>`. This always wins (operator override).
+2. **Let the detector read it** — give `--api-base` + `--admin-password` and
+   **omit** `--min-gap-seconds`; the detector does a one-shot
+   `GET /api/admin/alert-settings` and uses
+   `proctor.tab_away.threshold_seconds`. If the read fails (network/parse), it
+   falls back to the built-in default (**12**). An explicit `--min-gap-seconds`
+   always takes precedence over the API read.
+
+Precedence: explicit `--min-gap-seconds` → live admin-console value (when
+`--admin-password` given) → built-in default `12`.
 
 ### Picking the logo crop and region (important)
 
@@ -128,10 +152,10 @@ PRESENT/ABSENT/PRESENT `.webm`, then asserts the detector flags exactly the midd
 no-logo span as a `tab_away` alert, the alert obeys the contract + deep-link
 convention, the offsets line up, and a logo-present-throughout clip flags **nothing**
 (negative control). It uses `--min-gap-seconds` low so the seconds-long synthetic gap
-fires; the **production 60s default is unchanged**.
+fires; the **default 12s threshold (sourced from the admin console) is unchanged**.
 
 Does not touch the network or the real backend. Keeps existing
-`python3 monitoring/test_monitoring.py` (30/30) passing.
+`python3 monitoring/test_monitoring.py` passing.
 
 ## HELD for Karthi (final accuracy tuning)
 

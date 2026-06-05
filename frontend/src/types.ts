@@ -141,7 +141,8 @@ export type Alert = {
   id: string;
   source: AlertSource;
   /**
-   * proctor: recording_stopped | screen_share_stopped | invalid_share_surface | recording_error | ip_changed
+   * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected
+   *   (legacy, no longer raised but may still appear in stored data: invalid_share_surface)
    * contest-eval: peer_copy_cluster | recurring_pair | web_paste | fast_solve
    */
   type: string;
@@ -202,10 +203,12 @@ export type AlertActionResponse = {
 };
 
 // Per-type proctor alert configuration (GET/POST /api/admin/alert-settings).
+// NOTE: invalid_share_surface was REMOVED — the recorder now refuses to record on
+// an invalid share surface, so the event can never fire. Existing stored alerts of
+// that type still DISPLAY; it is just no longer in the configurable catalog.
 export type ProctorAlertType =
   | "recording_stopped"
   | "screen_share_stopped"
-  | "invalid_share_surface"
   | "recording_error"
   | "ip_changed"
   | "tab_hidden"
@@ -215,6 +218,10 @@ export type ProctorAlertType =
 export type ProctorAlertTypeConfig = {
   enabled: boolean;
   severity: AlertSeverity;
+  // Only tab_away carries this: the minimum continuous "HackerRank not visible"
+  // span (seconds) the monitoring tab-away detector must observe before raising
+  // an alert. Default 12. Source of truth for the detector's --min-gap-seconds.
+  threshold_seconds?: number;
 };
 
 export type AlertSettings = {

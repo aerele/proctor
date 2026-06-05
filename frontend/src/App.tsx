@@ -1,7 +1,7 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardList, Clock, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, ExternalLink, Eye, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchProctorSettings, resumeSession, saveAlertSettings, saveProctorSettings, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
-import { createProctorRecorder, type MediaCaptureState } from "./useProctorRecorder";
+import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
@@ -76,6 +76,10 @@ function StudentApp() {
   const [queueDepth, setQueueDepth] = useState(0);
   const [uploadedCount, setUploadedCount] = useState(0);
   const [error, setError] = useState("");
+  // Recoverable screen-share/start failure (invalid surface, share cancelled,
+  // permission denied, unsupported, etc.). When set, the student is clearly NOT
+  // recording and an inline "Try again" re-invokes the share — never a reload.
+  const [startError, setStartError] = useState<{ kind: RecorderStartErrorKind; message: string } | null>(null);
   const [reloadWarning, setReloadWarning] = useState("");
   const [manifest, setManifest] = useState<UploadManifestItem[]>([]);
   const [clipboardText, setClipboardText] = useState("");
@@ -86,6 +90,9 @@ function StudentApp() {
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [endRequested, setEndRequested] = useState(false);
+  // Recording already stopped but the final end/manifest submit failed — show an
+  // inline "Retry submitting" instead of dead-ending in the error state.
+  const [endFailed, setEndFailed] = useState(false);
   const [assuranceAccepted, setAssuranceAccepted] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
@@ -342,6 +349,13 @@ function StudentApp() {
   // Bring up the recorder for an active session. Shared by first-start and by
   // "Resume recording" after a reload (both need a fresh getDisplayMedia gesture).
   const beginRecording = async (session: SessionStartResponse) => {
+    // If a prior recorder is still around (e.g. screen share dropped mid-session
+    // and the student is retrying), tear it down first so we don't leave a second
+    // heartbeat/upload loop running against the same session.
+    if (recorderRef.current) {
+      await recorderRef.current.stop().catch(() => undefined);
+      recorderRef.current = null;
+    }
     setStartIp(session.start_ip || "unavailable");
     setCurrentIp(session.start_ip || "unavailable");
     setIpChanged(false);
@@ -357,10 +371,20 @@ function StudentApp() {
         setUploadedCount(uploaded);
       },
       onFatalError: (message) => {
-        setError(message);
-        setStatus("error");
         if (message.includes("Screen sharing stopped")) {
-          speakWarning("Screen sharing stopped. Return to the proctor app immediately.");
+          // Recoverable: the session is still active server-side; the student can
+          // re-share their screen inline (no reload) to resume recording.
+          setStatus("idle");
+          setStartError({
+            kind: "share_cancelled",
+            message: "Screen sharing stopped, so recording is paused. This is logged. Press Resume screen share and choose your Entire Screen to continue — do not close this tab."
+          });
+          speakWarning("Screen sharing stopped. Return to the proctor app and resume your screen share immediately.");
+        } else {
+          // A local capture failure (e.g. MediaRecorder error). Still recoverable
+          // via Try again, but surface the raw reason for transparency.
+          setStatus("idle");
+          setStartError({ kind: "unknown", message: `${message} You can press Try again to restart recording without reloading.` });
         }
       },
       // B1: the server locked/ended/paused this session — the recorder has
@@ -406,11 +430,32 @@ function StudentApp() {
     setStatus("recording");
   };
 
+  // Translate a recorder start failure into recoverable, human-readable copy. The
+  // student is left in a clear NOT-RECORDING state with an inline Try-again button
+  // (no page reload). Server/registration errors keep the generic message.
+  const handleStartFailure = (cause: unknown) => {
+    const kind = classifyStartError(cause);
+    let message: string;
+    if (kind === "invalid_surface") {
+      message = "You must share your ENTIRE SCREEN — you selected a tab or window. Recording has not started. Press Try again and choose Entire Screen.";
+    } else if (kind === "share_cancelled") {
+      message = "Screen share was cancelled or blocked, so recording has not started. Press Try again, then choose Entire Screen and allow access.";
+    } else if (kind === "unsupported") {
+      message = "This browser cannot record your screen. Open this page in the latest Chrome or Edge on a laptop or desktop, then press Try again.";
+    } else {
+      message = cause instanceof Error ? cause.message : String(cause);
+    }
+    setStartError({ kind, message });
+    setStatus("idle");
+  };
+
   const start = async () => {
     setError("");
+    setStartError(null);
     setStatus("starting");
+    let session: SessionStartResponse;
     try {
-      const session = await startSession({
+      session = await startSession({
         ...form,
         hackerrank_username: form.hackerrank_username.trim(),
         name: form.name.trim(),
@@ -426,11 +471,19 @@ function StudentApp() {
         setStatus("idle");
         return;
       }
+    } catch (cause) {
+      // Registration/gate failure (time window, network, etc.) — generic error.
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setStatus("idle");
+      return;
+    }
+
+    // Screen-share / capture phase. A failure here is recoverable inline — the
+    // session exists, the student just needs to re-share (no reload, no re-entry).
+    try {
       await beginRecording(session);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
-      setStatus("idle");
+      handleStartFailure(cause);
     }
   };
 
@@ -439,21 +492,37 @@ function StudentApp() {
   const resumeRecording = async () => {
     if (!sessionConfig) return;
     setError("");
+    setStartError(null);
     setStatus("starting");
+    let session: SessionStartResponse;
     try {
-      const session = await resumeSession(sessionConfig.session_id);
+      session = await resumeSession(sessionConfig.session_id);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         setStatus("idle");
         if (serverStatus === "ended") window.localStorage.removeItem(sessionStorageKey);
         return;
       }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setStatus("idle");
+      return;
+    }
+
+    try {
       await beginRecording(session);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
-      setStatus("idle");
+      handleStartFailure(cause);
     }
+  };
+
+  // Inline "Try again" for a failed screen share — re-invokes the share prompt
+  // WITHOUT a page reload. Routes to resume when a session was already restored,
+  // otherwise re-runs the first-start share for the just-created session.
+  const retryScreenShare = () => {
+    setStartError(null);
+    if (gate === "running" && sessionConfig) void resumeRecording();
+    else void start();
   };
 
   // Re-poll the server status from a blocked screen (pending/locked) so the
@@ -557,6 +626,7 @@ function StudentApp() {
     }
     setStatus("ending");
     setError("");
+    setEndFailed(false);
     let recorderStopped = false;
     try {
       if (sessionId) {
@@ -576,7 +646,38 @@ function StudentApp() {
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
-      setStatus(recorderStopped ? "error" : "recording");
+      if (recorderStopped) {
+        // The recording is already stopped but submitting the end failed (network,
+        // server). Stay on a recoverable "error" state with an inline Retry — never
+        // force a reload, which could orphan the session as incomplete.
+        setStatus("error");
+        setEndFailed(true);
+      } else {
+        // Nothing stopped yet — drop straight back to recording so the student can
+        // re-press End. Keep the End panel open for an immediate retry.
+        setStatus("recording");
+      }
+    }
+  };
+
+  // Retry submitting the end after the recording already stopped but the final
+  // end/manifest call failed. No reload, no re-recording — just re-send the end.
+  const retryEnd = async () => {
+    setStatus("ending");
+    setError("");
+    try {
+      if (sessionId) {
+        await endSession({ sessionId, manifest, assuranceAccepted });
+      }
+      window.localStorage.removeItem(sessionStorageKey);
+      setEndFailed(false);
+      setStatus("ended");
+      setGate("ended");
+      setEndRequested(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setStatus("error");
+      setEndFailed(true);
     }
   };
 
@@ -673,14 +774,23 @@ function StudentApp() {
       ) : null}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 
+      {/* Pre-start: the rules are the headline, not a sidebar afterthought. The
+          candidate reads exactly what is required and what is recorded before the
+          form, so the rules are unmissable. */}
+      {isFormStage ? <PreStartRules /> : null}
+
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
-              <h1 className="mt-2 text-2xl font-semibold text-ink">HackerRank companion recording</h1>
+              <h1 className="mt-2 text-2xl font-semibold text-ink">
+                {isFormStage ? "Register and start recording" : "HackerRank companion recording"}
+              </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
-                Start this before opening the contest. Select Entire Screen only. Any interruption, hidden activity, or unexplained anomaly may be reviewed before shortlisting.
+                {isFormStage
+                  ? "Enter your details below, then start proctoring before you open the contest. When you start, your browser will ask which screen to share — choose Entire Screen."
+                  : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
               </p>
             </div>
             <StatusPill status={status} />
@@ -688,6 +798,7 @@ function StudentApp() {
 
           {isFormStage ? (
             <>
+              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
               <div className="grid gap-4 md:grid-cols-2">
                 <Field label="HackerRank username" value={form.hackerrank_username} onChange={(value) => setForm({ ...form, hackerrank_username: value })} />
                 <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
@@ -704,16 +815,32 @@ function StudentApp() {
                   onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
                 />
                 <span>
-                  I consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
+                  I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
                 </span>
               </label>
             </>
           ) : null}
 
-          {error ? (
+          {/* Prominent, recoverable screen-share / start failure — never dead-ends
+              and never asks for a reload. Shown above the action buttons. */}
+          {startError ? (
+            <ScreenShareErrorPanel
+              startError={startError}
+              busy={status === "starting"}
+              onRetry={retryScreenShare}
+              onDismiss={() => setStartError(null)}
+            />
+          ) : null}
+
+          {error && !endFailed ? (
             <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
               {error}
             </div>
+          ) : null}
+
+          {/* Recording stopped but the final submit failed — inline retry, no reload. */}
+          {endFailed ? (
+            <EndRetryPanel error={error} busy={status === "ending"} onRetry={() => void retryEnd()} />
           ) : null}
 
           {reloadWarning ? (
@@ -727,13 +854,15 @@ function StudentApp() {
           ) : null}
 
           <div className="mt-5 flex flex-wrap gap-3">
-            {isFormStage ? (
+            {/* While the recoverable share-error panel is up it owns the retry, so
+                we hide the duplicate Start/Resume buttons to avoid two CTAs. */}
+            {isFormStage && !startError ? (
               <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={!canStart || status === "starting"} onClick={start}>
                 <MonitorUp size={16} /> {status === "starting" ? "Starting…" : "Start proctoring"}
               </button>
             ) : null}
             {/* Active session restored on reload but recorder not yet running. */}
-            {gate === "running" && status !== "recording" && status !== "ending" ? (
+            {gate === "running" && status !== "recording" && status !== "ending" && !startError ? (
               <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={status === "starting"} onClick={resumeRecording}>
                 <MonitorUp size={16} /> {status === "starting" ? "Resuming…" : "Resume recording"}
               </button>
@@ -771,10 +900,20 @@ function StudentApp() {
         </section>
 
         <aside className="space-y-5">
-          <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
-          <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} />
-          <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
-          <RulesPanel />
+          {/* Form stage: keep the sidebar focused on "what's being recorded" — the
+              live camera/health/evidence panels are empty until recording starts,
+              so we show a compact preview of what monitoring will capture instead.
+              Recording stage: the live panels take over. */}
+          {isFormStage ? (
+            <WhatIsRecordedPanel />
+          ) : (
+            <>
+              <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
+              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} />
+              <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
+              <RulesPanel />
+            </>
+          )}
         </aside>
       </div>
 
@@ -1469,19 +1608,44 @@ function ProctorAlertTypesSection({ settings, loading, message, onReload, onSave
                   </label>
                   {!config.enabled ? <span className="rounded-full border border-line px-2 py-0.5 text-xs text-muted">disabled</span> : null}
                 </div>
-                <label className="flex items-center gap-2 text-xs text-muted">
-                  Severity
-                  <select
-                    className="focus-ring h-9 w-32 rounded-md border border-line bg-white px-2 text-sm"
-                    value={config.severity}
-                    disabled={loading}
-                    onChange={(event) => updateType(type, { severity: event.target.value as AlertSeverity })}
-                  >
-                    <option value="critical">critical</option>
-                    <option value="warning">warning</option>
-                    <option value="info">info</option>
-                  </select>
-                </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  {/* tab_away alone exposes a configurable threshold: the minimum
+                      continuous "HackerRank not visible" span (seconds) the
+                      monitoring tab-away detector must observe before alerting.
+                      Saved with the rest of alert-settings (source of truth for
+                      the detector's --min-gap-seconds). */}
+                  {type === "tab_away" ? (
+                    <label className="flex items-center gap-2 text-xs text-muted">
+                      Threshold
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        className="focus-ring h-9 w-20 rounded-md border border-line bg-white px-2 text-sm"
+                        value={config.threshold_seconds ?? 12}
+                        disabled={loading}
+                        onChange={(event) => {
+                          const next = Number(event.target.value);
+                          updateType(type, { threshold_seconds: Number.isFinite(next) && next > 0 ? next : 12 });
+                        }}
+                      />
+                      seconds
+                    </label>
+                  ) : null}
+                  <label className="flex items-center gap-2 text-xs text-muted">
+                    Severity
+                    <select
+                      className="focus-ring h-9 w-32 rounded-md border border-line bg-white px-2 text-sm"
+                      value={config.severity}
+                      disabled={loading}
+                      onChange={(event) => updateType(type, { severity: event.target.value as AlertSeverity })}
+                    >
+                      <option value="critical">critical</option>
+                      <option value="warning">warning</option>
+                      <option value="info">info</option>
+                    </select>
+                  </label>
+                </div>
               </div>
             );
           })}
@@ -1994,15 +2158,29 @@ function CameraSelfView({ videoRef, mediaCapture, pipMessage, onPopOut, pipAvail
   );
 }
 
+// Map the raw recorder status to plain candidate-facing language so the health
+// panel reads "Recording" / "Not recording" rather than internal status strings.
+function recordingStateLabel(status: SessionStatus): { label: string; recording: boolean } {
+  if (status === "recording") return { label: "Recording", recording: true };
+  if (status === "ending") return { label: "Finishing up…", recording: true };
+  return { label: "Not recording", recording: false };
+}
+
 function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState }) {
+  const state = recordingStateLabel(status);
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
-      <div className="mb-4 flex items-center gap-2">
-        <ShieldCheck size={18} />
-        <h2 className="font-semibold">Recording health</h2>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <ShieldCheck size={18} />
+          <h2 className="font-semibold">Recording health</h2>
+        </div>
+        <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${state.recording ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>
+          {state.label}
+        </span>
       </div>
       <div className="space-y-3 text-sm">
-        <Metric icon={<CheckCircle2 size={16} />} label="State" value={status} />
+        <Metric icon={<CheckCircle2 size={16} />} label="State" value={state.label} />
         <Metric icon={<UploadCloud size={16} />} label="Uploaded chunks" value={`${uploadedCount}${queueDepth ? ` (${queueDepth} pending)` : ""}`} />
         <Metric icon={<MonitorUp size={16} />} label="Chunk interval" value={config ? `${config.upload_config.chunk_seconds}s` : "Not started"} />
         <Metric icon={<MonitorUp size={16} />} label="Screen" value={mediaCapture.screen} />
@@ -2069,23 +2247,196 @@ function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit
   );
 }
 
+// Single source of truth for the test rules. The prominent PreStartRules block
+// (pre-start) and the compact RulesPanel reminder (during recording) both read
+// this so the rules never drift between the two surfaces.
+const TEST_RULES: Array<{ icon: React.ReactNode; title: string; body: string }> = [
+  {
+    icon: <MonitorUp size={18} />,
+    title: "Share your ENTIRE SCREEN",
+    body: "When prompted, choose Entire Screen — not a tab, window, or browser. Tab/window sharing is rejected and recording will not start."
+  },
+  {
+    icon: <Video size={18} />,
+    title: "Keep recording running",
+    body: "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have fully submitted on HackerRank."
+  },
+  {
+    icon: <Eye size={18} />,
+    title: "Stay on HackerRank and this tab",
+    body: "Don't switch to other tabs, apps, or windows. Focus changes, hidden states, and exits are logged and may need explanation."
+  },
+  {
+    icon: <Copy size={18} />,
+    title: "No copy / paste or outside help",
+    body: "Clipboard and paste activity is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
+  },
+  {
+    icon: <Camera size={18} />,
+    title: "Keep your camera visible",
+    body: "If a camera is available, keep the self-view (or its pop-out) visible while you work in HackerRank. Microphone is captured when available."
+  },
+  {
+    icon: <ClipboardCheck size={18} />,
+    title: "End the test here when done",
+    body: "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
+  }
+];
+
+// PROMINENT pre-start rules — the candidate reads this before the form. This is
+// the headline of the page at the form stage, not a sidebar afterthought.
+function PreStartRules() {
+  return (
+    <section className="mb-5 rounded-lg border border-warning/40 bg-warning/5 p-6 shadow-subtle">
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={22} className="mt-0.5 shrink-0 text-warning" />
+        <div>
+          <h2 className="text-xl font-semibold text-ink">Read the rules before you start</h2>
+          <p className="mt-1 text-sm leading-6 text-muted">
+            This session is proctored and recorded for a hiring assessment. Follow every rule below — violations are logged and reviewed before shortlisting.
+          </p>
+        </div>
+      </div>
+      <ol className="mt-5 grid gap-3 sm:grid-cols-2">
+        {TEST_RULES.map((rule, index) => (
+          <li key={rule.title} className="flex gap-3 rounded-lg border border-line bg-panel p-4">
+            <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink/5 text-accent">{rule.icon}</span>
+            <div>
+              <p className="text-sm font-semibold text-ink">
+                <span className="mr-1.5 font-mono text-xs text-muted">{index + 1}.</span>
+                {rule.title}
+              </p>
+              <p className="mt-1 text-sm leading-6 text-muted">{rule.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+// Compact rules reminder kept in the sidebar DURING recording so the candidate
+// can re-check the rules at a glance without losing the live panels.
 function RulesPanel() {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-2">
         <AlertTriangle size={18} />
-        <h2 className="font-semibold">Test rules</h2>
+        <h2 className="font-semibold">Rules reminder</h2>
       </div>
-      <ul className="space-y-2 text-sm leading-6 text-muted">
-        <li>Select Entire Screen only. Tab/window sharing is not accepted.</li>
-        <li>Screen sharing is mandatory and is recorded directly for reliability. Microphone is included when available.</li>
-        <li>If a camera is available, keep the camera preview or pop-out visible when you move to HackerRank.</li>
-        <li>Do not stop screen sharing until the assessment is fully submitted.</li>
-        <li>Keep this proctor app open. If you reload by accident, your session resumes automatically.</li>
-        <li>Copied code, AI-assisted answers, or unexplained anomalies may lead to disqualification.</li>
-        <li>Shortlisted candidates must explain and modify their code live.</li>
+      <ul className="space-y-2.5 text-sm leading-6 text-muted">
+        {TEST_RULES.map((rule) => (
+          <li key={rule.title} className="flex gap-2">
+            <CheckCircle2 size={16} className="mt-1 shrink-0 text-accent" />
+            <span><span className="font-medium text-ink">{rule.title}.</span> {rule.body}</span>
+          </li>
+        ))}
       </ul>
     </section>
+  );
+}
+
+// What the proctoring captures — shown in the form-stage sidebar so the candidate
+// knows exactly what is recorded before they consent and start. Replaces the
+// empty live panels (camera/health/evidence) that have nothing to show yet.
+function WhatIsRecordedPanel() {
+  const items: Array<{ icon: React.ReactNode; label: string; detail: string }> = [
+    { icon: <MonitorUp size={16} />, label: "Your entire screen", detail: "Recorded continuously and uploaded in short segments throughout the test." },
+    { icon: <Camera size={16} />, label: "Camera (if available)", detail: "A small self-view; keep your face visible. Skipped if no camera is present." },
+    { icon: <Mic size={16} />, label: "Microphone (if available)", detail: "Audio is captured alongside the screen when a microphone is present." },
+    { icon: <Copy size={16} />, label: "Clipboard & paste activity", detail: "Copy/cut/paste inside the session is part of the integrity record." },
+    { icon: <Activity size={16} />, label: "Focus & network signals", detail: "Tab switches, hidden states, refreshes, exits, and IP changes are logged." }
+  ];
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-4 flex items-center gap-2">
+        <ShieldCheck size={18} className="text-accent" />
+        <h2 className="font-semibold">What is recorded</h2>
+      </div>
+      <ul className="space-y-3 text-sm">
+        {items.map((item) => (
+          <li key={item.label} className="flex gap-3">
+            <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-ink/5 text-ink">{item.icon}</span>
+            <div>
+              <p className="font-medium text-ink">{item.label}</p>
+              <p className="mt-0.5 leading-6 text-muted">{item.detail}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// PROMINENT, recoverable screen-share / start failure. Always offers an inline
+// Try-again that re-invokes the share prompt — never a page reload. The headline
+// makes the NOT-RECORDING state unmistakable.
+function ScreenShareErrorPanel({ startError, busy, onRetry, onDismiss }: { startError: { kind: RecorderStartErrorKind; message: string }; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
+  const isInvalidSurface = startError.kind === "invalid_surface";
+  const heading = isInvalidSurface
+    ? "Recording has NOT started — share your entire screen"
+    : startError.kind === "unsupported"
+      ? "Recording has NOT started — unsupported browser"
+      : "Recording has NOT started";
+  return (
+    <div className="mt-5 rounded-lg border-2 border-danger/50 bg-danger/5 p-5 shadow-subtle">
+      <div className="flex items-start gap-3">
+        <MailWarning size={22} className="mt-0.5 shrink-0 text-danger" />
+        <div className="min-w-0">
+          <p className="text-base font-semibold text-danger">{heading}</p>
+          <p className="mt-1.5 text-sm leading-6 text-ink">{startError.message}</p>
+          {isInvalidSurface ? (
+            <p className="mt-2 text-xs leading-5 text-muted">
+              Tip: in the share dialog, open the <span className="font-medium">Entire Screen</span> tab (not Window or Chrome Tab), pick your screen, then choose Share.
+            </p>
+          ) : null}
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onRetry}
+          disabled={busy}
+        >
+          <MonitorUp size={16} /> {busy ? "Opening share…" : "Try again — share entire screen"}
+        </button>
+        <button
+          className="focus-ring rounded-md border border-line px-4 py-2 text-sm font-medium text-muted hover:border-ink/40"
+          onClick={onDismiss}
+          disabled={busy}
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Recording already stopped but the final end/manifest submit failed. Recoverable
+// inline — re-send the end without reloading (a reload could orphan the session).
+function EndRetryPanel({ error, busy, onRetry }: { error: string; busy: boolean; onRetry: () => void }) {
+  return (
+    <div className="mt-5 rounded-lg border-2 border-danger/50 bg-danger/5 p-5 shadow-subtle">
+      <div className="flex items-start gap-3">
+        <MailWarning size={22} className="mt-0.5 shrink-0 text-danger" />
+        <div className="min-w-0">
+          <p className="text-base font-semibold text-danger">Couldn't submit the end of your test</p>
+          <p className="mt-1.5 text-sm leading-6 text-ink">
+            Your recording has stopped and the segments are uploaded, but confirming the end of the session failed. Do not close this tab — press Retry to finish submitting.
+          </p>
+          {error ? <p className="mt-2 break-words text-xs leading-5 text-muted">{error}</p> : null}
+        </div>
+      </div>
+      <div className="mt-4">
+        <button
+          className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onRetry}
+          disabled={busy}
+        >
+          <RefreshCw size={16} className={busy ? "animate-spin" : undefined} /> {busy ? "Submitting…" : "Retry submitting"}
+        </button>
+      </div>
+    </div>
   );
 }
 

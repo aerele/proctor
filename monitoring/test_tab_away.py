@@ -14,9 +14,10 @@ gap detect -> alert build, NO network POST) and asserts:
      idempotent id, video_key + #t deep-link), and
   3. the gap offsets line up with where the logo actually disappeared.
 
-The production rule is ">60s continuous"; the synthetic clip is only seconds
-long, so the test passes `--min-gap-seconds` low (the SAME knob exposed on the
-CLI). The >60s default is unchanged in production.
+The production rule is ">threshold_seconds continuous" (admin-console default 12s);
+the synthetic clip is only seconds long, so the test passes `--min-gap-seconds` low
+(the SAME knob exposed on the CLI). The production default (12s, sourced from the
+admin console) is unchanged by this test.
 
 Run:   python3 monitoring/test_tab_away.py
 Exit:  0 iff all asserts pass; nonzero on the first failure or if ffmpeg/imaging
@@ -144,7 +145,7 @@ def main():
 
         interval = 2.0  # sample every 2s -> 3 frames per 6s segment
         # min-gap below the 6s absent span so the synthetic gap fires; the SAME
-        # knob the CLI exposes (--min-gap-seconds). Production default stays 60.
+        # knob the CLI exposes (--min-gap-seconds). Production default is 12.
         min_gap = 3.0
 
         alerts, summary = tad.analyze_recording(

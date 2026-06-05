@@ -959,7 +959,11 @@ async function applySessionAction(action, session) {
 const SURE_SHOT_EVENT_TYPES = {
   recording_stopped: { severity: "critical", title: "Recording stopped" },
   screen_share_stopped: { severity: "critical", title: "Screen sharing stopped" },
-  invalid_share_surface: { severity: "critical", title: "Invalid share surface" },
+  // invalid_share_surface is intentionally absent: the recorder now REFUSES to
+  // record on a non-monitor share surface (tab/window), so this event can never
+  // fire. Removed from the catalog so it is no longer raised or configurable.
+  // Existing stored alerts of this type still DISPLAY (see ALLOWED_ALERT_TYPES /
+  // alert normalization) for backward compatibility.
   recording_error: { severity: "critical", title: "Recording error" }
 };
 
@@ -971,17 +975,22 @@ const SURE_SHOT_EVENT_TYPES = {
 // full set (defaults merged with any stored overrides) so the console renders a
 // complete toggle list.
 //
-// recording_stopped / screen_share_stopped / invalid_share_surface /
-//   recording_error  → critical
+// recording_stopped / screen_share_stopped / recording_error  → critical
 // ip_changed / tab_hidden / tab_away / disconnected → warning
+// NOTE: invalid_share_surface was REMOVED from the catalog — the recorder now
+// refuses to record on an invalid share surface, so the event can never fire.
+// tab_away additionally carries a numeric threshold_seconds (default 12): the
+// minimum continuous "HackerRank not visible" span the monitoring tab-away
+// detector must observe before raising an alert. This is the source of truth for
+// the detector's --min-gap-seconds.
+const TAB_AWAY_DEFAULT_THRESHOLD_SECONDS = 12;
 const DEFAULT_PROCTOR_ALERT_SETTINGS = {
   recording_stopped: { enabled: true, severity: "critical" },
   screen_share_stopped: { enabled: true, severity: "critical" },
-  invalid_share_surface: { enabled: true, severity: "critical" },
   recording_error: { enabled: true, severity: "critical" },
   ip_changed: { enabled: true, severity: "warning" },
   tab_hidden: { enabled: true, severity: "warning" },
-  tab_away: { enabled: true, severity: "warning" },
+  tab_away: { enabled: true, severity: "warning", threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
   disconnected: { enabled: true, severity: "warning" }
 };
 
@@ -999,10 +1008,19 @@ function mergeAlertSettings(stored) {
   const proctor = {};
   for (const [type, def] of Object.entries(DEFAULT_PROCTOR_ALERT_SETTINGS)) {
     const override = stored && typeof stored === "object" ? stored[type] : undefined;
-    proctor[type] = {
+    const entry = {
       enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
       severity: override && ALERT_SEVERITIES.includes(override.severity) ? override.severity : def.severity
     };
+    // tab_away alone carries a numeric threshold_seconds (minimum continuous
+    // absence the tab-away detector flags). Validate it's a positive finite
+    // number; otherwise fall back to the default (12). Other types don't have it.
+    if ("threshold_seconds" in def) {
+      const raw = override ? override.threshold_seconds : undefined;
+      const num = typeof raw === "number" ? raw : Number(raw);
+      entry.threshold_seconds = Number.isFinite(num) && num > 0 ? num : def.threshold_seconds;
+    }
+    proctor[type] = entry;
   }
   return { proctor };
 }

@@ -429,7 +429,7 @@ async function startedSession(firestore, storage, { mergedVideoKey } = {}) {
   return sessionId;
 }
 
-for (const type of ["recording_stopped", "screen_share_stopped", "invalid_share_surface", "recording_error"]) {
+for (const type of ["recording_stopped", "screen_share_stopped", "recording_error"]) {
   test(`sure-shot: event '${type}' → exactly one idempotent proctor alert`, async () => {
     const firestore = makeFakeFirestore();
     const storage = makeFakeStorage();

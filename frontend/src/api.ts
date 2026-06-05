@@ -8,6 +8,7 @@ import type {
   AlertsResponse,
   BeaconKind,
   HeartbeatResponse,
+  ProctorAlertTypeConfig,
   ProctorEvent,
   ProctorSettings,
   ReviewNature,
@@ -805,11 +806,10 @@ const DEFAULT_DEMO_ALERT_SETTINGS: AlertSettings = {
   proctor: {
     recording_stopped: { enabled: true, severity: "critical" },
     screen_share_stopped: { enabled: true, severity: "critical" },
-    invalid_share_surface: { enabled: true, severity: "critical" },
     recording_error: { enabled: true, severity: "critical" },
     ip_changed: { enabled: true, severity: "warning" },
     tab_hidden: { enabled: true, severity: "warning" },
-    tab_away: { enabled: true, severity: "warning" },
+    tab_away: { enabled: true, severity: "warning", threshold_seconds: 12 },
     disconnected: { enabled: true, severity: "warning" }
   }
 };
@@ -820,10 +820,18 @@ function mergeDemoAlertSettings(stored?: Partial<AlertSettings["proctor"]>): Ale
   const proctor: AlertSettings["proctor"] = {};
   for (const [type, def] of Object.entries(DEFAULT_DEMO_ALERT_SETTINGS.proctor)) {
     const override = stored?.[type];
-    proctor[type] = {
+    const entry: ProctorAlertTypeConfig = {
       enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
       severity: override && ["critical", "warning", "info"].includes(override.severity) ? override.severity : def.severity
     };
+    // Mirror the backend: tab_away alone carries threshold_seconds. Validate it's
+    // a positive finite number; otherwise fall back to the default (12).
+    if (def.threshold_seconds !== undefined) {
+      const raw = override?.threshold_seconds;
+      const num = typeof raw === "number" ? raw : Number(raw);
+      entry.threshold_seconds = Number.isFinite(num) && num > 0 ? num : def.threshold_seconds;
+    }
+    proctor[type] = entry;
   }
   return { proctor };
 }
