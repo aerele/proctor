@@ -175,7 +175,7 @@ Shared alert shape (all producers and the backend must agree):
 {
   "id": "<source>:<type>:<username_norm>:<contest_slug>:<dedupe>",
   "source": "proctor | contest-eval",
-  "type": "recording_stopped | screen_share_stopped | invalid_share_surface | recording_error | ip_changed | tab_hidden | tab_away | disconnected | peer_copy_cluster | recurring_pair | web_paste | fast_solve",
+  "type": "recording_stopped | screen_share_stopped | invalid_share_surface | recording_error | ip_changed | tab_hidden | tab_away | disconnected | peer_copy_cluster | recurring_pair | web_paste | first_attempt_solve | tough_first_attempt",
   "severity": "critical | warning | info",
   "timestamp": "ISO 8601",
   "contest_slug": "optional",

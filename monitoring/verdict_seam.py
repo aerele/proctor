@@ -164,7 +164,9 @@ def _now_iso():
 #   - single-hard recurring pair (warning) — one shared hard problem, could be convergent
 #   - web_paste (warning) — provenance signal needs code-level confirmation
 #   - peer_copy_cluster on MED problems (warning) — difficulty-weighting judgment
-# fast_solve (info) is a corroborator, not routed alone.
+# first_attempt_solve (info) is a corroborator, not routed alone. tough_first_attempt
+# (critical) is a decisive flag and, like a conclusive recurring_pair, goes straight
+# to the dashboard rather than through the seam.
 def is_ambiguous(alert):
     t = alert.get("type")
     sev = alert.get("severity")

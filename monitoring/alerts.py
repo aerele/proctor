@@ -6,10 +6,20 @@ ingest in backend/src/handler.mjs and the frontend types). Required-on-ingest
 fields: source, type, severity, timestamp, hackerrank_username, title.
 
 contest-eval alert types:
-  peer_copy_cluster  — >1 distinct user with identical (skeleton) code on a problem
-  recurring_pair     — a pair sharing identical code on 2+ problems OR 1+ hard (conclusive)
-  web_paste          — strong web/editorial provenance signature in accepted code
-  fast_solve         — single-attempt full solve on a HARD problem (metadata only)
+  peer_copy_cluster   — >1 distinct user with identical (skeleton) code on a problem
+  recurring_pair      — a pair sharing identical code on 2+ problems OR 1+ hard (conclusive)
+  web_paste           — strong web/editorial provenance signature in accepted code
+  first_attempt_solve — candidate got a problem ACCEPTED on their FIRST submission
+                        attempt (zero prior attempts on that problem). info-only.
+  tough_first_attempt — a first_attempt_solve on a TOUGH problem (operator-marked
+                        in alert-config.json tough_questions, OR data-derived hard).
+                        This is the real "solved a tough question on attempt #1"
+                        FLAG — default severity critical.
+
+  fast_solve is RETAINED as a back-compat ALIAS of first_attempt_solve: it still
+  loads/validates from alert-config.json, and a fast_solve config entry seeds the
+  first_attempt_solve defaults when first_attempt_solve is itself absent. New
+  alerts are emitted under first_attempt_solve / tough_first_attempt only.
 
 id is stable+idempotent: "<source>:<type>:<username_norm>:<contest_slug>:<dedupe>"
 so re-running a poll cycle merges instead of duplicating in Firestore.
@@ -23,8 +33,23 @@ from pathlib import Path
 # source of truth used when alert-config.json is missing a type (or absent
 # entirely): every type enabled, severity=None => keep the dynamic HARD/MED
 # mapping that build_alerts computes (i.e. legacy behavior, fully back-compat).
-ALERT_TYPES = ("peer_copy_cluster", "recurring_pair", "web_paste", "fast_solve")
+#
+# first_attempt_solve defaults to info; tough_first_attempt defaults to critical
+# (it IS the real flag). fast_solve is kept ONLY as a deprecated alias so old
+# configs keep loading — no alert is emitted under that type anymore.
+ALERT_TYPES = ("peer_copy_cluster", "recurring_pair", "web_paste",
+               "first_attempt_solve", "tough_first_attempt")
+# Deprecated alias accepted in alert-config.json. A fast_solve entry seeds
+# first_attempt_solve's defaults when the latter is not explicitly configured.
+ALIAS_TYPES = {"fast_solve": "first_attempt_solve"}
 _DEFAULT_TYPE_CFG = {t: {"enabled": True, "severity": None} for t in ALERT_TYPES}
+
+# Each type's DYNAMIC (built-in) default severity, used when the config does not
+# pin one (severity=null/absent => keep dynamic). build_alerts emits these.
+# first_attempt_solve is an info-only corroborator; tough_first_attempt IS the
+# real flag, so it defaults to critical. The shipped alert-config.json pins both
+# explicitly too, but the dynamic defaults keep missing-file behavior sensible.
+_DYNAMIC_SEVERITY = {"first_attempt_solve": "info", "tough_first_attempt": "critical"}
 
 # Default config-file location: monitoring/alert-config.json (next to this file).
 DEFAULT_ALERT_CONFIG_PATH = Path(__file__).resolve().parent / "alert-config.json"
@@ -46,20 +71,35 @@ class AlertConfig:
     can also change whether that alert is routed for human review.
     """
 
-    def __init__(self, by_type=None, source="<defaults>"):
+    def __init__(self, by_type=None, tough_questions=None, source="<defaults>"):
         # start from built-in defaults, then overlay anything provided
         self._by_type = {t: dict(c) for t, c in _DEFAULT_TYPE_CFG.items()}
         for t, c in (by_type or {}).items():
-            if t in self._by_type:
-                self._by_type[t].update(c)
+            canon = ALIAS_TYPES.get(t, t)
+            if canon in self._by_type:
+                # an explicit canonical entry must win over an alias entry: only
+                # apply an alias if the canonical key was not also provided.
+                if t in ALIAS_TYPES and (by_type or {}).get(canon) is not None:
+                    continue
+                self._by_type[canon].update(c)
+        # operator-marked tough challenge slugs/ids (manual list). A problem is
+        # "tough" if it is in this set OR data-derived hard (see is_tough()).
+        self.tough_questions = set(str(q) for q in (tough_questions or []))
         self.source = source
 
     def enabled(self, atype):
+        atype = ALIAS_TYPES.get(atype, atype)
         return self._by_type.get(atype, {"enabled": True}).get("enabled", True)
 
     def severity_override(self, atype):
         """Return an explicit severity for this type, or None to keep dynamic."""
+        atype = ALIAS_TYPES.get(atype, atype)
         return self._by_type.get(atype, {}).get("severity")
+
+    def is_tough(self, slug, data_hard=False):
+        """Is this challenge TOUGH? Manual tough_questions list wins/augments the
+        data-derived hardness: tough iff slug is operator-marked OR data_hard."""
+        return str(slug) in self.tough_questions or bool(data_hard)
 
     def as_dict(self):
         return {t: dict(c) for t, c in self._by_type.items()}
@@ -75,6 +115,10 @@ def load_alert_config(path=None):
 
     Per-type entries are validated: 'enabled' must be bool; 'severity' must be
     one of critical|warning|info or null/absent (null => keep dynamic severity).
+    The deprecated 'fast_solve' key is accepted as an alias of first_attempt_solve
+    (an explicit first_attempt_solve entry wins if both are present).
+    'tough_questions' (top level) must be a list of slug/id strings; it marks the
+    problems an operator considers tough (see AlertConfig.is_tough).
     Unknown top-level keys (e.g. '_README') and unknown alert types are ignored.
     """
     p = Path(path) if path is not None else DEFAULT_ALERT_CONFIG_PATH
@@ -87,11 +131,7 @@ def load_alert_config(path=None):
     if not isinstance(raw, dict):
         raise ValueError(f"alert-config {p}: top level must be a JSON object")
 
-    by_type = {}
-    for atype in ALERT_TYPES:
-        if atype not in raw:
-            continue  # fall back to built-in default for this type
-        entry = raw[atype]
+    def _parse_entry(atype, entry):
         if not isinstance(entry, dict):
             raise ValueError(f"alert-config {p}: {atype!r} must be an object")
         enabled = entry.get("enabled", True)
@@ -103,8 +143,24 @@ def load_alert_config(path=None):
             raise ValueError(
                 f"alert-config {p}: {atype}.severity must be one of "
                 f"{_VALID_SEVERITIES} or null, got {sev!r}")
-        by_type[atype] = {"enabled": enabled, "severity": sev}
-    return AlertConfig(by_type, source=str(p))
+        return {"enabled": enabled, "severity": sev}
+
+    by_type = {}
+    # deprecated aliases first (so an explicit canonical entry can override below)
+    for alias, canon in ALIAS_TYPES.items():
+        if alias in raw and canon not in raw:
+            by_type[canon] = _parse_entry(alias, raw[alias])
+    for atype in ALERT_TYPES:
+        if atype not in raw:
+            continue  # fall back to built-in (or alias-seeded) default for this type
+        by_type[atype] = _parse_entry(atype, raw[atype])
+
+    tough = raw.get("tough_questions", [])
+    if not isinstance(tough, list) or not all(isinstance(q, (str, int)) for q in tough):
+        raise ValueError(
+            f"alert-config {p}: tough_questions must be a list of slug/id strings")
+
+    return AlertConfig(by_type, tough_questions=tough, source=str(p))
 
 
 def normalize_username(value):
@@ -156,7 +212,8 @@ def build_alerts(slug, clone, meta_analysis, flagged, code_present_ids,
     Args:
       slug: contest slug.
       clone: dict from contest_eval_core.analyze_clones (has _records).
-      meta_analysis: dict from contest_eval_core.analyze_meta.
+      meta_analysis: dict from contest_eval_core.analyze_meta (has profiles_by_user;
+                     first-attempt solves are read from here for ALL participants).
       flagged: dict user -> reasons from metadata_flag_candidates.
       code_present_ids: set of submission ids we actually fetched code for
                         (so peer_copy/web_paste only fire where evidence is real).
@@ -165,6 +222,7 @@ def build_alerts(slug, clone, meta_analysis, flagged, code_present_ids,
                     dynamic-severity (legacy behavior). When a type is disabled
                     its alerts are skipped entirely; when a type sets an explicit
                     severity that value OVERRIDES the dynamic HARD/MED severity.
+                    Also supplies the operator tough_questions list.
     Returns: list[Alert].
     """
     chal_by_slug = chal_by_slug or {}
@@ -274,23 +332,65 @@ def build_alerts(slug, clone, meta_analysis, flagged, code_present_ids,
             dedupe=dedupe, timestamp=timestamp,
         ))
 
-    # ---- fast_solve (metadata-only: single-attempt full solve on HARD) ----
-    # info severity on its own (methodology: zero-iteration is NOT a flag alone),
-    # it only corroborates. We still surface it so the dashboard can cross-ref.
-    for u, reasons in flagged.items():
-        for r in reasons:
-            if r["kind"] != "single_attempt_hard":
-                continue
-            probs = r["problems"]
-            dedupe = _dedupe_segment("fastsolve", *sorted(probs))
-            detail = (f"Single-attempt full solve on HARD problem(s) "
-                      f"(zero iteration): {', '.join(chname(p) for p in probs)}. "
-                      f"Corroborate with clone/paste evidence before acting.")
+    # ---- first_attempt_solve / tough_first_attempt -----------------------
+    # FIRST-ATTEMPT detection: a candidate got a problem ACCEPTED on their FIRST
+    # submission attempt (zero prior wrong attempts on that problem). This is the
+    # analyze_meta "single_attempt" signal (acc_idx==0 with no wrong_before),
+    # exposed per user as single_attempt_problems (and the data-hard subset
+    # single_attempt_HARD_problems). We read it for ALL profiled participants
+    # (not just code-fetch-flagged ones) so first-attempt solves always surface.
+    #
+    #   - normal problem  -> first_attempt_solve (info; methodology: a one-shot
+    #     solve is a corroborator, not a standalone flag).
+    #   - TOUGH problem   -> tough_first_attempt (critical FLAG). "Tough" = the
+    #     slug is operator-marked in alert-config.json tough_questions OR it is
+    #     data-derived hard (<=10 solvers). Manual list wins/augments the
+    #     derivation (cfg.is_tough). This is the real "solved a tough question on
+    #     the first attempt" signal Karthi wants raised, not just info.
+    profiles = (meta_analysis or {}).get("profiles_by_user", {}) or {}
+    for u, p in profiles.items():
+        first_attempt = p.get("single_attempt_problems") or []
+        data_hard = set(p.get("single_attempt_HARD_problems") or [])
+        # partition this user's first-attempt solves into tough vs normal
+        tough_probs, normal_probs = [], []
+        for ch in first_attempt:
+            if cfg.is_tough(ch, data_hard=ch in data_hard):
+                tough_probs.append(ch)
+            else:
+                normal_probs.append(ch)
+
+        if tough_probs:
+            tough_probs = sorted(tough_probs)
+            dedupe = _dedupe_segment("toughfirst", *tough_probs)
+            detail = (f"First-attempt (zero prior attempts) ACCEPTED solve on "
+                      f"TOUGH problem(s): {', '.join(chname(c) for c in tough_probs)}. "
+                      f"Solved a tough question on the first try — corroborate with "
+                      f"clone/paste evidence before acting.")
             add(_alert(
-                "contest-eval", "fast_solve", "info", u,
-                f"One-shot HARD solve ({len(probs)} problem(s))", slug,
+                "contest-eval", "tough_first_attempt",
+                _DYNAMIC_SEVERITY["tough_first_attempt"], u,
+                f"Tough question solved on first attempt ({len(tough_probs)} problem(s))",
+                slug, detail=detail,
+                data={"tough_problems": tough_probs,
+                      "data_hard": sorted(p_ for p_ in tough_probs if p_ in data_hard),
+                      "operator_marked": sorted(
+                          p_ for p_ in tough_probs if p_ not in data_hard),
+                      "note": "first-attempt solve on a tough problem (FLAG)"},
+                dedupe=dedupe, timestamp=timestamp,
+            ))
+
+        if normal_probs:
+            normal_probs = sorted(normal_probs)
+            dedupe = _dedupe_segment("firstattempt", *normal_probs)
+            detail = (f"First-attempt (zero prior attempts) ACCEPTED solve on "
+                      f"problem(s): {', '.join(chname(c) for c in normal_probs)}. "
+                      f"Metadata corroborator, not a standalone flag.")
+            add(_alert(
+                "contest-eval", "first_attempt_solve",
+                _DYNAMIC_SEVERITY["first_attempt_solve"], u,
+                f"First-attempt solve ({len(normal_probs)} problem(s))", slug,
                 detail=detail,
-                data={"hard_problems": probs, "note": "metadata-only corroborator"},
+                data={"problems": normal_probs, "note": "metadata-only corroborator"},
                 dedupe=dedupe, timestamp=timestamp,
             ))
 
