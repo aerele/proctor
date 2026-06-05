@@ -82,4 +82,14 @@ Dispatched workflow `ww6qefqbj`: **archive** (approve→archive, archived hidden
 - **Contest-eval: first-attempt-solve alerts + manual tough-question marking (Karthi):** add a manual `tough_questions` list to the contest-eval config (he marks tough Qs, vs the auto ≤10-solver derivation); emit an alert on first-attempt/one-attempt accepted solves; **tough question + first-attempt → raised-severity flag** (not just info). Sharpens/promotes the existing `fast_solve`. (monitoring/ — queued after round-3 to avoid file conflicts.)
 - **S1 final tuning:** held for Karthi's real test recording + logo crop (logo confirmed top-left, white-on-dark).
 
+## 2026-06-05 — Morning feedback rounds — ALL DONE ✅ (pushed)
+Committed + pushed through `c4b15e9`. Implemented from Karthi's live review:
+- **Round 2** (db2e8ff/e15d792): alert archive (approve→archive, hidden + toggle), room filters (stats+alerts), alert-settings (proctor types enable/disable+severity in Settings UI; contest-eval in `monitoring/alert-config.json`), near-live (tab-close beacon + heartbeat-staleness `disconnected` + admin 5s auto-poll), **C1 admin-password hashing** (plain no longer in JS).
+- **Round 3** (9efe3b6): student-UX — invalid-share now REFUSES to record + inline Try-again (no reload), 6 error flows hardened, **rules promoted to a prominent section** + "What is recorded"; dropped `invalid_share_surface`; `tab_away` 12s + configurable seconds field.
+- **Contest-eval** (5cc06a4): `first_attempt_solve` (info) + `tough_first_attempt` (critical) + manual `tough_questions` list; `fast_solve` deprecated alias.
+- **Docs** (c4b15e9): comprehensive README + component READMEs (self-documenting).
+- **Visually re-verified** in demo: student rules/hierarchy, admin Settings taxonomy (tab_away seconds, invalid_share_surface gone, new contest-eval types), room filter + disconnected + auto-poll.
+Tests: backend 111, monitoring 60, frontend lint+build green. PR #1 open.
+**Still held for Karthi:** S1 final tuning (real recording + logo crop); S2 (extension) dropped.
+
 _(appended as phases complete.)_
