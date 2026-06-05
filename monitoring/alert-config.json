@@ -1,0 +1,23 @@
+{
+  "_README": "contest-eval alert catalog + per-type toggles. One object per alert TYPE. 'enabled' gates whether the poller builds alerts of that type at all (disabled => silently skipped, never POSTed). 'severity' (critical|warning|info) OVERRIDES the dynamically-computed HARD/MED severity in alerts.build_alerts when set to a non-null value; set severity to null (or delete the key) to keep the dynamic mapping. NOTE: severity also drives verdict-seam routing (alerts.is_ambiguous routes warning-level web_paste/recurring_pair/peer_copy_cluster to the human seam), so forcing a severity here can change whether a type is routed for human review. Missing file => every type enabled with dynamic severity (current/legacy behavior).",
+  "peer_copy_cluster": {
+    "enabled": true,
+    "severity": "critical",
+    "notes": "2+ distinct users with identical (skeleton) code on the same MED/HARD problem — direct peer copying."
+  },
+  "recurring_pair": {
+    "enabled": true,
+    "severity": "critical",
+    "notes": "A pair sharing identical code across 2+ problems OR 1+ hard problem — conclusive collusion between two candidates."
+  },
+  "web_paste": {
+    "enabled": true,
+    "severity": "warning",
+    "notes": "Accepted code carries web/editorial provenance signatures (smart quotes, NBSP, class-Solution, etc.) — likely pasted from an online source."
+  },
+  "fast_solve": {
+    "enabled": true,
+    "severity": "info",
+    "notes": "Single-attempt zero-iteration full solve on a HARD problem (metadata only) — corroborator, not a standalone flag."
+  }
+}

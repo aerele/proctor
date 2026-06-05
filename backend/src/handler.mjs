@@ -28,6 +28,17 @@ const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
 const SESSIONS_QUERY_LIMIT = 2000;
 const SETTINGS_ID = "active";
+// Settings doc id for the per-type proctor alert configuration (enabled +
+// severity). Lives in the same SETTINGS_COLLECTION but under a distinct doc id
+// so it never collides with the schedule/contest "active" settings doc.
+const ALERT_SETTINGS_ID = "alert_settings";
+// A session whose status is still active but whose last liveness signal
+// (heartbeat or beacon) is older than this many milliseconds is treated as a
+// derived "disconnected" signal for the console. Configurable via env.
+const DISCONNECTED_STALENESS_MS = Number(process.env.DISCONNECTED_STALENESS_MS || "45000");
+// Cap on the distinct rooms list returned to the admin console so a pathological
+// number of room labels can never bloat a stats/alerts response.
+const ROOMS_LIST_LIMIT = 200;
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
@@ -61,6 +72,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/events") return send(res, 200, await recordEvents(req));
     if (req.method === "POST" && path === "/api/review-file") return send(res, 200, await recordReviewFile(req));
     if (req.method === "POST" && path === "/api/heartbeat") return send(res, 200, await recordHeartbeat(req));
+    if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
     if (req.method === "POST" && path === "/api/session/validate-end") return send(res, 200, await validateEndSession(req));
     if (req.method === "POST" && path === "/api/session/end") return send(res, 200, await endSession(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
@@ -70,6 +82,9 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
     if (req.method === "GET" && path === "/api/admin/alerts") return send(res, 200, await adminAlerts(req));
+    if (req.method === "POST" && path === "/api/admin/alert-action") return send(res, 200, await adminAlertAction(req));
+    if (req.method === "GET" && path === "/api/admin/alert-settings") return send(res, 200, await adminGetAlertSettings(req));
+    if (req.method === "POST" && path === "/api/admin/alert-settings") return send(res, 200, await adminSaveAlertSettings(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
@@ -415,8 +430,11 @@ async function recordEvents(req) {
 
   // Phase 2 (2.3): surface only the SURE-SHOT signals as proctor alerts so the
   // admin console deep-links to them. Noisy events (focus/blur/visibility/
-  // clipboard) are intentionally NOT surfaced.
-  await raiseSureShotAlertsFromEvents(session, cleanedEvents);
+  // clipboard) are intentionally NOT surfaced. One settings read per request is
+  // threaded into the upsert so a disabled type is skipped and a configured
+  // severity overrides the default.
+  const alertSettings = await getAlertSettings();
+  await raiseSureShotAlertsFromEvents(session, cleanedEvents, alertSettings);
 
   return { ok: true, storage_key: eventKey };
 }
@@ -466,9 +484,14 @@ async function recordHeartbeat(req) {
     last_ip_change_at: newlyChanged ? now : session.last_ip_change_at || null,
     upload_queue_depth: Number(body.upload_queue_depth || 0),
     network_online: Boolean(body.network_online),
+    last_seen_at: now,
     heartbeat_count: FieldValue.increment(1),
     ip_change_count: FieldValue.increment(newlyChanged ? 1 : 0)
   });
+
+  // One settings read per request; thread it into both sure-shot upsert sites so
+  // a disabled type is skipped and a configured severity overrides the default.
+  const alertSettings = await getAlertSettings();
 
   if (newlyChanged) {
     await putJsonl(`${sessionPrefix(session)}events/ip-change-${Date.now()}-${randomUUID()}.jsonl`, [{
@@ -482,36 +505,115 @@ async function recordHeartbeat(req) {
       }
     }]);
     // Phase 2 (2.3): server-derived sure-shot — IP changed mid-session.
-    await upsertProctorAlert(session, {
-      type: "ip_changed",
-      severity: "warning",
-      timestamp: now,
-      title: "IP address changed",
-      detail: `IP changed from ${previousIp} to ${currentIp}`,
-      dedupe: currentIp,
-      data: { start_ip: startIp, previous_ip: previousIp, current_ip: currentIp }
-    });
+    const ipConfig = alertTypeConfig(alertSettings, "ip_changed", "warning");
+    if (ipConfig.enabled) {
+      await upsertProctorAlert(session, {
+        type: "ip_changed",
+        severity: ipConfig.severity,
+        timestamp: now,
+        title: "IP address changed",
+        detail: `IP changed from ${previousIp} to ${currentIp}`,
+        dedupe: currentIp,
+        data: { start_ip: startIp, previous_ip: previousIp, current_ip: currentIp }
+      });
+    }
   }
 
   // Phase 2 (2.3): a heartbeat reporting the recorder is no longer recording is
   // a sure-shot critical. Deduped per-day so a sustained-stopped state collapses
   // to one alert per session rather than one per heartbeat.
   if (isRecordingStopped(body.recording_state)) {
-    await upsertProctorAlert(session, {
-      type: "recording_stopped",
-      severity: "critical",
-      timestamp: now,
-      title: "Recording stopped",
-      detail: `recording_state=${String(body.recording_state)}`,
-      dedupe: now.slice(0, 10),
-      data: { recording_state: String(body.recording_state) }
-    });
+    const recConfig = alertTypeConfig(alertSettings, "recording_stopped", "critical");
+    if (recConfig.enabled) {
+      await upsertProctorAlert(session, {
+        type: "recording_stopped",
+        severity: recConfig.severity,
+        timestamp: now,
+        title: "Recording stopped",
+        detail: `recording_state=${String(body.recording_state)}`,
+        dedupe: now.slice(0, 10),
+        data: { recording_state: String(body.recording_state) }
+      });
+    }
   }
 
   // B1: surface the session lifecycle status so the recorder can self-stop if a
   // proctor locked/ended the session (requireWritableSession already 403/409s a
   // non-active session, but an active heartbeat returns the live status too).
   return { ok: true, status: session.status || "active", start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged };
+}
+
+// Liveness beacon (Phase 2). Designed for navigator.sendBeacon(), which fires on
+// page hide/unload and may deliver the body as text/plain rather than JSON, with
+// NO custom headers — so this endpoint is gated ONLY by session_id ownership
+// (the unguessable session token), never by admin auth. It accepts either a JSON
+// object body or a raw text/plain JSON string.
+//
+//   kind:'hidden'  → the proctor tab was hidden (visibilitychange)
+//   kind:'closing' → the page is unloading (pagehide/beforeunload)
+//   kind:'visible' → the tab returned to the foreground
+//
+// On 'hidden'/'closing' we stamp last_seen_at and (if the tab_hidden alert type
+// is enabled in settings) upsert a warning tab_hidden proctor alert carrying
+// video_key/room/session_id, using the same idempotent id convention. 'visible'
+// only refreshes last_seen_at. The beacon NEVER goes through
+// requireWritableSession: a locked/ended/pending session can still emit liveness
+// without being rejected (sendBeacon ignores the response anyway).
+async function recordBeacon(req) {
+  const body = parseBeaconBody(req);
+  requireFields(body, ["session_id"]);
+  const kind = String(body.kind || "hidden").toLowerCase();
+  if (!["hidden", "visible", "closing"].includes(kind)) {
+    return badRequest("kind must be hidden, visible, or closing");
+  }
+
+  // Ownership gate: an unknown session_id is a 404 (no admin auth involved). The
+  // session token is the only credential, matching sendBeacon's constraints.
+  const session = await getSession(body.session_id);
+  const now = new Date().toISOString();
+
+  await sessionRef(session.session_id).update({
+    updated_at: now,
+    last_seen_at: now,
+    last_beacon_kind: kind
+  });
+
+  // Only the away signals (hidden/closing) raise an alert; visible is liveness
+  // only. Respect the tab_hidden enable toggle and configured severity.
+  if (kind === "hidden" || kind === "closing") {
+    const settings = await getAlertSettings();
+    const config = alertTypeConfig(settings, "tab_hidden", "warning");
+    if (config.enabled) {
+      await upsertProctorAlert(session, {
+        type: "tab_hidden",
+        severity: config.severity,
+        timestamp: now,
+        title: "Proctor tab hidden",
+        detail: `Proctor tab ${kind === "closing" ? "closing/unloading" : "hidden"}`,
+        // Per-day dedupe so a flurry of hide/show events collapses to one alert
+        // per session per day, matching the other sure-shots.
+        dedupe: now.slice(0, 10),
+        data: { kind }
+      });
+    }
+  }
+
+  return { ok: true, kind, last_seen_at: now };
+}
+
+// sendBeacon may deliver a text/plain string body; parse it leniently as JSON.
+// A non-string body (some runtimes parse JSON for us) is returned as-is. A blank
+// body becomes {} so requireFields surfaces the missing session_id cleanly.
+function parseBeaconBody(req) {
+  const raw = req.body;
+  if (raw === undefined || raw === null || raw === "") return {};
+  if (typeof raw !== "string") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    throw httpError(400, "invalid_json");
+  }
 }
 
 async function validateEndSession(req) {
@@ -645,23 +747,41 @@ async function adminSessions(req) {
 
 // Phase 2 (2.4 / Epic 6.4 / 4.4): live counts by status for the admin dashboard.
 // Counts are derived from the session docs; an optional ?contest_slug filters to
-// one contest. "finished" == ended; "live" == active; plus locked + pending.
+// one contest, and an optional ?room scopes counts to a single room. "finished"
+// == ended; "live" == active; plus locked + pending. A derived `disconnected`
+// count flags active sessions whose last liveness signal (heartbeat or beacon)
+// is older than the staleness threshold. The distinct `rooms` list (computed
+// over the contest scope, BEFORE the room filter, so the dropdown stays full) is
+// returned so the console can populate a room dropdown.
 async function adminStats(req) {
   requireAdmin(req);
   const contestSlug = req.query?.contest_slug;
+  const room = normalizeRoomFilter(req.query?.room);
 
   let query = firestore.collection(SESSION_COLLECTION);
   if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
     query = query.where("contest_slug", "==", String(contestSlug));
   }
   const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
-  const docs = snapshot.docs.map((doc) => doc.data());
+  const allDocs = snapshot.docs.map((doc) => doc.data());
 
-  const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, total: 0 };
+  // Distinct rooms come from the full contest scope (NOT the room-filtered set)
+  // so the dropdown always lists every room even while one is selected.
+  const rooms = distinctRooms(allDocs);
+
+  // Apply the room filter to the docs the counts are computed over.
+  const docs = room ? allDocs.filter((doc) => String(doc.room || "") === room) : allDocs;
+
+  const nowMs = Date.now();
+  const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, total: 0 };
   for (const doc of docs) {
     stats.total += 1;
-    if (doc.status === "active") stats.live += 1;
-    else if (doc.status === "locked") stats.locked += 1;
+    if (doc.status === "active") {
+      stats.live += 1;
+      // Derived disconnected signal: an active session whose last heartbeat /
+      // beacon is older than the staleness threshold (default 45s).
+      if (isStaleSession(doc, nowMs)) stats.disconnected += 1;
+    } else if (doc.status === "locked") stats.locked += 1;
     else if (doc.status === "pending_approval") stats.pending_approval += 1;
     else if (doc.status === "ended") stats.finished += 1;
   }
@@ -671,7 +791,56 @@ async function adminStats(req) {
   // a roster exists).
   stats.not_started_or_total = stats.total;
 
-  return { contest_slug: contestSlug ? String(contestSlug) : null, stats };
+  return {
+    contest_slug: contestSlug ? String(contestSlug) : null,
+    room: room || null,
+    stats,
+    rooms,
+    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS
+  };
+}
+
+// Normalize a ?room query param to the same sanitized form rooms are stored in,
+// so the filter matches a session's stored room label exactly. Empty/absent →
+// null (no filter).
+function normalizeRoomFilter(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const cleaned = sanitizeRoom(value);
+  return cleaned || null;
+}
+
+// Distinct, sorted room labels across the given session docs, capped so a
+// pathological number of labels can't bloat the response. Blank rooms are
+// excluded (they don't belong in a dropdown).
+function distinctRooms(docs) {
+  const set = new Set();
+  for (const doc of docs) {
+    const room = String(doc.room || "").trim();
+    if (room) set.add(room);
+  }
+  return [...set].sort((a, b) => a.localeCompare(b)).slice(0, ROOMS_LIST_LIMIT);
+}
+
+// An active session is "stale" (a derived disconnected signal) when its most
+// recent LIVENESS signal — last_heartbeat_at OR last_seen_at (beacon), whichever
+// is newer — is older than DISCONNECTED_STALENESS_MS. Only when NEITHER liveness
+// stamp exists do we fall back to created_at, so a session that started but never
+// sent a heartbeat still ages into disconnected rather than looking permanently
+// fresh. created_at is NOT mixed in when a liveness stamp exists (a fresh
+// created_at would otherwise mask a genuinely stale heartbeat).
+function isStaleSession(doc, nowMs) {
+  const liveness = [doc.last_heartbeat_at, doc.last_seen_at]
+    .map((value) => (value ? Date.parse(value) : NaN))
+    .filter((ms) => Number.isFinite(ms));
+  let newest;
+  if (liveness.length) {
+    newest = Math.max(...liveness);
+  } else {
+    const created = doc.created_at ? Date.parse(doc.created_at) : NaN;
+    if (!Number.isFinite(created)) return false;
+    newest = created;
+  }
+  return nowMs - newest > DISCONNECTED_STALENESS_MS;
 }
 
 // Phase 2 (2.4 / Epic 4.3): remote admin actions, per-session (session_id) or in
@@ -794,6 +963,59 @@ const SURE_SHOT_EVENT_TYPES = {
   recording_error: { severity: "critical", title: "Recording error" }
 };
 
+// ---- Proctor alert settings (enabled + severity per sure-shot type) --------
+//
+// The admin console can disable a sure-shot type or override its severity. The
+// full set of proctor-controllable types and their DEFAULTS live here; the
+// settings doc only stores deltas, but adminGetAlertSettings always returns the
+// full set (defaults merged with any stored overrides) so the console renders a
+// complete toggle list.
+//
+// recording_stopped / screen_share_stopped / invalid_share_surface /
+//   recording_error  → critical
+// ip_changed / tab_hidden / tab_away / disconnected → warning
+const DEFAULT_PROCTOR_ALERT_SETTINGS = {
+  recording_stopped: { enabled: true, severity: "critical" },
+  screen_share_stopped: { enabled: true, severity: "critical" },
+  invalid_share_surface: { enabled: true, severity: "critical" },
+  recording_error: { enabled: true, severity: "critical" },
+  ip_changed: { enabled: true, severity: "warning" },
+  tab_hidden: { enabled: true, severity: "warning" },
+  tab_away: { enabled: true, severity: "warning" },
+  disconnected: { enabled: true, severity: "warning" }
+};
+
+// Read the stored alert-settings doc and merge it over the defaults so callers
+// always see a complete, well-formed per-type config. One Firestore read; call
+// once per request and thread the result into the sure-shot upsert sites so a
+// single request never re-reads it.
+async function getAlertSettings() {
+  const doc = await firestore.collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).get();
+  const stored = doc.exists ? (doc.data()?.proctor || {}) : {};
+  return mergeAlertSettings(stored);
+}
+
+function mergeAlertSettings(stored) {
+  const proctor = {};
+  for (const [type, def] of Object.entries(DEFAULT_PROCTOR_ALERT_SETTINGS)) {
+    const override = stored && typeof stored === "object" ? stored[type] : undefined;
+    proctor[type] = {
+      enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
+      severity: override && ALERT_SEVERITIES.includes(override.severity) ? override.severity : def.severity
+    };
+  }
+  return { proctor };
+}
+
+// Resolve the effective config for one alert type from a (already-read)
+// settings object. Falls back to a default-enabled/configured-severity entry for
+// any type not present in DEFAULT_PROCTOR_ALERT_SETTINGS (defensive).
+function alertTypeConfig(settings, type, fallbackSeverity) {
+  const entry = settings?.proctor?.[type];
+  if (entry) return entry;
+  return { enabled: true, severity: fallbackSeverity };
+}
+
 // Recorder states that mean "not recording" for the heartbeat sure-shot.
 const STOPPED_RECORDING_STATES = new Set(["stopped", "inactive", "ended", "error"]);
 
@@ -826,7 +1048,7 @@ function parseRecordingStateSegments(raw) {
   return segments;
 }
 
-async function raiseSureShotAlertsFromEvents(session, events) {
+async function raiseSureShotAlertsFromEvents(session, events, settings) {
   // Collapse repeats within this single batch: one alert per sure-shot type per
   // batch (the per-day dedupe in upsertProctorAlert keeps it stable across
   // batches too). Walk in order so we keep the latest timestamp for the type.
@@ -837,10 +1059,14 @@ async function raiseSureShotAlertsFromEvents(session, events) {
     seen.set(event.type, { event, spec });
   }
   for (const { event, spec } of seen.values()) {
+    // Consult the per-type proctor alert settings: skip a disabled type and use
+    // the configured severity (default = the spec's built-in severity).
+    const config = alertTypeConfig(settings, event.type, spec.severity);
+    if (!config.enabled) continue;
     const timestamp = isoOrNow(event.timestamp);
     await upsertProctorAlert(session, {
       type: event.type,
-      severity: spec.severity,
+      severity: config.severity,
       timestamp,
       title: spec.title,
       detail: detailFromEvent(event),
@@ -996,6 +1222,8 @@ async function adminAlerts(req) {
   const contestSlug = req.query?.contest_slug;
   const severity = req.query?.severity;
   const source = req.query?.source;
+  const room = normalizeRoomFilter(req.query?.room);
+  const includeArchived = isTruthyParam(req.query?.include_archived);
 
   // B6: applying ALL THREE equality filters server-side (contest_slug + severity
   // + source) would need a composite Firestore index that doesn't exist. To stay
@@ -1010,6 +1238,11 @@ async function adminAlerts(req) {
     .map((doc) => doc.data())
     .filter((alert) => !severity || alert.severity === String(severity))
     .filter((alert) => !source || alert.source === String(source))
+    .filter((alert) => !room || String(alert.room || "") === room)
+    // Archive: exclude archived alerts by default; include them only when the
+    // caller opts in with include_archived=true. A missing `archived` field on a
+    // legacy doc is treated as not-archived.
+    .filter((alert) => includeArchived || !alert.archived)
     .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
     .slice(0, ALERTS_QUERY_LIMIT);
 
@@ -1019,7 +1252,96 @@ async function adminAlerts(req) {
     return { ...alert, download_url: downloadUrl };
   }));
 
-  return { alerts: withUrls };
+  // Distinct rooms come from the SESSION docs (capped) so the console dropdown
+  // lists every room, not just rooms that happen to have an alert. Scoped to the
+  // same contest as the alerts query.
+  const rooms = await listSessionRooms(contestSlug);
+
+  return { alerts: withUrls, rooms };
+}
+
+// Distinct room labels across session docs (optionally scoped to a contest),
+// capped. Shared by adminAlerts so its room dropdown matches adminStats'.
+async function listSessionRooms(contestSlug) {
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  return distinctRooms(snapshot.docs.map((doc) => doc.data()));
+}
+
+// A query param is "truthy" when it is the string "true"/"1"/"yes" (case
+// insensitive) or the boolean true. Anything else (incl. absent) is false.
+function isTruthyParam(value) {
+  if (value === true) return true;
+  const lowered = String(value === undefined || value === null ? "" : value).toLowerCase();
+  return lowered === "true" || lowered === "1" || lowered === "yes";
+}
+
+// ---- Alert archive (admin) -------------------------------------------------
+//
+// Toggle the `archived` flag on a set of alert docs. The frontend calls this
+// after a session approve to also-archive that session's alerts, and from a
+// manual archive/unarchive control. archived alerts are hidden from
+// GET /api/admin/alerts unless include_archived=true.
+async function adminAlertAction(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const action = String(body.action || "");
+  if (!["archive", "unarchive"].includes(action)) {
+    return badRequest("action must be archive or unarchive");
+  }
+  const ids = Array.isArray(body.ids) ? body.ids.filter((id) => id !== undefined && id !== null && id !== "") : [];
+  if (!ids.length) return badRequest("ids[] must be a non-empty array of alert ids");
+
+  const archived = action === "archive";
+  const now = new Date().toISOString();
+  const updated = [];
+  const missing = [];
+  for (const rawId of ids) {
+    const id = String(rawId);
+    // merge:true so we only touch the archive fields and never clobber the rest
+    // of the alert doc. Skip ids that don't exist so a stale id can't 500 the
+    // whole batch — report them back so the console can surface it.
+    const ref = alertRef(id);
+    const doc = await ref.get();
+    if (!doc.exists) {
+      missing.push(id);
+      continue;
+    }
+    await ref.set({ archived, archived_at: archived ? now : null }, { merge: true });
+    updated.push(id);
+  }
+
+  return { ok: true, action, archived, updated, missing };
+}
+
+// ---- Proctor alert settings (admin) ----------------------------------------
+//
+// GET returns the full per-type config (defaults merged with stored overrides)
+// so the console can render a complete toggle list. POST upserts the doc; only
+// known types and valid severities are persisted, and a missing/blank `enabled`
+// falls back to the default so a partial payload can't corrupt the config.
+async function adminGetAlertSettings(req) {
+  requireAdmin(req);
+  return await getAlertSettings();
+}
+
+async function adminSaveAlertSettings(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const incoming = body && typeof body.proctor === "object" && body.proctor !== null ? body.proctor : {};
+
+  // Normalize against the known type set + defaults so a bad/partial payload
+  // can never persist an unknown type or an invalid severity.
+  const merged = mergeAlertSettings(incoming);
+  const now = new Date().toISOString();
+  await firestore.collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).set({
+    proctor: merged.proctor,
+    updated_at: now
+  });
+  return merged;
 }
 
 async function resolveSignedReadUrl(objectKey) {

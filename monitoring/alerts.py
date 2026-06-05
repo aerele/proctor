@@ -15,7 +15,96 @@ id is stable+idempotent: "<source>:<type>:<username_norm>:<contest_slug>:<dedupe
 so re-running a poll cycle merges instead of duplicating in Firestore.
 """
 import re
+import json
 import datetime
+from pathlib import Path
+
+# Canonical contest-eval alert types and their built-in defaults. This is the
+# source of truth used when alert-config.json is missing a type (or absent
+# entirely): every type enabled, severity=None => keep the dynamic HARD/MED
+# mapping that build_alerts computes (i.e. legacy behavior, fully back-compat).
+ALERT_TYPES = ("peer_copy_cluster", "recurring_pair", "web_paste", "fast_solve")
+_DEFAULT_TYPE_CFG = {t: {"enabled": True, "severity": None} for t in ALERT_TYPES}
+
+# Default config-file location: monitoring/alert-config.json (next to this file).
+DEFAULT_ALERT_CONFIG_PATH = Path(__file__).resolve().parent / "alert-config.json"
+
+_VALID_SEVERITIES = ("critical", "warning", "info")
+
+
+class AlertConfig:
+    """Per-type alert configuration (enable/disable + optional severity override).
+
+    Loaded from alert-config.json. Backward-compatible: a missing file (or a
+    missing/blank key for a given type) yields {enabled: True, severity: None},
+    where severity=None means "keep the dynamic HARD/MED severity build_alerts
+    already computes". Only an EXPLICIT, valid severity string overrides it.
+
+    PRECEDENCE (documented): if the config sets a non-null severity for a type,
+    that value WINS over the dynamic severity build_alerts would otherwise emit.
+    Because verdict-seam routing (is_ambiguous) keys off severity, an override
+    can also change whether that alert is routed for human review.
+    """
+
+    def __init__(self, by_type=None, source="<defaults>"):
+        # start from built-in defaults, then overlay anything provided
+        self._by_type = {t: dict(c) for t, c in _DEFAULT_TYPE_CFG.items()}
+        for t, c in (by_type or {}).items():
+            if t in self._by_type:
+                self._by_type[t].update(c)
+        self.source = source
+
+    def enabled(self, atype):
+        return self._by_type.get(atype, {"enabled": True}).get("enabled", True)
+
+    def severity_override(self, atype):
+        """Return an explicit severity for this type, or None to keep dynamic."""
+        return self._by_type.get(atype, {}).get("severity")
+
+    def as_dict(self):
+        return {t: dict(c) for t, c in self._by_type.items()}
+
+
+def load_alert_config(path=None):
+    """Load alert configuration from JSON. Returns an AlertConfig.
+
+    - path=None             -> DEFAULT_ALERT_CONFIG_PATH (monitoring/alert-config.json)
+    - file missing          -> all types enabled, dynamic severity (legacy behavior)
+    - malformed/invalid file -> raises ValueError (fail loud; do not silently
+                                 mis-classify integrity alerts)
+
+    Per-type entries are validated: 'enabled' must be bool; 'severity' must be
+    one of critical|warning|info or null/absent (null => keep dynamic severity).
+    Unknown top-level keys (e.g. '_README') and unknown alert types are ignored.
+    """
+    p = Path(path) if path is not None else DEFAULT_ALERT_CONFIG_PATH
+    if not p.exists():
+        return AlertConfig(source=f"{p} (absent -> all enabled, dynamic severity)")
+    try:
+        raw = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise ValueError(f"alert-config {p}: cannot read/parse JSON: {e}") from e
+    if not isinstance(raw, dict):
+        raise ValueError(f"alert-config {p}: top level must be a JSON object")
+
+    by_type = {}
+    for atype in ALERT_TYPES:
+        if atype not in raw:
+            continue  # fall back to built-in default for this type
+        entry = raw[atype]
+        if not isinstance(entry, dict):
+            raise ValueError(f"alert-config {p}: {atype!r} must be an object")
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(
+                f"alert-config {p}: {atype}.enabled must be true/false, got {enabled!r}")
+        sev = entry.get("severity")
+        if sev is not None and sev not in _VALID_SEVERITIES:
+            raise ValueError(
+                f"alert-config {p}: {atype}.severity must be one of "
+                f"{_VALID_SEVERITIES} or null, got {sev!r}")
+        by_type[atype] = {"enabled": enabled, "severity": sev}
+    return AlertConfig(by_type, source=str(p))
 
 
 def normalize_username(value):
@@ -61,7 +150,7 @@ def _alert(source, atype, severity, username, title, slug,
 
 
 def build_alerts(slug, clone, meta_analysis, flagged, code_present_ids,
-                 chal_by_slug=None, timestamp=None):
+                 chal_by_slug=None, timestamp=None, alert_config=None):
     """Produce the full list of contest-eval Alert dicts for one poll cycle.
 
     Args:
@@ -72,13 +161,26 @@ def build_alerts(slug, clone, meta_analysis, flagged, code_present_ids,
       code_present_ids: set of submission ids we actually fetched code for
                         (so peer_copy/web_paste only fire where evidence is real).
       chal_by_slug: optional {slug: challenge} for human-readable names.
+      alert_config: optional AlertConfig. If None, defaults to all-enabled /
+                    dynamic-severity (legacy behavior). When a type is disabled
+                    its alerts are skipped entirely; when a type sets an explicit
+                    severity that value OVERRIDES the dynamic HARD/MED severity.
     Returns: list[Alert].
     """
     chal_by_slug = chal_by_slug or {}
+    cfg = alert_config or AlertConfig()
     out = []
     seen_ids = set()
 
     def add(a):
+        # config gate: drop disabled types entirely (back-compat: default enabled)
+        if not cfg.enabled(a["type"]):
+            return
+        # config severity override: an explicit severity wins over the dynamic
+        # HARD/MED value computed below. None => keep the dynamic severity.
+        ov = cfg.severity_override(a["type"])
+        if ov is not None:
+            a["severity"] = ov
         if a["id"] in seen_ids:
             return
         seen_ids.add(a["id"])
