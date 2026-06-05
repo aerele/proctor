@@ -756,6 +756,67 @@ test("session-action: requires admin password", async () => {
 });
 
 // =====================================================================
+// Recording playback picker — GET /api/admin/recording-sessions
+// =====================================================================
+
+// Drive an upload-url so a chunk gets recorded (chunk_count incremented) on the
+// given session, mirroring how the real recorder bumps the counter.
+async function recordChunk(sessionId, chunkIndex = 0) {
+  return call(makeReq({
+    method: "POST",
+    path: "/api/upload-url",
+    body: { session_id: sessionId, kind: "screen", chunk_index: chunkIndex, content_type: "video/webm" }
+  }));
+}
+
+test("recording-sessions: lists only sessions with chunks, newest-first, lightweight (no evidence/urls)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+
+  // alice records 2 chunks; bob records 0 (no recording) → bob excluded.
+  const alice = await start(firestore, storage, { hackerrank_username: "alice" });
+  await recordChunk(alice.body.session_id, 0);
+  await recordChunk(alice.body.session_id, 1);
+  await start(firestore, storage, { hackerrank_username: "bob" });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: ADMIN_HEADERS }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 1, "only the session with chunks is listed");
+  const session = res.body.sessions[0];
+  assert.equal(session.hackerrank_username, "alice");
+  assert.equal(session.chunk_count, 2);
+  // Lightweight contract: no GCS listing, no signed URLs.
+  assert.equal(Object.prototype.hasOwnProperty.call(session, "evidence"), false, "no evidence array");
+  assert.equal(Object.prototype.hasOwnProperty.call(session, "merged_video_key"), false, "no signed urls / merged key");
+  // The shape the picker relies on.
+  for (const field of ["session_id", "name", "room", "contest_slug", "created_at", "status"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(session, field), `expected field ${field}`);
+  }
+});
+
+test("recording-sessions: falls back to ALL sessions when none report chunk_count", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Two sessions that never recorded a chunk (chunk_count stays 0).
+  await start(firestore, storage, { hackerrank_username: "alice" });
+  await start(firestore, storage, { hackerrank_username: "bob" });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: ADMIN_HEADERS }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 2, "fallback lists all sessions so the picker is not empty");
+});
+
+test("recording-sessions: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: {} }));
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
 // Security / correctness hardening (H1, H3, M1, M3, N3)
 // =====================================================================
 

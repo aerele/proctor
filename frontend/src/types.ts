@@ -106,6 +106,54 @@ export type AdminStatsResponse = {
   disconnected_staleness_ms?: number;
 };
 
+// GET /api/admin/recording-sessions — a LIGHTWEIGHT picker row for the screen-
+// recording playback view. No GCS listing, no signed URLs (those come later via
+// fetchAdminSessions when a user/session is chosen).
+export type RecordingSession = {
+  session_id: string;
+  hackerrank_username: string;
+  name: string;
+  room: string;
+  contest_slug: string;
+  chunk_count: number;
+  created_at: string;
+  status: string;
+};
+
+export type RecordingSessionsResponse = {
+  sessions: RecordingSession[];
+};
+
+// One signed-URL evidence file as returned (per session) by GET /api/admin/sessions.
+export type SessionEvidence = {
+  key: string;
+  size: number;
+  last_modified?: string;
+  download_url: string;
+};
+
+// A full session row from GET /api/admin/sessions: the session doc fields plus
+// the resolved evidence listing (signed URLs, ~1h expiry). Only the fields the
+// recording-playback view reads are typed; the rest is permissive.
+export type AdminSessionDetail = {
+  session_id?: string;
+  hackerrank_username?: string;
+  name?: string;
+  room?: string;
+  contest_slug?: string;
+  storage_prefix?: string;
+  status?: string;
+  created_at?: string;
+  chunk_count?: number;
+  merged_video_key?: string;
+  evidence?: SessionEvidence[];
+  [key: string]: unknown;
+};
+
+export type AdminSessionsResponse = {
+  sessions: AdminSessionDetail[];
+};
+
 export type SessionAction = "approve" | "lock" | "unlock" | "bypass" | "end";
 
 export type SessionActionRequest = {

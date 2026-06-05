@@ -78,6 +78,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
+    if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
@@ -740,6 +741,47 @@ async function adminSessions(req) {
         };
       }));
       return { ...item, evidence };
+    }));
+
+  return { sessions };
+}
+
+// Screen-recording playback picker (admin): a LIGHTWEIGHT list of sessions that
+// actually have recorded chunks, so the console can present a username/session
+// picker WITHOUT a GCS listing or any signed URLs (those are resolved lazily via
+// adminSessions when one is chosen). We query the session collection, prefer docs
+// with chunk_count > 0, optionally scope to a contest, sort newest-first, and cap
+// the result. If the chunk_count filter would return nothing (e.g. legacy docs
+// that never tracked chunk_count), we fall back to ALL sessions so the picker is
+// never empty against older data.
+async function adminRecordingSessions(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const allDocs = snapshot.docs.map((doc) => doc.data());
+
+  // Prefer sessions with recorded chunks; fall back to ALL when none report a
+  // positive chunk_count (legacy docs) so the picker still lists something.
+  const withChunks = allDocs.filter((doc) => Number(doc.chunk_count || 0) > 0);
+  const source = withChunks.length ? withChunks : allDocs;
+
+  const sessions = source
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+    .slice(0, 500)
+    .map((doc) => ({
+      session_id: doc.session_id,
+      hackerrank_username: doc.hackerrank_username || "",
+      name: doc.name || "",
+      room: doc.room || "",
+      contest_slug: doc.contest_slug || "",
+      chunk_count: Number(doc.chunk_count || 0),
+      created_at: doc.created_at || "",
+      status: doc.status || ""
     }));
 
   return { sessions };
