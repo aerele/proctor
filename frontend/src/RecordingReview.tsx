@@ -1,7 +1,7 @@
 import { AlertTriangle, Clock, Film, Pause, Play, RefreshCw, Search, Video } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchAdminSessions, fetchRecordingSessions } from "./api";
-import type { AdminSessionDetail, RecordingSession, SessionEvidence } from "./types";
+import { fetchAdminSessions, fetchRecordingSessions, fetchSubmissionEvents } from "./api";
+import type { AdminSessionDetail, RecordingSession, SessionEvidence, SubmissionEvent } from "./types";
 
 // Every recorded chunk is a fixed 30-second .webm (uploadConfig.chunk_seconds on
 // the backend). The playback timeline is built around this constant.
@@ -16,6 +16,13 @@ type TimelineChunk = {
   url: string;
   offsetSec: number; // start, relative to test start
   endSec: number; // offsetSec + CHUNK_SECONDS
+};
+
+// A SUBMISSION-TIME MARKER placed on the test-relative timeline: offsetSec is the
+// submission's real time relative to the test start, valid drives GREEN/RED.
+type TimelineMarker = {
+  event: SubmissionEvent;
+  offsetSec: number; // (submitted_at − testStart), in seconds
 };
 
 // Pull the numeric index out of a screen-chunk key, e.g.
@@ -131,6 +138,9 @@ export function RecordingReview({ password }: Props) {
 
   // Selected user's loaded sessions (with signed evidence) + which one is active.
   const [sessions, setSessions] = useState<AdminSessionDetail[]>([]);
+  // The selected user's SUBMISSION-TIME MARKERS (poller-sourced). Empty when the
+  // user has none or the endpoint is not deployed (graceful — no markers shown).
+  const [submissionEvents, setSubmissionEvents] = useState<SubmissionEvent[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [loadingUser, setLoadingUser] = useState(false);
   const [error, setError] = useState("");
@@ -198,6 +208,25 @@ export function RecordingReview({ password }: Props) {
   }, [playlist]);
   const spanDuration = Math.max(1, span.end - span.start);
 
+  // SUBMISSION-TIME MARKERS, placed on the SAME test-relative scale the timeline
+  // uses: offsetSec = (submitted_at − testStart). Recomputed whenever the events
+  // OR the test-start anchor change, so markers stay aligned when the test-start
+  // input is edited. Sorted ascending so overlapping markers paint deterministically.
+  const markers = useMemo<TimelineMarker[]>(() => {
+    if (!submissionEvents.length || !Number.isFinite(testStartMs)) return [];
+    return submissionEvents
+      .map((event) => {
+        const submittedMs = Date.parse(event.submitted_at);
+        if (!Number.isFinite(submittedMs)) return null;
+        return { event, offsetSec: (submittedMs - testStartMs) / 1000 };
+      })
+      .filter((marker): marker is TimelineMarker => marker !== null)
+      .sort((a, b) => a.offsetSec - b.offsetSec);
+  }, [submissionEvents, testStartMs]);
+
+  const validCount = useMemo(() => markers.filter((m) => m.event.valid).length, [markers]);
+  const invalidCount = markers.length - validCount;
+
   // ---- Load a chosen user's sessions (with signed evidence). --------------
   const loadUser = useCallback(
     async (username: string) => {
@@ -221,9 +250,20 @@ export function RecordingReview({ password }: Props) {
         setCurrentTestTime(0);
         setPlaying(false);
         if (!loaded.length) setError(`No sessions found for "${trimmed}".`);
+
+        // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the newest
+        // session's contest so the markers line up with that test; a 404 (or
+        // null) just means no markers — never blocks the recording view.
+        try {
+          const events = await fetchSubmissionEvents(password, trimmed, newest?.contest_slug || undefined);
+          setSubmissionEvents(events ?? []);
+        } catch {
+          setSubmissionEvents([]);
+        }
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
         setSessions([]);
+        setSubmissionEvents([]);
       } finally {
         setLoadingUser(false);
       }
@@ -649,6 +689,39 @@ export function RecordingReview({ password }: Props) {
                         <span className="absolute -bottom-5 -translate-x-1/2 text-[10px] text-muted">{formatClock(tick.sec)}</span>
                       </div>
                     ))}
+                    {/* SUBMISSION-TIME MARKERS: GREEN tick = valid (Accepted),
+                        RED = invalid (failed). Positioned by real submission time
+                        on the SAME scale as the chunks; click seeks the video to
+                        that moment. Markers outside the recorded span clamp to the
+                        nearest edge (still clickable) so a submission just before
+                        the first chunk or after the last is never lost. */}
+                    {markers.map((marker) => {
+                      const clamped = Math.max(span.start, Math.min(marker.offsetSec, span.end));
+                      const left = ((clamped - span.start) / spanDuration) * 100;
+                      const color = marker.event.valid ? "bg-emerald-500" : "bg-danger";
+                      const ring = marker.event.valid ? "ring-emerald-500/40" : "ring-danger/40";
+                      const label = `${marker.event.valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}`
+                        + ` · ${marker.event.challenge_name || marker.event.challenge_slug || "submission"}`
+                        + (marker.event.lang ? ` · ${marker.event.lang}` : "")
+                        + ` · ${formatClock(marker.offsetSec)}`;
+                      return (
+                        <button
+                          key={marker.event.submission_id}
+                          type="button"
+                          title={label}
+                          aria-label={label}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            seekToTestTime(marker.offsetSec, playing || !videoRef.current?.paused);
+                          }}
+                          className="absolute -top-1.5 z-20 -translate-x-1/2 cursor-pointer"
+                          style={{ left: `${left}%` }}
+                        >
+                          <span className={`block h-3.5 w-3.5 rounded-full border border-white shadow ring-2 ${ring} ${color} transition-transform hover:scale-125`} />
+                          <span className={`mx-auto block h-2 w-0.5 ${color}`} />
+                        </button>
+                      );
+                    })}
                     {/* Playhead. */}
                     <div className="pointer-events-none absolute top-0 bottom-0 z-10 w-0.5 bg-danger" style={{ left: `${playheadPct}%` }}>
                       <div className="absolute -top-1 -translate-x-1/2 rounded-full border border-white bg-danger px-0 py-0" style={{ width: 8, height: 8 }} />
@@ -659,6 +732,22 @@ export function RecordingReview({ password }: Props) {
                     <span>{playlist.length} chunk(s) · {CHUNK_SECONDS}s each · gaps shown as blanks</span>
                     <span>{formatClock(span.end)}</span>
                   </div>
+                  {/* SUBMISSION-TIME MARKERS legend + counts. Hidden entirely when
+                      the student has no markers (no endpoint / no submissions). */}
+                  {markers.length ? (
+                    <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs text-muted">
+                      <span className="font-medium text-ink">Submissions on timeline:</span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block h-3 w-3 rounded-full border border-white bg-emerald-500 ring-2 ring-emerald-500/40" />
+                        ✓ {validCount} valid
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="inline-block h-3 w-3 rounded-full border border-white bg-danger ring-2 ring-danger/40" />
+                        ✗ {invalidCount} invalid
+                      </span>
+                      <span className="text-muted/70">Click a marker to jump the recording to that submission.</span>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
