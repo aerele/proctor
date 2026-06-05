@@ -124,6 +124,27 @@ export type RecordingSessionsResponse = {
   sessions: RecordingSession[];
 };
 
+// A SUBMISSION-TIME MARKER for the recording-review timeline. Sourced from the
+// contest-eval poller via POST /api/submission-events and read back (admin) via
+// GET /api/admin/submission-events. `valid` is the GREEN(true)/RED(false) flag
+// (Accepted vs a terminal failure); transient submissions are never stored.
+export type SubmissionEvent = {
+  submission_id: string;
+  hackerrank_username: string;
+  contest_slug?: string;
+  challenge_slug?: string;
+  challenge_name?: string;
+  lang?: string;
+  status?: string;
+  valid: boolean;
+  /** ISO 8601 timestamp of the submission's real time. */
+  submitted_at: string;
+};
+
+export type SubmissionEventsResponse = {
+  events: SubmissionEvent[];
+};
+
 // One signed-URL evidence file as returned (per session) by GET /api/admin/sessions.
 export type SessionEvidence = {
   key: string;

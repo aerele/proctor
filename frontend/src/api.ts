@@ -21,6 +21,8 @@ import type {
   SessionEvidence,
   SessionStartResponse,
   StudentForm,
+  SubmissionEvent,
+  SubmissionEventsResponse,
   UploadManifestItem,
   UploadUrlResponse
 } from "./types";
@@ -534,6 +536,38 @@ export async function fetchRecordingSessions(password: string, contestSlug?: str
   }
 }
 
+// GET /api/admin/submission-events — the SUBMISSION-TIME MARKERS for one user's
+// recording-review timeline (GREEN valid / RED invalid). Returns `null` on a 404
+// (endpoint not deployed yet) so the timeline simply renders WITHOUT markers
+// instead of erroring. In demo mode it returns canned events for the demo
+// students so the markers are visible offline.
+export async function fetchSubmissionEvents(
+  password: string,
+  username: string,
+  contestSlug?: string
+): Promise<SubmissionEvent[] | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    return demoSubmissionEventsFor(normalizeUsername(username), contestSlug);
+  }
+
+  const query = new URLSearchParams();
+  query.set("username", username);
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  try {
+    const response = await request<SubmissionEventsResponse>(
+      `/api/admin/submission-events?${query.toString()}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.events;
+  } catch (cause) {
+    // Endpoint not deployed yet → no markers (graceful), not a hard error.
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
 // ---- Demo recording dataset ----------------------------------------------
 // A small, self-contained set of fake students whose sessions carry screen
 // chunks so the recording-playback UI (search → timeline → player → auto-advance)
@@ -599,6 +633,35 @@ const DEMO_RECORDING_SESSIONS: DemoRecordingSeed[] = [
     chunk_count: 4
   }
 ];
+
+// ---- Demo submission-time markers ----------------------------------------
+// Canned submission events for the 3 demo students so the timeline markers
+// (GREEN valid / RED invalid) are visible OFFLINE. Times are placed ON each
+// student's recording timeline (created_at + minutes), with a realistic mix of
+// valid + invalid. One of Karan's lands in his recording GAP (09:03:30–09:04:30)
+// so the proctor sees "they submitted during the blackout".
+type DemoSubmissionSeed = SubmissionEvent & { username_norm: string };
+
+const DEMO_SUBMISSION_EVENTS: DemoSubmissionSeed[] = [
+  // Asha (created 09:00:00, 8 chunks → 09:00–09:04): two fails then an accept.
+  { username_norm: "asha_r", hackerrank_username: "Asha_R", contest_slug: "mcet-june-2026", submission_id: "as-1", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "python3", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:01:10.000Z" },
+  { username_norm: "asha_r", hackerrank_username: "Asha_R", contest_slug: "mcet-june-2026", submission_id: "as-2", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "python3", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T09:02:25.000Z" },
+  { username_norm: "asha_r", hackerrank_username: "Asha_R", contest_slug: "mcet-june-2026", submission_id: "as-3", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "python3", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:03:40.000Z" },
+  // Karan (created 09:02:00, gap 09:03:30–09:04:30): one accept, one in the GAP.
+  { username_norm: "karan_v", hackerrank_username: "Karan_V", contest_slug: "mcet-june-2026", submission_id: "ka-1", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:03:05.000Z" },
+  { username_norm: "karan_v", hackerrank_username: "Karan_V", contest_slug: "mcet-june-2026", submission_id: "ka-2", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Compilation error", valid: false, submitted_at: "2026-06-05T09:04:00.000Z" },
+  // Neha (created 09:00:30, 4 chunks → 09:00:30–09:02:30): one fail, one accept.
+  { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-1", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Terminated due to timeout", valid: false, submitted_at: "2026-06-05T09:01:15.000Z" },
+  { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-2", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:02:05.000Z" }
+];
+
+function demoSubmissionEventsFor(usernameNorm: string, contestSlug?: string): SubmissionEvent[] {
+  return DEMO_SUBMISSION_EVENTS
+    .filter((seed) => seed.username_norm === usernameNorm)
+    .filter((seed) => !contestSlug || seed.contest_slug === contestSlug)
+    .map(({ username_norm: _drop, ...event }) => event)
+    .sort((a, b) => a.submitted_at.localeCompare(b.submitted_at));
+}
 
 // Build the signed-evidence playlist for a demo session: one screen chunk per
 // index, last_modified stamped at chunkSeconds spacing from created_at (a chunk's

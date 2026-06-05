@@ -30,6 +30,7 @@ sys.path.insert(0, str(HERE))
 import contest_eval_core as core
 import alerts as alertmod
 import enrich as enrichmod
+import post_submission_events as subev
 from verdict_seam import VerdictSeam, is_ambiguous
 
 
@@ -727,6 +728,91 @@ def test_enrichment(t):
             "no credential anywhere => None (enrichment disabled, no crash)", detail=src4)
 
 
+def test_submission_events(t):
+    """post_submission_events: classification, epoch normalization, grouping +
+    a mocked POST (no network)."""
+    t.section("SUBMISSION-TIME MARKERS — classify / epoch / build / POST")
+
+    # --- classification ---
+    t.check(subev.classify("Accepted") == "valid", "Accepted -> valid")
+    t.check(subev.classify("Wrong Answer") == "invalid", "Wrong Answer -> invalid")
+    for s in ["Compilation error", "Runtime Error", "Segmentation Fault",
+              "Terminated due to timeout", "Abort Called"]:
+        t.check(subev.classify(s) == "invalid", f"terminal '{s}' -> invalid")
+    t.check(subev.classify("Processing") == "skip", "Processing -> skip (transient)")
+    t.check(subev.classify("Queued") == "skip", "Queued -> skip (transient)")
+    # An unknown/new failure label is treated as invalid (RED), not dropped.
+    t.check(subev.classify("Some New Failure") == "invalid",
+            "unknown non-transient status -> invalid (renders RED, never vanishes)")
+
+    # --- epoch normalization (seconds vs ms) ---
+    iso_s = subev.epoch_to_iso(1780640626)            # seconds
+    iso_ms = subev.epoch_to_iso(1780640626 * 1000)    # already ms
+    t.check(iso_s == iso_ms, "seconds and ms epochs normalize to the same ISO",
+            detail=f"{iso_s} vs {iso_ms}")
+    t.check(iso_s.endswith("Z") and "T" in iso_s, "ISO is UTC Z-suffixed", detail=iso_s)
+
+    # --- build_events: grouping by user + skip transient + valid/invalid counts ---
+    meta = {
+        "submissions": [
+            {"id": 1, "user": "Asha_R", "ch": "two-sum", "chName": "Two Sum",
+             "lang": "python3", "status": "Accepted", "score": 100, "created": 1780640600},
+            {"id": 2, "user": "Asha_R", "ch": "two-sum", "chName": "Two Sum",
+             "lang": "python3", "status": "Wrong Answer", "score": 0, "created": 1780640500},
+            {"id": 3, "user": "Karan_V", "ch": "brackets", "chName": "Balanced Brackets",
+             "lang": "cpp", "status": "Runtime Error", "score": 0, "created": 1780640700},
+            {"id": 4, "user": "Karan_V", "ch": "brackets", "chName": "Balanced Brackets",
+             "lang": "cpp", "status": "Processing", "score": 0, "created": 1780640800},
+        ]
+    }
+    events, summary = subev.build_events(meta, "mcet-june-2026")
+    t.check(summary["users"] == 2, "grouped 2 distinct users", detail=str(summary))
+    t.check(summary["valid"] == 1, "1 valid (Asha Accepted)", detail=str(summary))
+    t.check(summary["invalid"] == 2, "2 invalid (Asha WA + Karan RE)", detail=str(summary))
+    t.check(summary["skipped"] == 1, "1 transient skipped (Karan Processing)", detail=str(summary))
+    t.check(len(events) == 3, "3 events built (transient excluded)", detail=str(len(events)))
+    asha_accepted = next(e for e in events if e["submission_id"] == 1)
+    t.check(asha_accepted["valid"] is True and asha_accepted["challenge_name"] == "Two Sum"
+            and asha_accepted["contest_slug"] == "mcet-june-2026"
+            and asha_accepted["submitted_at"].endswith("Z"),
+            "event shape carries valid/challenge/contest/iso", detail=str(asha_accepted))
+    t.check(all(isinstance(e["submission_id"], int) for e in events),
+            "submission_id is an int in the payload")
+
+    # --- mocked POST (no network): batching calls the poster with the right shape ---
+    captured = []
+
+    def fake_urlopen(req, timeout=20):
+        captured.append({
+            "url": req.full_url,
+            "key": req.get_header("X-api-key"),
+            "body": json.loads(req.data.decode("utf-8")),
+        })
+
+        class _Resp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner):
+                return json.dumps({"ok": True, "stored": len(captured[-1]["body"]["events"])}).encode()
+        return _Resp()
+
+    orig = subev.urllib.request.urlopen
+    subev.urllib.request.urlopen = fake_urlopen
+    try:
+        ok, info = subev.post_submission_events("http://api.test", "secret-key", events)
+    finally:
+        subev.urllib.request.urlopen = orig
+    t.check(ok and info.get("stored") == 3, "mocked POST returns ok + stored count", detail=str(info))
+    t.check(captured and captured[0]["url"].endswith("/api/submission-events"),
+            "POST hits /api/submission-events", detail=str(captured[0]["url"]) if captured else "none")
+    t.check(captured and captured[0]["key"] == "secret-key",
+            "x-api-key header is sent (auth matches alerts ingest)")
+
+
 def main():
     t = T()
     test_core_reproduces_clone_analysis(t)
@@ -736,6 +822,7 @@ def main():
     test_alert_config(t)
     test_first_attempt_alerts(t)
     test_enrichment(t)
+    test_submission_events(t)
     print("\n" + "=" * 70)
     total = t.passed + t.failed
     print(f"RESULT: {t.passed}/{total} passed, {t.failed} failed")
