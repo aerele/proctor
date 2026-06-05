@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Proctor Extension Spike",
+  "version": "0.1.0",
+  "description": "Spike: demonstrates exactly what a proctoring browser extension CAN and CANNOT see.",
+  "permissions": ["tabs", "webNavigation"],
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Proctor Spike — what can the extension see?"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

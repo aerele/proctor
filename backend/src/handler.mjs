@@ -1,17 +1,52 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 
-const firestore = new Firestore();
-const storage = new Storage();
+let firestore = new Firestore();
+let storage = new Storage();
+
+// Dependency-injection seam for unit tests only. Production code never calls
+// these; tests inject fake Firestore/Storage objects so no real GCP is touched.
+export function __setClientsForTest({ firestore: fakeFirestore, storage: fakeStorage } = {}) {
+  if (fakeFirestore) firestore = fakeFirestore;
+  if (fakeStorage) storage = fakeStorage;
+}
 
 const SESSION_COLLECTION = process.env.SESSION_COLLECTION || "proctor_sessions";
 const SETTINGS_COLLECTION = process.env.SETTINGS_COLLECTION || "proctor_settings";
+const ALERTS_COLLECTION = process.env.ALERTS_COLLECTION || "proctor_alerts";
+// H1: per-(username_norm, contest_slug) live-slot lock. A start atomically
+// .create()s the lock doc; exactly one concurrent writer wins the slot and goes
+// active, the rest fall to pending_approval. Released when the owning session
+// ends so a later legitimate restart can re-acquire it.
+const LIVE_LOCK_COLLECTION = process.env.LIVE_LOCK_COLLECTION || "proctor_live_locks";
 const EVIDENCE_BUCKET = process.env.EVIDENCE_BUCKET;
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
+const ALERTS_QUERY_LIMIT = 500;
+const SESSIONS_QUERY_LIMIT = 2000;
 const SETTINGS_ID = "active";
+// Settings doc id for the per-type proctor alert configuration (enabled +
+// severity). Lives in the same SETTINGS_COLLECTION but under a distinct doc id
+// so it never collides with the schedule/contest "active" settings doc.
+const ALERT_SETTINGS_ID = "alert_settings";
+// A session whose status is still active but whose last liveness signal
+// (heartbeat or beacon) is older than this many milliseconds is treated as a
+// derived "disconnected" signal for the console. Configurable via env.
+const DISCONNECTED_STALENESS_MS = Number(process.env.DISCONNECTED_STALENESS_MS || "45000");
+// Cap on the distinct rooms list returned to the admin console so a pathological
+// number of room labels can never bloat a stats/alerts response.
+const ROOMS_LIST_LIMIT = 200;
+
+// Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
+//   active          → the one live session for (username_norm, contest_slug)
+//   pending_approval → a second start arrived for an already-active username;
+//                      waits for admin approval or a takeover before going live
+//   locked          → admin locked it (or a contingency lock); needs unlock
+//   ended           → finished (manifest uploaded or admin-ended)
+const SESSION_STATUSES = ["active", "pending_approval", "locked", "ended"];
 
 const uploadConfig = {
   chunk_seconds: 30,
@@ -32,40 +67,91 @@ export const api = async (req, res) => {
 
     const path = req.path || new URL(req.url, "http://localhost").pathname;
     if (req.method === "POST" && path === "/api/session/start") return send(res, 200, await startSession(req));
+    if (req.method === "POST" && path === "/api/session/resume") return send(res, 200, await resumeSession(req));
     if (req.method === "POST" && path === "/api/upload-url") return send(res, 200, await createUploadUrl(req));
     if (req.method === "POST" && path === "/api/events") return send(res, 200, await recordEvents(req));
     if (req.method === "POST" && path === "/api/review-file") return send(res, 200, await recordReviewFile(req));
     if (req.method === "POST" && path === "/api/heartbeat") return send(res, 200, await recordHeartbeat(req));
+    if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
     if (req.method === "POST" && path === "/api/session/validate-end") return send(res, 200, await validateEndSession(req));
     if (req.method === "POST" && path === "/api/session/end") return send(res, 200, await endSession(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
+    if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
+    if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
+    if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
+    if (req.method === "GET" && path === "/api/admin/alerts") return send(res, 200, await adminAlerts(req));
+    if (req.method === "POST" && path === "/api/admin/alert-action") return send(res, 200, await adminAlertAction(req));
+    if (req.method === "GET" && path === "/api/admin/alert-settings") return send(res, 200, await adminGetAlertSettings(req));
+    if (req.method === "POST" && path === "/api/admin/alert-settings") return send(res, 200, await adminSaveAlertSettings(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
+    // Always log the real error server-side for debugging.
     console.error(error);
     const statusCode = error?.statusCode || 500;
-    return send(res, statusCode, {
-      error: statusCode === 500 ? "Internal server error" : String(error?.message || error),
-      detail: String(error?.message || error)
-    });
+    // M3: only intentional 4xx httpError cases (those carrying an explicit
+    // statusCode) get their message echoed to the client via `detail`.
+    // Unexpected 500s return a generic body with NO `detail`, so an internal
+    // stack/message (DB names, paths, library internals) never leaks to callers.
+    const isIntentional = Boolean(error?.statusCode);
+    if (isIntentional) {
+      const message = String(error?.message || error);
+      return send(res, statusCode, { error: message, detail: message });
+    }
+    return send(res, 500, { error: "Internal server error" });
   }
 };
 
 async function startSession(req) {
   const body = parseBody(req);
-  requireFields(body, ["hackerrank_username", "name", "roll_number", "email", "proctor_passcode"]);
+  // Phase 2 (0.1): the entry passcode is gone. Start is gated only by the
+  // contest time window + complete details. `proctor_passcode` is no longer
+  // required (a client may still send it harmlessly; it is ignored).
+  requireFields(body, ["hackerrank_username", "name", "roll_number", "email"]);
   if (body.consent_accepted !== true) {
     return badRequest("Consent is required");
   }
-  const settings = await validateProctorGate(body.proctor_passcode);
+  const settings = await validateProctorGate();
 
   const now = new Date().toISOString();
-  const sessionId = randomUUID();
   const username = String(body.hackerrank_username).trim();
   const usernameNorm = normalizeUsername(username);
+  const contestSlug = contestSlugFromUrl(settings.contest_url);
   const clientIp = getClientIp(req);
+
+  // Resume / single-session reconciliation (Epic 2 + 0.3). A session token the
+  // browser already holds wins: if the SAME session_id is replayed we return it
+  // verbatim (idempotent resume, no re-collection of details). If a DIFFERENT
+  // start arrives for a username_norm+contest_slug that already has an active
+  // (or locked/pending) session, the new one is created as pending_approval so
+  // two live sessions never run at once.
+  const existingActive = await findLiveSessionFor(usernameNorm, contestSlug);
+
+  if (body.session_id) {
+    const replay = await getSessionOrNull(body.session_id);
+    if (replay && replay.username_norm === usernameNorm && replay.contest_slug === (contestSlug || "")) {
+      // Idempotent resume of a session this browser already owns.
+      return startResponse(replay, settings);
+    }
+  }
+
+  const sessionId = randomUUID();
+  const room = body.room !== undefined && body.room !== null ? sanitizeRoom(body.room) : "";
+
+  // H1 (TOCTOU fix): decide active-vs-pending ATOMICALLY by acquiring the
+  // live-slot lock rather than trusting the `existingActive` pre-read (which is
+  // racy: two concurrent starts can both read "no active session" and both go
+  // active). acquireLiveSlot re-reads live sessions INSIDE the lock decision, so
+  // exactly one concurrent start wins the slot. existingActive is still used as
+  // a best-effort hint for the conflict pointer, but the authoritative
+  // blocked_by id comes from the lock owner.
+  const slot = await acquireLiveSlot(usernameNorm, contestSlug, sessionId);
+  const status = slot.acquired ? "active" : "pending_approval";
+  const blockedBy = slot.acquired
+    ? null
+    : (slot.ownerSessionId || (existingActive && existingActive.session_id) || null);
 
   const item = {
     session_id: sessionId,
@@ -74,11 +160,18 @@ async function startSession(req) {
     name: String(body.name).trim(),
     roll_number: String(body.roll_number).trim(),
     email: String(body.email).trim(),
+    room,
+    contest_slug: contestSlug || "",
+    // storage_prefix is the single source of truth for every per-session GCS
+    // key. Persisting it here means per-chunk sites build keys with ZERO extra
+    // Firestore reads (they already fetch the session doc).
+    storage_prefix: buildStoragePrefix(contestSlug, usernameNorm, sessionId),
     start_ip: clientIp,
     current_ip: clientIp,
     ip_change_count: 0,
     consent_accepted: true,
-    status: "started",
+    status,
+    blocked_by_session_id: blockedBy,
     created_at: now,
     updated_at: now,
     event_count: 0,
@@ -90,24 +183,175 @@ async function startSession(req) {
   };
 
   await sessionRef(sessionId).create(item);
-  await putJsonl(`sessions/${usernameNorm}/${sessionId}/events/session.jsonl`, [{
+  await putJsonl(`${item.storage_prefix}events/session.jsonl`, [{
     type: "session_started",
     timestamp: now,
     detail: { user_agent: req.get?.("user-agent") || req.headers?.["user-agent"] || "", start_ip: clientIp }
   }]);
 
+  return startResponse(item, settings);
+}
+
+// Resume an existing session by its stored token without re-collecting details.
+// Used by a browser reload (Epic 2.1/2.2). 404 when the token is unknown or
+// does not belong to the supplied username.
+async function resumeSession(req) {
+  const body = parseBody(req);
+  requireFields(body, ["session_id"]);
+  const session = await getSessionOrNull(body.session_id);
+  if (!session) throw httpError(404, "Session not found");
+  if (body.hackerrank_username) {
+    const usernameNorm = normalizeUsername(body.hackerrank_username);
+    if (session.username_norm !== usernameNorm) throw httpError(404, "Session not found");
+  }
+  const settings = await getSettings();
+  return startResponse(session, settings || {});
+}
+
+// Shared start/resume payload so the browser always gets the same shape whether
+// it just started, replayed a token, or resumed after reload.
+function startResponse(session, settings) {
   return {
-    session_id: sessionId,
-    start_ip: clientIp,
-    contest_url: settings.contest_url || "",
+    session_id: session.session_id,
+    status: session.status,
+    hackerrank_username: session.hackerrank_username,
+    name: session.name,
+    room: session.room || "",
+    contest_slug: session.contest_slug || "",
+    storage_prefix: session.storage_prefix || buildStoragePrefix(session.contest_slug, session.username_norm, session.session_id),
+    blocked_by_session_id: session.blocked_by_session_id || null,
+    start_ip: session.start_ip || session.current_ip || "",
+    contest_url: settings?.contest_url || "",
     upload_config: uploadConfig,
     heartbeat_interval_seconds: 15
   };
 }
 
-async function validateProctorGate(passcode) {
+// Find the session that currently holds the live slot for (username, contest):
+// any non-ended session blocks a new active start. active wins over
+// locked/pending for the conflict pointer when more than one exists.
+async function findLiveSessionFor(usernameNorm, contestSlug) {
+  const snapshot = await firestore
+    .collection(SESSION_COLLECTION)
+    .where("username_norm", "==", usernameNorm)
+    .where("contest_slug", "==", contestSlug || "")
+    .limit(50)
+    .get();
+  const live = snapshot.docs
+    .map((doc) => doc.data())
+    .filter((doc) => doc.status && doc.status !== "ended");
+  if (!live.length) return null;
+  return live.find((doc) => doc.status === "active") || live[0];
+}
+
+// H1: deterministic id for the per-(username, contest) live-slot lock.
+function liveLockId(usernameNorm, contestSlug) {
+  return `live:${usernameNorm}:${contestSlug || "_"}`;
+}
+
+function liveLockRef(usernameNorm, contestSlug) {
+  return firestore.collection(LIVE_LOCK_COLLECTION).doc(liveLockId(usernameNorm, contestSlug));
+}
+
+// H1 — atomically acquire the live slot for (username_norm, contest_slug).
+//
+// The slot is owned by a lock doc whose id is deterministic, so two
+// near-simultaneous starts contend on the SAME doc. `.create()` is atomic in
+// Firestore: exactly one concurrent writer succeeds; the rest get ALREADY_EXISTS
+// and become pending_approval. The decision is NEVER derived from the racy
+// `existingActive` pre-read.
+//
+// On a create-collision we read the LOCK DOC (not a session collection query,
+// which would race with a concurrent winner whose session doc is not yet
+// written) to find the current owner, and consult the owner's session by id:
+//   - owner session is genuinely live (not ended)  → real conflict → pending.
+//   - owner session does not exist yet              → a concurrent winner is
+//                                                     mid-flight → yield, pending.
+//   - owner session exists and is already `ended`   → stale lock (crash / the
+//                                                     previous taker finished) →
+//                                                     take the slot over → active.
+//
+// Returns { acquired: true } on win, or
+// { acquired: false, ownerSessionId } when another live session holds the slot.
+async function acquireLiveSlot(usernameNorm, contestSlug, sessionId) {
+  const ref = liveLockRef(usernameNorm, contestSlug);
+  const now = new Date().toISOString();
+  const lockBody = { username_norm: usernameNorm, contest_slug: contestSlug || "", session_id: sessionId, acquired_at: now };
+
+  try {
+    await ref.create(lockBody);
+    return { acquired: true };
+  } catch (error) {
+    // Anything other than an already-exists collision is unexpected; rethrow.
+    if (!isAlreadyExists(error)) throw error;
+  }
+
+  // Lock is held — read it to find the current owner.
+  const lockDoc = await ref.get();
+  const ownerSessionId = lockDoc.exists ? lockDoc.data()?.session_id : null;
+
+  // No owner recorded (shouldn't happen, but be safe): treat the lock as stale.
+  if (!ownerSessionId || ownerSessionId === sessionId) {
+    await ref.set(lockBody);
+    return { acquired: true };
+  }
+
+  // Only an OWNER session that already ended makes the lock stale. A missing
+  // owner doc means a concurrent winner hasn't persisted yet — we must yield.
+  const owner = await getSessionOrNull(ownerSessionId);
+  if (owner && owner.status === "ended") {
+    await ref.set(lockBody);
+    return { acquired: true };
+  }
+
+  return { acquired: false, ownerSessionId };
+}
+
+function isAlreadyExists(error) {
+  // Firestore signals an existing-doc create collision with gRPC code 6
+  // (ALREADY_EXISTS); the fake test Firestore mirrors this. Match on code or
+  // message so both real and mocked clients are handled.
+  return error?.code === 6 || /ALREADY_EXISTS/i.test(String(error?.message || ""));
+}
+
+// H1 — release the live slot when its owning session is no longer live, so a
+// later legitimate start for the same (username, contest) can re-acquire it.
+// Best-effort: a failure here must never break the end/lock flow, and we only
+// clear the lock when it still points at THIS session (avoid stomping a lock a
+// newer winner already took over).
+async function releaseLiveSlot(session) {
+  if (!session?.username_norm) return;
+  try {
+    const ref = liveLockRef(session.username_norm, session.contest_slug);
+    const doc = await ref.get();
+    if (doc.exists && doc.data()?.session_id === session.session_id) {
+      await ref.delete();
+    }
+  } catch (error) {
+    console.warn(`Failed to release live slot for ${session.session_id}: ${error?.message || error}`);
+  }
+}
+
+// H1 — make `session` the owner of its (username, contest) live slot. Used when
+// an admin action (approve/bypass) promotes a session to live outside the
+// normal acquire path. Best-effort; overwrites any prior owner.
+async function takeOverLiveSlot(session) {
+  if (!session?.username_norm) return;
+  try {
+    await liveLockRef(session.username_norm, session.contest_slug).set({
+      username_norm: session.username_norm,
+      contest_slug: session.contest_slug || "",
+      session_id: session.session_id,
+      acquired_at: new Date().toISOString()
+    });
+  } catch (error) {
+    console.warn(`Failed to take over live slot for ${session.session_id}: ${error?.message || error}`);
+  }
+}
+
+async function validateProctorGate() {
   const settings = await getSettings();
-  if (!settings?.passcode_hash || !settings?.start_at || !settings?.end_at) {
+  if (!settings?.start_at || !settings?.end_at) {
     throw httpError(403, "Proctoring is not configured yet.");
   }
 
@@ -119,16 +363,13 @@ async function validateProctorGate(passcode) {
   }
   if (now < startAt) throw httpError(403, "Proctoring has not started yet.");
   if (now > endAt) throw httpError(403, "Proctoring has ended.");
-  if (hashPasscode(passcode) !== settings.passcode_hash) {
-    throw httpError(403, "Invalid proctoring passcode.");
-  }
   return settings;
 }
 
 async function createUploadUrl(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "kind", "chunk_index", "content_type"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   const kind = sanitizeSegment(body.kind);
   const chunkIndex = Number(body.chunk_index);
   if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
@@ -136,7 +377,7 @@ async function createUploadUrl(req) {
   }
 
   const extension = String(body.content_type).includes("webm") ? "webm" : "bin";
-  const objectKey = `sessions/${session.username_norm}/${session.session_id}/${kind}/chunk-${String(chunkIndex).padStart(5, "0")}.${extension}`;
+  const objectKey = `${sessionPrefix(session)}${kind}/chunk-${String(chunkIndex).padStart(5, "0")}.${extension}`;
   const [uploadUrl] = await bucket()
     .file(objectKey)
     .getSignedUrl({
@@ -161,7 +402,7 @@ async function createUploadUrl(req) {
 async function recordEvents(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "events"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   if (!Array.isArray(body.events)) return badRequest("events must be an array");
 
   const cleanedEvents = body.events.slice(0, 100).map((item) => ({
@@ -171,7 +412,7 @@ async function recordEvents(req) {
     detail: sanitizeObject(item.detail || {})
   }));
 
-  const eventKey = `sessions/${session.username_norm}/${session.session_id}/events/events-${Date.now()}-${randomUUID()}.jsonl`;
+  const eventKey = `${sessionPrefix(session)}events/events-${Date.now()}-${randomUUID()}.jsonl`;
   await putJsonl(eventKey, cleanedEvents);
 
   const clipboardCount = cleanedEvents.filter((item) => item.type === "clipboard_activity").length;
@@ -187,13 +428,21 @@ async function recordEvents(req) {
     upload_error_count: FieldValue.increment(uploadErrorCount)
   });
 
+  // Phase 2 (2.3): surface only the SURE-SHOT signals as proctor alerts so the
+  // admin console deep-links to them. Noisy events (focus/blur/visibility/
+  // clipboard) are intentionally NOT surfaced. One settings read per request is
+  // threaded into the upsert so a disabled type is skipped and a configured
+  // severity overrides the default.
+  const alertSettings = await getAlertSettings();
+  await raiseSureShotAlertsFromEvents(session, cleanedEvents, alertSettings);
+
   return { ok: true, storage_key: eventKey };
 }
 
 async function recordReviewFile(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "nature", "records"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   if (!["clipboard", "tabs", "cookies"].includes(body.nature)) return badRequest("nature must be clipboard, tabs, or cookies");
   if (!Array.isArray(body.records)) return badRequest("records must be an array");
 
@@ -202,7 +451,7 @@ async function recordReviewFile(req) {
     ...record,
     server_received_at: now
   }));
-  const key = `sessions/${session.username_norm}/${session.session_id}/review/${body.nature}.jsonl`;
+  const key = `${sessionPrefix(session)}review/${body.nature}.jsonl`;
   await putJsonl(key, records);
 
   await sessionRef(session.session_id).update({
@@ -217,7 +466,7 @@ async function recordReviewFile(req) {
 async function recordHeartbeat(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "recording_state", "visibility_state"]);
-  const session = await getSession(body.session_id);
+  const session = requireWritableSession(await getSession(body.session_id));
   const now = new Date().toISOString();
   const currentIp = getClientIp(req);
   const startIp = session.start_ip || currentIp;
@@ -235,12 +484,17 @@ async function recordHeartbeat(req) {
     last_ip_change_at: newlyChanged ? now : session.last_ip_change_at || null,
     upload_queue_depth: Number(body.upload_queue_depth || 0),
     network_online: Boolean(body.network_online),
+    last_seen_at: now,
     heartbeat_count: FieldValue.increment(1),
     ip_change_count: FieldValue.increment(newlyChanged ? 1 : 0)
   });
 
+  // One settings read per request; thread it into both sure-shot upsert sites so
+  // a disabled type is skipped and a configured severity overrides the default.
+  const alertSettings = await getAlertSettings();
+
   if (newlyChanged) {
-    await putJsonl(`sessions/${session.username_norm}/${session.session_id}/events/ip-change-${Date.now()}-${randomUUID()}.jsonl`, [{
+    await putJsonl(`${sessionPrefix(session)}events/ip-change-${Date.now()}-${randomUUID()}.jsonl`, [{
       type: "ip_address_changed",
       timestamp: now,
       detail: {
@@ -250,29 +504,139 @@ async function recordHeartbeat(req) {
         current_ip: currentIp
       }
     }]);
+    // Phase 2 (2.3): server-derived sure-shot — IP changed mid-session.
+    const ipConfig = alertTypeConfig(alertSettings, "ip_changed", "warning");
+    if (ipConfig.enabled) {
+      await upsertProctorAlert(session, {
+        type: "ip_changed",
+        severity: ipConfig.severity,
+        timestamp: now,
+        title: "IP address changed",
+        detail: `IP changed from ${previousIp} to ${currentIp}`,
+        dedupe: currentIp,
+        data: { start_ip: startIp, previous_ip: previousIp, current_ip: currentIp }
+      });
+    }
   }
 
-  return { ok: true, start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged };
+  // Phase 2 (2.3): a heartbeat reporting the recorder is no longer recording is
+  // a sure-shot critical. Deduped per-day so a sustained-stopped state collapses
+  // to one alert per session rather than one per heartbeat.
+  if (isRecordingStopped(body.recording_state)) {
+    const recConfig = alertTypeConfig(alertSettings, "recording_stopped", "critical");
+    if (recConfig.enabled) {
+      await upsertProctorAlert(session, {
+        type: "recording_stopped",
+        severity: recConfig.severity,
+        timestamp: now,
+        title: "Recording stopped",
+        detail: `recording_state=${String(body.recording_state)}`,
+        dedupe: now.slice(0, 10),
+        data: { recording_state: String(body.recording_state) }
+      });
+    }
+  }
+
+  // B1: surface the session lifecycle status so the recorder can self-stop if a
+  // proctor locked/ended the session (requireWritableSession already 403/409s a
+  // non-active session, but an active heartbeat returns the live status too).
+  return { ok: true, status: session.status || "active", start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged };
+}
+
+// Liveness beacon (Phase 2). Designed for navigator.sendBeacon(), which fires on
+// page hide/unload and may deliver the body as text/plain rather than JSON, with
+// NO custom headers — so this endpoint is gated ONLY by session_id ownership
+// (the unguessable session token), never by admin auth. It accepts either a JSON
+// object body or a raw text/plain JSON string.
+//
+//   kind:'hidden'  → the proctor tab was hidden (visibilitychange)
+//   kind:'closing' → the page is unloading (pagehide/beforeunload)
+//   kind:'visible' → the tab returned to the foreground
+//
+// On 'hidden'/'closing' we stamp last_seen_at and (if the tab_hidden alert type
+// is enabled in settings) upsert a warning tab_hidden proctor alert carrying
+// video_key/room/session_id, using the same idempotent id convention. 'visible'
+// only refreshes last_seen_at. The beacon NEVER goes through
+// requireWritableSession: a locked/ended/pending session can still emit liveness
+// without being rejected (sendBeacon ignores the response anyway).
+async function recordBeacon(req) {
+  const body = parseBeaconBody(req);
+  requireFields(body, ["session_id"]);
+  const kind = String(body.kind || "hidden").toLowerCase();
+  if (!["hidden", "visible", "closing"].includes(kind)) {
+    return badRequest("kind must be hidden, visible, or closing");
+  }
+
+  // Ownership gate: an unknown session_id is a 404 (no admin auth involved). The
+  // session token is the only credential, matching sendBeacon's constraints.
+  const session = await getSession(body.session_id);
+  const now = new Date().toISOString();
+
+  await sessionRef(session.session_id).update({
+    updated_at: now,
+    last_seen_at: now,
+    last_beacon_kind: kind
+  });
+
+  // Only the away signals (hidden/closing) raise an alert; visible is liveness
+  // only. Respect the tab_hidden enable toggle and configured severity.
+  if (kind === "hidden" || kind === "closing") {
+    const settings = await getAlertSettings();
+    const config = alertTypeConfig(settings, "tab_hidden", "warning");
+    if (config.enabled) {
+      await upsertProctorAlert(session, {
+        type: "tab_hidden",
+        severity: config.severity,
+        timestamp: now,
+        title: "Proctor tab hidden",
+        detail: `Proctor tab ${kind === "closing" ? "closing/unloading" : "hidden"}`,
+        // Per-day dedupe so a flurry of hide/show events collapses to one alert
+        // per session per day, matching the other sure-shots.
+        dedupe: now.slice(0, 10),
+        data: { kind }
+      });
+    }
+  }
+
+  return { ok: true, kind, last_seen_at: now };
+}
+
+// sendBeacon may deliver a text/plain string body; parse it leniently as JSON.
+// A non-string body (some runtimes parse JSON for us) is returned as-is. A blank
+// body becomes {} so requireFields surfaces the missing session_id cleanly.
+function parseBeaconBody(req) {
+  const raw = req.body;
+  if (raw === undefined || raw === null || raw === "") return {};
+  if (typeof raw !== "string") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    throw httpError(400, "invalid_json");
+  }
 }
 
 async function validateEndSession(req) {
+  // Phase 2 (0.1): the exit passcode is gone. Ending only requires the integrity
+  // assurance checkbox. `end_proctor_code`/`end_code` are no longer required.
   const body = parseBody(req);
-  requireFields(body, ["session_id", "end_proctor_code"]);
+  requireFields(body, ["session_id"]);
   if (body.assurance_accepted !== true) return badRequest("Integrity assurance is required before ending the test.");
-  await getSession(body.session_id);
-  await validateEndCode(body.end_proctor_code);
+  requireWritableSession(await getSession(body.session_id));
   return { ok: true };
 }
 
 async function endSession(req) {
   const body = parseBody(req);
-  requireFields(body, ["session_id", "end_proctor_code"]);
+  requireFields(body, ["session_id"]);
   if (body.assurance_accepted !== true) return badRequest("Integrity assurance is required before ending the test.");
-  await validateEndCode(body.end_proctor_code);
-  const session = await getSession(body.session_id);
+  // H3: a locked or pending session cannot be self-ended by the client; only an
+  // already-ended session is rejected (idempotency handled below via 409). An
+  // active session ends normally (the happy path).
+  const session = requireWritableSession(await getSession(body.session_id));
   const manifest = Array.isArray(body.manifest) ? body.manifest : [];
   const now = new Date().toISOString();
-  const manifestKey = `sessions/${session.username_norm}/${session.session_id}/manifest.json`;
+  const manifestKey = `${sessionPrefix(session)}manifest.json`;
 
   await bucket().file(manifestKey).save(JSON.stringify({ session_id: session.session_id, ended_at: now, manifest }, null, 2), {
     contentType: "application/json"
@@ -286,15 +650,11 @@ async function endSession(req) {
     uploaded_manifest_count: manifest.length
   });
 
-  return { ok: true, manifest_key: manifestKey };
-}
+  // H1: the session is over — free its live slot so a later legitimate start for
+  // the same (username, contest) can re-acquire it instead of being parked.
+  await releaseLiveSlot(session);
 
-async function validateEndCode(endCode) {
-  const settings = await getSettings();
-  if (!settings?.end_code_hash) throw httpError(403, "Proctoring end code is not configured.");
-  if (hashPasscode(endCode) !== settings.end_code_hash) {
-    throw httpError(403, "Invalid proctoring end code.");
-  }
+  return { ok: true, manifest_key: manifestKey };
 }
 
 async function adminGetSettings(req) {
@@ -314,24 +674,28 @@ async function adminSaveSettings(req) {
   }
 
   const existing = await getSettings();
-  const passcode = String(body.passcode || "");
-  const endCode = String(body.end_code || "");
   const contestUrl = String(body.contest_url || "").trim();
-  if (!existing?.passcode_hash && !passcode) return badRequest("Passcode is required the first time settings are saved.");
-  if (!existing?.end_code_hash && !endCode) return badRequest("End code is required the first time settings are saved.");
-  if (passcode && passcode.length < 4) return badRequest("Passcode must be at least 4 characters.");
-  if (endCode && endCode.length < 4) return badRequest("End code must be at least 4 characters.");
   if (contestUrl && !isHttpUrl(contestUrl)) return badRequest("Contest URL must start with http:// or https://.");
 
+  // Phase 2 (0.1): passcodes are removed. They are no longer REQUIRED to save
+  // settings, and start/end are gated only by the time window. We still persist
+  // any passcode/end_code an older admin UI happens to send so the stored doc is
+  // backward-compatible, but nothing reads the hashes anymore.
   const now = new Date().toISOString();
+  const passcode = String(body.passcode || "");
+  const endCode = String(body.end_code || "");
+  if (passcode && passcode.length < 4) return badRequest("Passcode must be at least 4 characters.");
+  if (endCode && endCode.length < 4) return badRequest("End code must be at least 4 characters.");
+
   const item = {
     start_at: startAt.toISOString(),
     end_at: endAt.toISOString(),
     contest_url: contestUrl,
-    passcode_hash: passcode ? hashPasscode(passcode) : existing.passcode_hash,
-    passcode_preview: passcode ? maskPasscode(passcode) : existing.passcode_preview,
-    end_code_hash: endCode ? hashPasscode(endCode) : existing.end_code_hash,
-    end_code_preview: endCode ? maskPasscode(endCode) : existing.end_code_preview,
+    contest_slug: contestSlugFromUrl(contestUrl),
+    passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
+    passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
+    end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
+    end_code_preview: endCode ? maskPasscode(endCode) : (existing?.end_code_preview || ""),
     updated_at: now
   };
 
@@ -356,7 +720,10 @@ async function adminSessions(req) {
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
     .slice(0, 20)
     .map(async (item) => {
-      const prefix = `sessions/${item.username_norm}/${item.session_id}/`;
+      // Admin-evidence listing MUST use the same prefix the upload sites wrote
+      // to, or it lists nothing. sessionPrefix() reads the persisted
+      // storage_prefix (legacy docs fall back to the reconstructed legacy path).
+      const prefix = sessionPrefix(item);
       const [files] = await bucket().getFiles({ prefix, maxResults: 1000 });
       const evidence = await Promise.all(files.map(async (file) => {
         const [metadata] = await file.getMetadata();
@@ -378,15 +745,722 @@ async function adminSessions(req) {
   return { sessions };
 }
 
+// Phase 2 (2.4 / Epic 6.4 / 4.4): live counts by status for the admin dashboard.
+// Counts are derived from the session docs; an optional ?contest_slug filters to
+// one contest, and an optional ?room scopes counts to a single room. "finished"
+// == ended; "live" == active; plus locked + pending. A derived `disconnected`
+// count flags active sessions whose last liveness signal (heartbeat or beacon)
+// is older than the staleness threshold. The distinct `rooms` list (computed
+// over the contest scope, BEFORE the room filter, so the dropdown stays full) is
+// returned so the console can populate a room dropdown.
+async function adminStats(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+  const room = normalizeRoomFilter(req.query?.room);
+
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const allDocs = snapshot.docs.map((doc) => doc.data());
+
+  // Distinct rooms come from the full contest scope (NOT the room-filtered set)
+  // so the dropdown always lists every room even while one is selected.
+  const rooms = distinctRooms(allDocs);
+
+  // Apply the room filter to the docs the counts are computed over.
+  const docs = room ? allDocs.filter((doc) => String(doc.room || "") === room) : allDocs;
+
+  const nowMs = Date.now();
+  const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, total: 0 };
+  for (const doc of docs) {
+    stats.total += 1;
+    if (doc.status === "active") {
+      stats.live += 1;
+      // Derived disconnected signal: an active session whose last heartbeat /
+      // beacon is older than the staleness threshold (default 45s).
+      if (isStaleSession(doc, nowMs)) stats.disconnected += 1;
+    } else if (doc.status === "locked") stats.locked += 1;
+    else if (doc.status === "pending_approval") stats.pending_approval += 1;
+    else if (doc.status === "ended") stats.finished += 1;
+  }
+  // "not started or total": with no roster the backend can't know who hasn't
+  // started, so we report total session docs as the closest defensible number
+  // (the frontend can subtract the started states to estimate yet-to-start once
+  // a roster exists).
+  stats.not_started_or_total = stats.total;
+
+  return {
+    contest_slug: contestSlug ? String(contestSlug) : null,
+    room: room || null,
+    stats,
+    rooms,
+    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS
+  };
+}
+
+// Normalize a ?room query param to the same sanitized form rooms are stored in,
+// so the filter matches a session's stored room label exactly. Empty/absent →
+// null (no filter).
+function normalizeRoomFilter(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const cleaned = sanitizeRoom(value);
+  return cleaned || null;
+}
+
+// Distinct, sorted room labels across the given session docs, capped so a
+// pathological number of labels can't bloat the response. Blank rooms are
+// excluded (they don't belong in a dropdown).
+function distinctRooms(docs) {
+  const set = new Set();
+  for (const doc of docs) {
+    const room = String(doc.room || "").trim();
+    if (room) set.add(room);
+  }
+  return [...set].sort((a, b) => a.localeCompare(b)).slice(0, ROOMS_LIST_LIMIT);
+}
+
+// An active session is "stale" (a derived disconnected signal) when its most
+// recent LIVENESS signal — last_heartbeat_at OR last_seen_at (beacon), whichever
+// is newer — is older than DISCONNECTED_STALENESS_MS. Only when NEITHER liveness
+// stamp exists do we fall back to created_at, so a session that started but never
+// sent a heartbeat still ages into disconnected rather than looking permanently
+// fresh. created_at is NOT mixed in when a liveness stamp exists (a fresh
+// created_at would otherwise mask a genuinely stale heartbeat).
+function isStaleSession(doc, nowMs) {
+  const liveness = [doc.last_heartbeat_at, doc.last_seen_at]
+    .map((value) => (value ? Date.parse(value) : NaN))
+    .filter((ms) => Number.isFinite(ms));
+  let newest;
+  if (liveness.length) {
+    newest = Math.max(...liveness);
+  } else {
+    const created = doc.created_at ? Date.parse(doc.created_at) : NaN;
+    if (!Number.isFinite(created)) return false;
+    newest = created;
+  }
+  return nowMs - newest > DISCONNECTED_STALENESS_MS;
+}
+
+// Phase 2 (2.4 / Epic 4.3): remote admin actions, per-session (session_id) or in
+// bulk (usernames[] within a contest). Returns the updated docs so the console
+// can reflect the new state immediately.
+async function adminSessionAction(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const action = String(body.action || "");
+  const VALID_ACTIONS = ["approve", "lock", "unlock", "bypass", "end"];
+  if (!VALID_ACTIONS.includes(action)) {
+    return badRequest(`action must be one of ${VALID_ACTIONS.join(", ")}`);
+  }
+
+  const targets = await resolveActionTargets(body);
+  if (!targets.length) return badRequest("Provide session_id or a non-empty usernames[]");
+
+  const updated = [];
+  for (const session of targets) {
+    const result = await applySessionAction(action, session);
+    if (Array.isArray(result)) updated.push(...result);
+    else if (result) updated.push(result);
+  }
+  return { ok: true, action, updated };
+}
+
+// Resolve which session docs an action applies to: a single session_id, or all
+// non-ended sessions for each username in usernames[] (optionally scoped to a
+// contest_slug). For bulk we operate on the live (non-ended) doc per username.
+async function resolveActionTargets(body) {
+  if (body.session_id) {
+    const session = await getSessionOrNull(body.session_id);
+    return session ? [session] : [];
+  }
+  if (Array.isArray(body.usernames) && body.usernames.length) {
+    const contestSlug = body.contest_slug !== undefined && body.contest_slug !== null
+      ? String(body.contest_slug)
+      : null;
+    const out = [];
+    for (const username of body.usernames) {
+      const usernameNorm = normalizeUsername(username);
+      let query = firestore
+        .collection(SESSION_COLLECTION)
+        .where("username_norm", "==", usernameNorm);
+      if (contestSlug !== null) query = query.where("contest_slug", "==", contestSlug);
+      const snapshot = await query.limit(50).get();
+      const live = snapshot.docs
+        .map((doc) => doc.data())
+        .filter((doc) => doc.status && doc.status !== "ended")
+        .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+      if (live.length) out.push(live[0]);
+    }
+    return out;
+  }
+  return [];
+}
+
+async function applySessionAction(action, session) {
+  const now = new Date().toISOString();
+
+  if (action === "approve") {
+    // Activate a pending session and END the conflicting active one it was
+    // waiting behind, so exactly one session is live afterward.
+    const out = [];
+    if (session.blocked_by_session_id) {
+      const conflict = await getSessionOrNull(session.blocked_by_session_id);
+      if (conflict && conflict.status !== "ended") {
+        await sessionRef(conflict.session_id).update({ status: "ended", ended_at: now, updated_at: now, ended_reason: "superseded_by_approval" });
+        // H1: the conflicting session no longer holds the live slot.
+        await releaseLiveSlot(conflict);
+        out.push({ ...conflict, status: "ended", ended_at: now, updated_at: now, ended_reason: "superseded_by_approval" });
+      }
+    }
+    await sessionRef(session.session_id).update({ status: "active", blocked_by_session_id: null, approved_at: now, updated_at: now });
+    // H1: the approved session now OWNS the live slot — point the lock at it.
+    await takeOverLiveSlot(session);
+    out.push({ ...session, status: "active", blocked_by_session_id: null, approved_at: now, updated_at: now });
+    return out;
+  }
+
+  if (action === "lock") {
+    await sessionRef(session.session_id).update({ status: "locked", locked_at: now, updated_at: now });
+    return { ...session, status: "locked", locked_at: now, updated_at: now };
+  }
+
+  if (action === "unlock") {
+    await sessionRef(session.session_id).update({ status: "active", unlocked_at: now, updated_at: now });
+    return { ...session, status: "active", unlocked_at: now, updated_at: now };
+  }
+
+  if (action === "bypass") {
+    // Clear a pending/locked block: make the session live and drop the conflict
+    // pointer WITHOUT ending the other session (contingency override).
+    await sessionRef(session.session_id).update({ status: "active", blocked_by_session_id: null, bypassed_at: now, updated_at: now });
+    // H1: this session is now live by override — point the slot lock at it so a
+    // later fresh start sees a coherent owner.
+    await takeOverLiveSlot(session);
+    return { ...session, status: "active", blocked_by_session_id: null, bypassed_at: now, updated_at: now };
+  }
+
+  if (action === "end") {
+    await sessionRef(session.session_id).update({ status: "ended", ended_at: now, updated_at: now, ended_reason: "admin_action" });
+    // H1: free the live slot so a legitimate restart can re-acquire it.
+    await releaseLiveSlot(session);
+    return { ...session, status: "ended", ended_at: now, updated_at: now, ended_reason: "admin_action" };
+  }
+
+  return null;
+}
+
+// ---- Sure-shot proctor alerts (Phase 2, 2.3 / Epic 4) ---------------------
+
+// SURE-SHOT client event types: when one of these arrives via /api/events we
+// raise an idempotent proctor alert. Everything else (focus/blur/visibility/
+// clipboard) is intentionally NOT surfaced — it is noisy.
+const SURE_SHOT_EVENT_TYPES = {
+  recording_stopped: { severity: "critical", title: "Recording stopped" },
+  screen_share_stopped: { severity: "critical", title: "Screen sharing stopped" },
+  // invalid_share_surface is intentionally absent: the recorder now REFUSES to
+  // record on a non-monitor share surface (tab/window), so this event can never
+  // fire. Removed from the catalog so it is no longer raised or configurable.
+  // Existing stored alerts of this type still DISPLAY (see ALLOWED_ALERT_TYPES /
+  // alert normalization) for backward compatibility.
+  recording_error: { severity: "critical", title: "Recording error" }
+};
+
+// ---- Proctor alert settings (enabled + severity per sure-shot type) --------
+//
+// The admin console can disable a sure-shot type or override its severity. The
+// full set of proctor-controllable types and their DEFAULTS live here; the
+// settings doc only stores deltas, but adminGetAlertSettings always returns the
+// full set (defaults merged with any stored overrides) so the console renders a
+// complete toggle list.
+//
+// recording_stopped / screen_share_stopped / recording_error  → critical
+// ip_changed / tab_hidden / tab_away / disconnected → warning
+// NOTE: invalid_share_surface was REMOVED from the catalog — the recorder now
+// refuses to record on an invalid share surface, so the event can never fire.
+// tab_away additionally carries a numeric threshold_seconds (default 12): the
+// minimum continuous "HackerRank not visible" span the monitoring tab-away
+// detector must observe before raising an alert. This is the source of truth for
+// the detector's --min-gap-seconds.
+const TAB_AWAY_DEFAULT_THRESHOLD_SECONDS = 12;
+const DEFAULT_PROCTOR_ALERT_SETTINGS = {
+  recording_stopped: { enabled: true, severity: "critical" },
+  screen_share_stopped: { enabled: true, severity: "critical" },
+  recording_error: { enabled: true, severity: "critical" },
+  ip_changed: { enabled: true, severity: "warning" },
+  tab_hidden: { enabled: true, severity: "warning" },
+  tab_away: { enabled: true, severity: "warning", threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
+  disconnected: { enabled: true, severity: "warning" }
+};
+
+// Read the stored alert-settings doc and merge it over the defaults so callers
+// always see a complete, well-formed per-type config. One Firestore read; call
+// once per request and thread the result into the sure-shot upsert sites so a
+// single request never re-reads it.
+async function getAlertSettings() {
+  const doc = await firestore.collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).get();
+  const stored = doc.exists ? (doc.data()?.proctor || {}) : {};
+  return mergeAlertSettings(stored);
+}
+
+function mergeAlertSettings(stored) {
+  const proctor = {};
+  for (const [type, def] of Object.entries(DEFAULT_PROCTOR_ALERT_SETTINGS)) {
+    const override = stored && typeof stored === "object" ? stored[type] : undefined;
+    const entry = {
+      enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
+      severity: override && ALERT_SEVERITIES.includes(override.severity) ? override.severity : def.severity
+    };
+    // tab_away alone carries a numeric threshold_seconds (minimum continuous
+    // absence the tab-away detector flags). Validate it's a positive finite
+    // number; otherwise fall back to the default (12). Other types don't have it.
+    if ("threshold_seconds" in def) {
+      const raw = override ? override.threshold_seconds : undefined;
+      const num = typeof raw === "number" ? raw : Number(raw);
+      entry.threshold_seconds = Number.isFinite(num) && num > 0 ? num : def.threshold_seconds;
+    }
+    proctor[type] = entry;
+  }
+  return { proctor };
+}
+
+// Resolve the effective config for one alert type from a (already-read)
+// settings object. Falls back to a default-enabled/configured-severity entry for
+// any type not present in DEFAULT_PROCTOR_ALERT_SETTINGS (defensive).
+function alertTypeConfig(settings, type, fallbackSeverity) {
+  const entry = settings?.proctor?.[type];
+  if (entry) return entry;
+  return { enabled: true, severity: fallbackSeverity };
+}
+
+// Recorder states that mean "not recording" for the heartbeat sure-shot.
+const STOPPED_RECORDING_STATES = new Set(["stopped", "inactive", "ended", "error"]);
+
+// B2: the recorder sends a COMPOSITE recording_state like
+//   "combined:inactive;screen:stopped;camera:recording;microphone:stopped"
+// (one segment per media track). The sure-shot fires when the CORE capture
+// (the combined MediaRecorder or the screen track) is not recording — a stopped
+// camera/microphone alone is not a recording_stopped signal. A bare legacy
+// string ("stopped") is still honoured for backward compatibility.
+function isRecordingStopped(recordingState) {
+  const raw = String(recordingState || "").toLowerCase().trim();
+  if (!raw) return false;
+  if (raw.includes(":")) {
+    const segments = parseRecordingStateSegments(raw);
+    // Only the core capture tracks gate the sure-shot. If the payload doesn't
+    // name them (unexpected shape), fall back to "any segment stopped".
+    const core = ["combined", "screen"].filter((key) => key in segments);
+    const gates = core.length ? core.map((key) => segments[key]) : Object.values(segments);
+    return gates.some((state) => STOPPED_RECORDING_STATES.has(state));
+  }
+  return STOPPED_RECORDING_STATES.has(raw);
+}
+
+function parseRecordingStateSegments(raw) {
+  const segments = {};
+  for (const part of raw.split(";")) {
+    const [key, value] = part.split(":");
+    if (key && value !== undefined) segments[key.trim()] = value.trim();
+  }
+  return segments;
+}
+
+async function raiseSureShotAlertsFromEvents(session, events, settings) {
+  // Collapse repeats within this single batch: one alert per sure-shot type per
+  // batch (the per-day dedupe in upsertProctorAlert keeps it stable across
+  // batches too). Walk in order so we keep the latest timestamp for the type.
+  const seen = new Map();
+  for (const event of events) {
+    const spec = SURE_SHOT_EVENT_TYPES[event.type];
+    if (!spec) continue;
+    seen.set(event.type, { event, spec });
+  }
+  for (const { event, spec } of seen.values()) {
+    // Consult the per-type proctor alert settings: skip a disabled type and use
+    // the configured severity (default = the spec's built-in severity).
+    const config = alertTypeConfig(settings, event.type, spec.severity);
+    if (!config.enabled) continue;
+    const timestamp = isoOrNow(event.timestamp);
+    await upsertProctorAlert(session, {
+      type: event.type,
+      severity: config.severity,
+      timestamp,
+      title: spec.title,
+      detail: detailFromEvent(event),
+      dedupe: timestamp.slice(0, 10),
+      data: event.detail && typeof event.detail === "object" ? event.detail : undefined
+    });
+  }
+}
+
+function detailFromEvent(event) {
+  if (event.detail && typeof event.detail === "object") {
+    const reason = event.detail.reason || event.detail.message || event.detail.surface;
+    if (reason) return String(reason).slice(0, 2000);
+  }
+  return undefined;
+}
+
+// Upsert a source:'proctor' alert into ALERTS_COLLECTION using the same
+// idempotent id convention as Phase-1 ingest:
+//   <source>:<type>:<username_norm>:<contest_slug>:<dedupe>
+// so retries / repeated heartbeats collapse to one document. Attaches video_key
+// (merged output if present, else the raw screen chunk prefix) for deep-linking.
+async function upsertProctorAlert(session, { type, severity, timestamp, title, detail, dedupe, data }) {
+  const usernameNorm = session.username_norm;
+  const contestSlug = session.contest_slug || "_";
+  const id = `proctor:${type}:${usernameNorm}:${contestSlug}:${dedupe}`;
+  const now = new Date().toISOString();
+
+  const item = {
+    id,
+    source: "proctor",
+    type,
+    severity,
+    timestamp: isoOrNow(timestamp),
+    hackerrank_username: session.hackerrank_username,
+    username_norm: usernameNorm,
+    title,
+    session_id: session.session_id,
+    received_at: now
+  };
+  if (session.contest_slug) item.contest_slug = session.contest_slug;
+  if (session.room) item.room = session.room;
+  if (detail) item.detail = String(detail).slice(0, 2000);
+  if (data && typeof data === "object") item.data = sanitizeObject(data);
+
+  const videoKey = sureShotVideoKey(session);
+  if (videoKey) item.video_key = videoKey;
+
+  await alertRef(id).set(item, { merge: true });
+  return item;
+}
+
+// Deep-link target for a sure-shot alert: the merged review video the worker
+// wrote back onto the session doc (merged_video_key) once a merge succeeded.
+// B4: if no merged video exists yet, return null rather than a `…/screen/`
+// FOLDER prefix — a folder prefix signs a nonexistent object and renders a
+// broken link. With null, the console simply hides the link until the merge
+// runs and merged_video_key is populated.
+function sureShotVideoKey(session) {
+  return session.merged_video_key || null;
+}
+
+function isoOrNow(value) {
+  if (value && !Number.isNaN(Date.parse(value))) return new Date(value).toISOString();
+  return new Date().toISOString();
+}
+
+const ALERT_SOURCES = ["proctor", "contest-eval"];
+const ALERT_SEVERITIES = ["critical", "warning", "info"];
+const ALERT_VERDICT_STATUSES = ["pending", "real", "false_positive", "inconclusive"];
+const ALERT_REQUIRED_FIELDS = ["source", "type", "severity", "timestamp", "hackerrank_username", "title"];
+
+async function ingestAlerts(req) {
+  requireApiKey(req);
+  const body = parseBody(req);
+  const rawAlerts = Array.isArray(body?.alerts) ? body.alerts : [body];
+  if (!rawAlerts.length) return badRequest("No alerts provided");
+  if (rawAlerts.length > 500) return badRequest("Too many alerts in one request (max 500)");
+
+  const now = new Date().toISOString();
+  const normalized = rawAlerts.map((alert, index) => normalizeAlert(alert, index, now));
+
+  // Idempotent merge keyed on alert.id so retried deliveries do not duplicate.
+  await Promise.all(normalized.map((alert) => alertRef(alert.id).set(alert, { merge: true })));
+
+  return { ok: true, ingested: normalized.length, ids: normalized.map((alert) => alert.id) };
+}
+
+function normalizeAlert(alert, index, receivedAt) {
+  if (!alert || typeof alert !== "object" || Array.isArray(alert)) {
+    throw httpError(400, `alerts[${index}] must be an object`);
+  }
+  for (const field of ALERT_REQUIRED_FIELDS) {
+    const value = alert[field];
+    if (value === undefined || value === null || value === "") {
+      throw httpError(400, `alerts[${index}].${field} is required`);
+    }
+  }
+  if (!ALERT_SOURCES.includes(alert.source)) {
+    throw httpError(400, `alerts[${index}].source must be one of ${ALERT_SOURCES.join(", ")}`);
+  }
+  if (!ALERT_SEVERITIES.includes(alert.severity)) {
+    throw httpError(400, `alerts[${index}].severity must be one of ${ALERT_SEVERITIES.join(", ")}`);
+  }
+  if (Number.isNaN(Date.parse(alert.timestamp))) {
+    throw httpError(400, `alerts[${index}].timestamp must be a valid ISO 8601 date`);
+  }
+
+  const username = String(alert.hackerrank_username).trim();
+  const usernameNorm = alert.username_norm ? normalizeUsername(alert.username_norm) : normalizeUsername(username);
+  // Derive a stable, deterministic id when the client did not supply one so the
+  // doc id stays idempotent across retries instead of minting a random UUID.
+  const id = alert.id !== undefined && alert.id !== null && alert.id !== ""
+    ? String(alert.id)
+    : `${alert.source}:${alert.type}:${usernameNorm}:${alert.contest_slug || "_"}:${alert.timestamp}`;
+
+  const item = {
+    id,
+    source: String(alert.source),
+    type: String(alert.type),
+    severity: String(alert.severity),
+    timestamp: String(alert.timestamp),
+    hackerrank_username: username,
+    username_norm: usernameNorm,
+    title: String(alert.title),
+    received_at: receivedAt
+  };
+
+  if (alert.contest_slug) item.contest_slug = String(alert.contest_slug);
+  if (alert.session_id) item.session_id = String(alert.session_id);
+  if (alert.room) item.room = String(alert.room);
+  if (alert.detail) item.detail = String(alert.detail);
+  if (alert.data && typeof alert.data === "object") item.data = sanitizeObject(alert.data);
+  if (alert.video_key) item.video_key = String(alert.video_key);
+  if (alert.verdict && typeof alert.verdict === "object") {
+    item.verdict = normalizeVerdict(alert.verdict);
+  }
+
+  // download_url is resolved on read and never persisted.
+  return item;
+}
+
+function normalizeVerdict(verdict) {
+  const status = ALERT_VERDICT_STATUSES.includes(verdict.status) ? verdict.status : "pending";
+  const out = { status };
+  if (verdict.reason) out.reason = String(verdict.reason).slice(0, 2000);
+  if (verdict.by) out.by = String(verdict.by).slice(0, 200);
+  return out;
+}
+
+async function adminAlerts(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+  const severity = req.query?.severity;
+  const source = req.query?.source;
+  const room = normalizeRoomFilter(req.query?.room);
+  const includeArchived = isTruthyParam(req.query?.include_archived);
+
+  // B6: applying ALL THREE equality filters server-side (contest_slug + severity
+  // + source) would need a composite Firestore index that doesn't exist. To stay
+  // index-free (lower risk than relying on a deployed composite index), we push
+  // AT MOST ONE equality filter to Firestore — the most selective, contest_slug —
+  // and filter the remaining fields in memory. ALERTS_QUERY_LIMIT bounds the scan.
+  let query = firestore.collection(ALERTS_COLLECTION);
+  if (contestSlug) query = query.where("contest_slug", "==", String(contestSlug));
+
+  const snapshot = await query.limit(ALERTS_QUERY_LIMIT).get();
+  const alerts = snapshot.docs
+    .map((doc) => doc.data())
+    .filter((alert) => !severity || alert.severity === String(severity))
+    .filter((alert) => !source || alert.source === String(source))
+    .filter((alert) => !room || String(alert.room || "") === room)
+    // Archive: exclude archived alerts by default; include them only when the
+    // caller opts in with include_archived=true. A missing `archived` field on a
+    // legacy doc is treated as not-archived.
+    .filter((alert) => includeArchived || !alert.archived)
+    .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
+    .slice(0, ALERTS_QUERY_LIMIT);
+
+  const withUrls = await Promise.all(alerts.map(async (alert) => {
+    if (!alert.video_key) return { ...alert, download_url: null };
+    const downloadUrl = await resolveSignedReadUrl(alert.video_key);
+    return { ...alert, download_url: downloadUrl };
+  }));
+
+  // Distinct rooms come from the SESSION docs (capped) so the console dropdown
+  // lists every room, not just rooms that happen to have an alert. Scoped to the
+  // same contest as the alerts query.
+  const rooms = await listSessionRooms(contestSlug);
+
+  return { alerts: withUrls, rooms };
+}
+
+// Distinct room labels across session docs (optionally scoped to a contest),
+// capped. Shared by adminAlerts so its room dropdown matches adminStats'.
+async function listSessionRooms(contestSlug) {
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  return distinctRooms(snapshot.docs.map((doc) => doc.data()));
+}
+
+// A query param is "truthy" when it is the string "true"/"1"/"yes" (case
+// insensitive) or the boolean true. Anything else (incl. absent) is false.
+function isTruthyParam(value) {
+  if (value === true) return true;
+  const lowered = String(value === undefined || value === null ? "" : value).toLowerCase();
+  return lowered === "true" || lowered === "1" || lowered === "yes";
+}
+
+// ---- Alert archive (admin) -------------------------------------------------
+//
+// Toggle the `archived` flag on a set of alert docs. The frontend calls this
+// after a session approve to also-archive that session's alerts, and from a
+// manual archive/unarchive control. archived alerts are hidden from
+// GET /api/admin/alerts unless include_archived=true.
+async function adminAlertAction(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const action = String(body.action || "");
+  if (!["archive", "unarchive"].includes(action)) {
+    return badRequest("action must be archive or unarchive");
+  }
+  const ids = Array.isArray(body.ids) ? body.ids.filter((id) => id !== undefined && id !== null && id !== "") : [];
+  if (!ids.length) return badRequest("ids[] must be a non-empty array of alert ids");
+
+  const archived = action === "archive";
+  const now = new Date().toISOString();
+  const updated = [];
+  const missing = [];
+  for (const rawId of ids) {
+    const id = String(rawId);
+    // merge:true so we only touch the archive fields and never clobber the rest
+    // of the alert doc. Skip ids that don't exist so a stale id can't 500 the
+    // whole batch — report them back so the console can surface it.
+    const ref = alertRef(id);
+    const doc = await ref.get();
+    if (!doc.exists) {
+      missing.push(id);
+      continue;
+    }
+    await ref.set({ archived, archived_at: archived ? now : null }, { merge: true });
+    updated.push(id);
+  }
+
+  return { ok: true, action, archived, updated, missing };
+}
+
+// ---- Proctor alert settings (admin) ----------------------------------------
+//
+// GET returns the full per-type config (defaults merged with stored overrides)
+// so the console can render a complete toggle list. POST upserts the doc; only
+// known types and valid severities are persisted, and a missing/blank `enabled`
+// falls back to the default so a partial payload can't corrupt the config.
+async function adminGetAlertSettings(req) {
+  requireAdmin(req);
+  return await getAlertSettings();
+}
+
+async function adminSaveAlertSettings(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const incoming = body && typeof body.proctor === "object" && body.proctor !== null ? body.proctor : {};
+
+  // Normalize against the known type set + defaults so a bad/partial payload
+  // can never persist an unknown type or an invalid severity.
+  const merged = mergeAlertSettings(incoming);
+  const now = new Date().toISOString();
+  await firestore.collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).set({
+    proctor: merged.proctor,
+    updated_at: now
+  });
+  return merged;
+}
+
+async function resolveSignedReadUrl(objectKey) {
+  // Best-effort: a missing bucket or a signing failure must not break the whole
+  // admin listing, so we degrade to null instead of throwing.
+  try {
+    const [downloadUrl] = await bucket()
+      .file(String(objectKey))
+      .getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: Date.now() + URL_EXPIRY_SECONDS * 1000
+      });
+    return downloadUrl;
+  } catch (error) {
+    console.warn(`Failed to sign read URL for ${objectKey}: ${error?.message || error}`);
+    return null;
+  }
+}
+
+function alertRef(alertId) {
+  return firestore.collection(ALERTS_COLLECTION).doc(String(alertId));
+}
+
 async function getSession(sessionId) {
   const doc = await sessionRef(sessionId).get();
   if (!doc.exists) throw httpError(404, "Session not found");
   return doc.data();
 }
 
+// H3: gate every client WRITE endpoint on session status so admin lock/end and
+// the pending-approval hold actually stop the browser instead of silently
+// accepting more evidence/heartbeats:
+//   ended  → 409 session_ended (the test is over; no further writes)
+//   locked → 403 session_locked (admin paused it; needs unlock)
+//   pending_approval → 403 waiting_for_approval (second device, not yet live)
+// active (and any unknown/legacy status) is allowed so happy paths are unchanged.
+function requireWritableSession(session) {
+  const status = session?.status;
+  if (status === "ended") throw httpError(409, "session_ended");
+  if (status === "locked") throw httpError(403, "session_locked");
+  if (status === "pending_approval") throw httpError(403, "waiting_for_approval");
+  return session;
+}
+
+// Like getSession but returns null instead of throwing — used by resume and
+// single-session reconciliation where "not found" is a normal control-flow path.
+async function getSessionOrNull(sessionId) {
+  const doc = await sessionRef(String(sessionId)).get();
+  return doc.exists ? doc.data() : null;
+}
+
 async function getSettings() {
   const doc = await settingsRef().get();
   return doc.exists ? doc.data() : null;
+}
+
+// ---- GCS contest-foldering (Phase 2, 2.1) ---------------------------------
+// ONE place that turns a contest_url into a path slug, and ONE place that
+// assembles the per-session GCS prefix. Every key-build site calls
+// sessionPrefix(session) so upload, signing, and admin-evidence listing always
+// agree. New shape: contests/<slug>/sessions/<username_norm>/<session_id>/...
+// Legacy fallback (no/invalid contest_url): sessions/<username_norm>/<session_id>/...
+
+// Extract the contest slug from a contest_url: last non-empty path segment, then
+// the existing sanitizeSegment. Empty/invalid url → "" (legacy, no contest folder).
+function contestSlugFromUrl(contestUrl) {
+  if (!contestUrl) return "";
+  let pathname;
+  try {
+    pathname = new URL(String(contestUrl)).pathname;
+  } catch {
+    return "";
+  }
+  const segments = String(pathname).split("/").filter(Boolean);
+  if (!segments.length) return "";
+  return sanitizeSegment(segments[segments.length - 1]);
+}
+
+// Build the per-session prefix from parts. Slug present → contest folder; absent
+// → legacy layout (and never a contests// double-slash).
+function buildStoragePrefix(contestSlug, usernameNorm, sessionId) {
+  if (contestSlug) {
+    return `contests/${contestSlug}/sessions/${usernameNorm}/${sessionId}/`;
+  }
+  return `sessions/${usernameNorm}/${sessionId}/`;
+}
+
+// The prefix for an existing session doc. Prefer the persisted storage_prefix
+// (zero extra reads); fall back to reconstructing from stored fields so legacy
+// docs written before Phase 2 still resolve to their original legacy path.
+function sessionPrefix(session) {
+  if (session && session.storage_prefix) return session.storage_prefix;
+  return buildStoragePrefix(session?.contest_slug, session?.username_norm, session?.session_id);
+}
+
+// Room label sanitizer (Epic 4.2): a short human-readable label, stored on the
+// session/alert for display only (never used in a GCS key). Keep letters,
+// digits, space, dash, dot, underscore; bound the length. Never throws.
+function sanitizeRoom(value) {
+  return String(value).trim().replace(/[^a-zA-Z0-9 ._-]/g, "").slice(0, 80);
 }
 
 function sessionRef(sessionId) {
@@ -410,7 +1484,15 @@ function bucket() {
 
 function parseBody(req) {
   if (!req.body) return {};
-  return typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+  if (typeof req.body !== "string") return req.body;
+  // N3: malformed JSON is a client error, not a server crash. Catch the
+  // SyntaxError and surface a clean 400 instead of falling through to the
+  // catch-all (which would otherwise report it as a 500).
+  try {
+    return JSON.parse(req.body);
+  } catch {
+    throw httpError(400, "invalid_json");
+  }
 }
 
 function requireFields(body, fields) {
@@ -428,11 +1510,45 @@ function requireAdmin(req) {
   }
 }
 
+let warnedMissingApiKey = false;
+
+function requireApiKey(req) {
+  // Closed-by-default: if no ingest key is configured, reject every request so
+  // a misconfigured deploy never accepts unauthenticated alert writes.
+  if (!ALERTS_INGEST_API_KEY) {
+    if (!warnedMissingApiKey) {
+      console.warn("ALERTS_INGEST_API_KEY is not set; rejecting all /api/alerts ingest requests.");
+      warnedMissingApiKey = true;
+    }
+    throw httpError(401, "Unauthorized");
+  }
+  const provided = req.get?.("x-api-key") || req.headers?.["x-api-key"] || "";
+  if (!safeEqual(provided, ALERTS_INGEST_API_KEY)) {
+    throw httpError(401, "Unauthorized");
+  }
+}
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a), "utf8");
+  const bufB = Buffer.from(String(b), "utf8");
+  // timingSafeEqual requires equal-length buffers; comparing lengths first would
+  // leak length but bail out, so hash both to a fixed width and compare those.
+  const hashA = createHash("sha256").update(bufA).digest();
+  const hashB = createHash("sha256").update(bufB).digest();
+  return timingSafeEqual(hashA, hashB);
+}
+
 function publicSettings(settings) {
   return {
     start_at: settings?.start_at || "",
     end_at: settings?.end_at || "",
     contest_url: settings?.contest_url || "",
+    // contest_slug is derived from contest_url and persisted at save time; we
+    // recompute on read so an older settings doc (no stored slug) still reports
+    // the right value. This is the slug all sure-shot alerts/sessions join on.
+    contest_slug: settings?.contest_slug || contestSlugFromUrl(settings?.contest_url),
+    // Passcodes are removed (Phase 2, 0.1). These flags remain for backward
+    // compatibility with any older admin UI; the backend no longer enforces them.
     passcode_set: Boolean(settings?.passcode_hash),
     passcode_preview: settings?.passcode_preview || "",
     end_code_set: Boolean(settings?.end_code_hash),
@@ -455,7 +1571,12 @@ function normalizeUsername(value) {
 }
 
 function sanitizeSegment(value) {
-  return String(value).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  const cleaned = String(value).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  // M1: a segment that is empty or all-dots (e.g. "", ".", "..") is a path
+  // traversal / blank-key hazard once it lands in a GCS object key. Substitute a
+  // safe token so a username like ".." can never become a ".." path component.
+  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
+  return cleaned;
 }
 
 function sanitizeObject(value) {
@@ -498,7 +1619,7 @@ function httpError(statusCode, message) {
 function setCors(res) {
   res.set("access-control-allow-origin", PUBLIC_APP_ORIGIN);
   res.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  res.set("access-control-allow-headers", "content-type,x-admin-password");
+  res.set("access-control-allow-headers", "content-type,x-admin-password,x-api-key");
 }
 
 function send(res, statusCode, body) {

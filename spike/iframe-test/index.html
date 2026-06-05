@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Proctor — Extension test &amp; install</title>
+<style>
+  :root { --ink:#0f172a; --line:#e2e8f0; --panel:#fff; --bg:#f1f5f9; --ok:#15803d; --bad:#b91c1c; --warn:#b45309; --muted:#64748b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--ink); background:var(--bg); }
+  header { padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; }
+  .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+  .wrap { display:grid; grid-template-columns: 1fr 380px; gap:14px; padding:14px; align-items:start; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; }
+  aside { display:flex; flex-direction:column; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:13px; font-weight:700; }
+  .pill.ok { background:#dcfce7; color:var(--ok); } .pill.bad { background:#fee2e2; color:var(--bad); } .pill.warn { background:#fef3c7; color:var(--warn); } .pill.muted { background:#f1f5f9; color:var(--muted); }
+  button, a.btn { font:inherit; padding:8px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; text-decoration:none; color:var(--ink); display:inline-block; }
+  button.primary, a.btn.primary { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  ol { margin:6px 0 0; padding-left:20px; } ol li { margin:4px 0; }
+  code { background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .big-status { font-size:22px; font-weight:800; margin:4px 0 10px; }
+  .log { font:12px/1.45 ui-monospace, monospace; background:#0b1220; color:#cbd5e1; border-radius:6px; padding:8px; height:160px; overflow:auto; white-space:pre-wrap; }
+  .kv { display:flex; justify-content:space-between; gap:8px; padding:3px 0; border-bottom:1px dashed var(--line); }
+  .kv:last-child { border-bottom:0; }
+  .count { font-weight:700; }
+  hr { border:0; border-top:1px solid var(--line); margin:12px 0; }
+  /* overlays */
+  #warn, #lock { position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:50; }
+  #warn { background:rgba(180,83,9,.96); color:#fff; } #lock { background:rgba(15,23,42,.98); color:#fff; }
+  .overlay-card { max-width:560px; text-align:center; padding:28px; }
+  .big { font-size:34px; font-weight:800; } .count-big { font-size:64px; font-weight:800; font-variant-numeric:tabular-nums; }
+  input { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Proctor &mdash; Extension test &amp; install</h1>
+  <div class="sub">Download &amp; install the proctoring extension, confirm the page can detect it, and try the fullscreen / tab-away / cross-tab primitives. (The iframe test is done — HackerRank can't be embedded; we're going extension + web-evidence.)</div>
+</header>
+
+<div class="wrap">
+  <div>
+    <!-- ===== Extension install + detection ===== -->
+    <div class="card">
+      <h2>1 · Extension status</h2>
+      <div class="big-status"><span id="extStatus" class="pill muted">checking…</span></div>
+      <div class="row">
+        <button class="primary" id="recheck">Re-check</button>
+        <button id="reload">Reload page</button>
+        <span class="sub" id="extDetail">After installing, click Re-check (or reload).</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Download the extension</h2>
+      <div class="row">
+        <a class="btn primary" href="proctor-extension.zip" download>⬇ Download unpacked (.zip) — recommended</a>
+        <a class="btn" href="proctor-extension.crx" download>⬇ Download .crx</a>
+      </div>
+      <p class="sub" style="margin-top:8px">The <b>.zip</b> is for the reliable "Load unpacked" path. The <b>.crx</b> is to feel the self-hosted-install friction (Chrome will likely refuse it — that's the lesson).</p>
+    </div>
+
+    <div class="card">
+      <h2>3 · Install instructions</h2>
+      <b>Easy path — Load unpacked (works 100%):</b>
+      <ol>
+        <li>Download the <b>.zip</b> above and unzip it to a folder.</li>
+        <li>Open <code>chrome://extensions</code></li>
+        <li>Turn on <b>Developer mode</b> (top-right toggle).</li>
+        <li>Click <b>Load unpacked</b> → select the unzipped <code>proctor-extension</code> folder.</li>
+        <li>Come back here and click <b>Re-check</b> — status should flip to green.</li>
+      </ol>
+      <hr />
+      <b>The .crx path (to test self-hosted install friction):</b>
+      <ol>
+        <li><code>chrome://extensions</code>, Developer mode on.</li>
+        <li>Drag the downloaded <b>.crx</b> onto the page.</li>
+        <li>Chrome will likely <b>block it</b> ("can only be added from the Chrome Web Store"). That friction is exactly why real install = Web Store (BYOD) or force-install policy (lab machines).</li>
+      </ol>
+      <p class="sub">On install you'll see the warning <b>"Read your browsing history"</b> (the <code>tabs</code> permission) — that's what students would see.</p>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>What the extension can see</h2>
+      <div class="kv"><span>extension</span><span id="aStatus" class="pill muted">—</span></div>
+      <p class="sub" style="margin:8px 0 0">When installed, open <code>chrome://extensions</code> → this extension → <b>service worker</b> (Inspect) and switch tabs / alt-tab — it logs every tab + switch browser-wide. It <b>cannot</b> see other programs / Task Manager (needs a native host).</p>
+    </div>
+
+    <div class="card">
+      <h2>Fullscreen-exit lockdown demo</h2>
+      <div class="row"><button id="fs">Go fullscreen</button><label class="sub">grace <input id="grace" type="number" value="8" min="1" max="60" style="width:56px"></label></div>
+      <p class="sub" style="margin:8px 0 0">Esc out: 1st = type-to-continue, 2nd = lock (code <b>1234</b>). Works on <i>this</i> tab only.</p>
+    </div>
+
+    <div class="card">
+      <h2>Tab-away / focus detection (this tab)</h2>
+      <div class="kv"><span>visibilityState</span><span id="d-vis" class="pill muted">—</span></div>
+      <div class="kv"><span>window focused</span><span id="d-foc" class="pill muted">—</span></div>
+      <div class="kv"><span>hidden events</span><span id="d-hid">0</span></div>
+      <div class="kv"><span>blur events</span><span id="d-blur">0</span></div>
+      <div class="kv"><span>fullscreen exits</span><span id="d-fsx">0</span></div>
+      <div class="row" style="margin-top:8px"><button id="openTab">Open HackerRank in NEW TAB + probe it</button></div>
+      <p class="sub" style="margin:6px 0 0">Cross-tab probe shows this page <b>cannot</b> read another tab's state — proving the extension is needed for that.</p>
+    </div>
+
+    <div class="card">
+      <h2>Event log</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </aside>
+</div>
+
+<div id="warn"><div class="overlay-card">
+  <div class="big">Return to full screen</div><p>Your test will lock in</p>
+  <div class="count-big" id="warnCount">8</div>
+  <p>Type <b>I will not exit full screen</b>:</p><input id="warnInput" autocomplete="off" />
+  <div style="margin-top:12px"><button class="primary" id="warnOk">Continue</button></div>
+</div></div>
+<div id="lock"><div class="overlay-card">
+  <div class="big">Test locked</div><p>Enter unlock code:</p><input id="lockInput" autocomplete="off" />
+  <div style="margin-top:12px"><button class="primary" id="lockOk">Unlock</button></div>
+  <p class="sub" style="margin-top:14px">(Demo code: <b>1234</b>)</p>
+</div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
