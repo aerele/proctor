@@ -478,16 +478,16 @@ def test_first_attempt_alerts(t):
     tfa2 = [a for a in got if a["type"] == "tough_first_attempt"]
     fa2_probs = set(fa2[0]["data"]["problems"]) if fa2 else set()
     tfa2_probs = set(tfa2[0]["data"]["tough_problems"]) if tfa2 else set()
-    t.check(fa2_probs == {"easy-prob"},
-            "operator-marked tough_questions removes manual-prob from first_attempt_solve",
+    t.check(fa2_probs == {"easy-prob", "hard-prob"},
+            "non-empty tough_questions is AUTHORITATIVE: data-hard 'hard-prob' stays a normal first_attempt_solve",
             detail=str(fa2_probs))
-    t.check(tfa2_probs == {"hard-prob", "manual-prob"},
-            "tough_first_attempt now covers data-hard AND operator-marked tough problems",
+    t.check(tfa2_probs == {"manual-prob"},
+            "tough_first_attempt covers ONLY operator-marked problems when a list is set (data-hard ignored)",
             detail=str(tfa2_probs))
-    # provenance split is recorded for the flag
+    # provenance: only operator-marked; data_hard is empty because it is ignored when a list is set
     t.check(tfa2 and set(tfa2[0]["data"]["operator_marked"]) == {"manual-prob"}
-            and set(tfa2[0]["data"]["data_hard"]) == {"hard-prob"},
-            "tough_first_attempt records operator_marked vs data_hard provenance",
+            and set(tfa2[0]["data"].get("data_hard", [])) == set(),
+            "tough_first_attempt provenance: operator_marked only (data_hard ignored under authoritative list)",
             detail=str((tfa2 or [{}])[0].get("data")))
 
     # --- tough_questions empty => falls back to data-hard derivation only ---

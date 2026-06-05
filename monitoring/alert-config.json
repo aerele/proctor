@@ -1,6 +1,15 @@
 {
-  "_README": "contest-eval alert catalog + per-type toggles. One object per alert TYPE. 'enabled' gates whether the poller builds alerts of that type at all (disabled => silently skipped, never POSTed). 'severity' (critical|warning|info) OVERRIDES the dynamically-computed default severity in alerts.build_alerts when set to a non-null value; set severity to null (or delete the key) to keep the dynamic mapping. NOTE: severity also drives verdict-seam routing (alerts.is_ambiguous routes warning-level web_paste/recurring_pair/peer_copy_cluster to the human seam), so forcing a severity here can change whether a type is routed for human review. Missing file => every type enabled with dynamic severity (current/legacy behavior). FIRST-ATTEMPT FLAGS: 'first_attempt_solve' fires when a candidate got a problem ACCEPTED on their FIRST submission attempt (zero prior wrong attempts); 'tough_first_attempt' is emitted INSTEAD when that first-attempt solve is on a TOUGH problem. TOUGH = the challenge slug/id is in the operator-marked 'tough_questions' list below OR it is data-derived hard (<=10 solvers); the manual list WINS/AUGMENTS the data derivation. 'fast_solve' is the deprecated former name of first_attempt_solve and is still accepted here as an ALIAS (it seeds first_attempt_solve's config if first_attempt_solve is absent), but new alerts are only emitted under first_attempt_solve / tough_first_attempt.",
-  "tough_questions": [],
+  "_README": "contest-eval alert catalog + per-type toggles. One object per alert TYPE. 'enabled' gates whether the poller builds alerts of that type at all (disabled => silently skipped, never POSTed). 'severity' (critical|warning|info) OVERRIDES the dynamically-computed default severity in alerts.build_alerts when set to a non-null value; set severity to null (or delete the key) to keep the dynamic mapping. NOTE: severity also drives verdict-seam routing (alerts.is_ambiguous routes warning-level web_paste/recurring_pair/peer_copy_cluster to the human seam), so forcing a severity here can change whether a type is routed for human review. Missing file => every type enabled with dynamic severity (current/legacy behavior). FIRST-ATTEMPT FLAGS: 'first_attempt_solve' fires when a candidate got a problem ACCEPTED on their FIRST submission attempt (zero prior wrong attempts) on a NORMAL problem; 'tough_first_attempt' is emitted INSTEAD when that first-attempt solve is on a TOUGH problem. TOUGH semantics: if 'tough_questions' below is NON-EMPTY it is AUTHORITATIVE — ONLY those slugs are tough, and the noisy data-derived <=10-solver rule is IGNORED (this avoids false positives early in a contest when almost every problem has near-zero solvers). If 'tough_questions' is EMPTY, it falls back to the data-derived rule (<=10 solvers = hard). Mark tough problems by their HackerRank difficulty (Medium/Hard/Expert), NOT by live solve count. 'fast_solve' is the deprecated former name of first_attempt_solve and is still accepted as an ALIAS.",
+  "tough_questions": [
+    "challenge-4-aerele",
+    "challenge-5-aerele",
+    "challenge-6-aerele",
+    "challenge-7-aerele",
+    "challenge-8-aerele",
+    "challenge-9-aerele",
+    "occupations",
+    "15-days-of-learning-sql"
+  ],
   "peer_copy_cluster": {
     "enabled": true,
     "severity": "critical",
@@ -17,13 +26,13 @@
     "notes": "Accepted code carries web/editorial provenance signatures (smart quotes, NBSP, class-Solution, etc.) — likely pasted from an online source."
   },
   "first_attempt_solve": {
-    "enabled": false,
+    "enabled": true,
     "severity": "info",
     "notes": "Candidate got a problem ACCEPTED on their FIRST submission attempt (zero prior wrong attempts on that problem) — on a NORMAL (non-tough) problem. Metadata corroborator, not a standalone flag."
   },
   "tough_first_attempt": {
     "enabled": true,
     "severity": "critical",
-    "notes": "A first-attempt accepted solve on a TOUGH problem (operator-marked in tough_questions OR data-derived hard). The real 'solved a tough question on the first attempt' FLAG — emitted instead of first_attempt_solve for tough problems."
+    "notes": "A first-attempt accepted solve on a TOUGH problem (a slug in the operator-marked tough_questions list; or data-derived hard only when tough_questions is empty). The real 'solved a tough question on the first attempt' FLAG — emitted instead of first_attempt_solve for tough problems."
   }
 }

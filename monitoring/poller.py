@@ -80,6 +80,13 @@ def select_code_targets(meta, flagged, chal_by_slug):
 
 
 def run_cycle(args, acquirer, seam, cycle_idx):
+    # Hot-reload alert-config each cycle so live tuning (enable/disable a type, edit
+    # tough_questions) takes effect WITHOUT restarting the poller. A malformed or
+    # mid-save edit keeps the last-good config and never crashes the loop.
+    try:
+        args._alert_config = alertmod.load_alert_config(args.alert_config)
+    except Exception as e:
+        log(f"  alert-config reload skipped (keeping last good): {e}")
     chal_by_slug = {}
     log(f"cycle {cycle_idx}: fetching metadata (mode={acquirer.mode})")
     try:
