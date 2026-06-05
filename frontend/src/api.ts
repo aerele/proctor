@@ -1,7 +1,12 @@
 import type {
   AdminStatsResponse,
   Alert,
+  AlertActionRequest,
+  AlertActionResponse,
   AlertFilters,
+  AlertSettings,
+  AlertsResponse,
+  BeaconKind,
   HeartbeatResponse,
   ProctorEvent,
   ProctorSettings,
@@ -15,11 +20,26 @@ import type {
   UploadUrlResponse
 } from "./types";
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
+export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+export const isDemoMode = demoMode;
 const demoSettingsKey = "aerele-proctor-demo-settings";
 const demoSessionsKey = "aerele-proctor-demo-sessions";
+const demoAlertsKey = "aerele-proctor-demo-alerts";
+const demoAlertSettingsKey = "aerele-proctor-demo-alert-settings";
 export const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD ?? "";
+// C1: when set, the unlock gate compares the sha256 hash of the typed password
+// to this embedded hash (so the plain password is never shipped in the bundle).
+// Empty when unset; callers fall back to the plain adminPassword compare.
+export const adminPasswordHash = (import.meta.env.VITE_ADMIN_PASSWORD_HASH ?? "").trim().toLowerCase();
+
+// C1: SHA-256 hex of an input string via the Web Crypto API. Used by the admin
+// unlock gate to verify the typed password against VITE_ADMIN_PASSWORD_HASH.
+export async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 async function request<T>(path: string, init: RequestInit): Promise<T> {
   if (!apiBaseUrl && !demoMode) {
@@ -469,22 +489,34 @@ export async function fetchAdminSessions(username: string, password: string) {
   });
 }
 
-export async function fetchAdminStats(password: string, contestSlug?: string): Promise<AdminStatsResponse> {
+export async function fetchAdminStats(password: string, contestSlug?: string, room?: string): Promise<AdminStatsResponse> {
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
     const sessions = readDemoSessions();
+    // Distinct rooms come from the demo session store (contest-scoped, BEFORE the
+    // room filter) so the dropdown stays full. Fall back to the demo alert rooms
+    // when no sessions exist yet so the canned-number path still has a dropdown.
+    const demoRooms = sessions.length
+      ? [...new Set(sessions.filter((s) => !contestSlug || s.contest_slug === contestSlug).map((s) => String(s.room || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+      : distinctDemoRooms(readDemoAlerts(), contestSlug);
     // Derive live counts from the demo session store so the dashboard reflects
     // whatever the student flow created. Fall back to canned numbers when empty.
     if (!sessions.length) {
+      const canned = { live: 6, locked: 1, pending_approval: 2, finished: 14, disconnected: 1, total: 23, not_started_or_total: 23 };
       return {
         contest_slug: contestSlug || null,
-        stats: { live: 6, locked: 1, pending_approval: 2, finished: 14, total: 23, not_started_or_total: 23 }
+        room: room || null,
+        stats: canned,
+        rooms: demoRooms,
+        disconnected_staleness_ms: 45000
       };
     }
-    const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, total: 0, not_started_or_total: 0 };
+    const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, total: 0, not_started_or_total: 0 };
     for (const session of sessions) {
       if (contestSlug && session.contest_slug !== contestSlug) continue;
+      // Room scopes the COUNTS (but not the rooms dropdown, computed above).
+      if (room && String(session.room || "") !== room) continue;
       stats.total += 1;
       if (session.status === "active") stats.live += 1;
       else if (session.status === "locked") stats.locked += 1;
@@ -492,11 +524,14 @@ export async function fetchAdminStats(password: string, contestSlug?: string): P
       else if (session.status === "ended") stats.finished += 1;
     }
     stats.not_started_or_total = stats.total;
-    return { contest_slug: contestSlug || null, stats };
+    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000 };
   }
 
-  const query = contestSlug ? `?contest_slug=${encodeURIComponent(contestSlug)}` : "";
-  return request<AdminStatsResponse>(`/api/admin/stats${query}`, {
+  const query = new URLSearchParams();
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  if (room) query.set("room", room);
+  const suffix = query.toString();
+  return request<AdminStatsResponse>(`/api/admin/stats${suffix ? `?${suffix}` : ""}`, {
     method: "GET",
     headers: {
       "x-admin-password": password
@@ -567,21 +602,28 @@ function applyDemoSessionAction(body: SessionActionRequest): Array<Record<string
   return updated;
 }
 
-export async function fetchAlerts(password: string, filters?: AlertFilters): Promise<{ alerts: Alert[] }> {
+export async function fetchAlerts(password: string, filters?: AlertFilters): Promise<AlertsResponse> {
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
-    const alerts = filterDemoAlerts(demoAlerts(), filters);
-    return { alerts };
+    const all = readDemoAlerts();
+    const alerts = filterDemoAlerts(all, filters);
+    // Distinct rooms come from the FULL alert set (contest-scoped only), BEFORE
+    // the room/archive filter, so the dropdown always lists every room — mirroring
+    // the backend (which derives rooms from session docs over the contest scope).
+    const rooms = distinctDemoRooms(all, filters?.contest_slug);
+    return { alerts, rooms };
   }
 
   const query = new URLSearchParams();
   if (filters?.source) query.set("source", filters.source);
   if (filters?.severity) query.set("severity", filters.severity);
   if (filters?.contest_slug) query.set("contest_slug", filters.contest_slug);
+  if (filters?.room) query.set("room", filters.room);
+  if (filters?.include_archived) query.set("include_archived", "true");
   const suffix = query.toString();
 
-  return request<{ alerts: Alert[] }>(`/api/admin/alerts${suffix ? `?${suffix}` : ""}`, {
+  return request<AlertsResponse>(`/api/admin/alerts${suffix ? `?${suffix}` : ""}`, {
     method: "GET",
     headers: {
       "x-admin-password": password
@@ -589,14 +631,85 @@ export async function fetchAlerts(password: string, filters?: AlertFilters): Pro
   });
 }
 
+// POST /api/admin/alert-action — archive/unarchive a set of alert ids. In demo
+// mode this MUTATES the persisted demo alert store so the console list and stats
+// visibly change after the action (Karthi saw clicks do nothing in demo).
+export async function alertAction(password: string, body: AlertActionRequest): Promise<AlertActionResponse> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const archived = body.action === "archive";
+    const now = new Date().toISOString();
+    const ids = new Set(body.ids.filter(Boolean).map(String));
+    const all = readDemoAlerts();
+    const updated: string[] = [];
+    const missing: string[] = [];
+    for (const id of ids) {
+      const found = all.find((alert) => alert.id === id);
+      if (!found) {
+        missing.push(id);
+        continue;
+      }
+      found.archived = archived;
+      found.archived_at = archived ? now : null;
+      updated.push(id);
+    }
+    writeDemoAlerts(all);
+    return { ok: true, action: body.action, archived, updated, missing };
+  }
+
+  return request<AlertActionResponse>("/api/admin/alert-action", {
+    method: "POST",
+    headers: {
+      "x-admin-password": password
+    },
+    body: JSON.stringify(body)
+  });
+}
+
 function filterDemoAlerts(alerts: Alert[], filters?: AlertFilters): Alert[] {
-  if (!filters) return alerts;
   return alerts.filter((alert) => {
-    if (filters.source && alert.source !== filters.source) return false;
-    if (filters.severity && alert.severity !== filters.severity) return false;
-    if (filters.contest_slug && alert.contest_slug !== filters.contest_slug) return false;
+    if (filters?.source && alert.source !== filters.source) return false;
+    if (filters?.severity && alert.severity !== filters.severity) return false;
+    if (filters?.contest_slug && alert.contest_slug !== filters.contest_slug) return false;
+    if (filters?.room && String(alert.room || "") !== filters.room) return false;
+    // Exclude archived alerts by default; include them only on opt-in. This
+    // mirrors the backend default-excludes-archived behaviour.
+    if (!filters?.include_archived && alert.archived) return false;
     return true;
   });
+}
+
+function distinctDemoRooms(alerts: Alert[], contestSlug?: string): string[] {
+  const set = new Set<string>();
+  for (const alert of alerts) {
+    if (contestSlug && alert.contest_slug !== contestSlug) continue;
+    const room = String(alert.room || "").trim();
+    if (room) set.add(room);
+  }
+  return [...set].sort((a, b) => a.localeCompare(b)).slice(0, 200);
+}
+
+// Persisted demo alert store. Seeded once from the canned sample set so archive
+// flags survive across reloads and re-renders. Read-through: if nothing is
+// stored yet, seed and persist the sample alerts.
+function readDemoAlerts(): Alert[] {
+  const raw = window.localStorage.getItem(demoAlertsKey);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as Alert[];
+    } catch {
+      // fall through to reseed
+    }
+  }
+  const seeded = demoAlerts();
+  writeDemoAlerts(seeded);
+  return seeded;
+}
+
+function writeDemoAlerts(alerts: Alert[]) {
+  window.localStorage.setItem(demoAlertsKey, JSON.stringify(alerts));
 }
 
 function demoAlerts(): Alert[] {
@@ -686,8 +799,123 @@ function demoAlerts(): Alert[] {
   ];
 }
 
+// Default per-type proctor alert config — mirrors the backend
+// DEFAULT_PROCTOR_ALERT_SETTINGS so the demo console renders the same toggle list.
+const DEFAULT_DEMO_ALERT_SETTINGS: AlertSettings = {
+  proctor: {
+    recording_stopped: { enabled: true, severity: "critical" },
+    screen_share_stopped: { enabled: true, severity: "critical" },
+    invalid_share_surface: { enabled: true, severity: "critical" },
+    recording_error: { enabled: true, severity: "critical" },
+    ip_changed: { enabled: true, severity: "warning" },
+    tab_hidden: { enabled: true, severity: "warning" },
+    tab_away: { enabled: true, severity: "warning" },
+    disconnected: { enabled: true, severity: "warning" }
+  }
+};
+
+// Merge a (possibly partial) stored proctor config over the defaults so callers
+// always see a complete, well-formed per-type config — mirrors backend merge.
+function mergeDemoAlertSettings(stored?: Partial<AlertSettings["proctor"]>): AlertSettings {
+  const proctor: AlertSettings["proctor"] = {};
+  for (const [type, def] of Object.entries(DEFAULT_DEMO_ALERT_SETTINGS.proctor)) {
+    const override = stored?.[type];
+    proctor[type] = {
+      enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
+      severity: override && ["critical", "warning", "info"].includes(override.severity) ? override.severity : def.severity
+    };
+  }
+  return { proctor };
+}
+
+export async function fetchAlertSettings(password: string): Promise<AlertSettings> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    const raw = window.localStorage.getItem(demoAlertSettingsKey);
+    let stored: Partial<AlertSettings["proctor"]> | undefined;
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as AlertSettings;
+        stored = parsed?.proctor;
+      } catch {
+        stored = undefined;
+      }
+    }
+    return mergeDemoAlertSettings(stored);
+  }
+
+  return request<AlertSettings>("/api/admin/alert-settings", {
+    method: "GET",
+    headers: {
+      "x-admin-password": password
+    }
+  });
+}
+
+export async function saveAlertSettings(password: string, settings: AlertSettings): Promise<AlertSettings> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const merged = mergeDemoAlertSettings(settings?.proctor);
+    window.localStorage.setItem(demoAlertSettingsKey, JSON.stringify(merged));
+    return merged;
+  }
+
+  return request<AlertSettings>("/api/admin/alert-settings", {
+    method: "POST",
+    headers: {
+      "x-admin-password": password
+    },
+    body: JSON.stringify(settings)
+  });
+}
+
+// POST /api/session/beacon — liveness beacon via navigator.sendBeacon (NO auth,
+// sendBeacon-friendly). Best-effort, fire-and-forget: never awaited by the
+// caller, never throws. In demo mode it stamps the demo session's last-seen so
+// the demo store stays coherent, then no-ops the network call.
+export function sendSessionBeacon(sessionId: string, kind: BeaconKind): void {
+  if (!sessionId) return;
+  if (demoMode) {
+    const session = readDemoSessions().find((item) => item.session_id === sessionId);
+    // Demo store has no last_seen field on the typed shape; updating updated_at via
+    // upsert keeps the record fresh without changing status. No-op if not found.
+    if (session) upsertDemoSession({ ...session });
+    return;
+  }
+  const url = `${apiBaseUrl}/api/session/beacon`;
+  const payload = JSON.stringify({ session_id: sessionId, kind });
+  try {
+    if (navigator.sendBeacon) {
+      // text/plain keeps the request "simple" (no CORS preflight) and the backend
+      // parses a text/plain JSON string leniently.
+      const blob = new Blob([payload], { type: "text/plain" });
+      navigator.sendBeacon(url, blob);
+      return;
+    }
+  } catch {
+    // fall through to fetch keepalive
+  }
+  // Fallback for browsers without sendBeacon: keepalive fetch so the request can
+  // still complete during unload.
+  try {
+    void fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: payload, keepalive: true });
+  } catch {
+    // best-effort only
+  }
+}
+
 function assertDemoAdmin(password: string) {
-  if (password !== adminPassword) {
+  // The unlock gate (App.tsx) already verified the password (plain compare, or
+  // sha256 against VITE_ADMIN_PASSWORD_HASH) before storing it. Here we only
+  // re-check against the plain VITE_ADMIN_PASSWORD when one is configured; if the
+  // demo build was given ONLY a hash, there is no plain value to compare so we
+  // trust the already-unlocked session and accept any non-empty password.
+  if (adminPassword && password !== adminPassword) {
+    throw new Error("Invalid admin password.");
+  }
+  if (!adminPassword && !password) {
     throw new Error("Invalid admin password.");
   }
 }

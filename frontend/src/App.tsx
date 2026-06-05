@@ -1,8 +1,15 @@
-import { AlertTriangle, Bell, Camera, CheckCircle2, ClipboardList, Clock, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardList, Clock, Cookie, ExternalLink, Lock, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, endSession, fetchAdminSessions, fetchAdminStats, fetchAlerts, fetchProctorSettings, resumeSession, saveProctorSettings, sendEvents, sessionAction, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchProctorSettings, resumeSession, saveAlertSettings, saveProctorSettings, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { createProctorRecorder, type MediaCaptureState } from "./useProctorRecorder";
-import type { AdminStats, Alert, AlertFilters, AlertSeverity, AlertSource, ProctorEvent, ProctorSettings, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+
+// Auto-poll interval for the admin Live stats / Live alerts views.
+const ADMIN_POLL_INTERVAL_MS = 5000;
+
+// Read-only reference list — contest-eval alert types are configured in
+// monitoring/alert-config.json, NOT through this console.
+const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_paste", "fast_solve"] as const;
 
 const sessionStorageKey = "aerele-proctor-session-id";
 
@@ -259,6 +266,25 @@ function StudentApp() {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [status]);
+
+  // STUDENT TAB-CLOSE BEACON: stamp liveness and raise the tab_hidden sure-shot.
+  // visibilitychange→hidden sends kind:'hidden'; pagehide sends kind:'closing'.
+  // Guarded on having an active session_id so the form/ended screens stay silent.
+  // navigator.sendBeacon survives unload; demo mode no-ops the network call.
+  useEffect(() => {
+    if (!sessionId) return;
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") sendSessionBeacon(sessionId, "hidden");
+      else if (document.visibilityState === "visible") sendSessionBeacon(sessionId, "visible");
+    };
+    const onPageHide = () => sendSessionBeacon(sessionId, "closing");
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -924,10 +950,14 @@ function AdminApp() {
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsLoaded, setAlertsLoaded] = useState(false);
   const [alertFilters, setAlertFilters] = useState<AlertFilters>({});
+  const [rooms, setRooms] = useState<string[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [actionMessage, setActionMessage] = useState("");
+  const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
+  const [alertSettingsLoading, setAlertSettingsLoading] = useState(false);
+  const [alertSettingsMessage, setAlertSettingsMessage] = useState("");
 
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
@@ -936,6 +966,7 @@ function AdminApp() {
       const response = await fetchAlerts(password, filters ?? alertFilters);
       const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
       setAlerts(sorted);
+      if (response.rooms) setRooms(response.rooms);
       setAlertsLoaded(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -944,13 +975,16 @@ function AdminApp() {
     }
   };
 
-  const loadStats = async () => {
+  const loadStats = async (filters?: AlertFilters) => {
     setStatsLoading(true);
     setError("");
     try {
-      // B7: scope the live counts to the same contest the admin filtered alerts by.
-      const response = await fetchAdminStats(password, alertFilters.contest_slug);
+      // B7: scope the live counts to the same contest the admin filtered alerts by;
+      // also pass the room filter so counts and the alerts view share scope.
+      const active = filters ?? alertFilters;
+      const response = await fetchAdminStats(password, active.contest_slug, active.room);
       setStats(response.stats);
+      if (response.rooms) setRooms(response.rooms);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -970,6 +1004,7 @@ function AdminApp() {
         if (cancelled) return;
         const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
         setAlerts(sorted);
+        if (response.rooms) setRooms(response.rooms);
         setAlertsLoaded(true);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -991,8 +1026,10 @@ function AdminApp() {
       setStatsLoading(true);
       setError("");
       try {
-        const response = await fetchAdminStats(password, alertFilters.contest_slug);
-        if (!cancelled) setStats(response.stats);
+        const response = await fetchAdminStats(password, alertFilters.contest_slug, alertFilters.room);
+        if (cancelled) return;
+        setStats(response.stats);
+        if (response.rooms) setRooms(response.rooms);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
@@ -1005,13 +1042,69 @@ function AdminApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, stats, password]);
 
-  const unlockAdmin = () => {
+  // ADMIN AUTO-POLL: while on Live stats or Live alerts, refresh on a ~5s
+  // interval IN ADDITION to the manual Refresh button. The interval is cleared on
+  // unmount and whenever the view/filters change (a new effect run replaces it).
+  // Loading flags are deliberately NOT in the dep list (avoids the B0 self-cancel
+  // bug); the poll fires its own request each tick regardless of in-flight state.
+  useEffect(() => {
+    if (!unlocked || (view !== "stats" && view !== "alerts")) return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        if (view === "stats") {
+          const response = await fetchAdminStats(password, alertFilters.contest_slug, alertFilters.room);
+          if (cancelled) return;
+          setStats(response.stats);
+          if (response.rooms) setRooms(response.rooms);
+        } else {
+          const response = await fetchAlerts(password, alertFilters);
+          if (cancelled) return;
+          const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+          setAlerts(sorted);
+          if (response.rooms) setRooms(response.rooms);
+          setAlertsLoaded(true);
+        }
+      } catch {
+        // Swallow poll errors so a transient failure doesn't spam the banner;
+        // the manual Refresh surfaces real errors.
+      }
+    };
+    const timer = window.setInterval(() => void tick(), ADMIN_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, view, password, alertFilters]);
+
+  // C1: when VITE_ADMIN_PASSWORD_HASH is set, verify the typed password by hashing
+  // it (sha256 hex via crypto.subtle) and comparing to the embedded hash — the
+  // plain password is never shipped in the bundle. On match we KEEP the typed
+  // password in state to send as x-admin-password (backend is unchanged). FALLBACK
+  // (hash unset): the existing plain VITE_ADMIN_PASSWORD compare, so the :5173
+  // demo with 'dev' still works.
+  const unlockAdmin = async () => {
     setError("");
-    if (passwordInput !== adminPassword) {
+    const typed = passwordInput;
+    if (adminPasswordHash) {
+      let typedHash = "";
+      try {
+        typedHash = await sha256Hex(typed);
+      } catch {
+        setError("This browser cannot hash the password (crypto.subtle unavailable).");
+        return;
+      }
+      if (typedHash !== adminPasswordHash) {
+        setError("Invalid admin password.");
+        return;
+      }
+    } else if (typed !== adminPassword) {
       setError("Invalid admin password.");
       return;
     }
-    setPassword(passwordInput);
+    setPassword(typed);
     setUnlocked(true);
     setPasswordInput("");
   };
@@ -1103,6 +1196,95 @@ function AdminApp() {
     });
   };
 
+  // ARCHIVE a single alert (or a set of ids) then refresh the alerts list so the
+  // change is visible immediately. In demo mode the api mutates the demo store, so
+  // the reload reflects the archive flag.
+  const archiveAlerts = async (ids: string[], action: "archive" | "unarchive" = "archive") => {
+    if (!ids.length) return;
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await alertAction(password, { action, ids });
+      setActionMessage(`${action === "archive" ? "Archived" : "Unarchived"} ${response.updated.length} alert(s)${response.missing.length ? ` (${response.missing.length} missing)` : ""}.`);
+      await loadAlerts();
+      setSelected(new Set());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  // APPROVE-then-ARCHIVE: the Approve button on an alert row both approves the
+  // session (session-action) AND archives that alert (alert-action), orchestrated
+  // here on the frontend. runAction already refreshes stats/alerts afterward.
+  const approveAndArchive = async (alert: Alert) => {
+    setError("");
+    setActionMessage("");
+    try {
+      await sessionAction(password, {
+        action: "approve",
+        ...(alert.session_id ? { session_id: alert.session_id } : { usernames: [alert.hackerrank_username] }),
+        ...(alert.contest_slug ? { contest_slug: alert.contest_slug } : {})
+      });
+      await alertAction(password, { action: "archive", ids: [alert.id] });
+      setActionMessage(`Approved ${alert.hackerrank_username} and archived the alert.`);
+      await loadStats();
+      await loadAlerts();
+      setSelected(new Set());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const loadAlertSettings = async () => {
+    setAlertSettingsLoading(true);
+    setError("");
+    setAlertSettingsMessage("");
+    try {
+      const response = await fetchAlertSettings(password);
+      setAlertSettings(response);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAlertSettingsLoading(false);
+    }
+  };
+
+  const saveAlertSettingsNow = async (next: AlertSettings) => {
+    setAlertSettingsLoading(true);
+    setError("");
+    setAlertSettingsMessage("");
+    try {
+      const response = await saveAlertSettings(password, next);
+      setAlertSettings(response);
+      setAlertSettingsMessage("Saved proctor alert settings.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAlertSettingsLoading(false);
+    }
+  };
+
+  // Auto-load the proctor alert settings the first time the Settings tab opens.
+  useEffect(() => {
+    if (!unlocked || view !== "settings" || alertSettings !== null) return;
+    let cancelled = false;
+    void (async () => {
+      setAlertSettingsLoading(true);
+      try {
+        const response = await fetchAlertSettings(password);
+        if (!cancelled) setAlertSettings(response);
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        if (!cancelled) setAlertSettingsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, view, alertSettings, password]);
+
   if (!unlocked) {
     return (
       <Shell>
@@ -1137,7 +1319,18 @@ function AdminApp() {
       {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
 
       {view === "stats" ? (
-        <StatsDashboard stats={stats} loading={statsLoading} onRefresh={loadStats} />
+        <StatsDashboard
+          stats={stats}
+          loading={statsLoading}
+          onRefresh={() => loadStats()}
+          rooms={rooms}
+          room={alertFilters.room ?? ""}
+          onRoomChange={(room) => {
+            const next = { ...alertFilters, room: room || undefined };
+            setAlertFilters(next);
+            void loadStats(next);
+          }}
+        />
       ) : null}
 
       {view === "alerts" ? (
@@ -1146,6 +1339,7 @@ function AdminApp() {
           loading={alertsLoading}
           loaded={alertsLoaded}
           filters={alertFilters}
+          rooms={rooms}
           selected={selected}
           onToggleSelected={toggleSelected}
           onFiltersChange={(next) => {
@@ -1154,10 +1348,13 @@ function AdminApp() {
           }}
           onRefresh={() => loadAlerts()}
           onAction={runAction}
+          onArchive={(ids, action) => void archiveAlerts(ids, action)}
+          onApproveArchive={(alert) => void approveAndArchive(alert)}
         />
       ) : null}
 
       {view === "settings" ? (
+      <div className="space-y-5">
       <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
         <div className="mb-5 flex items-center gap-3">
           <Lock size={20} />
@@ -1182,6 +1379,17 @@ function AdminApp() {
         {settingsMessage ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{settingsMessage}</div> : null}
         {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
       </section>
+
+      <ProctorAlertTypesSection
+        settings={alertSettings}
+        loading={alertSettingsLoading}
+        message={alertSettingsMessage}
+        onReload={loadAlertSettings}
+        onSave={saveAlertSettingsNow}
+      />
+
+      <ContestEvalAlertTypesSection />
+      </div>
       ) : null}
 
       {view === "review" ? (
@@ -1213,7 +1421,99 @@ function AdminApp() {
   );
 }
 
-function StatsDashboard({ stats, loading, onRefresh }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void }) {
+// SETTINGS tab — per-type proctor alert configuration (enable/disable + severity)
+// backed by GET/POST /api/admin/alert-settings. Each toggle/severity change saves
+// the FULL config immediately so a partial payload can never be sent.
+function ProctorAlertTypesSection({ settings, loading, message, onReload, onSave }: { settings: AlertSettings | null; loading: boolean; message: string; onReload: () => void; onSave: (next: AlertSettings) => void }) {
+  const types = settings ? Object.keys(settings.proctor) : [];
+  const updateType = (type: string, patch: Partial<ProctorAlertTypeConfig>) => {
+    if (!settings) return;
+    const next: AlertSettings = {
+      proctor: { ...settings.proctor, [type]: { ...settings.proctor[type], ...patch } }
+    };
+    onSave(next);
+  };
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Bell size={20} />
+          <div>
+            <h2 className="text-2xl font-semibold">Proctor alert types</h2>
+            <p className="mt-1 text-sm text-muted">Enable or disable each proctor sure-shot and override its severity. Changes save immediately.</p>
+          </div>
+        </div>
+        <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" onClick={onReload} disabled={loading}>
+          <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> Reload
+        </button>
+      </div>
+
+      {settings === null ? (
+        <div className="rounded-lg border border-line bg-white p-4 text-sm text-muted">{loading ? "Loading alert settings…" : "No alert settings loaded yet."}</div>
+      ) : (
+        <div className="space-y-2">
+          {types.map((type) => {
+            const config = settings.proctor[type];
+            return (
+              <div key={type} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white/60 p-3">
+                <div className="flex items-center gap-3">
+                  <label className="inline-flex items-center gap-2 text-sm font-medium">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-accent"
+                      checked={config.enabled}
+                      disabled={loading}
+                      onChange={(event) => updateType(type, { enabled: event.target.checked })}
+                    />
+                    <span className="font-mono">{type}</span>
+                  </label>
+                  {!config.enabled ? <span className="rounded-full border border-line px-2 py-0.5 text-xs text-muted">disabled</span> : null}
+                </div>
+                <label className="flex items-center gap-2 text-xs text-muted">
+                  Severity
+                  <select
+                    className="focus-ring h-9 w-32 rounded-md border border-line bg-white px-2 text-sm"
+                    value={config.severity}
+                    disabled={loading}
+                    onChange={(event) => updateType(type, { severity: event.target.value as AlertSeverity })}
+                  >
+                    <option value="critical">critical</option>
+                    <option value="warning">warning</option>
+                    <option value="info">info</option>
+                  </select>
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {message ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{message}</div> : null}
+    </section>
+  );
+}
+
+// SETTINGS tab — read-only reference for the contest-eval alert types, which are
+// configured in monitoring/alert-config.json (NOT through this console).
+function ContestEvalAlertTypesSection() {
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-4 flex items-center gap-3">
+        <Search size={20} />
+        <div>
+          <h2 className="text-2xl font-semibold">Contest-eval alert types</h2>
+          <p className="mt-1 text-sm text-muted">Read-only. These are configured in <span className="font-mono">monitoring/alert-config.json</span>, not here.</p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {CONTEST_EVAL_ALERT_TYPES.map((type) => (
+          <span key={type} className="rounded-full border border-line bg-white px-3 py-1.5 font-mono text-xs text-muted">{type}</span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void; rooms: string[]; room: string; onRoomChange: (room: string) => void }) {
   return (
     <section className="space-y-5">
       <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -1222,20 +1522,25 @@ function StatsDashboard({ stats, loading, onRefresh }: { stats: AdminStats | nul
             <ShieldCheck size={20} />
             <div>
               <h1 className="text-2xl font-semibold">Live stats</h1>
-              <p className="mt-1 text-sm text-muted">Current session counts by status across the contest. Refresh to update.</p>
+              <p className="mt-1 text-sm text-muted">Current session counts by status across the contest. Auto-refreshes every 5s; Refresh to update now.</p>
             </div>
           </div>
           <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
             <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
           </button>
         </div>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <RoomFilter rooms={rooms} value={room} onChange={onRoomChange} />
+          {room ? <p className="text-xs text-muted">Counts scoped to room <span className="font-medium">{room}</span>.</p> : null}
+        </div>
       </div>
 
       {stats === null ? (
         <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading stats…" : "No stats loaded yet."}</div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
           <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} />
+          <StatCard label="Disconnected" value={stats.disconnected ?? 0} tone="danger" icon={<Activity size={18} />} />
           <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} />
           <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} />
           <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} />
@@ -1244,6 +1549,22 @@ function StatsDashboard({ stats, loading, onRefresh }: { stats: AdminStats | nul
         </div>
       )}
     </section>
+  );
+}
+
+// Shared room dropdown — populated from the response `rooms` list (full contest
+// scope) so it always lists every room even while one is selected.
+function RoomFilter({ rooms, value, onChange }: { rooms: string[]; value: string; onChange: (room: string) => void }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">Room</span>
+      <select className="focus-ring mt-1 h-10 w-44 rounded-md border border-line bg-white px-3 text-sm" value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">All rooms</option>
+        {rooms.map((label) => (
+          <option key={label} value={label}>{label}</option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -1344,16 +1665,19 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, loading, loaded, filters, selected, onToggleSelected, onFiltersChange, onRefresh, onAction }: {
+function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onToggleSelected, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
   alerts: Alert[];
   loading: boolean;
   loaded: boolean;
   filters: AlertFilters;
+  rooms: string[];
   selected: Set<string>;
   onToggleSelected: (key: string) => void;
   onFiltersChange: (filters: AlertFilters) => void;
   onRefresh: () => void;
   onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
+  onArchive: (ids: string[], action?: "archive" | "unarchive") => void;
+  onApproveArchive: (alert: Alert) => void;
 }) {
   // Unique candidate usernames in the current (selected) alert set, for bulk actions.
   const selectedUsernames = useMemo(() => {
@@ -1372,7 +1696,7 @@ function AlertsConsole({ alerts, loading, loaded, filters, selected, onToggleSel
             <Bell size={20} />
             <div>
               <h1 className="text-2xl font-semibold">Live alerts console</h1>
-              <p className="mt-1 text-sm text-muted">Proctoring and contest-eval signals across all rooms, newest first. Click a clip to open the recorded evidence.</p>
+              <p className="mt-1 text-sm text-muted">Proctoring and contest-eval signals across all rooms, newest first. Auto-refreshes every 5s. Click a clip to open the recorded evidence.</p>
             </div>
           </div>
           <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
@@ -1393,6 +1717,7 @@ function AlertsConsole({ alerts, loading, loaded, filters, selected, onToggleSel
             options={[{ value: "", label: "All severities" }, { value: "critical", label: "Critical" }, { value: "warning", label: "Warning" }, { value: "info", label: "Info" }]}
             onChange={(value) => onFiltersChange({ ...filters, severity: value ? (value as AlertSeverity) : undefined })}
           />
+          <RoomFilter rooms={rooms} value={filters.room ?? ""} onChange={(room) => onFiltersChange({ ...filters, room: room || undefined })} />
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">Contest slug</span>
             <input
@@ -1401,6 +1726,15 @@ function AlertsConsole({ alerts, loading, loaded, filters, selected, onToggleSel
               placeholder="all contests"
               onChange={(event) => onFiltersChange({ ...filters, contest_slug: event.target.value || undefined })}
             />
+          </label>
+          <label className="mb-2 flex items-center gap-2 text-sm">
+            <input
+              className="h-4 w-4 accent-accent"
+              type="checkbox"
+              checked={Boolean(filters.include_archived)}
+              onChange={(event) => onFiltersChange({ ...filters, include_archived: event.target.checked || undefined })}
+            />
+            <span className="font-medium">Show archived</span>
           </label>
         </div>
 
@@ -1432,6 +1766,8 @@ function AlertsConsole({ alerts, loading, loaded, filters, selected, onToggleSel
               selected={selected.has(alert.id)}
               onToggleSelected={() => onToggleSelected(alert.id)}
               onAction={onAction}
+              onArchive={onArchive}
+              onApproveArchive={onApproveArchive}
             />
           ))
         )}
@@ -1475,11 +1811,15 @@ function FilterSelect({ label, value, options, onChange }: { label: string; valu
   );
 }
 
-function AlertRow({ alert, selected, onToggleSelected, onAction }: { alert: Alert; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void }) {
+// Session actions shown on an alert row EXCLUDING approve — approve is handled
+// by the dedicated Approve button below, which also archives the alert.
+const ALERT_ROW_ACTIONS = ACTION_LABELS.filter((item) => item.action !== "approve");
+
+function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
   return (
-    <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
+    <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.archived ? "opacity-70" : ""} ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 gap-3">
           <input className="mt-1.5 h-4 w-4 shrink-0 accent-accent" type="checkbox" checked={selected} onChange={onToggleSelected} aria-label={`Select ${alert.hackerrank_username}`} />
@@ -1488,6 +1828,7 @@ function AlertRow({ alert, selected, onToggleSelected, onAction }: { alert: Aler
               <SeverityPill severity={alert.severity} />
               <span className="rounded-full border border-line px-2.5 py-1 text-xs font-medium capitalize text-muted">{alert.source}</span>
               <span className="rounded-full border border-line px-2.5 py-1 font-mono text-xs text-muted">{alert.type}</span>
+              {alert.archived ? <span className="rounded-full border border-ink/20 bg-ink/5 px-2.5 py-1 text-xs font-medium text-muted">Archived</span> : null}
             </div>
             <h2 className="mt-2 text-lg font-semibold">{alert.title}</h2>
             {alert.detail ? <p className="mt-1 text-sm leading-6 text-muted">{alert.detail}</p> : null}
@@ -1524,7 +1865,34 @@ function AlertRow({ alert, selected, onToggleSelected, onAction }: { alert: Aler
             </button>
           ) : null}
         </div>
-        <ActionButtons onAction={onAction} username={alert.hackerrank_username} sessionId={alert.session_id} actions={ACTION_LABELS} />
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Approve also archives this alert (frontend orchestrates approve → archive). */}
+          <button
+            type="button"
+            onClick={() => onApproveArchive(alert)}
+            className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+          >
+            Approve
+          </button>
+          {alert.archived ? (
+            <button
+              type="button"
+              onClick={() => onArchive([alert.id], "unarchive")}
+              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+            >
+              <ArchiveRestore size={14} /> Unarchive
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onArchive([alert.id], "archive")}
+              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+            >
+              <Archive size={14} /> Archive
+            </button>
+          )}
+          <ActionButtons onAction={onAction} username={alert.hackerrank_username} sessionId={alert.session_id} actions={ALERT_ROW_ACTIONS} />
+        </div>
       </div>
 
       {expanded && hasData ? (
