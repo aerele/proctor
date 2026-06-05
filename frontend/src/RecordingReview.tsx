@@ -1,4 +1,16 @@
-import { AlertTriangle, Clock, Film, Pause, Play, RefreshCw, Search, Video } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Film,
+  Pause,
+  Play,
+  RefreshCw,
+  Rewind,
+  Search,
+  Video
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAdminSessions, fetchRecordingSessions, fetchSubmissionEvents } from "./api";
 import type { AdminSessionDetail, RecordingSession, SessionEvidence, SubmissionEvent } from "./types";
@@ -23,6 +35,14 @@ type TimelineChunk = {
 type TimelineMarker = {
   event: SubmissionEvent;
   offsetSec: number; // (submitted_at − testStart), in seconds
+};
+
+// A RECORDING GAP: a span on the timeline where consecutive chunks' offsets leave
+// a blank (recording stopped / chunks missing). Rendered as a hatched span so the
+// proctor sees "nothing was recorded here". `fromSec`→`toSec` are test-relative.
+type TimelineGap = {
+  fromSec: number;
+  toSec: number;
 };
 
 // Pull the numeric index out of a screen-chunk key, e.g.
@@ -107,20 +127,74 @@ function buildPlaylist(
 // Pick the chunk whose [offset, end] span contains testTime; if none contains it
 // (a gap), pick the nearest chunk by edge distance so a click in a blank seeks to
 // the closest available recording. Returns the playlist position (array index).
-function chunkPosForTestTime(playlist: TimelineChunk[], testTime: number): number {
-  if (!playlist.length) return -1;
-  const containing = playlist.findIndex((c) => testTime >= c.offsetSec && testTime < c.endSec);
-  if (containing !== -1) return containing;
-  let best = 0;
-  let bestDist = Infinity;
-  playlist.forEach((c, i) => {
-    const dist = testTime < c.offsetSec ? c.offsetSec - testTime : testTime - c.endSec;
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = i;
+//
+// PERFORMANCE: chunks are sorted by offsetSec (buildPlaylist sorts by index, and
+// offsets are monotonic in index for both the real and fallback placement), so we
+// BINARY-SEARCH for the candidate instead of an O(n) scan. With 200+ chunks this
+// keeps every seek/click/keyboard-nudge O(log n) rather than O(n). We locate the
+// last chunk whose offsetSec ≤ testTime, then check it and its neighbour to settle
+// containment-vs-nearest. `offsets` is the precomputed sorted offset array.
+function chunkPosForTestTime(playlist: TimelineChunk[], offsets: number[], testTime: number): number {
+  const n = playlist.length;
+  if (!n) return -1;
+  // Binary search: largest i with offsets[i] <= testTime (lo..hi over [-1, n-1]).
+  let lo = 0;
+  let hi = n - 1;
+  let floor = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (offsets[mid] <= testTime) {
+      floor = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
     }
-  });
-  return best;
+  }
+  // The containing chunk (if any) is the floor one — its span starts at/before
+  // testTime; check whether testTime is still inside it.
+  if (floor !== -1 && testTime < playlist[floor].endSec) return floor;
+  // Otherwise testTime sits in a gap (or before the first chunk). The nearest
+  // chunk is either `floor` (gap before the next chunk) or `floor + 1` (the next
+  // chunk's start); compare edge distances. floor === -1 → before everything.
+  const lower = floor; // last chunk ending at/before testTime (or -1)
+  const upper = floor + 1 < n ? floor + 1 : -1; // first chunk starting after testTime
+  if (lower === -1) return upper === -1 ? 0 : upper;
+  if (upper === -1) return lower;
+  const distLower = testTime - playlist[lower].endSec;
+  const distUpper = playlist[upper].offsetSec - testTime;
+  return distLower <= distUpper ? lower : upper;
+}
+
+// Choose the MAJOR label interval (seconds) from total span so labels never crowd.
+// ≤10min→1min, ≤30min→5min, ≤90min→10min, >90min→15min. The minor interval is a
+// lighter subdivision (1/5 of major, snapped to a tidy value) for unlabeled ticks.
+function tickIntervals(spanSeconds: number): { major: number; minor: number } {
+  const minutes = spanSeconds / 60;
+  if (minutes <= 10) return { major: 60, minor: 30 }; // 1min labels, 30s minors
+  if (minutes <= 30) return { major: 5 * 60, minor: 60 }; // 5min labels, 1min minors
+  if (minutes <= 90) return { major: 10 * 60, minor: 2 * 60 }; // 10min labels, 2min minors
+  return { major: 15 * 60, minor: 5 * 60 }; // 15min labels, 5min minors
+}
+
+// Parse a "jump to time" string into seconds. Accepts mm:ss, h:mm:ss, a bare
+// minutes number (e.g. "75" → 75min) or a decimal minutes (e.g. "12.5"). Returns
+// NaN when the input can't be understood so callers can ignore it.
+function parseTimeInput(raw: string): number {
+  const text = raw.trim();
+  if (!text) return NaN;
+  if (text.includes(":")) {
+    const parts = text.split(":").map((p) => p.trim());
+    if (parts.some((p) => p === "" || !/^\d+(\.\d+)?$/.test(p))) return NaN;
+    const nums = parts.map(Number);
+    if (nums.some((n) => !Number.isFinite(n))) return NaN;
+    if (nums.length === 2) return nums[0] * 60 + nums[1]; // mm:ss
+    if (nums.length === 3) return nums[0] * 3600 + nums[1] * 60 + nums[2]; // h:mm:ss
+    return NaN;
+  }
+  // Bare number → minutes (the most natural single-number scrub at this scale).
+  const minutes = Number(text);
+  if (!Number.isFinite(minutes)) return NaN;
+  return minutes * 60;
 }
 
 type Props = {
@@ -154,11 +228,21 @@ export function RecordingReview({ password }: Props) {
   const [currentTestTime, setCurrentTestTime] = useState(0); // seconds, test-relative
   const [refreshNote, setRefreshNote] = useState("");
 
+  // "Jump to time" input (mm:ss / h:mm:ss / bare-minutes), parsed on submit.
+  const [jumpInput, setJumpInput] = useState("");
+  // DRAG-SCRUB state: while the playhead is being dragged we show a live preview
+  // time WITHOUT seeking the <video> on every mousemove (seek only on release, so
+  // a 2-hour scrub stays smooth). `null` when not dragging.
+  const [dragTime, setDragTime] = useState<number | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const preloadRef = useRef<HTMLVideoElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
+  const playerWrapRef = useRef<HTMLDivElement | null>(null);
   // Guards a single in-flight URL refresh so a burst of errors doesn't stampede.
   const refreshingRef = useRef(false);
+  // Live drag flag for the window-level mousemove/up listeners (avoids re-binding).
+  const draggingRef = useRef(false);
 
   // ---- Load the lightweight picker list once. -----------------------------
   useEffect(() => {
@@ -207,6 +291,26 @@ export function RecordingReview({ password }: Props) {
     return { start, end: Math.max(end, start + CHUNK_SECONDS) };
   }, [playlist]);
   const spanDuration = Math.max(1, span.end - span.start);
+
+  // PERF: precompute the sorted chunk-offset array ONCE per playlist so every
+  // seek/click/keyboard-nudge does an O(log n) binary search instead of an O(n)
+  // scan. Memoized on `playlist` (which itself only recomputes on chunks/testStart).
+  const offsets = useMemo(() => playlist.map((c) => c.offsetSec), [playlist]);
+
+  // RECORDING GAPS: spans between consecutive chunks where the next chunk starts
+  // after the previous one ends (recording stopped / chunks missing). Derived once
+  // per playlist. A small tolerance avoids drawing sub-second "gaps" from rounding.
+  // These render as distinct hatched blanks on the continuous bar — NOT as 200
+  // individual segment divs (only the gaps get a div, typically a handful).
+  const gaps = useMemo<TimelineGap[]>(() => {
+    const out: TimelineGap[] = [];
+    for (let i = 1; i < playlist.length; i += 1) {
+      const prevEnd = playlist[i - 1].endSec;
+      const nextStart = playlist[i].offsetSec;
+      if (nextStart - prevEnd > 0.5) out.push({ fromSec: prevEnd, toSec: nextStart });
+    }
+    return out;
+  }, [playlist]);
 
   // SUBMISSION-TIME MARKERS, placed on the SAME test-relative scale the timeline
   // uses: offsetSec = (submitted_at − testStart). Recomputed whenever the events
@@ -354,7 +458,7 @@ export function RecordingReview({ password }: Props) {
   // and seek to (testTime − chunkOffset) within that chunk.
   const seekToTestTime = useCallback(
     (testTime: number, autoplay: boolean) => {
-      const pos = chunkPosForTestTime(playlist, testTime);
+      const pos = chunkPosForTestTime(playlist, offsets, testTime);
       if (pos === -1) return;
       const chunk = playlist[pos];
       const withinChunk = Math.max(0, Math.min(testTime - chunk.offsetSec, CHUNK_SECONDS));
@@ -362,7 +466,7 @@ export function RecordingReview({ password }: Props) {
       setCurrentTestTime(testTime);
       loadChunkIntoPlayer(pos, withinChunk, autoplay);
     },
-    [playlist, loadChunkIntoPlayer]
+    [playlist, offsets, loadChunkIntoPlayer]
   );
 
   // When the playlist first becomes available (or changes session), load the
@@ -432,30 +536,148 @@ export function RecordingReview({ password }: Props) {
     }
   }, [playlist, currentPos, loadChunkIntoPlayer]);
 
-  // Click on the scrubber bar → seek to that test-time.
-  const handleBarClick = useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      const bar = barRef.current;
-      if (!bar || !playlist.length) return;
-      const rect = bar.getBoundingClientRect();
-      const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-      const testTime = span.start + fraction * spanDuration;
-      seekToTestTime(testTime, playing || !videoRef.current?.paused);
+  // Whether playback should resume after a programmatic seek (mirrors the player's
+  // current intent so a seek doesn't stop a playing recording or start a paused one).
+  const wantPlaying = useCallback(() => playing || !videoRef.current?.paused, [playing]);
+
+  // Relative skip by N seconds from the current test-time (used by the skip buttons
+  // and arrow-key nudges). Clamps to the span so it never runs off the bar.
+  const skipBy = useCallback(
+    (deltaSec: number) => {
+      if (!playlist.length) return;
+      const target = Math.max(span.start, Math.min(currentTestTime + deltaSec, span.end));
+      seekToTestTime(target, wantPlaying());
     },
-    [playlist, span.start, spanDuration, seekToTestTime, playing]
+    [playlist.length, span.start, span.end, currentTestTime, seekToTestTime, wantPlaying]
   );
 
-  // Minute tick marks across the span (mm:ss labels, relative to test start).
-  const ticks = useMemo(() => {
-    const out: Array<{ sec: number; pct: number }> = [];
-    const firstTick = Math.ceil(span.start / 60) * 60;
-    for (let sec = firstTick; sec <= span.end; sec += 60) {
-      out.push({ sec, pct: ((sec - span.start) / spanDuration) * 100 });
+  // PREV / NEXT CHUNK: jump to the start of the adjacent chunk in index order.
+  const stepChunk = useCallback(
+    (dir: -1 | 1) => {
+      if (!playlist.length) return;
+      const nextPos = Math.max(0, Math.min(currentPos + dir, playlist.length - 1));
+      if (nextPos === currentPos && (dir === -1 ? currentTestTime <= playlist[0].offsetSec : true)) {
+        // Already at the boundary chunk; for prev, also rewind within-chunk to its start.
+        if (dir === -1) seekToTestTime(playlist[currentPos].offsetSec, wantPlaying());
+        return;
+      }
+      seekToTestTime(playlist[nextPos].offsetSec, wantPlaying());
+    },
+    [playlist, currentPos, currentTestTime, seekToTestTime, wantPlaying]
+  );
+
+  // JUMP TO TIME: parse the input (mm:ss / h:mm:ss / bare minutes) and seek there.
+  const handleJump = useCallback(() => {
+    const parsed = parseTimeInput(jumpInput);
+    if (!Number.isFinite(parsed)) return;
+    // The input is relative to the test start; clamp into the recorded span.
+    const target = Math.max(span.start, Math.min(parsed, span.end));
+    seekToTestTime(target, wantPlaying());
+  }, [jumpInput, span.start, span.end, seekToTestTime, wantPlaying]);
+
+  // Convert an absolute clientX on the bar into a test-relative time.
+  const timeFromClientX = useCallback(
+    (clientX: number) => {
+      const bar = barRef.current;
+      if (!bar) return span.start;
+      const rect = bar.getBoundingClientRect();
+      const fraction = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
+      return span.start + Math.max(0, Math.min(1, fraction)) * spanDuration;
+    },
+    [span.start, spanDuration]
+  );
+
+  // DRAG-SCRUB: pressing on the bar starts a drag; window listeners track the move
+  // and the release. During the drag we only update `dragTime` (a cheap preview);
+  // the actual <video> seek happens once on release so a long scrub stays smooth.
+  const startDrag = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!playlist.length) return;
+      event.preventDefault();
+      draggingRef.current = true;
+      setDragTime(timeFromClientX(event.clientX));
+    },
+    [playlist.length, timeFromClientX]
+  );
+
+  useEffect(() => {
+    const onMove = (event: MouseEvent) => {
+      if (!draggingRef.current) return;
+      setDragTime(timeFromClientX(event.clientX));
+    };
+    const onUp = (event: MouseEvent) => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      const target = timeFromClientX(event.clientX);
+      setDragTime(null);
+      seekToTestTime(target, wantPlaying());
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [timeFromClientX, seekToTestTime, wantPlaying]);
+
+  // ARROW-KEY NUDGE when the player area is focused: ←/→ = ±5s, Shift+←/→ = ±30s.
+  // Space toggles play/pause. We never hijack keys while an input/select/textarea
+  // (or any contenteditable) is focused, so typing in Jump-to-time stays normal.
+  const handlePlayerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        skipBy(event.shiftKey ? -30 : -5);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        skipBy(event.shiftKey ? 30 : 5);
+      } else if (event.key === " " || event.key === "Spacebar") {
+        event.preventDefault();
+        togglePlay();
+      }
+    },
+    [skipBy, togglePlay]
+  );
+
+  // Click on the scrubber bar → seek to that test-time. (A genuine click without a
+  // drag; the drag path handles press-move-release on its own.)
+  const handleBarClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!playlist.length) return;
+      seekToTestTime(timeFromClientX(event.clientX), wantPlaying());
+    },
+    [playlist.length, seekToTestTime, timeFromClientX, wantPlaying]
+  );
+
+  // ADAPTIVE TICKS across the span. The major interval (labeled) is chosen from the
+  // total duration so labels never crowd at 2-hour scale; minor ticks (unlabeled,
+  // lighter) subdivide between them. Labels use formatClock (h:mm:ss past an hour).
+  const { majorTicks, minorTicks } = useMemo(() => {
+    const { major, minor } = tickIntervals(spanDuration);
+    const majorOut: Array<{ sec: number; pct: number }> = [];
+    const minorOut: Array<{ sec: number; pct: number }> = [];
+    const firstMajor = Math.ceil(span.start / major) * major;
+    for (let sec = firstMajor; sec <= span.end + 0.001; sec += major) {
+      majorOut.push({ sec, pct: ((sec - span.start) / spanDuration) * 100 });
     }
-    return out;
+    const firstMinor = Math.ceil(span.start / minor) * minor;
+    for (let sec = firstMinor; sec <= span.end + 0.001; sec += minor) {
+      // Skip minors that coincide with a major tick (avoid double-drawing).
+      if (Math.abs(sec % major) < 0.001) continue;
+      minorOut.push({ sec, pct: ((sec - span.start) / spanDuration) * 100 });
+    }
+    return { majorTicks: majorOut, minorTicks: minorOut };
   }, [span.start, span.end, spanDuration]);
 
-  const playheadPct = Math.max(0, Math.min(100, ((currentTestTime - span.start) / spanDuration) * 100));
+  // The time shown at the playhead: the live drag preview while scrubbing, else the
+  // real playback time. Playhead percent is derived from this so the handle tracks
+  // the cursor during a drag without seeking the video on every move.
+  const displayTime = dragTime ?? currentTestTime;
+  const playheadPct = Math.max(0, Math.min(100, ((displayTime - span.start) / spanDuration) * 100));
+  const playedPct = Math.max(0, Math.min(100, ((currentTestTime - span.start) / spanDuration) * 100));
 
   // Filtered picker list (search box). Case-insensitive over username + name + room.
   const filteredSessions = useMemo(() => {
@@ -608,12 +830,19 @@ export function RecordingReview({ password }: Props) {
                   {activeSession.name ? `${activeSession.name} · ` : ""}
                   {activeSession.hackerrank_username}
                   {activeSession.room ? ` · Room ${activeSession.room}` : ""}
-                  {" · "}timeline labels are mm:ss relative to the test start above.
+                  {" · "}timeline labels are relative to the test start above ({formatClock(span.end)} long
+                  {spanDuration >= 3600 ? ", h:mm:ss" : ", mm:ss"}).
                 </p>
               </div>
 
-              {/* PLAYER */}
-              <div className="overflow-hidden rounded-lg border border-line bg-ink">
+              {/* PLAYER — focusable wrapper so ARROW KEYS nudge playback (±5s, Shift
+                  ±30s) and Space toggles, without hijacking keys typed into inputs. */}
+              <div
+                ref={playerWrapRef}
+                tabIndex={0}
+                onKeyDown={handlePlayerKeyDown}
+                className="focus-ring overflow-hidden rounded-lg border border-line bg-ink"
+              >
                 {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
                 <video
                   ref={videoRef}
@@ -631,121 +860,262 @@ export function RecordingReview({ password }: Props) {
               </div>
 
               {/* CONTROLS + readout */}
-              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel p-3 shadow-subtle">
-                <button
-                  type="button"
-                  onClick={togglePlay}
-                  disabled={!playlist.length}
-                  className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
-                >
-                  {playing ? <Pause size={16} /> : <Play size={16} />} {playing ? "Pause" : "Play"}
-                </button>
-                <span className="inline-flex items-center gap-1.5 font-mono text-sm text-ink">
-                  <Clock size={14} className="text-muted" />
-                  {formatClock(currentTestTime)} <span className="text-muted">/ {formatClock(span.end)}</span>
-                </span>
-                <span className="rounded-full border border-line px-2.5 py-1 text-xs text-muted">
-                  chunk {playlist.length ? currentPos + 1 : 0} / {playlist.length}
-                </span>
-                {refreshNote ? (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2.5 py-1 text-xs text-accent">
-                    <RefreshCw size={12} /> {refreshNote}
+              <div className="space-y-3 rounded-lg border border-line bg-panel p-3 shadow-subtle">
+                {/* Row 1: transport — play/pause, prev/next chunk, ±skip buttons. */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={togglePlay}
+                    disabled={!playlist.length}
+                    className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
+                  >
+                    {playing ? <Pause size={16} /> : <Play size={16} />} {playing ? "Pause" : "Play"}
+                  </button>
+
+                  {/* PREV / NEXT CHUNK */}
+                  <div className="inline-flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => stepChunk(-1)}
+                      disabled={!playlist.length}
+                      title="Previous chunk"
+                      aria-label="Previous chunk"
+                      className="focus-ring inline-flex h-9 items-center gap-1 rounded-md border border-line bg-white px-2.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                    >
+                      <ChevronLeft size={14} /> Chunk
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => stepChunk(1)}
+                      disabled={!playlist.length}
+                      title="Next chunk"
+                      aria-label="Next chunk"
+                      className="focus-ring inline-flex h-9 items-center gap-1 rounded-md border border-line bg-white px-2.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                    >
+                      Chunk <ChevronRight size={14} />
+                    </button>
+                  </div>
+
+                  {/* SKIP buttons: −30s −1m −10s +10s +1m +30s */}
+                  <div className="inline-flex items-center gap-1">
+                    {([-60, -30, -10] as const).map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => skipBy(d)}
+                        disabled={!playlist.length}
+                        className="focus-ring inline-flex h-9 items-center rounded-md border border-line bg-white px-2 font-mono text-xs text-ink hover:border-ink/40 disabled:opacity-50"
+                      >
+                        {d === -60 ? "−1m" : `${d}s`}
+                      </button>
+                    ))}
+                    {([10, 30, 60] as const).map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => skipBy(d)}
+                        disabled={!playlist.length}
+                        className="focus-ring inline-flex h-9 items-center rounded-md border border-line bg-white px-2 font-mono text-xs text-ink hover:border-ink/40 disabled:opacity-50"
+                      >
+                        {d === 60 ? "+1m" : `+${d}s`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Row 2: readout + JUMP-TO-TIME. */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="inline-flex items-center gap-1.5 font-mono text-sm text-ink">
+                    <Clock size={14} className="text-muted" />
+                    {formatClock(displayTime)} <span className="text-muted">/ {formatClock(span.end)}</span>
                   </span>
-                ) : null}
+                  <span className="rounded-full border border-line px-2.5 py-1 text-xs text-muted">
+                    chunk {playlist.length ? currentPos + 1 : 0} / {playlist.length}
+                  </span>
+
+                  {/* JUMP TO TIME — mm:ss, h:mm:ss, or bare minutes. */}
+                  <form
+                    className="ml-auto inline-flex items-center gap-1.5"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      handleJump();
+                    }}
+                  >
+                    <label className="text-xs text-muted" htmlFor="jump-to-time">
+                      Jump to
+                    </label>
+                    <input
+                      id="jump-to-time"
+                      value={jumpInput}
+                      onChange={(event) => setJumpInput(event.target.value)}
+                      placeholder="mm:ss / h:mm:ss"
+                      inputMode="numeric"
+                      className="focus-ring h-9 w-32 rounded-md border border-line bg-white px-2.5 font-mono text-xs text-ink"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!playlist.length || !Number.isFinite(parseTimeInput(jumpInput))}
+                      title="Jump to time"
+                      aria-label="Jump to time"
+                      className="focus-ring inline-flex h-9 items-center gap-1 rounded-md border border-line bg-white px-2.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                    >
+                      <Rewind size={13} /> Go
+                    </button>
+                  </form>
+
+                  {refreshNote ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2.5 py-1 text-xs text-accent">
+                      <RefreshCw size={12} /> {refreshNote}
+                    </span>
+                  ) : null}
+                </div>
               </div>
 
               {/* TIMELINE scrubber */}
               {playlist.length ? (
                 <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+                  {/* The bar carries generous vertical padding: VALID submission
+                      markers sit ABOVE the track, INVALID ones BELOW, so the two
+                      classes never overlap even when densely packed. The continuous
+                      track itself is a single element (played fill + base), NOT one
+                      div per chunk — only recording GAPS get their own hatched span. */}
                   <div
                     ref={barRef}
                     onClick={handleBarClick}
-                    className="relative h-12 w-full cursor-pointer rounded-md border border-line bg-neutral-100"
+                    onMouseDown={startDrag}
+                    className="relative h-9 w-full cursor-pointer select-none rounded-md"
                     role="slider"
                     aria-label="Recording timeline"
                     aria-valuemin={0}
                     aria-valuemax={Math.round(span.end)}
-                    aria-valuenow={Math.round(currentTestTime)}
+                    aria-valuenow={Math.round(displayTime)}
                     tabIndex={0}
                   >
-                    {/* Chunk segment blocks (gaps stay blank). */}
-                    {playlist.map((chunk, i) => {
-                      const left = ((chunk.offsetSec - span.start) / spanDuration) * 100;
-                      const width = (CHUNK_SECONDS / spanDuration) * 100;
-                      const isCurrent = i === currentPos;
+                    {/* CONTINUOUS TRACK: a single base bar (full recorded span) with
+                        a played-portion fill. No per-chunk divs. */}
+                    <div className="absolute inset-x-0 top-1/2 h-2.5 -translate-y-1/2 overflow-hidden rounded-full border border-line bg-accent/25">
+                      <div className="absolute inset-y-0 left-0 bg-accent" style={{ width: `${playedPct}%` }} />
+                    </div>
+
+                    {/* RECORDING GAPS: distinct hatched blank spans where the
+                        recording stopped / chunks are missing. Only the (few) gaps
+                        render, so this stays cheap at 200+ chunks. */}
+                    {gaps.map((gap) => {
+                      const left = ((gap.fromSec - span.start) / spanDuration) * 100;
+                      const width = ((gap.toSec - gap.fromSec) / spanDuration) * 100;
                       return (
                         <div
-                          key={chunk.key}
-                          className={`absolute top-1.5 bottom-1.5 rounded-sm ${isCurrent ? "bg-accent" : "bg-accent/40"} ${isCurrent ? "" : "hover:bg-accent/60"}`}
-                          style={{ left: `${left}%`, width: `calc(${width}% - 2px)` }}
-                          title={`chunk ${chunk.index} · ${formatClock(chunk.offsetSec)}–${formatClock(chunk.endSec)}`}
+                          key={`gap-${gap.fromSec}`}
+                          className="pointer-events-none absolute top-1/2 h-2.5 -translate-y-1/2 rounded-sm border border-warning/50"
+                          style={{
+                            left: `${left}%`,
+                            width: `${width}%`,
+                            backgroundImage:
+                              "repeating-linear-gradient(45deg, rgba(217,119,6,0.18) 0, rgba(217,119,6,0.18) 3px, transparent 3px, transparent 6px)"
+                          }}
+                          title={`Recording gap · ${formatClock(gap.fromSec)}–${formatClock(gap.toSec)}`}
                         />
                       );
                     })}
-                    {/* Minute ticks + labels. */}
-                    {ticks.map((tick) => (
-                      <div key={tick.sec} className="pointer-events-none absolute top-0 bottom-0" style={{ left: `${tick.pct}%` }}>
-                        <div className="h-full w-px bg-line" />
-                        <span className="absolute -bottom-5 -translate-x-1/2 text-[10px] text-muted">{formatClock(tick.sec)}</span>
+
+                    {/* MINOR ticks (lighter, unlabeled). */}
+                    {minorTicks.map((tick) => (
+                      <div
+                        key={`minor-${tick.sec}`}
+                        className="pointer-events-none absolute top-1/2 h-2.5 w-px -translate-y-1/2 bg-line/60"
+                        style={{ left: `${tick.pct}%` }}
+                      />
+                    ))}
+                    {/* MAJOR ticks + labels (adaptive interval, h:mm:ss past 1h). */}
+                    {majorTicks.map((tick) => (
+                      <div key={`major-${tick.sec}`} className="pointer-events-none absolute bottom-0 top-0" style={{ left: `${tick.pct}%` }}>
+                        <div className="absolute top-1/2 h-4 w-px -translate-y-1/2 bg-line" />
+                        <span className="absolute -bottom-5 -translate-x-1/2 whitespace-nowrap text-[10px] text-muted">
+                          {formatClock(tick.sec)}
+                        </span>
                       </div>
                     ))}
-                    {/* SUBMISSION-TIME MARKERS: GREEN tick = valid (Accepted),
-                        RED = invalid (failed). Positioned by real submission time
-                        on the SAME scale as the chunks; click seeks the video to
-                        that moment. Markers outside the recorded span clamp to the
-                        nearest edge (still clickable) so a submission just before
-                        the first chunk or after the last is never lost. */}
+
+                    {/* SUBMISSION-TIME MARKERS as THIN 2px ticks. VALID (green) sit
+                        ABOVE the track, INVALID (red) BELOW, so the two classes stay
+                        separable even when many land within a few px. Each keeps a
+                        small invisible hit-area so it's individually hoverable and
+                        clickable at density (they never merge into a blob). Hover
+                        shows the existing tooltip; click seeks to that submission. */}
                     {markers.map((marker) => {
                       const clamped = Math.max(span.start, Math.min(marker.offsetSec, span.end));
                       const left = ((clamped - span.start) / spanDuration) * 100;
-                      const color = marker.event.valid ? "bg-emerald-500" : "bg-danger";
-                      const ring = marker.event.valid ? "ring-emerald-500/40" : "ring-danger/40";
-                      const label = `${marker.event.valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}`
-                        + ` · ${marker.event.challenge_name || marker.event.challenge_slug || "submission"}`
-                        + (marker.event.lang ? ` · ${marker.event.lang}` : "")
-                        + ` · ${formatClock(marker.offsetSec)}`;
+                      const valid = marker.event.valid;
+                      const color = valid ? "bg-emerald-500" : "bg-danger";
+                      const label =
+                        `${valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}` +
+                        ` · ${marker.event.challenge_name || marker.event.challenge_slug || "submission"}` +
+                        (marker.event.lang ? ` · ${marker.event.lang}` : "") +
+                        ` · ${formatClock(marker.offsetSec)}`;
                       return (
                         <button
                           key={marker.event.submission_id}
                           type="button"
                           title={label}
                           aria-label={label}
+                          onMouseDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
-                            seekToTestTime(marker.offsetSec, playing || !videoRef.current?.paused);
+                            seekToTestTime(marker.offsetSec, wantPlaying());
                           }}
-                          className="absolute -top-1.5 z-20 -translate-x-1/2 cursor-pointer"
+                          className={`group absolute z-20 -translate-x-1/2 cursor-pointer ${valid ? "top-0" : "bottom-0"}`}
                           style={{ left: `${left}%` }}
                         >
-                          <span className={`block h-3.5 w-3.5 rounded-full border border-white shadow ring-2 ${ring} ${color} transition-transform hover:scale-125`} />
-                          <span className={`mx-auto block h-2 w-0.5 ${color}`} />
+                          {/* Invisible widened hit-area for easy hover at density. */}
+                          <span className="absolute -inset-x-1.5 inset-y-0" />
+                          <span
+                            className={`block h-3 w-0.5 ${color} transition-transform group-hover:scale-y-150 group-hover:opacity-100`}
+                          />
                         </button>
                       );
                     })}
-                    {/* Playhead. */}
-                    <div className="pointer-events-none absolute top-0 bottom-0 z-10 w-0.5 bg-danger" style={{ left: `${playheadPct}%` }}>
-                      <div className="absolute -top-1 -translate-x-1/2 rounded-full border border-white bg-danger px-0 py-0" style={{ width: 8, height: 8 }} />
+
+                    {/* DRAGGABLE PLAYHEAD with a live readout (shown while dragging). */}
+                    <div className="pointer-events-none absolute bottom-0 top-0 z-30" style={{ left: `${playheadPct}%` }}>
+                      <div className="absolute top-1/2 h-7 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-ink" />
+                      <div className="absolute top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-ink shadow" />
+                      {dragTime !== null ? (
+                        <div className="absolute -top-7 -translate-x-1/2 rounded bg-ink px-1.5 py-0.5 font-mono text-[10px] text-white shadow">
+                          {formatClock(displayTime)}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
+
                   <div className="mt-6 flex items-center justify-between text-[11px] text-muted">
                     <span>{formatClock(span.start)}</span>
-                    <span>{playlist.length} chunk(s) · {CHUNK_SECONDS}s each · gaps shown as blanks</span>
+                    <span>
+                      {playlist.length} chunk(s) · {CHUNK_SECONDS}s each
+                      {gaps.length ? ` · ${gaps.length} recording gap${gaps.length > 1 ? "s" : ""}` : " · no gaps"}
+                    </span>
                     <span>{formatClock(span.end)}</span>
                   </div>
+
+                  {/* Navigation hint. */}
+                  <p className="mt-1 text-[11px] text-muted/80">
+                    Drag the playhead or click the bar to scrub · arrow keys ±5s (Shift ±30s) when the player is
+                    focused · gaps shown as hatched blanks.
+                  </p>
+
                   {/* SUBMISSION-TIME MARKERS legend + counts. Hidden entirely when
                       the student has no markers (no endpoint / no submissions). */}
                   {markers.length ? (
                     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs text-muted">
                       <span className="font-medium text-ink">Submissions on timeline:</span>
                       <span className="inline-flex items-center gap-1.5">
-                        <span className="inline-block h-3 w-3 rounded-full border border-white bg-emerald-500 ring-2 ring-emerald-500/40" />
-                        ✓ {validCount} valid
+                        <span className="inline-block h-3.5 w-0.5 bg-emerald-500" /> above
+                        <span className="font-medium text-ink">✓ {validCount} valid</span>
                       </span>
                       <span className="inline-flex items-center gap-1.5">
-                        <span className="inline-block h-3 w-3 rounded-full border border-white bg-danger ring-2 ring-danger/40" />
-                        ✗ {invalidCount} invalid
+                        <span className="inline-block h-3.5 w-0.5 bg-danger" /> below
+                        <span className="font-medium text-ink">✗ {invalidCount} invalid</span>
                       </span>
-                      <span className="text-muted/70">Click a marker to jump the recording to that submission.</span>
+                      <span className="text-muted/70">Hover a tick for details · click to jump the recording there.</span>
                     </div>
                   ) : null}
                 </div>

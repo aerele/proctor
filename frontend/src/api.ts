@@ -592,6 +592,11 @@ type DemoRecordingSeed = {
   // values models a recording gap. Defaults to contiguous 0..chunk_count-1.
   gapAfterIndex?: number; // chunks after this 1-based index are shifted later
   gapChunks?: number; // how many chunk-widths of gap to insert
+  // Multiple gaps (for the large/realistic seed). Each entry shifts every chunk
+  // whose 1-based index is > afterIndex later by `chunks` chunk-widths. Applied in
+  // addition to (and after) the single-gap fields above. afterIndex must be sorted
+  // ascending; shifts accumulate so later chunks reflect all earlier gaps.
+  gaps?: Array<{ afterIndex: number; chunks: number }>;
 };
 
 const DEMO_RECORDING_SESSIONS: DemoRecordingSeed[] = [
@@ -631,6 +636,26 @@ const DEMO_RECORDING_SESSIONS: DemoRecordingSeed[] = [
     status: "active",
     created_at: "2026-06-05T09:00:30.000Z",
     chunk_count: 4
+  },
+  {
+    // REAL-SCALE seed: a full ~1h50m sitting. 220 recorded chunks × 30s = 110min of
+    // recording; two recording GAPS push the timeline end a little past that, so the
+    // dense timeline, adaptive 15-min ticks, gap rendering and marker legibility can
+    // all be verified OFFLINE. Gap 1: ~5min blackout after chunk 80 (around 00:40).
+    // Gap 2: ~2.5min blackout after chunk 150 (around 01:15, post-gap-1 shifted).
+    session_id: "rec-vikram-load",
+    hackerrank_username: "Vikram_T",
+    username_norm: "vikram_t",
+    name: "Vikram Thiagarajan",
+    room: "Lab C-3",
+    contest_slug: "mcet-june-2026",
+    status: "ended",
+    created_at: "2026-06-05T09:00:00.000Z",
+    chunk_count: 220,
+    gaps: [
+      { afterIndex: 80, chunks: 10 }, // ~5min recording gap mid-test
+      { afterIndex: 150, chunks: 5 } // ~2.5min recording gap later
+    ]
   }
 ];
 
@@ -652,7 +677,37 @@ const DEMO_SUBMISSION_EVENTS: DemoSubmissionSeed[] = [
   { username_norm: "karan_v", hackerrank_username: "Karan_V", contest_slug: "mcet-june-2026", submission_id: "ka-2", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Compilation error", valid: false, submitted_at: "2026-06-05T09:04:00.000Z" },
   // Neha (created 09:00:30, 4 chunks → 09:00:30–09:02:30): one fail, one accept.
   { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-1", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Terminated due to timeout", valid: false, submitted_at: "2026-06-05T09:01:15.000Z" },
-  { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-2", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:02:05.000Z" }
+  { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-2", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:02:05.000Z" },
+  // Vikram (created 09:00:00, ~117min span, gaps at 40–45min and 80–82.5min):
+  // 22 submissions across the full sitting, a realistic valid/invalid mix, several
+  // clustered tightly (to prove dense markers stay individually legible), and two
+  // landing IN the recording gaps (proctor sees "submitted during the blackout").
+  // Times are real (09:00 + offset); the recording timeline labels them in h:mm:ss.
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-01", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:03:20.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-02", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:05:10.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-03", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:07:45.000Z" },
+  // Cluster around 12–13min (three submissions within ~70s → dense markers).
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-04", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T09:12:05.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-05", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:12:40.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-06", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:13:15.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-07", challenge_slug: "merge-intervals", challenge_name: "Merge Intervals", lang: "cpp", status: "Compilation error", valid: false, submitted_at: "2026-06-05T09:18:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-08", challenge_slug: "merge-intervals", challenge_name: "Merge Intervals", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:22:50.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-09", challenge_slug: "lru-cache", challenge_name: "LRU Cache", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:28:10.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-10", challenge_slug: "lru-cache", challenge_name: "LRU Cache", lang: "cpp", status: "Terminated due to timeout", valid: false, submitted_at: "2026-06-05T09:33:25.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-11", challenge_slug: "lru-cache", challenge_name: "LRU Cache", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:38:55.000Z" },
+  // vt-12 lands IN GAP 1 (recording blackout 40–45min): "submitted during blackout".
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-12", challenge_slug: "word-ladder", challenge_name: "Word Ladder", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:42:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-13", challenge_slug: "word-ladder", challenge_name: "Word Ladder", lang: "cpp", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T09:48:05.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-14", challenge_slug: "word-ladder", challenge_name: "Word Ladder", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:54:40.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-15", challenge_slug: "trapping-rain-water", challenge_name: "Trapping Rain Water", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:01:15.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-16", challenge_slug: "trapping-rain-water", challenge_name: "Trapping Rain Water", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T10:08:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-17", challenge_slug: "edit-distance", challenge_name: "Edit Distance", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:14:20.000Z" },
+  // vt-18 lands IN GAP 2 (recording blackout ~80–82.5min → 10:20–10:22:30).
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-18", challenge_slug: "edit-distance", challenge_name: "Edit Distance", lang: "cpp", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T10:21:10.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-19", challenge_slug: "edit-distance", challenge_name: "Edit Distance", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T10:27:45.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-20", challenge_slug: "n-queens", challenge_name: "N-Queens", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:36:05.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-21", challenge_slug: "n-queens", challenge_name: "N-Queens", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:44:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-22", challenge_slug: "n-queens", challenge_name: "N-Queens", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T10:54:10.000Z" }
 ];
 
 function demoSubmissionEventsFor(usernameNorm: string, contestSlug?: string): SubmissionEvent[] {
@@ -675,6 +730,12 @@ function demoEvidenceFor(seed: DemoRecordingSeed): SessionEvidence[] {
   for (let i = 1; i <= seed.chunk_count; i += 1) {
     let position = i; // 1-based contiguous position on the timeline
     if (seed.gapAfterIndex && i > seed.gapAfterIndex) position += seed.gapChunks ?? 1;
+    // Apply any additional (multi-gap) shifts; each gap pushes all later chunks.
+    if (seed.gaps) {
+      for (const gap of seed.gaps) {
+        if (i > gap.afterIndex) position += gap.chunks;
+      }
+    }
     // last_modified = END of this chunk = createdMs + position*chunkSeconds.
     const lastModifiedMs = createdMs + position * DEMO_CHUNK_SECONDS * 1000;
     evidence.push({
