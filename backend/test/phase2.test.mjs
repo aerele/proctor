@@ -12,6 +12,7 @@ import test from "node:test";
 const TEST_ADMIN_PASSWORD = "admin-pass-phase2";
 process.env.ALERTS_INGEST_API_KEY = "phase2-ingest-key-placeholder-not-a-real-secret";
 process.env.ALERTS_COLLECTION = "phase2_alerts";
+process.env.SUBMISSION_EVENTS_COLLECTION = "phase2_submission_events";
 process.env.SESSION_COLLECTION = "phase2_sessions";
 process.env.SETTINGS_COLLECTION = "phase2_settings";
 process.env.EVIDENCE_BUCKET = "phase2-bucket";
@@ -752,6 +753,209 @@ test("session-action: requires admin password", async () => {
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
   const res = await call(makeReq({ method: "POST", path: "/api/admin/session-action", headers: {}, body: { action: "end", session_id: "x" } }));
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
+// Recording playback picker — GET /api/admin/recording-sessions
+// =====================================================================
+
+// Drive an upload-url so a chunk gets recorded (chunk_count incremented) on the
+// given session, mirroring how the real recorder bumps the counter.
+async function recordChunk(sessionId, chunkIndex = 0) {
+  return call(makeReq({
+    method: "POST",
+    path: "/api/upload-url",
+    body: { session_id: sessionId, kind: "screen", chunk_index: chunkIndex, content_type: "video/webm" }
+  }));
+}
+
+test("recording-sessions: lists only sessions with chunks, newest-first, lightweight (no evidence/urls)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+
+  // alice records 2 chunks; bob records 0 (no recording) → bob excluded.
+  const alice = await start(firestore, storage, { hackerrank_username: "alice" });
+  await recordChunk(alice.body.session_id, 0);
+  await recordChunk(alice.body.session_id, 1);
+  await start(firestore, storage, { hackerrank_username: "bob" });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: ADMIN_HEADERS }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 1, "only the session with chunks is listed");
+  const session = res.body.sessions[0];
+  assert.equal(session.hackerrank_username, "alice");
+  assert.equal(session.chunk_count, 2);
+  // Lightweight contract: no GCS listing, no signed URLs.
+  assert.equal(Object.prototype.hasOwnProperty.call(session, "evidence"), false, "no evidence array");
+  assert.equal(Object.prototype.hasOwnProperty.call(session, "merged_video_key"), false, "no signed urls / merged key");
+  // The shape the picker relies on.
+  for (const field of ["session_id", "name", "room", "contest_slug", "created_at", "status"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(session, field), `expected field ${field}`);
+  }
+});
+
+test("recording-sessions: falls back to ALL sessions when none report chunk_count", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Two sessions that never recorded a chunk (chunk_count stays 0).
+  await start(firestore, storage, { hackerrank_username: "alice" });
+  await start(firestore, storage, { hackerrank_username: "bob" });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: ADMIN_HEADERS }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 2, "fallback lists all sessions so the picker is not empty");
+});
+
+test("recording-sessions: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: {} }));
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
+// Submission-time markers — POST /api/submission-events + GET /api/admin/submission-events
+// =====================================================================
+
+const INGEST_HEADERS = { "x-api-key": process.env.ALERTS_INGEST_API_KEY };
+
+function submissionEvent(overrides = {}) {
+  return {
+    hackerrank_username: "Alice",
+    contest_slug: "mcet-june-2026",
+    submission_id: 1001,
+    challenge_slug: "two-sum",
+    challenge_name: "Two Sum",
+    lang: "python3",
+    status: "Accepted",
+    valid: true,
+    submitted_at: "2026-06-05T09:05:00.000Z",
+    ...overrides
+  };
+}
+
+test("submission-events: ingest stores a per-(user,contest) doc and admin reads it sorted ascending", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  const res = await call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: INGEST_HEADERS,
+    body: {
+      events: [
+        submissionEvent({ submission_id: 1002, submitted_at: "2026-06-05T09:10:00.000Z", status: "Wrong Answer", valid: false }),
+        submissionEvent({ submission_id: 1001, submitted_at: "2026-06-05T09:05:00.000Z" })
+      ]
+    }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.stored, 2);
+
+  // One doc per (username_norm, contest_slug).
+  const store = firestore._collections.get(process.env.SUBMISSION_EVENTS_COLLECTION);
+  assert.equal(store.size, 1, "one merged doc per (username_norm, contest_slug)");
+  assert.ok(store.has("alice:mcet-june-2026"), `expected keyed doc, got ${[...store.keys()]}`);
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "Alice", contest_slug: "mcet-june-2026" }
+  }));
+  assert.equal(read.statusCode, 200);
+  assert.equal(read.body.events.length, 2);
+  // Sorted by submitted_at ascending.
+  assert.equal(read.body.events[0].submission_id, "1001");
+  assert.equal(read.body.events[1].submission_id, "1002");
+  assert.equal(read.body.events[0].valid, true);
+  assert.equal(read.body.events[1].valid, false);
+});
+
+test("submission-events: re-posting the same submission_id de-dups (idempotent upsert)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  const post = (status, valid) => call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: INGEST_HEADERS,
+    body: { events: [submissionEvent({ submission_id: 2001, status, valid })] }
+  }));
+
+  await post("Processing", false); // would be skipped poller-side, but exercise de-dup
+  await post("Accepted", true); // re-post same id with a terminal classification
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "Alice", contest_slug: "mcet-june-2026" }
+  }));
+  assert.equal(read.body.events.length, 1, "same submission_id de-duped to one event");
+  assert.equal(read.body.events[0].status, "Accepted", "later post overwrites the earlier one");
+  assert.equal(read.body.events[0].valid, true);
+});
+
+test("submission-events: admin read with NO contest_slug merges across contests", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: INGEST_HEADERS,
+    body: {
+      events: [
+        submissionEvent({ contest_slug: "contest-a", submission_id: 3001, submitted_at: "2026-06-05T09:01:00.000Z" }),
+        submissionEvent({ contest_slug: "contest-b", submission_id: 3002, submitted_at: "2026-06-05T09:02:00.000Z", valid: false, status: "Runtime Error" })
+      ]
+    }
+  }));
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "Alice" } // no contest_slug → merge across contests
+  }));
+  assert.equal(read.statusCode, 200);
+  assert.equal(read.body.events.length, 2, "events from both contests merged");
+  assert.equal(read.body.events[0].submission_id, "3001");
+  assert.equal(read.body.events[1].submission_id, "3002");
+});
+
+test("submission-events: ingest requires the api key (401 without x-api-key)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: {}, // no x-api-key
+    body: { events: [submissionEvent()] }
+  }));
+  assert.equal(res.statusCode, 401);
+});
+
+test("submission-events: admin read requires the admin password (401 without it)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: {}, // no x-admin-password
+    query: { username: "Alice" }
+  }));
   assert.equal(res.statusCode, 401);
 });
 

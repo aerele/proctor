@@ -97,9 +97,14 @@ class AlertConfig:
         return self._by_type.get(atype, {}).get("severity")
 
     def is_tough(self, slug, data_hard=False):
-        """Is this challenge TOUGH? Manual tough_questions list wins/augments the
-        data-derived hardness: tough iff slug is operator-marked OR data_hard."""
-        return str(slug) in self.tough_questions or bool(data_hard)
+        """Is this challenge TOUGH? When the operator has marked ANY tough_questions,
+        that manual list is AUTHORITATIVE and the noisy data-derived hardness is
+        ignored — this avoids false positives early in a contest, when almost every
+        problem has <=10 solvers and would otherwise be flagged 'hard'. Only when
+        tough_questions is EMPTY do we fall back to the data-derived rule."""
+        if self.tough_questions:
+            return str(slug) in self.tough_questions
+        return bool(data_hard)
 
     def as_dict(self):
         return {t: dict(c) for t, c in self._by_type.items()}

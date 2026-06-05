@@ -1,6 +1,7 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, ExternalLink, Eye, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, ExternalLink, Eye, Film, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchProctorSettings, resumeSession, saveAlertSettings, saveProctorSettings, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { RecordingReview } from "./RecordingReview";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
@@ -1071,7 +1072,7 @@ function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }:
   );
 }
 
-type AdminView = "stats" | "alerts" | "review" | "settings";
+type AdminView = "stats" | "alerts" | "review" | "recordings" | "settings";
 
 function AdminApp() {
   const [view, setView] = useState<AdminView>("stats");
@@ -1451,6 +1452,7 @@ function AdminApp() {
         <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
         <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
+        <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
         <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
       </nav>
 
@@ -1556,6 +1558,8 @@ function AdminApp() {
       </section>
       </>
       ) : null}
+
+      {view === "recordings" ? <RecordingReview password={password} /> : null}
     </Shell>
   );
 }
