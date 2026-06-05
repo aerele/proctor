@@ -710,6 +710,23 @@ async function adminSaveSettings(req) {
   return publicSettings(item);
 }
 
+// Run an async mapper over items with a bounded number of concurrent workers, so
+// a single request can't fan out into hundreds of simultaneous GCS/IAM calls.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
+  );
+  return results;
+}
+
 async function adminSessions(req) {
   requireAdmin(req);
   const username = req.query?.username;
@@ -732,20 +749,26 @@ async function adminSessions(req) {
       // storage_prefix (legacy docs fall back to the reconstructed legacy path).
       const prefix = sessionPrefix(item);
       const [files] = await bucket().getFiles({ prefix, maxResults: 1000 });
-      const evidence = await Promise.all(files.map(async (file) => {
-        const [metadata] = await file.getMetadata();
+      // Sign read URLs with BOUNDED concurrency and WITHOUT a redundant per-file
+      // getMetadata() call — getFiles already populates file.metadata. Heavy
+      // recordings have 200+ chunk files; the previous code fired 2 calls per file
+      // (getMetadata + getSignedUrl) all at once, so a single request fanned out
+      // into ~400 simultaneous GCS/IAM calls and 500'd on the small Cloud Run
+      // instance. Capping concurrency keeps a heavy session well under the timeout.
+      const evidence = await mapWithConcurrency(files, 12, async (file) => {
         const [downloadUrl] = await file.getSignedUrl({
           version: "v4",
           action: "read",
           expires: Date.now() + 3600 * 1000
         });
+        const meta = file.metadata || {};
         return {
           key: file.name,
-          size: Number(metadata.size || 0),
-          last_modified: metadata.updated,
+          size: Number(meta.size || 0),
+          last_modified: meta.updated,
           download_url: downloadUrl
         };
-      }));
+      });
       return { ...item, evidence };
     }));
 
