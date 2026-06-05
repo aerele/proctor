@@ -43,7 +43,7 @@ All three subsystems (this poller, the proctor backend ingest, the dashboard) ag
 {
   "id": "<source>:<type>:<username_norm>:<contest_slug>:<dedupe>",  // stable + idempotent
   "source": "contest-eval",                  // or "proctor"
-  "type": "peer_copy_cluster|recurring_pair|web_paste|fast_solve",
+  "type": "peer_copy_cluster|recurring_pair|web_paste|first_attempt_solve|tough_first_attempt",
   "severity": "critical|warning|info",
   "timestamp": "<ISO 8601>",
   "contest_slug": "<slug>",
@@ -68,8 +68,22 @@ The id is deterministic so retried/repeat cycles **merge** in Firestore instead 
 - **`web_paste`** (warning) — strong web/editorial provenance signature (GfG/LeetCode/foreign
   driver/raw smart-quotes/NBSP/zero-width/BOM) in fetched accepted code. The Java
   `public class Solution` template false positive is suppressed.
-- **`fast_solve`** (info) — single-attempt full solve on a HARD problem. A corroborator only;
+- **`first_attempt_solve`** (info) — candidate got a problem ACCEPTED on their FIRST submission
+  attempt (zero prior wrong attempts) on a NORMAL (non-tough) problem. A corroborator only;
   never a standalone accusation (per methodology: zero-iteration is not a flag alone).
+- **`tough_first_attempt`** (critical) — a first-attempt accepted solve on a TOUGH problem.
+  "Tough" = the challenge slug/id is operator-marked in `alert-config.json`'s `tough_questions`
+  list **OR** it is data-derived hard (≤10 solvers); the manual list wins/augments the
+  derivation. This is the real "solved a tough question on the first attempt" flag and is
+  emitted *instead of* `first_attempt_solve` for tough problems.
+  (The former `fast_solve` type is retained only as a deprecated config alias of
+  `first_attempt_solve`; no alerts are emitted under that name anymore.)
+
+#### Marking tough questions (`tough_questions`)
+`alert-config.json` carries a top-level `"tough_questions": []` array. Add challenge slugs/ids
+the operator considers tough; any first-attempt solve on those fires `tough_first_attempt`
+(critical) instead of `first_attempt_solve` (info). Leave it empty to fall back purely to the
+auto ≤10-solver hard derivation.
 
 ## Usage
 

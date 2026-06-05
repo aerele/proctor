@@ -170,8 +170,10 @@ def test_verdict_seam(t):
                 "single-hard recurring_pair (warning) is routed")
         t.check(not is_ambiguous(_fake_alert(atype="recurring_pair", sev="critical")),
                 "conclusive recurring_pair (critical) is NOT routed (goes straight through)")
-        t.check(not is_ambiguous(_fake_alert(atype="fast_solve", sev="info")),
-                "fast_solve (info corroborator) is NOT routed alone")
+        t.check(not is_ambiguous(_fake_alert(atype="first_attempt_solve", sev="info")),
+                "first_attempt_solve (info corroborator) is NOT routed alone")
+        t.check(not is_ambiguous(_fake_alert(atype="tough_first_attempt", sev="critical")),
+                "tough_first_attempt (critical flag) is NOT routed (goes straight through)")
 
 
 def _safe(s):
@@ -387,15 +389,160 @@ def test_alert_config(t):
         "peer_copy_cluster": ("enabled", "critical"),
         "recurring_pair": ("enabled", "critical"),
         "web_paste": ("enabled", "warning"),
-        "fast_solve": ("enabled", "info"),
+        "first_attempt_solve": ("enabled", "info"),
+        "tough_first_attempt": ("enabled", "critical"),
     }
     cat_ok = all(
         shipped.enabled(t_) and shipped.severity_override(t_) == sev
         for t_, (_en, sev) in expect.items()
     )
     t.check(cat_ok, "committed alert-config.json matches the documented defaults "
-            "(pcc/rp critical, web_paste warning, fast_solve info, all enabled)",
+            "(pcc/rp/tough_first_attempt critical, web_paste warning, "
+            "first_attempt_solve info, all enabled)",
             detail=str(shipped.as_dict()))
+    # the deprecated fast_solve key resolves to the same first_attempt_solve config
+    t.check(shipped.enabled("fast_solve") and shipped.severity_override("fast_solve") == "info",
+            "deprecated 'fast_solve' alias resolves to first_attempt_solve config")
+
+
+# ---------------------------------------------------------------------------
+# 6. first_attempt_solve / tough_first_attempt detection (synthetic, fixture-free)
+# ---------------------------------------------------------------------------
+def _synthetic_meta_analysis():
+    """meta_analysis-shaped dict with one participant who first-attempt-solved a
+    NORMAL problem ('easy-prob') and a DATA-HARD problem ('hard-prob'). The
+    data-hard subset is reported in single_attempt_HARD_problems (as analyze_meta
+    would). 'manual-prob' is NOT data-hard — it only becomes tough via the
+    operator tough_questions list."""
+    return {
+        "challenges": [],
+        "profiles_by_user": {
+            "carol": {
+                "user": "carol",
+                "single_attempt_problems": ["easy-prob", "hard-prob", "manual-prob"],
+                "single_attempt_HARD_problems": ["hard-prob"],
+            }
+        },
+    }
+
+
+def _build_first_attempt(alert_config=None):
+    """build_alerts over a clone result that fires NO clone/paste alerts, so the
+    only alerts produced are the first-attempt family."""
+    clone = {"recurring_pairs": [], "skeleton_clusters": [], "_records": []}
+    ma = _synthetic_meta_analysis()
+    chal_by_slug = {
+        "easy-prob": {"slug": "easy-prob", "name": "Easy Problem"},
+        "hard-prob": {"slug": "hard-prob", "name": "Hard Problem"},
+        "manual-prob": {"slug": "manual-prob", "name": "Manual Tough Problem"},
+    }
+    return alertmod.build_alerts(
+        "demo-slug", clone, ma, {}, set(), chal_by_slug=chal_by_slug,
+        alert_config=alert_config)
+
+
+def test_first_attempt_alerts(t):
+    t.section("6. first_attempt_solve / tough_first_attempt detection (synthetic)")
+
+    # --- baseline: no tough_questions => only DATA-HARD problem is tough ---
+    base = _build_first_attempt(alert_config=None)
+    by_type = {}
+    for a in base:
+        by_type.setdefault(a["type"], []).append(a)
+    fa = by_type.get("first_attempt_solve", [])
+    tfa = by_type.get("tough_first_attempt", [])
+    t.check(len(fa) == 1 and len(tfa) == 1,
+            "baseline: one first_attempt_solve + one tough_first_attempt",
+            detail=str({k: len(v) for k, v in by_type.items()}))
+    # the info alert covers the NORMAL problems (easy-prob + manual-prob, since
+    # manual-prob is not data-hard and not yet operator-marked)
+    fa_probs = set(fa[0]["data"]["problems"]) if fa else set()
+    t.check(fa_probs == {"easy-prob", "manual-prob"},
+            "first_attempt_solve carries the normal (non-tough) problems",
+            detail=str(fa_probs))
+    t.check(fa and fa[0]["severity"] == "info",
+            "first_attempt_solve default severity is info", detail=str(fa))
+    # the tough flag covers only the DATA-HARD problem, at critical
+    tfa_probs = set(tfa[0]["data"]["tough_problems"]) if tfa else set()
+    t.check(tfa_probs == {"hard-prob"},
+            "tough_first_attempt fires on the data-hard problem", detail=str(tfa_probs))
+    t.check(tfa and tfa[0]["severity"] == "critical",
+            "tough_first_attempt default severity is critical (the real flag)",
+            detail=str(tfa))
+
+    # --- manual tough_questions: marking 'manual-prob' (not data-hard) makes it
+    #     tough, moving it out of first_attempt_solve into tough_first_attempt ---
+    cfg_manual = alertmod.AlertConfig(tough_questions=["manual-prob"])
+    got = _build_first_attempt(alert_config=cfg_manual)
+    fa2 = [a for a in got if a["type"] == "first_attempt_solve"]
+    tfa2 = [a for a in got if a["type"] == "tough_first_attempt"]
+    fa2_probs = set(fa2[0]["data"]["problems"]) if fa2 else set()
+    tfa2_probs = set(tfa2[0]["data"]["tough_problems"]) if tfa2 else set()
+    t.check(fa2_probs == {"easy-prob"},
+            "operator-marked tough_questions removes manual-prob from first_attempt_solve",
+            detail=str(fa2_probs))
+    t.check(tfa2_probs == {"hard-prob", "manual-prob"},
+            "tough_first_attempt now covers data-hard AND operator-marked tough problems",
+            detail=str(tfa2_probs))
+    # provenance split is recorded for the flag
+    t.check(tfa2 and set(tfa2[0]["data"]["operator_marked"]) == {"manual-prob"}
+            and set(tfa2[0]["data"]["data_hard"]) == {"hard-prob"},
+            "tough_first_attempt records operator_marked vs data_hard provenance",
+            detail=str((tfa2 or [{}])[0].get("data")))
+
+    # --- tough_questions empty => falls back to data-hard derivation only ---
+    cfg_empty = alertmod.AlertConfig(tough_questions=[])
+    got_empty = _build_first_attempt(alert_config=cfg_empty)
+    tfa_empty = [a for a in got_empty if a["type"] == "tough_first_attempt"]
+    t.check(len(tfa_empty) == 1
+            and set(tfa_empty[0]["data"]["tough_problems"]) == {"hard-prob"},
+            "empty tough_questions => only the data-hard problem is tough (fallback)",
+            detail=str([a["data"].get("tough_problems") for a in tfa_empty]))
+
+    # --- disabling first_attempt_solve suppresses ONLY the info type ---
+    cfg_no_info = alertmod.AlertConfig(
+        {"first_attempt_solve": {"enabled": False, "severity": None}})
+    got_ni = _build_first_attempt(alert_config=cfg_no_info)
+    types_ni = {a["type"] for a in got_ni}
+    t.check("first_attempt_solve" not in types_ni and "tough_first_attempt" in types_ni,
+            "disabling first_attempt_solve suppresses info alerts but keeps the tough flag",
+            detail=str(sorted(types_ni)))
+
+    # --- disabling tough_first_attempt suppresses ONLY the flag ---
+    cfg_no_flag = alertmod.AlertConfig(
+        {"tough_first_attempt": {"enabled": False, "severity": None}})
+    got_nf = _build_first_attempt(alert_config=cfg_no_flag)
+    types_nf = {a["type"] for a in got_nf}
+    t.check("tough_first_attempt" not in types_nf and "first_attempt_solve" in types_nf,
+            "disabling tough_first_attempt suppresses the flag but keeps info alerts",
+            detail=str(sorted(types_nf)))
+
+    # --- severity override applies to the new types (precedence: config wins) ---
+    cfg_ov = alertmod.AlertConfig(
+        {"tough_first_attempt": {"enabled": True, "severity": "warning"}})
+    got_ov = _build_first_attempt(alert_config=cfg_ov)
+    tfa_ov = next((a for a in got_ov if a["type"] == "tough_first_attempt"), None)
+    t.check(tfa_ov is not None and tfa_ov["severity"] == "warning",
+            "explicit severity override on tough_first_attempt replaces dynamic critical",
+            detail=(tfa_ov or {}).get("severity"))
+    cfg_ov2 = alertmod.AlertConfig(
+        {"first_attempt_solve": {"enabled": True, "severity": "warning"}})
+    fa_ov = next((a for a in _build_first_attempt(alert_config=cfg_ov2)
+                  if a["type"] == "first_attempt_solve"), None)
+    t.check(fa_ov is not None and fa_ov["severity"] == "warning",
+            "explicit severity override on first_attempt_solve replaces dynamic info",
+            detail=(fa_ov or {}).get("severity"))
+
+    # --- deprecated fast_solve alias still configures first_attempt_solve ---
+    cfg_alias = alertmod.AlertConfig(
+        {"fast_solve": {"enabled": False, "severity": None}})
+    got_alias = _build_first_attempt(alert_config=cfg_alias)
+    t.check("first_attempt_solve" not in {a["type"] for a in got_alias},
+            "configuring the deprecated 'fast_solve' alias disables first_attempt_solve")
+
+    # --- ids are well-formed (5 colon segments) for the new types ---
+    bad = [a["id"] for a in base if len(a["id"].split(":")) != 5]
+    t.check(not bad, "first-attempt alert ids keep the 5-segment id format", detail=str(bad))
 
 
 def main():
@@ -405,6 +552,7 @@ def main():
     test_alert_idempotency_and_id_format(t)
     test_cdp_importable(t)
     test_alert_config(t)
+    test_first_attempt_alerts(t)
     print("\n" + "=" * 70)
     total = t.passed + t.failed
     print(f"RESULT: {t.passed}/{total} passed, {t.failed} failed")

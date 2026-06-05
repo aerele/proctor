@@ -9,7 +9,7 @@ const ADMIN_POLL_INTERVAL_MS = 5000;
 
 // Read-only reference list — contest-eval alert types are configured in
 // monitoring/alert-config.json, NOT through this console.
-const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_paste", "fast_solve"] as const;
+const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_paste", "first_attempt_solve", "tough_first_attempt"] as const;
 
 const sessionStorageKey = "aerele-proctor-session-id";
 
