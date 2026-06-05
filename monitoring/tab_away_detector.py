@@ -4,8 +4,14 @@
 Given a screen-capture recording (.webm) of a HackerRank coding session, sample
 frames at a fixed interval via ffmpeg, look for the HackerRank logo in the header
 band (top-left by default), and flag CONTINUOUS runs where the logo is ABSENT for
-longer than a threshold (default 60s) as the candidate having navigated AWAY from
+longer than a threshold (default 12s) as the candidate having navigated AWAY from
 HackerRank (switched tab / window / opened another site).
+
+The threshold is configured in the admin console (Settings → Proctor alert types →
+tab_away → threshold_seconds, default 12) which is the SOURCE OF TRUTH; it is passed
+to this detector via --min-gap-seconds. If --api-base and --admin-password are
+given AND --min-gap-seconds is not explicitly set, the detector reads the live
+value from GET /api/admin/alert-settings (proctor.tab_away.threshold_seconds).
 
 Each such run becomes a SHARED-CONTRACT Alert:
     source   = "proctor"
@@ -43,6 +49,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -51,6 +59,35 @@ sys.path.insert(0, str(HERE))
 # Reuse the existing poster + the shared-contract helpers from the poller stack.
 from poller import post_alerts                          # noqa: E402
 from alerts import normalize_username, validate_alert, _now_iso  # noqa: E402
+
+# Default minimum continuous absent span to flag. The admin console
+# (Settings -> tab_away -> threshold_seconds) is the SOURCE OF TRUTH and is passed
+# in via --min-gap-seconds; this default applies only when neither the flag nor an
+# API-read value is available. Mirrors backend TAB_AWAY_DEFAULT_THRESHOLD_SECONDS.
+DEFAULT_MIN_GAP_SECONDS = 12.0
+
+
+def fetch_threshold_seconds(api_base, admin_password, timeout=20):
+    """Read proctor.tab_away.threshold_seconds from GET /api/admin/alert-settings.
+
+    Returns the float threshold, or None on any error (caller falls back to the
+    default). Best-effort: a network/parse failure must not abort the analysis.
+    """
+    url = api_base.rstrip("/") + "/api/admin/alert-settings"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("x-admin-password", admin_password or "")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError) as e:
+        print(f"[tab-away] could not read threshold from {url}: {e}", file=sys.stderr)
+        return None
+    try:
+        value = data["proctor"]["tab_away"]["threshold_seconds"]
+        value = float(value)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 # ---------------------------------------------------------------------------
@@ -440,9 +477,17 @@ def build_argparser():
     p.add_argument("--region", default="top-left",
                    help=f"header region: a preset {sorted(REGION_PRESETS)} or "
                         f"'x0,y0,x1,y1' fractions (default top-left)")
-    p.add_argument("--min-gap-seconds", type=float, default=60.0,
-                   help="minimum continuous absent span to flag (production "
-                        "default 60; lower it for short test clips)")
+    p.add_argument("--min-gap-seconds", type=float, default=None,
+                   help="minimum continuous absent span to flag. Source of truth "
+                        "is the admin console (Settings -> tab_away -> "
+                        "threshold_seconds, default 12). If omitted and "
+                        "--api-base + --admin-password are given, it is read from "
+                        "GET /api/admin/alert-settings; otherwise defaults to "
+                        f"{DEFAULT_MIN_GAP_SECONDS}. Lower it for short test clips.")
+    p.add_argument("--admin-password", default=None,
+                   help="admin password; when set with --api-base and WITHOUT an "
+                        "explicit --min-gap-seconds, the tab_away threshold_seconds "
+                        "is read from GET /api/admin/alert-settings")
     p.add_argument("--username", default="unknown",
                    help="candidate's HackerRank username (for the alert)")
     p.add_argument("--contest-slug", default=None, help="contest slug for the alert id")
@@ -473,10 +518,26 @@ def main(argv=None):
     args = build_argparser().parse_args(argv)
     print(f"[tab-away] imaging backend: {_BACKEND}", file=sys.stderr)
 
+    # Resolve the gap threshold. Precedence:
+    #   1. explicit --min-gap-seconds (operator override / test clips)
+    #   2. live admin-console value (GET /api/admin/alert-settings) when
+    #      --admin-password is supplied — the console is the source of truth
+    #   3. the built-in default (12)
+    min_gap_seconds = args.min_gap_seconds
+    if min_gap_seconds is None:
+        if args.admin_password:
+            fetched = fetch_threshold_seconds(args.api_base, args.admin_password)
+            if fetched is not None:
+                min_gap_seconds = fetched
+                print(f"[tab-away] threshold from alert-settings: {min_gap_seconds}s",
+                      file=sys.stderr)
+        if min_gap_seconds is None:
+            min_gap_seconds = DEFAULT_MIN_GAP_SECONDS
+
     alerts, summary = analyze_recording(
         args.video, args.logo,
         interval=args.interval, threshold=args.threshold,
-        region=parse_region(args.region), min_gap_seconds=args.min_gap_seconds,
+        region=parse_region(args.region), min_gap_seconds=min_gap_seconds,
         username=args.username, contest_slug=args.contest_slug,
         video_key=args.video_key, download_url_base=args.download_url_base,
         base_offset=args.base_offset, frames_dir=args.frames_dir,

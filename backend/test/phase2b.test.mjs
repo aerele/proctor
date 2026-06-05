@@ -374,12 +374,81 @@ test("alert-settings: GET returns full default config (all enabled, documented s
   assert.equal(p.recording_stopped.enabled, true);
   assert.equal(p.recording_stopped.severity, "critical");
   assert.equal(p.screen_share_stopped.severity, "critical");
-  assert.equal(p.invalid_share_surface.severity, "critical");
   assert.equal(p.recording_error.severity, "critical");
   assert.equal(p.ip_changed.severity, "warning");
   assert.equal(p.tab_hidden.severity, "warning");
   assert.equal(p.tab_away.severity, "warning");
   assert.equal(p.disconnected.severity, "warning");
+  // invalid_share_surface was removed from the catalog (recorder now refuses to
+  // record on an invalid share surface, so the event can never fire).
+  assert.equal(p.invalid_share_surface, undefined, "invalid_share_surface no longer in the catalog");
+  // tab_away carries a configurable threshold_seconds (default 12).
+  assert.equal(p.tab_away.threshold_seconds, 12, "tab_away default threshold is 12s");
+});
+
+test("alert-settings: tab_away threshold_seconds round-trips (positive number; default 12 on bad input)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+
+  // A valid positive number persists and reads back.
+  const save = await call(makeReq({
+    method: "POST", path: "/api/admin/alert-settings", headers: ADMIN_HEADERS,
+    body: { proctor: { tab_away: { enabled: true, severity: "warning", threshold_seconds: 30 } } }
+  }));
+  assert.equal(save.statusCode, 200);
+  assert.equal(save.body.proctor.tab_away.threshold_seconds, 30, "valid threshold persists");
+  const get = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings", headers: ADMIN_HEADERS }));
+  assert.equal(get.body.proctor.tab_away.threshold_seconds, 30, "threshold round-trips on GET");
+
+  // A non-positive / non-numeric threshold falls back to the default 12.
+  const bad = await call(makeReq({
+    method: "POST", path: "/api/admin/alert-settings", headers: ADMIN_HEADERS,
+    body: { proctor: { tab_away: { enabled: true, severity: "warning", threshold_seconds: -5 } } }
+  }));
+  assert.equal(bad.body.proctor.tab_away.threshold_seconds, 12, "invalid threshold falls back to default 12");
+
+  // Other types never gain a threshold_seconds field.
+  assert.equal(bad.body.proctor.recording_stopped.threshold_seconds, undefined, "only tab_away has threshold_seconds");
+});
+
+test("invalid_share_surface event no longer raises an alert (removed from sure-shot catalog)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const startRes = await start(firestore, storage);
+  const sessionId = startRes.body.session_id;
+
+  await call(makeReq({
+    method: "POST", path: "/api/events",
+    body: { session_id: sessionId, events: [{ type: "invalid_share_surface", timestamp: "2026-06-05T10:00:00Z" }] }
+  }));
+  const alerts = firestore._collections.get(process.env.ALERTS_COLLECTION);
+  const fired = [...(alerts?.values() || [])].filter((a) => a.type === "invalid_share_surface");
+  assert.equal(fired.length, 0, "invalid_share_surface event raises no alert");
+});
+
+test("backward-compat: a stored invalid_share_surface alert still DISPLAYS in the admin listing", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // Ingest a legacy invalid_share_surface alert via the generic /api/alerts path
+  // (free-form type — no catalog gate), then confirm the admin listing returns it.
+  const ingest = await call(makeReq({
+    method: "POST", path: "/api/alerts", headers: { "x-api-key": process.env.ALERTS_INGEST_API_KEY },
+    body: { alerts: [{
+      source: "proctor", type: "invalid_share_surface", severity: "critical",
+      timestamp: "2026-06-05T09:00:00Z", hackerrank_username: "legacy_user",
+      title: "Invalid share surface"
+    }] }
+  }));
+  assert.equal(ingest.statusCode, 200, JSON.stringify(ingest.body));
+
+  const list = await call(makeReq({ method: "GET", path: "/api/admin/alerts", headers: ADMIN_HEADERS }));
+  assert.equal(list.statusCode, 200);
+  const found = (list.body.alerts || []).find((a) => a.type === "invalid_share_surface");
+  assert.ok(found, "legacy invalid_share_surface alert still displays");
+  assert.equal(found.title, "Invalid share surface");
 });
 
 test("alert-settings: GET requires admin password", async () => {
