@@ -153,10 +153,21 @@ admin review.
   stamp added. Required fields: `source`, `type`, `severity`, `timestamp`,
   `hackerrank_username`, `title`.
 - `GET /api/admin/alerts` — list alerts newest-first (capped at 500), with
-  optional `contest_slug`, `severity`, and `source` query-param filters.
+  optional `contest_slug`, `severity`, `source`, and `room` query-param filters,
+  plus `include_archived` (default excludes archived alerts).
   Authenticated with the `x-admin-password` header (same as `/api/admin/sessions`).
   Alerts that carry a `video_key` get a short-lived signed read `download_url`
-  resolved at read time (never stored); signing failures degrade to `null`.
+  resolved at read time (never stored); signing failures degrade to `null`. Also
+  returns a distinct `rooms` array (from session docs, capped) for the console
+  room dropdown.
+- `POST /api/admin/alert-action` — admin-authenticated. Body
+  `{ action: "archive" | "unarchive", ids: [ ... ] }`. Toggles the `archived`
+  flag (and stamps/clears `archived_at`) on the named alert docs. Used by the
+  frontend to also-archive a session's alerts after an approve. Returns
+  `{ ok, action, archived, updated: [ids…], missing: [ids…] }`.
+- `GET` / `POST /api/admin/alert-settings` — admin-authenticated per-type proctor
+  alert configuration; see [Proctor alert settings](#proctor-alert-settings)
+  below.
 
 Shared alert shape (all producers and the backend must agree):
 
@@ -164,7 +175,7 @@ Shared alert shape (all producers and the backend must agree):
 {
   "id": "<source>:<type>:<username_norm>:<contest_slug>:<dedupe>",
   "source": "proctor | contest-eval",
-  "type": "recording_stopped | screen_share_stopped | invalid_share_surface | recording_error | ip_changed | peer_copy_cluster | recurring_pair | web_paste | fast_solve",
+  "type": "recording_stopped | screen_share_stopped | invalid_share_surface | recording_error | ip_changed | tab_hidden | tab_away | disconnected | peer_copy_cluster | recurring_pair | web_paste | fast_solve",
   "severity": "critical | warning | info",
   "timestamp": "ISO 8601",
   "contest_slug": "optional",
@@ -188,6 +199,7 @@ Shared alert shape (all producers and the backend must agree):
 |---|---|---|---|
 | `ALERTS_INGEST_API_KEY` | Yes | none | Shared secret for `POST /api/alerts` (`x-api-key`). Unset = reject all ingest. Karthi sets the real value at deploy time; the test suite uses a throwaway placeholder. Generate with `openssl rand -base64 32`. |
 | `ALERTS_COLLECTION` | No | `proctor_alerts` | Firestore collection for ingested alerts. |
+| `DISCONNECTED_STALENESS_MS` | No | `45000` | An `active` session whose newest liveness signal (heartbeat or beacon) is older than this is counted as `disconnected` in `/api/admin/stats`. |
 
 > Never commit a real `ALERTS_INGEST_API_KEY`. The deploy script and
 > `.env.deploy.example` carry placeholders only; Karthi supplies the real key
@@ -235,6 +247,8 @@ original legacy path. The `video-worker` scans **both** layouts.
   "blocked_by_session_id": "uuid | null (set when pending_approval)",
   "start_ip": "x.x.x.x", "current_ip": "x.x.x.x", "ip_change_count": 0,
   "created_at": "ISO", "updated_at": "ISO", "ended_at": "ISO?",
+  "last_heartbeat_at": "ISO?", "last_seen_at": "ISO? (heartbeat or beacon)",
+  "last_beacon_kind": "hidden | visible | closing (last beacon)",
   "event_count": 0, "heartbeat_count": 0, "chunk_count": 0,
   "manifest_key": "…/manifest.json (after end)"
 }
@@ -263,11 +277,28 @@ original legacy path. The `video-worker` scans **both** layouts.
   `{ session_id, assurance_accepted:true, manifest? }`. **No end code.** Only the
   integrity-assurance checkbox is required. `end` marks the session `ended` and
   writes `manifest.json` under `storage_prefix`.
-- `GET /api/admin/stats?contest_slug=` *(admin)* — counts by status:
-  `{ contest_slug, stats: { live, locked, pending_approval, finished, total,
-  not_started_or_total } }`. `not_started_or_total` equals `total` (no roster is
-  stored, so yet-to-start cannot be derived server-side; the frontend can
-  estimate it once a roster exists).
+- `POST /api/session/beacon` — liveness beacon, designed for
+  `navigator.sendBeacon()` (fires on page hide/unload). Accepts a JSON object
+  body **or** a raw `text/plain` JSON string (sendBeacon can't set custom
+  headers). Gated **only** by `session_id` ownership — **no admin auth**, and it
+  is **not** `requireWritableSession`-gated, so a locked/ended session can still
+  emit liveness. Body `{ session_id, kind: "hidden" | "visible" | "closing" }`.
+  Every kind refreshes `last_seen_at`; `hidden`/`closing` additionally upsert a
+  `warning` `tab_hidden` proctor alert (carrying `video_key`/`room`/`session_id`,
+  same idempotent id convention) **if** the `tab_hidden` type is enabled in the
+  alert settings. Unknown `session_id` → `404`; missing `session_id` → `400`.
+  Returns `{ ok, kind, last_seen_at }`.
+- `GET /api/admin/stats?contest_slug=&room=` *(admin)* — counts by status:
+  `{ contest_slug, room, stats: { live, locked, pending_approval, finished,
+  disconnected, total, not_started_or_total }, rooms: [ ... ],
+  disconnected_staleness_ms }`. `?room=` scopes the **counts** to one room (the
+  `rooms` list itself stays full so the dropdown still lists every room).
+  `disconnected` counts `active` sessions whose newest liveness signal
+  (`last_heartbeat_at` or `last_seen_at`, falling back to `created_at` only when
+  neither exists) is older than `disconnected_staleness_ms` (default `45000`,
+  override via the `DISCONNECTED_STALENESS_MS` env var). `not_started_or_total`
+  equals `total` (no roster is stored, so yet-to-start cannot be derived
+  server-side; the frontend can estimate it once a roster exists).
 - `POST /api/admin/session-action` *(admin)* — body
   `{ action, session_id?, usernames?: string[], contest_slug? }` where `action ∈
   approve | lock | unlock | bypass | end`. Targets one session (`session_id`) or
@@ -288,15 +319,48 @@ Selected proctor signals are upserted as `source:"proctor"` alerts into
 `proctor:<type>:<username_norm>:<contest_slug>:<dedupe>`), so they show up in
 `GET /api/admin/alerts` automatically with a `video_key` deep-link:
 
-| Signal | Source | Severity |
+| Signal | Source | Default severity |
 |---|---|---|
 | `recording_stopped` / `screen_share_stopped` / `invalid_share_surface` / `recording_error` | `/api/events` event types | `critical` |
 | `recording_stopped` | `/api/heartbeat` with a stopped `recording_state` | `critical` |
 | `ip_changed` | server-derived on `/api/heartbeat` | `warning` |
+| `tab_hidden` | `/api/session/beacon` with `kind:"hidden"`/`"closing"` | `warning` |
 
 Noisy events (`focus` / `blur` / `visibility` / `clipboard`) are intentionally
-**not** surfaced. `video_key` is the merged review video if one exists, else the
-raw `…/screen/` chunk prefix.
+**not** surfaced. `video_key` is the merged review video if one exists (else the
+field is omitted — never a broken `…/screen/` folder link). `tab_away` and
+`disconnected` are reserved proctor alert types (configurable in the settings
+below; `disconnected` is also surfaced as a derived count in `/api/admin/stats`).
+
+Each sure-shot upsert **consults the proctor alert settings** (one Firestore read
+per request): a **disabled** type is skipped, and the **configured severity**
+overrides the default in the table above.
+
+### Proctor alert settings
+
+- `GET /api/admin/alert-settings` *(admin)* — returns the full per-type config
+  (defaults merged with any stored overrides) so the console can render a
+  complete toggle list:
+  `{ proctor: { <type>: { enabled: boolean, severity: "critical"|"warning"|"info" } } }`.
+  Types and their defaults:
+  `recording_stopped`, `screen_share_stopped`, `invalid_share_surface`,
+  `recording_error` → `critical`; `ip_changed`, `tab_hidden`, `tab_away`,
+  `disconnected` → `warning` (all enabled by default).
+- `POST /api/admin/alert-settings` *(admin)* — upserts the same shape. Unknown
+  types are dropped and invalid severities fall back to the default, so a partial
+  or malformed payload can never corrupt the config. Stored as a dedicated
+  `alert_settings` doc in `SETTINGS_COLLECTION` (never collides with the
+  `active` schedule/contest settings doc).
+
+### Alert archive
+
+Alert docs carry a boolean `archived` (+ `archived_at` timestamp). A missing
+`archived` field is treated as not-archived (legacy-safe).
+`GET /api/admin/alerts` **excludes archived alerts by default**; pass
+`?include_archived=true` to include them. `POST /api/admin/alert-action`
+(`{ action, ids }`) toggles the flag. A re-firing sure-shot does **not**
+un-archive an already-archived alert (the archive flag is only ever written by
+`alert-action`, never by the sure-shot upsert path).
 
 ### Firestore composite index
 

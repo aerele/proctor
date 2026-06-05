@@ -266,12 +266,145 @@ def test_cdp_importable(t):
         t.check(False, "import cdp", detail=repr(e))
 
 
+# ---------------------------------------------------------------------------
+# 5. alert-config: disable suppresses a type; severity override is applied;
+#    missing file is back-compat; malformed file fails loud.
+# ---------------------------------------------------------------------------
+def _synthetic_clone():
+    """A minimal clone result that fires exactly one peer_copy_cluster (hard,
+    severity 'critical' dynamically) and one recurring_pair (1 hard problem =>
+    'warning' dynamically). Fixture-independent so this test always runs."""
+    clone = {
+        "recurring_pairs": [{
+            "pair": ["alice", "bob"], "ranks": [1, 2],
+            "n_problems": 1, "problems": ["hard-prob"],
+            "n_hard": 1, "hard_problems": ["hard-prob"],
+        }],
+        "skeleton_clusters": [{
+            "ch": "hard-prob", "hardness": "hard", "n_users": 2,
+            "members": [{"user": "alice", "id": "111"}, {"user": "bob", "id": "222"}],
+        }],
+        "_records": [],
+    }
+    return clone
+
+
+def _build_synth(alert_config=None):
+    clone = _synthetic_clone()
+    chal_by_slug = {"hard-prob": {"slug": "hard-prob", "name": "Hard Problem"}}
+    return alertmod.build_alerts(
+        "demo-slug", clone, {}, {}, set(), chal_by_slug=chal_by_slug,
+        alert_config=alert_config)
+
+
+def test_alert_config(t):
+    t.section("5. alert-config: disable suppresses; severity override applied; "
+              "missing file = back-compat; malformed = fail loud")
+
+    # --- baseline: no config == built-in defaults == legacy dynamic severity ---
+    base = _build_synth(alert_config=None)
+    base_types = {a["type"] for a in base}
+    t.check("peer_copy_cluster" in base_types and "recurring_pair" in base_types,
+            "baseline (no config) builds both synthetic alert types",
+            detail=str(sorted(base_types)))
+    pcc_base = next(a for a in base if a["type"] == "peer_copy_cluster")
+    rp_base = next(a for a in base if a["type"] == "recurring_pair")
+    t.check(pcc_base["severity"] == "critical",
+            "baseline peer_copy_cluster keeps DYNAMIC severity (hard => critical)",
+            detail=pcc_base["severity"])
+    t.check(rp_base["severity"] == "warning",
+            "baseline single-hard recurring_pair keeps DYNAMIC severity (=> warning)",
+            detail=rp_base["severity"])
+
+    # --- disabling a type suppresses every alert of that type ---
+    cfg_disable = alertmod.AlertConfig(
+        {"peer_copy_cluster": {"enabled": False, "severity": None}})
+    got = _build_synth(alert_config=cfg_disable)
+    types = {a["type"] for a in got}
+    t.check("peer_copy_cluster" not in types,
+            "disabling peer_copy_cluster suppresses all its alerts",
+            detail=str(sorted(types)))
+    t.check("recurring_pair" in types,
+            "disabling one type does not suppress the others",
+            detail=str(sorted(types)))
+
+    # --- explicit severity override wins over the dynamic HARD/MED mapping ---
+    cfg_override = alertmod.AlertConfig(
+        {"recurring_pair": {"enabled": True, "severity": "info"}})
+    got2 = _build_synth(alert_config=cfg_override)
+    rp = next((a for a in got2 if a["type"] == "recurring_pair"), None)
+    t.check(rp is not None and rp["severity"] == "info",
+            "explicit severity override ('info') replaces dynamic 'warning'",
+            detail=(rp or {}).get("severity"))
+    # a None severity in config must NOT override (stays dynamic)
+    cfg_none = alertmod.AlertConfig(
+        {"peer_copy_cluster": {"enabled": True, "severity": None}})
+    pcc = next(a for a in _build_synth(alert_config=cfg_none)
+               if a["type"] == "peer_copy_cluster")
+    t.check(pcc["severity"] == "critical",
+            "severity=null keeps the dynamic severity (no override)",
+            detail=pcc["severity"])
+
+    # --- missing file => back-compat (all enabled, dynamic severity) ---
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "does-not-exist.json"
+        cfg_missing = alertmod.load_alert_config(missing)
+        t.check(all(cfg_missing.enabled(x) for x in alertmod.ALERT_TYPES),
+                "missing config file => every type enabled (back-compat)")
+        t.check(all(cfg_missing.severity_override(x) is None
+                    for x in alertmod.ALERT_TYPES),
+                "missing config file => no severity overrides (dynamic kept)")
+        bm = _build_synth(alert_config=cfg_missing)
+        t.check({a["type"] for a in bm} == base_types
+                and next(a for a in bm if a["type"] == "peer_copy_cluster")["severity"]
+                    == "critical",
+                "missing-file config reproduces the no-config baseline exactly")
+
+        # --- malformed JSON fails loud (do not silently mis-classify alerts) ---
+        bad = Path(tmp) / "bad.json"
+        bad.write_text("{ this is not json")
+        raised = False
+        try:
+            alertmod.load_alert_config(bad)
+        except ValueError:
+            raised = True
+        t.check(raised, "malformed alert-config JSON raises ValueError (fail loud)")
+
+        # --- invalid severity value fails loud ---
+        bad2 = Path(tmp) / "bad2.json"
+        bad2.write_text(json.dumps(
+            {"web_paste": {"enabled": True, "severity": "MEGA"}}))
+        raised2 = False
+        try:
+            alertmod.load_alert_config(bad2)
+        except ValueError:
+            raised2 = True
+        t.check(raised2, "an out-of-range severity in config raises ValueError")
+
+    # --- the committed default catalog loads and matches the spec'd defaults ---
+    shipped = alertmod.load_alert_config(alertmod.DEFAULT_ALERT_CONFIG_PATH)
+    expect = {
+        "peer_copy_cluster": ("enabled", "critical"),
+        "recurring_pair": ("enabled", "critical"),
+        "web_paste": ("enabled", "warning"),
+        "fast_solve": ("enabled", "info"),
+    }
+    cat_ok = all(
+        shipped.enabled(t_) and shipped.severity_override(t_) == sev
+        for t_, (_en, sev) in expect.items()
+    )
+    t.check(cat_ok, "committed alert-config.json matches the documented defaults "
+            "(pcc/rp critical, web_paste warning, fast_solve info, all enabled)",
+            detail=str(shipped.as_dict()))
+
+
 def main():
     t = T()
     test_core_reproduces_clone_analysis(t)
     test_verdict_seam(t)
     test_alert_idempotency_and_id_format(t)
     test_cdp_importable(t)
+    test_alert_config(t)
     print("\n" + "=" * 70)
     total = t.passed + t.failed
     print(f"RESULT: {t.passed}/{total} passed, {t.failed} failed")

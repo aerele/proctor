@@ -74,4 +74,10 @@ Triple review + live visual verification; all real bugs (B0–B8) fixed and **re
 ### BUILD COMPLETE (within HOLD constraints)
 Full roadmap minus iframe + contest-eval monitoring: built, reviewed (security + triple), bugs fixed + live-verified, 85 backend / 30 monitoring / build green, committed + pushed, **PR #1 open**. Only S2 (extension) remains, held for Karthi's input. Morning items in MORNING-REVIEW.md.
 
+## 2026-06-05 — Morning feedback (Karthi reviewing) — Round 2
+Dispatched workflow `ww6qefqbj`: **archive** (approve→archive, archived hidden + toggle) · **room filters** (stats + alerts) · **alert-settings** (proctor types enable/disable + severity in Settings UI; contest-eval types in `monitoring/alert-config.json`) · **near-live** (student tab-close `sendBeacon` + heartbeat-staleness `disconnected` + admin auto-poll ~5s) · **C1** (embed only a SHA-256 hash of admin password; client hashes input; plain never in JS). Decisions: H2 accepted as-is; other hardening accepted; **S2 dropped**; WebSocket reframed (students=HTTP heartbeats, only admin needs near-live → auto-poll, no 500 sockets).
+**Queued (sequential, after round-2 frontend to avoid file conflicts):**
+- **Student-UX polish (batched, same page):** (a) invalid-share-surface (tab not entire screen) currently errors but STILL records → must refuse to record, clearly show not-recording, inline "Try again" (no reload); audit other dead-end error flows. (b) Content hierarchy: make important things look important; surface the **test rules** prominently so candidates read them; review all content placement on the student page.
+- **S1 final tuning:** held for Karthi's real test recording + logo crop (logo confirmed top-left, white-on-dark).
+
 _(appended as phases complete.)_

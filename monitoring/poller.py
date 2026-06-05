@@ -113,9 +113,10 @@ def run_cycle(args, acquirer, seam, cycle_idx):
     clone = core.analyze_clones(meta, code)
     code_present_ids = set(code.keys())
 
-    # build alerts (shared contract)
+    # build alerts (shared contract); alert_config gates types + overrides severity
     alert_list = alertmod.build_alerts(
-        slug, clone, ma, flagged, code_present_ids, chal_by_slug=chal_by_slug)
+        slug, clone, ma, flagged, code_present_ids, chal_by_slug=chal_by_slug,
+        alert_config=args._alert_config)
     # client-side validate (mirror backend)
     bad = [(a["id"], alertmod.validate_alert(a)) for a in alert_list]
     bad = [(i, e) for i, e in bad if e]
@@ -185,6 +186,9 @@ def build_argparser():
     p.add_argument("--fixtures", help="offline mode: contest-eval run dir with data/raw/")
     p.add_argument("--data-dir", default=str(HERE / ".data"),
                    help="local PII output dir (gitignored)")
+    p.add_argument("--alert-config", default=str(HERE / "alert-config.json"),
+                   help="per-type alert toggle/severity catalog (JSON). Missing "
+                        "file => all types enabled with dynamic severity.")
     p.add_argument("--verdict-queue",
                    default=str(HERE.parent / "night-run" / "verdict-queue"),
                    help="file-queue dir for the LLM verdict seam")
@@ -203,12 +207,25 @@ def main(argv=None):
         build_argparser().error("--slug is required in live mode (or pass --fixtures DIR)")
     Path(args.data_dir).mkdir(parents=True, exist_ok=True)
 
+    # load the alert catalog/config once (fail loud on a malformed file)
+    try:
+        args._alert_config = alertmod.load_alert_config(args.alert_config)
+    except ValueError as e:
+        build_argparser().error(str(e))
+    cfg_summary = {
+        t: ("off" if not args._alert_config.enabled(t)
+            else (args._alert_config.severity_override(t) or "dynamic"))
+        for t in alertmod.ALERT_TYPES
+    }
+
     acquirer = acq.make_acquirer(args)
     seam = VerdictSeam(args.verdict_queue, max_cycles=args.verdict_max_cycles)
 
     log(f"start: slug={args.slug} contest-id={args.contest_id} api-base={args.api_base} "
         f"mode={acquirer.mode} interval={args.interval}s "
         f"post={'OFF' if (args.no_post or args.dry_run) else 'ON'}")
+    log(f"alert-config: {args._alert_config.source}")
+    log(f"alert types (severity, 'off'=disabled, 'dynamic'=HARD/MED mapping): {cfg_summary}")
 
     cycle = 0
     last = None
