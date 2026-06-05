@@ -1,5 +1,6 @@
 import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
-import type { ProctorEvent, SessionStartResponse, UploadManifestItem } from "./types";
+import type { ApiError } from "./api";
+import type { ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 type RecorderOptions = {
   sessionId: string;
@@ -8,6 +9,10 @@ type RecorderOptions = {
   onEvent: (event: ProctorEvent) => void;
   onUploadChange: (depth: number, uploaded: number) => void;
   onFatalError: (message: string) => void;
+  // B1: the session was locked/ended/paused server-side (heartbeat status or a
+  // 403/409 from any write). The recorder has been stopped; the host flips its
+  // gate to match. Distinct from onFatalError, which is a local capture failure.
+  onStatusChange?: (status: ServerSessionStatus) => void;
   onMediaStateChange?: (state: MediaCaptureState) => void;
   onCameraStream?: (stream: MediaStream | null) => void;
   onIpStatusChange?: (status: { startIp: string; currentIp: string; ipChanged: boolean; newlyChanged: boolean }) => void;
@@ -25,6 +30,39 @@ export type MediaCaptureState = {
   camera: "inactive" | "recording" | "stopped" | "error" | "permission_denied" | "unavailable";
   microphone: "inactive" | "recording" | "stopped" | "error" | "permission_denied" | "unavailable";
 };
+
+// Thrown by recorder.start() BEFORE any MediaRecorder is created when the student
+// shares a tab/window/browser surface instead of the entire monitor. The caller
+// MUST treat this as "recording did NOT start" (no status flip to "recording")
+// and offer an inline retry. Distinct from a generic start failure so the host UI
+// can show the precise "share your ENTIRE SCREEN" guidance.
+export class InvalidShareSurfaceError extends Error {
+  /** The surface the student actually selected: 'window' | 'browser' | undefined. */
+  readonly displaySurface: string;
+  constructor(displaySurface: string) {
+    super("You must share your ENTIRE SCREEN — you selected a tab/window. Recording has not started.");
+    this.name = "InvalidShareSurfaceError";
+    this.displaySurface = displaySurface;
+  }
+}
+
+// Categorize a getDisplayMedia / getUserMedia rejection into a stable kind the
+// host can map to recoverable, human-readable copy. Permission-denied and the
+// user pressing Cancel both surface as NotAllowedError/AbortError on most
+// browsers; we keep them under one "share_cancelled" bucket because the recovery
+// (press Try again, pick Entire Screen, Allow) is identical.
+export type RecorderStartErrorKind = "unsupported" | "share_cancelled" | "invalid_surface" | "unknown";
+
+export function classifyStartError(error: unknown): RecorderStartErrorKind {
+  if (error instanceof InvalidShareSurfaceError) return "invalid_surface";
+  if (error instanceof Error) {
+    if (error.message.includes("Screen recording is not supported")) return "unsupported";
+    if (error.name === "NotAllowedError" || error.name === "AbortError" || error.name === "NotFoundError") {
+      return "share_cancelled";
+    }
+  }
+  return "unknown";
+}
 
 function createEvent(type: string, detail?: Record<string, unknown>): ProctorEvent {
   return {
@@ -66,10 +104,35 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   cameraVideo.muted = true;
   cameraVideo.playsInline = true;
 
+  let fatalStatusHandled = false;
+
   const emit = (type: string, detail?: Record<string, unknown>) => {
     const event = createEvent(type, detail);
     eventBuffer.push(event);
     options.onEvent(event);
+  };
+
+  // B1: map a backend write rejection (403 session_locked / waiting_for_approval,
+  // 409 session_ended) to the lifecycle status the host should flip to. Returns
+  // null for ordinary network/transient errors (no self-stop).
+  const fatalStatusFromError = (error: unknown): ServerSessionStatus | null => {
+    const err = error as ApiError;
+    if (err?.code === "session_ended") return "ended";
+    if (err?.code === "session_locked") return "locked";
+    if (err?.code === "waiting_for_approval") return "pending_approval";
+    if (err?.status === 409) return "ended";
+    if (err?.status === 403) return "locked";
+    return null;
+  };
+
+  // B1: stop the recorder and notify the host exactly once when the session is no
+  // longer writable. Guards against the multiple concurrent writes (heartbeat +
+  // chunk upload + event flush) all tripping the same 403 at the same time.
+  const handleFatalStatus = (status: ServerSessionStatus | null) => {
+    if (!status || fatalStatusHandled || stopping) return;
+    fatalStatusHandled = true;
+    void controls.stop();
+    options.onStatusChange?.(status);
   };
 
   const flushEvents = async () => {
@@ -80,6 +143,8 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     } catch (error) {
       eventBuffer = [...batch, ...eventBuffer].slice(-200);
       options.onEvent(createEvent("event_upload_error", { message: String(error) }));
+      // B1: a 403/409 on the events write means the session is no longer writable.
+      handleFatalStatus(fatalStatusFromError(error));
     }
   };
 
@@ -119,6 +184,8 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       })
       .catch((error) => {
         emit("upload_error", { kind: "screen", index, bytes: blob.size, message: String(error) });
+        // B1: a 403/409 on upload means the session is no longer writable.
+        handleFatalStatus(fatalStatusFromError(error));
         throw error;
       })
       .finally(() => {
@@ -188,12 +255,24 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
             message: "IP address changed after the test started."
           });
         }
-      }).catch((error) => emit("heartbeat_error", { message: String(error) }));
+        // B1: an active heartbeat reports the live status; if a proctor
+        // locked/ended/paused the session, self-stop the recorder.
+        if (response.status && response.status !== "active") {
+          handleFatalStatus(response.status);
+        }
+      }).catch((error) => {
+        const fatal = fatalStatusFromError(error);
+        if (fatal) {
+          handleFatalStatus(fatal);
+        } else {
+          emit("heartbeat_error", { message: String(error) });
+        }
+      });
       void flushEvents();
     }, options.heartbeatSeconds * 1000);
   };
 
-  return {
+  const controls: RecorderControls = {
     async start() {
       if (!navigator.mediaDevices?.getDisplayMedia) {
         throw new Error("Screen recording is not supported. Use latest Chrome or Edge.");
@@ -209,21 +288,31 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
 
       const [screenTrack] = screenStream.getVideoTracks();
       const screenSettings = screenTrack?.getSettings() as MediaTrackSettings & { displaySurface?: string };
+
+      // INVALID-SURFACE GUARD — runs BEFORE we attach the ended-listener, start
+      // the camera/mic, build the combined stream, or create the MediaRecorder.
+      // If the student shared a tab/window/browser instead of the whole monitor,
+      // we stop the obtained stream and throw a typed error so the host keeps the
+      // UI in a clear NOT-RECORDING state and offers an inline retry. No recording
+      // is ever started for an invalid surface.
+      if (screenSettings?.displaySurface && screenSettings.displaySurface !== "monitor") {
+        emit("invalid_share_surface", {
+          display_surface: screenSettings.displaySurface,
+          required_surface: "monitor"
+        });
+        screenStream.getTracks().forEach((track) => track.stop());
+        screenStream = null;
+        throw new InvalidShareSurfaceError(screenSettings.displaySurface);
+      }
+
+      // Valid full-screen share confirmed — now it is safe to wire up the
+      // stop-detection and begin capture.
       screenTrack?.addEventListener("ended", () => {
         if (stopping) return;
         updateMediaState("screen", "stopped");
         emit("screen_share_stopped", { reason: "track_ended" });
         options.onFatalError("Screen sharing stopped. Return to the proctor app immediately.");
       });
-      if (screenSettings?.displaySurface && screenSettings.displaySurface !== "monitor") {
-        emit("invalid_screen_share_surface", {
-          display_surface: screenSettings.displaySurface,
-          required_surface: "monitor"
-        });
-        options.onFatalError("You selected a tab or window. Restart and select Entire Screen for valid proctoring.");
-        screenStream.getTracks().forEach((track) => track.stop());
-        return;
-      }
 
       await startCameraAndMicrophone();
       startDirectScreenRecordingStream();
@@ -271,6 +360,8 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       return queueDepth;
     }
   };
+
+  return controls;
 
   async function startCameraAndMicrophone() {
     if (!navigator.mediaDevices?.getUserMedia) {

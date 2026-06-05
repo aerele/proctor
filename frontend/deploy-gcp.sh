@@ -18,7 +18,13 @@ if ! gcloud artifacts repositories describe "$REPOSITORY" --location="$REGION" >
     --location="$REGION"
 fi
 
-VITE_API_BASE_URL="$API_URL" VITE_ADMIN_PASSWORD="$ADMIN_PASSWORD" npm --workspace frontend run build
+# C1: never ship the plain admin password in the bundle. Compute its sha256 hex
+# and pass it as VITE_ADMIN_PASSWORD_HASH; the unlock gate hashes the typed
+# password and compares to this. The plain ADMIN_PASSWORD is NOT passed to the
+# build (it stays a backend-only secret).
+ADMIN_PASSWORD_HASH="$(printf '%s' "$ADMIN_PASSWORD" | sha256sum | awk '{print $1}')"
+
+VITE_API_BASE_URL="$API_URL" VITE_ADMIN_PASSWORD_HASH="$ADMIN_PASSWORD_HASH" npm --workspace frontend run build
 gcloud builds submit frontend --tag "$IMAGE"
 gcloud run deploy "$SERVICE_NAME" \
   --image "$IMAGE" \

@@ -5,6 +5,8 @@ PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID first, for example: export PROJECT_ID=a
 REGION="${REGION:-asia-south1}"
 SERVICE_NAME="${SERVICE_NAME:-proctor-api}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:?Set ADMIN_PASSWORD first}"
+ALERTS_INGEST_API_KEY="${ALERTS_INGEST_API_KEY:?Set ALERTS_INGEST_API_KEY first (generate with: openssl rand -base64 32)}"
+ALERTS_COLLECTION="${ALERTS_COLLECTION:-proctor_alerts}"
 PUBLIC_APP_ORIGIN="${PUBLIC_APP_ORIGIN:-*}"
 EVIDENCE_BUCKET="${EVIDENCE_BUCKET:-${PROJECT_ID}-proctor-evidence}"
 REPOSITORY="${REPOSITORY:-aerele-proctor}"
@@ -26,6 +28,18 @@ RUNTIME_SERVICE_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com
 if ! gcloud firestore databases describe --database="(default)" >/dev/null 2>&1; then
   gcloud firestore databases create --database="(default)" --location="$REGION"
 fi
+
+# Phase 2 (session model) needs a composite index on the sessions collection so
+# the single-session / bulk-action / per-contest-stats queries (which filter on
+# username_norm AND contest_slug) work. Creating an index that already exists is
+# a no-op; we ignore the "already exists" error so re-running deploy is safe.
+SESSION_COLLECTION="${SESSION_COLLECTION:-proctor_sessions}"
+gcloud firestore indexes composite create \
+  --collection-group="$SESSION_COLLECTION" \
+  --query-scope=COLLECTION \
+  --field-config=field-path=username_norm,order=ascending \
+  --field-config=field-path=contest_slug,order=ascending \
+  >/dev/null 2>&1 || echo "Composite index on ${SESSION_COLLECTION}(username_norm,contest_slug) already exists or is building."
 
 if ! gcloud storage buckets describe "gs://${EVIDENCE_BUCKET}" >/dev/null 2>&1; then
   gcloud storage buckets create "gs://${EVIDENCE_BUCKET}" --location="$REGION" --uniform-bucket-level-access
@@ -67,7 +81,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --max-instances 20 \
   --concurrency 100 \
   --timeout 30s \
-  --set-env-vars="EVIDENCE_BUCKET=${EVIDENCE_BUCKET},ADMIN_PASSWORD=${ADMIN_PASSWORD},PUBLIC_APP_ORIGIN=${PUBLIC_APP_ORIGIN},SESSION_COLLECTION=proctor_sessions,SETTINGS_COLLECTION=proctor_settings,URL_EXPIRY_SECONDS=900"
+  --set-env-vars="EVIDENCE_BUCKET=${EVIDENCE_BUCKET},ADMIN_PASSWORD=${ADMIN_PASSWORD},ALERTS_INGEST_API_KEY=${ALERTS_INGEST_API_KEY},ALERTS_COLLECTION=${ALERTS_COLLECTION},PUBLIC_APP_ORIGIN=${PUBLIC_APP_ORIGIN},SESSION_COLLECTION=${SESSION_COLLECTION},SETTINGS_COLLECTION=proctor_settings,URL_EXPIRY_SECONDS=900"
 
 echo "Backend URL:"
 gcloud run services describe "$SERVICE_NAME" --region="$REGION" --format="value(status.url)"
