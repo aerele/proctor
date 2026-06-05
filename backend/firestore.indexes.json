@@ -1,0 +1,14 @@
+{
+  "//": "Composite indexes the Phase-2 session model needs. Firestore requires a composite index for any query that filters on two or more fields. The single-session reconciliation (startSession), bulk session-action by username, and stats-by-contest queries filter on (username_norm, contest_slug). Deploy with: gcloud firestore indexes composite create ... OR `firebase deploy --only firestore:indexes` if you use the Firebase CLI. The first real query against a missing index returns an error whose message contains a one-click console URL to create it.",
+  "indexes": [
+    {
+      "collectionGroup": "proctor_sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "username_norm", "order": "ASCENDING" },
+        { "fieldPath": "contest_slug", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
