@@ -1,19 +1,31 @@
 import {
   AlertTriangle,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Clock,
+  Eye,
   Film,
   Pause,
   Play,
   RefreshCw,
   Rewind,
   Search,
-  Video
+  SkipForward,
+  ThumbsDown,
+  ThumbsUp,
+  UserCheck,
+  Video,
+  X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchAdminSessions, fetchRecordingSessions, fetchSubmissionEvents } from "./api";
-import type { AdminSessionDetail, RecordingSession, SessionEvidence, SubmissionEvent } from "./types";
+import { fetchAdminSessions, fetchMyReviews, fetchRecordingSessions, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
+import type { AdminSessionDetail, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEvidence, SubmissionEvent } from "./types";
+
+// localStorage key for the reviewer's own name so a refresh keeps them reviewing.
+const REVIEWER_NAME_KEY = "proctor_reviewer_name";
 
 // Every recorded chunk is a fixed 30-second .webm (uploadConfig.chunk_seconds on
 // the backend). The playback timeline is built around this constant.
@@ -244,6 +256,34 @@ export function RecordingReview({ password }: Props) {
   // Live drag flag for the window-level mousemove/up listeners (avoids re-binding).
   const draggingRef = useRef(false);
 
+  // ---- REVIEW MODE -------------------------------------------------------
+  // "browse" = the existing free username search/playback. "review" = the
+  // multi-reviewer one-by-one verdict workflow layered on top of the same player.
+  const [mode, setMode] = useState<"browse" | "review">("browse");
+  // The reviewer's name (persisted to localStorage so a refresh keeps them in).
+  const [reviewerName, setReviewerName] = useState<string>(
+    () => window.localStorage.getItem(REVIEWER_NAME_KEY) ?? ""
+  );
+  const [nameInput, setNameInput] = useState("");
+  // The student the server has served this reviewer to watch right now (review
+  // mode only). null before the first serve; "" when the queue is done.
+  const [reviewUsername, setReviewUsername] = useState<string | null>(null);
+  // True when the server returned {done:true} — the reviewer's queue is empty.
+  const [reviewDone, setReviewDone] = useState(false);
+  // The review endpoints are not deployed yet (a 404 → graceful degrade).
+  const [reviewUnavailable, setReviewUnavailable] = useState(false);
+  // In-flight guard so the big Yes/No buttons can't double-fire.
+  const [submitting, setSubmitting] = useState(false);
+  // Fetching-the-next-student spinner state.
+  const [advancing, setAdvancing] = useState(false);
+  // This reviewer's own completed verdicts (header count + re-watch list).
+  const [myReviews, setMyReviews] = useState<ReviewMineItem[]>([]);
+  const [myReviewsOpen, setMyReviewsOpen] = useState(false);
+  // When re-watching a completed review, this holds that username (read-only;
+  // the Yes/No controls are hidden and a "viewing a completed review" note shows).
+  const [rewatchUsername, setRewatchUsername] = useState<string | null>(null);
+  // The username currently loaded into the player (used to detect "no recording").
+
   // ---- Load the lightweight picker list once. -----------------------------
   useEffect(() => {
     let cancelled = false;
@@ -332,8 +372,10 @@ export function RecordingReview({ password }: Props) {
   const invalidCount = markers.length - validCount;
 
   // ---- Load a chosen user's sessions (with signed evidence). --------------
+  // `silentIfEmpty` (review mode) suppresses the "No sessions found" banner so
+  // ReviewModePanel can show its own "No recording found — score anyway" state.
   const loadUser = useCallback(
-    async (username: string) => {
+    async (username: string, silentIfEmpty = false) => {
       const trimmed = username.trim();
       if (!trimmed) return;
       setLoadingUser(true);
@@ -353,7 +395,7 @@ export function RecordingReview({ password }: Props) {
         setCurrentPos(0);
         setCurrentTestTime(0);
         setPlaying(false);
-        if (!loaded.length) setError(`No sessions found for "${trimmed}".`);
+        if (!loaded.length && !silentIfEmpty) setError(`No sessions found for "${trimmed}".`);
 
         // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the newest
         // session's contest so the markers line up with that test; a 404 (or
@@ -374,6 +416,144 @@ export function RecordingReview({ password }: Props) {
     },
     [password]
   );
+
+  // ---- REVIEW MODE actions ----------------------------------------------
+  // Refresh this reviewer's own completed-verdict list (header count + re-watch
+  // list). Tolerant: a null (404) just leaves the list empty.
+  const refreshMyReviews = useCallback(
+    async (name: string) => {
+      if (!name) return;
+      try {
+        const mine = await fetchMyReviews(password, name);
+        setMyReviews(mine?.reviews ?? []);
+      } catch {
+        // Non-fatal — the count/list just stays as-is.
+      }
+    },
+    [password]
+  );
+
+  // Ask the SERVER for the next student to review and load that recording into
+  // the existing player. {username} → load it; {done:true} → show the done state;
+  // null (404) → show "not deployed yet". Leaving re-watch mode along the way.
+  const serveNext = useCallback(
+    async (name: string) => {
+      if (!name) return;
+      setAdvancing(true);
+      setError("");
+      setRewatchUsername(null);
+      try {
+        const next = await reviewNext(password, name);
+        if (next === null) {
+          setReviewUnavailable(true);
+          setReviewUsername(null);
+          setReviewDone(false);
+          return;
+        }
+        setReviewUnavailable(false);
+        if (next.done) {
+          setReviewDone(true);
+          setReviewUsername(null);
+          // Clear the player so the done state isn't sitting behind a stale clip.
+          setSessions([]);
+          setSubmissionEvents([]);
+          return;
+        }
+        setReviewDone(false);
+        setReviewUsername(next.username);
+        await loadUser(next.username, true);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setAdvancing(false);
+      }
+    },
+    [password, loadUser]
+  );
+
+  // Start reviewing under a typed name: persist it, load this reviewer's history,
+  // and serve the first student.
+  const startReviewing = useCallback(
+    async (name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      window.localStorage.setItem(REVIEWER_NAME_KEY, trimmed);
+      setReviewerName(trimmed);
+      setNameInput("");
+      setReviewDone(false);
+      await refreshMyReviews(trimmed);
+      await serveNext(trimmed);
+    },
+    [refreshMyReviews, serveNext]
+  );
+
+  // "Not you? change name" — drop the persisted identity and return to the name
+  // prompt without leaving review mode.
+  const changeReviewerName = useCallback(() => {
+    window.localStorage.removeItem(REVIEWER_NAME_KEY);
+    setReviewerName("");
+    setNameInput("");
+    setReviewUsername(null);
+    setReviewDone(false);
+    setRewatchUsername(null);
+    setMyReviews([]);
+    setSessions([]);
+    setSubmissionEvents([]);
+  }, []);
+
+  // Record a YES(1)/NO(0) verdict for the served student, then serve the next.
+  const castVerdict = useCallback(
+    async (verdict: ReviewVerdict) => {
+      if (!reviewerName || !reviewUsername || submitting) return;
+      setSubmitting(true);
+      setError("");
+      try {
+        const ok = await submitReviewVerdict(password, { username: reviewUsername, reviewer_name: reviewerName, verdict });
+        if (ok === null) {
+          setReviewUnavailable(true);
+          return;
+        }
+        await refreshMyReviews(reviewerName);
+        await serveNext(reviewerName);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [password, reviewerName, reviewUsername, submitting, refreshMyReviews, serveNext]
+  );
+
+  // "Skip (no verdict)" — leave this student unscored and just ask for the next.
+  const skipStudent = useCallback(async () => {
+    if (!reviewerName || submitting || advancing) return;
+    await serveNext(reviewerName);
+  }, [reviewerName, submitting, advancing, serveNext]);
+
+  // Re-watch a COMPLETED review read-only: load that recording WITHOUT changing
+  // the served student or the verdict. Clears on the next serve/skip.
+  const rewatchReview = useCallback(
+    async (username: string) => {
+      setRewatchUsername(username);
+      setError("");
+      await loadUser(username, true);
+    },
+    [loadUser]
+  );
+
+  // On switching INTO review mode with a remembered name (refresh-resume), load
+  // the reviewer's history and serve the first student automatically.
+  const reviewBootstrappedRef = useRef(false);
+  useEffect(() => {
+    if (mode !== "review" || !reviewerName) return;
+    if (reviewBootstrappedRef.current) return;
+    reviewBootstrappedRef.current = true;
+    void (async () => {
+      await refreshMyReviews(reviewerName);
+      await serveNext(reviewerName);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, reviewerName]);
 
   // When the active session changes (different session picked), reset the anchor
   // to that session's created_at and rewind playback.
@@ -620,6 +800,28 @@ export function RecordingReview({ password }: Props) {
     };
   }, [timeFromClientX, seekToTestTime, wantPlaying]);
 
+  // REVIEW-MODE KEYBOARD: Y = Yes(1), N = No(0). Only active while a student is
+  // served for a fresh verdict (not while re-watching a completed review), and
+  // never when typing into an input/textarea/select so the name field is unaffected.
+  useEffect(() => {
+    if (mode !== "review" || !reviewUsername || rewatchUsername || reviewDone) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      const key = event.key.toLowerCase();
+      if (key === "y") {
+        event.preventDefault();
+        void castVerdict(1);
+      } else if (key === "n") {
+        event.preventDefault();
+        void castVerdict(0);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mode, reviewUsername, rewatchUsername, reviewDone, castVerdict]);
+
   // ARROW-KEY NUDGE when the player area is focused: ←/→ = ±5s, Shift+←/→ = ±30s.
   // Space toggles play/pause. We never hijack keys while an input/select/textarea
   // (or any contenteditable) is focused, so typing in Jump-to-time stays normal.
@@ -694,19 +896,88 @@ export function RecordingReview({ password }: Props) {
   return (
     <section className="space-y-5">
       <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
-        <div className="flex items-center gap-3">
-          <Film size={20} />
-          <div>
-            <h1 className="text-2xl font-semibold">Recordings</h1>
-            <p className="mt-1 text-sm text-muted">
-              Pick a student and watch their screen recording on a test-relative timeline. Playback advances seamlessly across 30-second chunks.
-            </p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Film size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">Recordings</h1>
+              <p className="mt-1 text-sm text-muted">
+                {mode === "browse"
+                  ? "Pick a student and watch their screen recording on a test-relative timeline. Playback advances seamlessly across 30-second chunks."
+                  : "Review mode: you are served students one-by-one to watch and give a Yes / No verdict. The server picks who comes next."}
+              </p>
+            </div>
+          </div>
+          {/* MODE TOGGLE — Browse (free search) vs Review (one-by-one verdicts). */}
+          <div className="inline-flex shrink-0 rounded-md border border-line bg-white p-1" role="tablist" aria-label="Recordings mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "browse"}
+              onClick={() => setMode("browse")}
+              className={`focus-ring inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium ${mode === "browse" ? "bg-ink text-white" : "text-ink hover:bg-ink/5"}`}
+            >
+              <Search size={14} /> Browse
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "review"}
+              onClick={() => setMode("review")}
+              className={`focus-ring inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium ${mode === "review" ? "bg-ink text-white" : "text-ink hover:bg-ink/5"}`}
+            >
+              <UserCheck size={14} /> Review mode
+            </button>
           </div>
         </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-        {/* LEFT: username picker (search list, or manual entry when no endpoint). */}
+      {/* REVIEW MODE — name gate, reviewer strip, verdict controls. The player on
+          the right is the SAME one Browse uses (loaded via loadUser). */}
+      {mode === "review" ? (
+        reviewUnavailable ? (
+          <div className="rounded-lg border border-warning/30 bg-warning/10 p-5 text-sm text-warning">
+            <AlertTriangle size={16} className="mr-2 inline" />
+            The multi-reviewer review workflow is not deployed yet. Switch to Browse to watch recordings directly, or try again once the review endpoints are live.
+          </div>
+        ) : !reviewerName ? (
+          <ReviewerNameGate
+            nameInput={nameInput}
+            onNameInput={setNameInput}
+            onStart={() => void startReviewing(nameInput)}
+            busy={advancing}
+          />
+        ) : (
+          <ReviewModePanel
+            reviewerName={reviewerName}
+            doneCount={myReviews.length}
+            myReviews={myReviews}
+            myReviewsOpen={myReviewsOpen}
+            onToggleMyReviews={() => setMyReviewsOpen((v) => !v)}
+            onChangeName={changeReviewerName}
+            onRewatch={(u) => void rewatchReview(u)}
+            reviewUsername={reviewUsername}
+            reviewDone={reviewDone}
+            rewatchUsername={rewatchUsername}
+            activeSession={activeSession}
+            hasRecording={Boolean(activeSession)}
+            loadingUser={loadingUser || advancing}
+            submitting={submitting}
+            onYes={() => void castVerdict(1)}
+            onNo={() => void castVerdict(0)}
+            onSkip={() => void skipStudent()}
+            onResumeQueue={() => void serveNext(reviewerName)}
+            error={error}
+          />
+        )
+      ) : null}
+
+      {/* The player/timeline grid is reused by BOTH modes. In review mode the left
+          picker aside is hidden (the server chooses who you watch), so we drop it. */}
+      <div className={mode === "review" ? "grid gap-5" : "grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]"}>
+        {/* LEFT: username picker (search list, or manual entry when no endpoint).
+            Hidden in REVIEW MODE — the server chooses who you watch next. */}
+        {mode === "review" ? null : (
         <aside className="space-y-3 rounded-lg border border-line bg-panel p-4 shadow-subtle">
           {endpointAvailable ? (
             <>
@@ -780,10 +1051,13 @@ export function RecordingReview({ password }: Props) {
             </>
           )}
         </aside>
+        )}
 
         {/* RIGHT: session controls + timeline + player. */}
         <div className="space-y-4">
-          {error ? (
+          {/* In REVIEW MODE the error + verdict chrome live in ReviewModePanel
+              above, so suppress the duplicate error banner here. */}
+          {error && mode === "browse" ? (
             <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div>
           ) : null}
 
@@ -793,10 +1067,15 @@ export function RecordingReview({ password }: Props) {
               <p className="mt-2">Loading sessions…</p>
             </div>
           ) : !activeSession ? (
+            // Review mode shows its own served-student / no-recording / done state
+            // in ReviewModePanel, so the right column stays empty until a recording
+            // actually loads. Browse mode keeps the "select a student" prompt.
+            mode === "review" ? null : (
             <div className="rounded-lg border border-line bg-panel p-8 text-center text-sm text-muted">
               <Film size={22} className="mx-auto text-muted" />
               <p className="mt-3">Select a student to load their screen recording.</p>
             </div>
+            )
           ) : (
             <>
               {/* Session selector + test-start anchor. */}
@@ -1129,6 +1408,266 @@ export function RecordingReview({ password }: Props) {
           )}
         </div>
       </div>
+    </section>
+  );
+}
+
+// REVIEW MODE — name gate. Centered card shown when no reviewer name is set yet.
+// Persisting the name (done by the caller) keeps the reviewer in across refreshes.
+function ReviewerNameGate({
+  nameInput,
+  onNameInput,
+  onStart,
+  busy
+}: {
+  nameInput: string;
+  onNameInput: (value: string) => void;
+  onStart: () => void;
+  busy: boolean;
+}) {
+  return (
+    <section className="mx-auto max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
+      <UserCheck size={28} className="mx-auto text-accent" />
+      <h2 className="mt-3 text-xl font-semibold text-ink">Enter your name to start reviewing</h2>
+      <p className="mt-2 text-sm leading-6 text-muted">
+        You will be served students one at a time. Watch each recording, then give a Yes or No verdict. Your name is saved on this device so a refresh keeps you reviewing.
+      </p>
+      <form
+        className="mt-5 space-y-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onStart();
+        }}
+      >
+        <input
+          autoFocus
+          className="focus-ring h-11 w-full rounded-md border border-line bg-white px-3 text-center text-sm"
+          placeholder="Your name (e.g. Priya)"
+          value={nameInput}
+          onChange={(event) => onNameInput(event.target.value)}
+        />
+        <button
+          type="submit"
+          disabled={!nameInput.trim() || busy}
+          className="focus-ring inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white disabled:opacity-50"
+        >
+          {busy ? <RefreshCw size={16} className="animate-spin" /> : <UserCheck size={16} />}
+          {busy ? "Starting…" : "Start reviewing"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+// REVIEW MODE — the reviewer strip (name · N done · Your reviews) plus the
+// prominent verdict controls. The recording player itself is rendered by the
+// shared right column below; this panel sits above it and drives the workflow.
+function ReviewModePanel({
+  reviewerName,
+  doneCount,
+  myReviews,
+  myReviewsOpen,
+  onToggleMyReviews,
+  onChangeName,
+  onRewatch,
+  reviewUsername,
+  reviewDone,
+  rewatchUsername,
+  activeSession,
+  hasRecording,
+  loadingUser,
+  submitting,
+  onYes,
+  onNo,
+  onSkip,
+  onResumeQueue,
+  error
+}: {
+  reviewerName: string;
+  doneCount: number;
+  myReviews: ReviewMineItem[];
+  myReviewsOpen: boolean;
+  onToggleMyReviews: () => void;
+  onChangeName: () => void;
+  onRewatch: (username: string) => void;
+  reviewUsername: string | null;
+  reviewDone: boolean;
+  rewatchUsername: string | null;
+  activeSession: AdminSessionDetail | undefined;
+  hasRecording: boolean;
+  loadingUser: boolean;
+  submitting: boolean;
+  onYes: () => void;
+  onNo: () => void;
+  onSkip: () => void;
+  onResumeQueue: () => void;
+  error: string;
+}) {
+  // The served student's display fields (from the loaded session, if any).
+  const displayName = activeSession?.name;
+  const room = activeSession?.room;
+  return (
+    <section className="space-y-4">
+      {/* HEADER STRIP: reviewer name · N done · change name · Your reviews toggle. */}
+      <div className="rounded-lg border border-ink/20 bg-ink/5 p-4 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <UserCheck size={20} className="text-accent" />
+            <div>
+              <p className="text-sm font-semibold text-ink">
+                Reviewer: <span className="font-mono">{reviewerName}</span>
+                <span className="text-muted"> · {doneCount} done</span>
+              </p>
+              <button
+                type="button"
+                onClick={onChangeName}
+                className="focus-ring mt-0.5 text-xs text-muted underline-offset-2 hover:underline"
+              >
+                Not you? Change name
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onToggleMyReviews}
+            className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+            aria-expanded={myReviewsOpen}
+          >
+            {myReviewsOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />} Your reviews ({myReviews.length})
+          </button>
+        </div>
+
+        {/* Collapsible "Your reviews" list — click an entry to RE-WATCH it
+            read-only (no verdict change). */}
+        {myReviewsOpen ? (
+          <div className="mt-3 max-h-56 space-y-1.5 overflow-auto border-t border-ink/10 pt-3">
+            {myReviews.length ? (
+              myReviews.map((r) => (
+                <button
+                  key={`${r.username}-${r.created_at}`}
+                  type="button"
+                  onClick={() => onRewatch(r.username)}
+                  className={`focus-ring flex w-full items-center justify-between gap-2 rounded-md border px-3 py-1.5 text-left text-sm hover:border-ink/40 ${rewatchUsername === r.username ? "border-ink/50 bg-white" : "border-line bg-white/60"}`}
+                  title="Re-watch this completed review (read-only)"
+                >
+                  <span className="truncate font-mono text-ink">{r.username}</span>
+                  <span className={`inline-flex items-center gap-1 text-xs font-semibold ${r.verdict === 1 ? "text-emerald-600" : "text-danger"}`}>
+                    {r.verdict === 1 ? <><Check size={14} /> Yes</> : <><X size={14} /> No</>}
+                  </span>
+                </button>
+              ))
+            ) : (
+              <p className="px-1 py-1 text-xs text-muted">No reviews yet — your verdicts will appear here.</p>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div>
+      ) : null}
+
+      {/* MAIN REVIEW STATE — done / re-watch note / served student + verdicts. */}
+      {reviewDone ? (
+        <div className="rounded-lg border border-accent/30 bg-accent/5 p-8 text-center shadow-subtle">
+          <p className="text-3xl">🎉</p>
+          <h3 className="mt-2 text-xl font-semibold text-ink">All assigned students reviewed</h3>
+          <p className="mt-2 text-sm leading-6 text-muted">Nothing left in your queue. New students assigned to you will appear when you check again.</p>
+          <button
+            type="button"
+            onClick={onResumeQueue}
+            disabled={loadingUser}
+            className="focus-ring mt-4 inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={loadingUser ? "animate-spin" : undefined} /> Check for more
+          </button>
+        </div>
+      ) : rewatchUsername ? (
+        // RE-WATCH a completed review: read-only, no verdict controls.
+        <div className="rounded-lg border border-accent/30 bg-accent/10 p-4 shadow-subtle">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="inline-flex items-center gap-2 text-sm font-medium text-accent">
+              <Eye size={16} /> Viewing a completed review of <span className="font-mono">{rewatchUsername}</span> — your verdict is unchanged.
+            </p>
+            <button
+              type="button"
+              onClick={onResumeQueue}
+              disabled={loadingUser}
+              className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
+            >
+              <SkipForward size={16} /> Back to reviewing
+            </button>
+          </div>
+        </div>
+      ) : reviewUsername ? (
+        // SERVED student — show who, then the big verdict controls. If no recording
+        // was found for them, say so but STILL allow scoring (plus Skip).
+        <div className="space-y-3">
+          <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+            <p className="text-xs font-semibold uppercase tracking-wide text-accent">Now reviewing</p>
+            <p className="mt-1 text-lg font-semibold text-ink">
+              {displayName ? `${displayName} ` : ""}
+              <span className="font-mono text-base text-muted">{reviewUsername}</span>
+              {room ? <span className="text-sm font-normal text-muted"> · Room {room}</span> : null}
+            </p>
+            {loadingUser ? (
+              <p className="mt-1 inline-flex items-center gap-1.5 text-xs text-muted">
+                <RefreshCw size={12} className="animate-spin" /> Loading recording…
+              </p>
+            ) : !hasRecording ? (
+              <p className="mt-2 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
+                <AlertTriangle size={16} /> No recording found for {reviewUsername}. You can still give a verdict, or Skip to the next student.
+              </p>
+            ) : null}
+          </div>
+
+          {/* PROMINENT VERDICT CONTROLS — big green Yes(1) / red No(0). Repeated
+              100s of times, so they are large and unmissable. Keyboard: Y / N. */}
+          <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={onYes}
+                disabled={submitting || loadingUser}
+                className="focus-ring inline-flex h-20 items-center justify-center gap-3 rounded-lg bg-emerald-600 text-2xl font-bold text-white shadow-subtle transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                <ThumbsUp size={28} /> Yes (1)
+              </button>
+              <button
+                type="button"
+                onClick={onNo}
+                disabled={submitting || loadingUser}
+                className="focus-ring inline-flex h-20 items-center justify-center gap-3 rounded-lg bg-danger text-2xl font-bold text-white shadow-subtle transition hover:bg-red-700 disabled:opacity-50"
+              >
+                <ThumbsDown size={28} /> No (0)
+              </button>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <p className="text-xs text-muted">
+                Keyboard: press <kbd className="rounded border border-line bg-white px-1.5 py-0.5 font-mono">Y</kbd> for Yes,{" "}
+                <kbd className="rounded border border-line bg-white px-1.5 py-0.5 font-mono">N</kbd> for No.
+                {submitting ? <span className="ml-2 inline-flex items-center gap-1 text-accent"><RefreshCw size={12} className="animate-spin" /> Saving…</span> : null}
+              </p>
+              {!hasRecording ? (
+                <button
+                  type="button"
+                  onClick={onSkip}
+                  disabled={submitting || loadingUser}
+                  className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                >
+                  <SkipForward size={16} /> Skip (no verdict)
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : (
+        // Between serves (initial load).
+        <div className="rounded-lg border border-line bg-panel p-8 text-center text-sm text-muted">
+          <RefreshCw size={18} className="mx-auto animate-spin text-accent" />
+          <p className="mt-2">Finding the next student for you…</p>
+        </div>
+      )}
     </section>
   );
 }
