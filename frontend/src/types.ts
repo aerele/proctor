@@ -300,3 +300,80 @@ export type AlertSettings = {
 
 // POST /api/session/beacon — liveness beacon, no auth (sendBeacon-friendly).
 export type BeaconKind = "hidden" | "visible" | "closing";
+
+// ---- Multi-reviewer recording-review workflow ----------------------------
+// A binary YES(1)/NO(0) verdict a reviewer gives after watching a student's
+// recording. Multiple reviewers each watch independently; the server serves the
+// next student by priority and records each (username, reviewer) verdict.
+
+export type ReviewVerdict = 0 | 1;
+
+// POST /api/admin/review-roster — the operator pastes the full set of usernames
+// to be reviewed. The client splits/trims/dedupes too, but the server is the
+// source of truth. Response echoes how many usernames are now in the roster.
+export type ReviewRosterSaveRequest = {
+  usernames: string[];
+};
+
+export type ReviewRosterSaveResponse = {
+  ok: boolean;
+  count: number;
+};
+
+// GET /api/admin/review-roster — roster summary for the Settings page: the full
+// username list plus the review-coverage buckets that drive the serving priority
+// (0 reviews, exactly 1, 2+) and how many reviewers currently hold a claim.
+export type ReviewRosterSummary = {
+  usernames: string[];
+  total: number;
+  with_0_reviews: number;
+  with_1_review: number;
+  with_2plus_reviews: number;
+  active_claims: number;
+};
+
+// POST /api/admin/review-next {reviewer_name} — the SERVER picks who this
+// reviewer watches next (by coverage priority, never repeating a username this
+// reviewer already scored). Returns the chosen username, or {done:true} when the
+// reviewer's queue is empty.
+export type ReviewNextResponse = { username: string; done?: false } | { done: true; username?: undefined };
+
+// POST /api/admin/review-verdict — record one reviewer's binary verdict for one
+// student. Idempotent server-side on (username, reviewer_name).
+export type ReviewVerdictRequest = {
+  username: string;
+  reviewer_name: string;
+  verdict: ReviewVerdict;
+};
+
+export type ReviewVerdictResponse = {
+  ok: boolean;
+};
+
+// One verdict record this reviewer has already submitted (GET review-mine).
+export type ReviewMineItem = {
+  username: string;
+  verdict: ReviewVerdict;
+  created_at: string;
+};
+
+// GET /api/admin/review-mine?reviewer_name=X — this reviewer's own completed
+// verdicts (for the header count + the re-watch "Your reviews" list).
+export type ReviewMineResponse = {
+  count: number;
+  reviews: ReviewMineItem[];
+};
+
+// One verdict record across ALL reviewers (GET reviews) — the CSV export source.
+export type ReviewRecord = {
+  username: string;
+  reviewer_name: string;
+  verdict: ReviewVerdict;
+  created_at: string;
+};
+
+// GET /api/admin/reviews — every verdict record from every reviewer, for the
+// operator's "Export reviews CSV" (one CSV row per record).
+export type ReviewsResponse = {
+  reviews: ReviewRecord[];
+};
