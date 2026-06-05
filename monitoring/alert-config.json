@@ -17,7 +17,7 @@
     "notes": "Accepted code carries web/editorial provenance signatures (smart quotes, NBSP, class-Solution, etc.) — likely pasted from an online source."
   },
   "first_attempt_solve": {
-    "enabled": true,
+    "enabled": false,
     "severity": "info",
     "notes": "Candidate got a problem ACCEPTED on their FIRST submission attempt (zero prior wrong attempts on that problem) — on a NORMAL (non-tough) problem. Metadata corroborator, not a standalone flag."
   },
