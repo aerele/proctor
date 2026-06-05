@@ -86,12 +86,15 @@ python3 "${HERE}/poller.py" \
   --verdict-queue "${DATA_DIR}/verdict-queue"
 
 echo "==> GET /api/admin/alerts (x-admin-password) — ingested alerts:"
-RESP="$(curl -fsS "${API_BASE}/api/admin/alerts" -H "x-admin-password: ${ADMIN_PW}")"
+RESP_FILE="${DATA_DIR}/admin-alerts-response.json"
+curl -fsS "${API_BASE}/api/admin/alerts" -H "x-admin-password: ${ADMIN_PW}" -o "$RESP_FILE"
 
 # Pretty summary + a few sample alerts (no jq dependency).
-python3 - "$RESP" <<'PY'
+# Read the response from a FILE, not argv — at 200+ alerts the JSON exceeds ARG_MAX
+# ("Argument list too long"). The ingest itself already succeeded above.
+python3 - "$RESP_FILE" <<'PY'
 import json, sys
-data = json.loads(sys.argv[1])
+data = json.load(open(sys.argv[1]))
 alerts = data.get("alerts", [])
 print(f"    total alerts in backend: {len(alerts)}")
 by_type = {}
@@ -116,11 +119,12 @@ python3 "${HERE}/poller.py" \
   --fixtures "${SLOT_DIR}" --contest-id "${CONTEST_ID}" --slug "${SLUG}" --once \
   --api-base "${API_BASE}" --api-key "${API_KEY}" \
   --data-dir "${DATA_DIR}" --verdict-queue "${DATA_DIR}/verdict-queue" >/dev/null
-RESP2="$(curl -fsS "${API_BASE}/api/admin/alerts" -H "x-admin-password: ${ADMIN_PW}")"
-python3 - "$RESP" "$RESP2" <<'PY'
+RESP2_FILE="${DATA_DIR}/admin-alerts-response-2.json"
+curl -fsS "${API_BASE}/api/admin/alerts" -H "x-admin-password: ${ADMIN_PW}" -o "$RESP2_FILE"
+python3 - "$RESP_FILE" "$RESP2_FILE" <<'PY'
 import json, sys
-n1 = len(json.loads(sys.argv[1]).get("alerts", []))
-n2 = len(json.loads(sys.argv[2]).get("alerts", []))
+n1 = len(json.load(open(sys.argv[1])).get("alerts", []))
+n2 = len(json.load(open(sys.argv[2])).get("alerts", []))
 print(f"    after 1st poll: {n1} alerts ; after 2nd poll: {n2} alerts")
 if n1 != n2:
     print(f"ERROR: idempotency broken — count changed {n1} -> {n2}", file=sys.stderr)
