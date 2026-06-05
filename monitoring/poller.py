@@ -37,6 +37,7 @@ sys.path.insert(0, str(HERE))
 import contest_eval_core as core
 import alerts as alertmod
 import acquire as acq
+import enrich as enrichmod
 from verdict_seam import VerdictSeam, is_ambiguous
 
 
@@ -132,6 +133,24 @@ def run_cycle(args, acquirer, seam, cycle_idx):
         valid_ids = {i for i, e in bad}
         alert_list = [a for a in alert_list if a["id"] not in valid_ids]
 
+    # candidate NAME + ROOM enrichment (POLLER-ONLY): look up each candidate's
+    # name+room from the live admin /api/admin/sessions endpoint and bake them
+    # into the alert's detail/room/data so the frozen frontend shows them with NO
+    # backend/frontend redeploy. Forever-cached, rate-limited, capped per cycle,
+    # critical/warning before info. No-op when disabled (no admin creds) or
+    # --no-enrich. Idempotent: re-POST merges late-resolved candidates over time.
+    enricher = getattr(args, "_enricher", None)
+    if enricher is not None and not getattr(args, "no_enrich", False):
+        try:
+            esum = enricher.enrich_alerts(alert_list)
+            if esum.get("enabled"):
+                log(f"  enrichment: applied={esum['applied']} "
+                    f"new_lookups={esum['new_lookups']} cached_hits={esum['cached_hits']} "
+                    f"skipped(cap)={esum['skipped_cap']} cache_size={len(enricher.cache)} "
+                    f"stats={enricher.stats}")
+        except Exception as e:  # never let enrichment break the cycle
+            log(f"  enrichment skipped (non-fatal): {type(e).__name__}: {e}")
+
     # verdict seam: route ambiguous ones; attach any resolved verdict
     n_routed = 0
     for a in alert_list:
@@ -203,6 +222,20 @@ def build_argparser():
                    help="cycles to wait for a verdict before timing out (stays pending)")
     p.add_argument("--no-post", action="store_true", help="do not POST alerts")
     p.add_argument("--dry-run", action="store_true", help="alias for --no-post")
+    # candidate name+room enrichment (POLLER-ONLY; backend/frontend frozen)
+    p.add_argument("--admin-password", default=None,
+                   help="admin password for GET /api/admin/sessions enrichment "
+                        "lookups. Default: env ADMIN_PASSWORD, else "
+                        "monitoring/.data/session.local (ADMIN_PASSWORD=...). If "
+                        "none is found, enrichment is disabled (poller still runs). "
+                        "NEVER hardcode/commit this.")
+    p.add_argument("--no-enrich", action="store_true",
+                   help="skip candidate name+room enrichment entirely")
+    p.add_argument("--enrich-max-per-cycle", type=int, default=20,
+                   help="cap on NEW admin/sessions lookups per cycle (protects the "
+                        "live backend; unresolved candidates enrich in later cycles)")
+    p.add_argument("--enrich-rate-limit", type=float, default=0.3,
+                   help="seconds between admin/sessions lookups (default 0.3)")
     return p
 
 
@@ -227,6 +260,26 @@ def main(argv=None):
 
     acquirer = acq.make_acquirer(args)
     seam = VerdictSeam(args.verdict_queue, max_cycles=args.verdict_max_cycles)
+
+    # candidate name+room enricher (POLLER-ONLY). Resolve the admin password WITHOUT
+    # logging it; disable cleanly (don't crash) when no credentials are available.
+    args._enricher = None
+    if args.no_enrich:
+        log("enrichment: OFF (--no-enrich)")
+    else:
+        admin_pw, pw_source = enrichmod.resolve_admin_password(cli_value=args.admin_password)
+        args._enricher = enrichmod.CandidateEnricher(
+            args.api_base, admin_pw,
+            rate_limit_s=args.enrich_rate_limit,
+            max_per_cycle=args.enrich_max_per_cycle)
+        if args._enricher.enabled:
+            log(f"enrichment: ON (admin pw from {pw_source}; "
+                f"max/cycle={args.enrich_max_per_cycle} rate={args.enrich_rate_limit}s; "
+                f"source GET {args.api_base.rstrip('/')}/api/admin/sessions)")
+        else:
+            log(f"enrichment: DISABLED — no admin password ({pw_source}); alerts stay "
+                f"username-only. Pass --admin-password or set ADMIN_PASSWORD / "
+                f"session.local to enable.")
 
     log(f"start: slug={args.slug} contest-id={args.contest_id} api-base={args.api_base} "
         f"mode={acquirer.mode} interval={args.interval}s "
