@@ -5,7 +5,8 @@ gitignored `monitoring/.data/session.local` (admin password etc.). Updated 2026-
 
 ## 🔴 LIVE RIGHT NOW (the thing compaction must not lose)
 - **A real contest is being monitored live:** `kec-aerele-coding-contest`, contest-id **386632**, on HackerRank.
-- **I am running + managing the poller** as a background process (Bash `run_in_background`, job id `bc3wxzc2y`, log `/tmp/proctor-poller.log`). It polls HackerRank via the user's logged-in Chrome on `:9222`, evaluates, and POSTs alerts to the deployed backend every 60s.
+- **I am running + managing the poller** as a background process (Bash `run_in_background`, job id **`bhuyj3ocb`** — restarted from `bc3wxzc2y` to add name+room enrichment, log `/tmp/proctor-poller.log`). It polls HackerRank via the user's logged-in Chrome on `:9222`, evaluates, and POSTs alerts to the deployed backend every 60s.
+- **Alert enrichment is ON:** the poller looks up each candidate's name+room from the live `/api/admin/sessions` (per-username, admin pw from `session.local`) and bakes `"Candidate: <name>, <username>, <room>"` into each contest-eval alert's `detail` + sets `room` — so the FROZEN frontend shows it with no redeploy. Forever-cached, rate-limited (0.3s), capped (20 new lookups/cycle, `--enrich-max-per-cycle`), critical-first; candidates with no proctor session stay username-only. (Backend + frontend are FROZEN — cannot be redeployed; poller-only changes.)
   - Check it: `pgrep -af "poller.py --live"` ; `grep -E "cycle [0-9]+:|POST .*ok=" /tmp/proctor-poller.log | tail`.
   - Restart it: re-scrape the full command (incl. `--api-key`) from `pgrep -af "poller.py --live"`, or rebuild from `monitoring/.data/session.local`. Run from the repo root. It **hot-reloads `monitoring/alert-config.json` every cycle** — live tuning needs no restart.
   - If `:9222` is down or a cycle errors, the poller self-recovers / falls back; it does not crash.
