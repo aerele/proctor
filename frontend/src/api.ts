@@ -1,4 +1,5 @@
 import type {
+  AdminSessionsResponse,
   AdminStatsResponse,
   Alert,
   AlertActionRequest,
@@ -11,12 +12,17 @@ import type {
   ProctorAlertTypeConfig,
   ProctorEvent,
   ProctorSettings,
+  RecordingSession,
+  RecordingSessionsResponse,
   ReviewNature,
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
+  SessionEvidence,
   SessionStartResponse,
   StudentForm,
+  SubmissionEvent,
+  SubmissionEventsResponse,
   UploadManifestItem,
   UploadUrlResponse
 } from "./types";
@@ -469,25 +475,297 @@ export async function validateEndSession(params: { sessionId: string; assuranceA
   });
 }
 
-export async function fetchAdminSessions(username: string, password: string) {
+export async function fetchAdminSessions(username: string, password: string): Promise<AdminSessionsResponse> {
   if (demoMode) {
-    await wait(100);
+    await wait(120);
     assertDemoAdmin(password);
     const usernameNorm = normalizeUsername(username);
+    // Recording playback view: a fake recording dataset takes precedence so the
+    // whole search → timeline → player flow is exercisable OFFLINE. Falls back to
+    // the demo STUDENT session store (no evidence) for any other username.
+    const recording = demoRecordingSessionsFor(usernameNorm);
+    if (recording.length) return { sessions: recording };
     const sessions = readDemoSessions()
       .filter((item) => item.username_norm === usernameNorm)
-      .map((item) => ({ ...item, evidence: [] as Array<Record<string, unknown>> }));
-    return { sessions: sessions as Array<Record<string, unknown>> };
+      .map((item) => ({ ...item, evidence: [] as SessionEvidence[] }));
+    return { sessions };
   }
 
-  return request<{
-    sessions: Array<Record<string, unknown>>;
-  }>(`/api/admin/sessions?username=${encodeURIComponent(username)}`, {
+  return request<AdminSessionsResponse>(`/api/admin/sessions?username=${encodeURIComponent(username)}`, {
     method: "GET",
     headers: {
       "x-admin-password": password
     }
   });
+}
+
+// GET /api/admin/recording-sessions — lightweight picker list of sessions with
+// recordings. Returns `null` when the endpoint is not deployed yet (404) so the
+// UI degrades to a manual "enter username" input. In demo mode it returns the
+// fake recording dataset so the picker/search works fully offline.
+export async function fetchRecordingSessions(password: string, contestSlug?: string): Promise<RecordingSession[] | null> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const list = DEMO_RECORDING_SESSIONS.filter((s) => !contestSlug || s.contest_slug === contestSlug);
+    return list.map((s) => ({
+      session_id: s.session_id,
+      hackerrank_username: s.hackerrank_username,
+      name: s.name,
+      room: s.room,
+      contest_slug: s.contest_slug,
+      chunk_count: s.chunk_count,
+      created_at: s.created_at,
+      status: s.status
+    }));
+  }
+
+  const query = new URLSearchParams();
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  const suffix = query.toString();
+  try {
+    const response = await request<RecordingSessionsResponse>(
+      `/api/admin/recording-sessions${suffix ? `?${suffix}` : ""}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.sessions;
+  } catch (cause) {
+    // Endpoint not deployed yet → degrade gracefully to the manual-username path.
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// GET /api/admin/submission-events — the SUBMISSION-TIME MARKERS for one user's
+// recording-review timeline (GREEN valid / RED invalid). Returns `null` on a 404
+// (endpoint not deployed yet) so the timeline simply renders WITHOUT markers
+// instead of erroring. In demo mode it returns canned events for the demo
+// students so the markers are visible offline.
+export async function fetchSubmissionEvents(
+  password: string,
+  username: string,
+  contestSlug?: string
+): Promise<SubmissionEvent[] | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    return demoSubmissionEventsFor(normalizeUsername(username), contestSlug);
+  }
+
+  const query = new URLSearchParams();
+  query.set("username", username);
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  try {
+    const response = await request<SubmissionEventsResponse>(
+      `/api/admin/submission-events?${query.toString()}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.events;
+  } catch (cause) {
+    // Endpoint not deployed yet → no markers (graceful), not a hard error.
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// ---- Demo recording dataset ----------------------------------------------
+// A small, self-contained set of fake students whose sessions carry screen
+// chunks so the recording-playback UI (search → timeline → player → auto-advance)
+// is fully testable OFFLINE. Each chunk's last_modified is placed on a real-time
+// line at chunkSeconds spacing, with a deliberate GAP in one session so the
+// timeline gap-rendering and seek-to-nearest logic are exercised. The actual clip
+// for every chunk is the bundled /sample.webm placeholder.
+const DEMO_CHUNK_SECONDS = 30;
+const DEMO_SAMPLE_CLIP = "/sample.webm";
+
+type DemoRecordingSeed = {
+  session_id: string;
+  hackerrank_username: string;
+  username_norm: string;
+  name: string;
+  room: string;
+  contest_slug: string;
+  status: string;
+  created_at: string;
+  chunk_count: number;
+  // Index offsets (0-based positions on the timeline). A jump between consecutive
+  // values models a recording gap. Defaults to contiguous 0..chunk_count-1.
+  gapAfterIndex?: number; // chunks after this 1-based index are shifted later
+  gapChunks?: number; // how many chunk-widths of gap to insert
+  // Multiple gaps (for the large/realistic seed). Each entry shifts every chunk
+  // whose 1-based index is > afterIndex later by `chunks` chunk-widths. Applied in
+  // addition to (and after) the single-gap fields above. afterIndex must be sorted
+  // ascending; shifts accumulate so later chunks reflect all earlier gaps.
+  gaps?: Array<{ afterIndex: number; chunks: number }>;
+};
+
+const DEMO_RECORDING_SESSIONS: DemoRecordingSeed[] = [
+  {
+    session_id: "rec-asha-9f2a",
+    hackerrank_username: "Asha_R",
+    username_norm: "asha_r",
+    name: "Asha Ramanathan",
+    room: "Lab A-1",
+    contest_slug: "mcet-june-2026",
+    status: "ended",
+    created_at: "2026-06-05T09:00:00.000Z",
+    chunk_count: 8
+  },
+  {
+    session_id: "rec-karan-71b4",
+    hackerrank_username: "Karan_V",
+    username_norm: "karan_v",
+    name: "Karan Verma",
+    room: "Lab B-2",
+    contest_slug: "mcet-june-2026",
+    status: "ended",
+    // Late joiner: starts 2 minutes after the test start.
+    created_at: "2026-06-05T09:02:00.000Z",
+    chunk_count: 6,
+    // Gap: after the 3rd chunk, the recording dropped for ~1 chunk-width.
+    gapAfterIndex: 3,
+    gapChunks: 2
+  },
+  {
+    session_id: "rec-neha-3c10",
+    hackerrank_username: "Neha_S",
+    username_norm: "neha_s",
+    name: "Neha Sharma",
+    room: "Lab B-2",
+    contest_slug: "mcet-june-2026",
+    status: "active",
+    created_at: "2026-06-05T09:00:30.000Z",
+    chunk_count: 4
+  },
+  {
+    // REAL-SCALE seed: a full ~1h50m sitting. 220 recorded chunks × 30s = 110min of
+    // recording; two recording GAPS push the timeline end a little past that, so the
+    // dense timeline, adaptive 15-min ticks, gap rendering and marker legibility can
+    // all be verified OFFLINE. Gap 1: ~5min blackout after chunk 80 (around 00:40).
+    // Gap 2: ~2.5min blackout after chunk 150 (around 01:15, post-gap-1 shifted).
+    session_id: "rec-vikram-load",
+    hackerrank_username: "Vikram_T",
+    username_norm: "vikram_t",
+    name: "Vikram Thiagarajan",
+    room: "Lab C-3",
+    contest_slug: "mcet-june-2026",
+    status: "ended",
+    created_at: "2026-06-05T09:00:00.000Z",
+    chunk_count: 220,
+    gaps: [
+      { afterIndex: 80, chunks: 10 }, // ~5min recording gap mid-test
+      { afterIndex: 150, chunks: 5 } // ~2.5min recording gap later
+    ]
+  }
+];
+
+// ---- Demo submission-time markers ----------------------------------------
+// Canned submission events for the 3 demo students so the timeline markers
+// (GREEN valid / RED invalid) are visible OFFLINE. Times are placed ON each
+// student's recording timeline (created_at + minutes), with a realistic mix of
+// valid + invalid. One of Karan's lands in his recording GAP (09:03:30–09:04:30)
+// so the proctor sees "they submitted during the blackout".
+type DemoSubmissionSeed = SubmissionEvent & { username_norm: string };
+
+const DEMO_SUBMISSION_EVENTS: DemoSubmissionSeed[] = [
+  // Asha (created 09:00:00, 8 chunks → 09:00–09:04): two fails then an accept.
+  { username_norm: "asha_r", hackerrank_username: "Asha_R", contest_slug: "mcet-june-2026", submission_id: "as-1", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "python3", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:01:10.000Z" },
+  { username_norm: "asha_r", hackerrank_username: "Asha_R", contest_slug: "mcet-june-2026", submission_id: "as-2", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "python3", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T09:02:25.000Z" },
+  { username_norm: "asha_r", hackerrank_username: "Asha_R", contest_slug: "mcet-june-2026", submission_id: "as-3", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "python3", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:03:40.000Z" },
+  // Karan (created 09:02:00, gap 09:03:30–09:04:30): one accept, one in the GAP.
+  { username_norm: "karan_v", hackerrank_username: "Karan_V", contest_slug: "mcet-june-2026", submission_id: "ka-1", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:03:05.000Z" },
+  { username_norm: "karan_v", hackerrank_username: "Karan_V", contest_slug: "mcet-june-2026", submission_id: "ka-2", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Compilation error", valid: false, submitted_at: "2026-06-05T09:04:00.000Z" },
+  // Neha (created 09:00:30, 4 chunks → 09:00:30–09:02:30): one fail, one accept.
+  { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-1", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Terminated due to timeout", valid: false, submitted_at: "2026-06-05T09:01:15.000Z" },
+  { username_norm: "neha_s", hackerrank_username: "Neha_S", contest_slug: "mcet-june-2026", submission_id: "ne-2", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "java", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:02:05.000Z" },
+  // Vikram (created 09:00:00, ~117min span, gaps at 40–45min and 80–82.5min):
+  // 22 submissions across the full sitting, a realistic valid/invalid mix, several
+  // clustered tightly (to prove dense markers stay individually legible), and two
+  // landing IN the recording gaps (proctor sees "submitted during the blackout").
+  // Times are real (09:00 + offset); the recording timeline labels them in h:mm:ss.
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-01", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:03:20.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-02", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:05:10.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-03", challenge_slug: "two-sum", challenge_name: "Two Sum", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:07:45.000Z" },
+  // Cluster around 12–13min (three submissions within ~70s → dense markers).
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-04", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T09:12:05.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-05", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:12:40.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-06", challenge_slug: "balanced-brackets", challenge_name: "Balanced Brackets", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:13:15.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-07", challenge_slug: "merge-intervals", challenge_name: "Merge Intervals", lang: "cpp", status: "Compilation error", valid: false, submitted_at: "2026-06-05T09:18:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-08", challenge_slug: "merge-intervals", challenge_name: "Merge Intervals", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:22:50.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-09", challenge_slug: "lru-cache", challenge_name: "LRU Cache", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:28:10.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-10", challenge_slug: "lru-cache", challenge_name: "LRU Cache", lang: "cpp", status: "Terminated due to timeout", valid: false, submitted_at: "2026-06-05T09:33:25.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-11", challenge_slug: "lru-cache", challenge_name: "LRU Cache", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:38:55.000Z" },
+  // vt-12 lands IN GAP 1 (recording blackout 40–45min): "submitted during blackout".
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-12", challenge_slug: "word-ladder", challenge_name: "Word Ladder", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T09:42:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-13", challenge_slug: "word-ladder", challenge_name: "Word Ladder", lang: "cpp", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T09:48:05.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-14", challenge_slug: "word-ladder", challenge_name: "Word Ladder", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T09:54:40.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-15", challenge_slug: "trapping-rain-water", challenge_name: "Trapping Rain Water", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:01:15.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-16", challenge_slug: "trapping-rain-water", challenge_name: "Trapping Rain Water", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T10:08:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-17", challenge_slug: "edit-distance", challenge_name: "Edit Distance", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:14:20.000Z" },
+  // vt-18 lands IN GAP 2 (recording blackout ~80–82.5min → 10:20–10:22:30).
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-18", challenge_slug: "edit-distance", challenge_name: "Edit Distance", lang: "cpp", status: "Runtime Error", valid: false, submitted_at: "2026-06-05T10:21:10.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-19", challenge_slug: "edit-distance", challenge_name: "Edit Distance", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T10:27:45.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-20", challenge_slug: "n-queens", challenge_name: "N-Queens", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:36:05.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-21", challenge_slug: "n-queens", challenge_name: "N-Queens", lang: "cpp", status: "Wrong Answer", valid: false, submitted_at: "2026-06-05T10:44:30.000Z" },
+  { username_norm: "vikram_t", hackerrank_username: "Vikram_T", contest_slug: "mcet-june-2026", submission_id: "vt-22", challenge_slug: "n-queens", challenge_name: "N-Queens", lang: "cpp", status: "Accepted", valid: true, submitted_at: "2026-06-05T10:54:10.000Z" }
+];
+
+function demoSubmissionEventsFor(usernameNorm: string, contestSlug?: string): SubmissionEvent[] {
+  return DEMO_SUBMISSION_EVENTS
+    .filter((seed) => seed.username_norm === usernameNorm)
+    .filter((seed) => !contestSlug || seed.contest_slug === contestSlug)
+    .map(({ username_norm: _drop, ...event }) => event)
+    .sort((a, b) => a.submitted_at.localeCompare(b.submitted_at));
+}
+
+// Build the signed-evidence playlist for a demo session: one screen chunk per
+// index, last_modified stamped at chunkSeconds spacing from created_at (a chunk's
+// last_modified is its END time, matching the real "object finalized when the
+// 30s chunk closes" semantics the offset math relies on). An optional gap shifts
+// the tail later so the timeline shows a visible blank.
+function demoEvidenceFor(seed: DemoRecordingSeed): SessionEvidence[] {
+  const createdMs = Date.parse(seed.created_at);
+  const prefix = `contests/${seed.contest_slug}/sessions/${seed.username_norm}/${seed.session_id}/`;
+  const evidence: SessionEvidence[] = [];
+  for (let i = 1; i <= seed.chunk_count; i += 1) {
+    let position = i; // 1-based contiguous position on the timeline
+    if (seed.gapAfterIndex && i > seed.gapAfterIndex) position += seed.gapChunks ?? 1;
+    // Apply any additional (multi-gap) shifts; each gap pushes all later chunks.
+    if (seed.gaps) {
+      for (const gap of seed.gaps) {
+        if (i > gap.afterIndex) position += gap.chunks;
+      }
+    }
+    // last_modified = END of this chunk = createdMs + position*chunkSeconds.
+    const lastModifiedMs = createdMs + position * DEMO_CHUNK_SECONDS * 1000;
+    evidence.push({
+      key: `${prefix}screen/chunk-${String(i).padStart(5, "0")}.webm`,
+      size: 320_000 + i * 1000,
+      last_modified: new Date(lastModifiedMs).toISOString(),
+      download_url: DEMO_SAMPLE_CLIP
+    });
+  }
+  // Add a couple of non-screen files so filtering is exercised too.
+  evidence.push({ key: `${prefix}manifest.json`, size: 412, last_modified: seed.created_at, download_url: DEMO_SAMPLE_CLIP });
+  return evidence;
+}
+
+function demoRecordingSessionsFor(usernameNorm: string): AdminSessionsResponse["sessions"] {
+  return DEMO_RECORDING_SESSIONS
+    .filter((seed) => seed.username_norm === usernameNorm)
+    .map((seed) => ({
+      session_id: seed.session_id,
+      hackerrank_username: seed.hackerrank_username,
+      username_norm: seed.username_norm,
+      name: seed.name,
+      room: seed.room,
+      contest_slug: seed.contest_slug,
+      storage_prefix: `contests/${seed.contest_slug}/sessions/${seed.username_norm}/${seed.session_id}/`,
+      status: seed.status,
+      created_at: seed.created_at,
+      chunk_count: seed.chunk_count,
+      evidence: demoEvidenceFor(seed)
+    }));
 }
 
 export async function fetchAdminStats(password: string, contestSlug?: string, room?: string): Promise<AdminStatsResponse> {

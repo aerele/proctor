@@ -31,15 +31,21 @@ fi
 
 # Phase 2 (session model) needs a composite index on the sessions collection so
 # the single-session / bulk-action / per-contest-stats queries (which filter on
-# username_norm AND contest_slug) work. Creating an index that already exists is
-# a no-op; we ignore the "already exists" error so re-running deploy is safe.
+# username_norm AND contest_slug) work. This MUST NOT block the deploy: the index
+# builds in the background (can take minutes), and the deploy/build doesn't depend
+# on it. --async returns as soon as the request is submitted (no waiting for the
+# build); --quiet avoids any interactive prompt; and the whole call is non-fatal
+# (|| true) so "already exists / building / any error" never stops the deploy.
 SESSION_COLLECTION="${SESSION_COLLECTION:-proctor_sessions}"
 gcloud firestore indexes composite create \
   --collection-group="$SESSION_COLLECTION" \
   --query-scope=COLLECTION \
   --field-config=field-path=username_norm,order=ascending \
   --field-config=field-path=contest_slug,order=ascending \
-  >/dev/null 2>&1 || echo "Composite index on ${SESSION_COLLECTION}(username_norm,contest_slug) already exists or is building."
+  --async --quiet >/dev/null 2>&1 \
+  || echo "Composite index on ${SESSION_COLLECTION}(username_norm,contest_slug): already exists or is building (non-blocking) — continuing."
+# Note: the index is also declared in backend/firestore.indexes.json; you can
+# alternatively deploy it out-of-band with: gcloud firestore indexes create-from-file.
 
 if ! gcloud storage buckets describe "gs://${EVIDENCE_BUCKET}" >/dev/null 2>&1; then
   gcloud storage buckets create "gs://${EVIDENCE_BUCKET}" --location="$REGION" --uniform-bucket-level-access
