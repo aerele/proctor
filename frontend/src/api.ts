@@ -1,4 +1,5 @@
 import type {
+  AdminSessionsResponse,
   AdminStatsResponse,
   Alert,
   AlertActionRequest,
@@ -11,10 +12,13 @@ import type {
   ProctorAlertTypeConfig,
   ProctorEvent,
   ProctorSettings,
+  RecordingSession,
+  RecordingSessionsResponse,
   ReviewNature,
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
+  SessionEvidence,
   SessionStartResponse,
   StudentForm,
   UploadManifestItem,
@@ -469,25 +473,175 @@ export async function validateEndSession(params: { sessionId: string; assuranceA
   });
 }
 
-export async function fetchAdminSessions(username: string, password: string) {
+export async function fetchAdminSessions(username: string, password: string): Promise<AdminSessionsResponse> {
   if (demoMode) {
-    await wait(100);
+    await wait(120);
     assertDemoAdmin(password);
     const usernameNorm = normalizeUsername(username);
+    // Recording playback view: a fake recording dataset takes precedence so the
+    // whole search → timeline → player flow is exercisable OFFLINE. Falls back to
+    // the demo STUDENT session store (no evidence) for any other username.
+    const recording = demoRecordingSessionsFor(usernameNorm);
+    if (recording.length) return { sessions: recording };
     const sessions = readDemoSessions()
       .filter((item) => item.username_norm === usernameNorm)
-      .map((item) => ({ ...item, evidence: [] as Array<Record<string, unknown>> }));
-    return { sessions: sessions as Array<Record<string, unknown>> };
+      .map((item) => ({ ...item, evidence: [] as SessionEvidence[] }));
+    return { sessions };
   }
 
-  return request<{
-    sessions: Array<Record<string, unknown>>;
-  }>(`/api/admin/sessions?username=${encodeURIComponent(username)}`, {
+  return request<AdminSessionsResponse>(`/api/admin/sessions?username=${encodeURIComponent(username)}`, {
     method: "GET",
     headers: {
       "x-admin-password": password
     }
   });
+}
+
+// GET /api/admin/recording-sessions — lightweight picker list of sessions with
+// recordings. Returns `null` when the endpoint is not deployed yet (404) so the
+// UI degrades to a manual "enter username" input. In demo mode it returns the
+// fake recording dataset so the picker/search works fully offline.
+export async function fetchRecordingSessions(password: string, contestSlug?: string): Promise<RecordingSession[] | null> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const list = DEMO_RECORDING_SESSIONS.filter((s) => !contestSlug || s.contest_slug === contestSlug);
+    return list.map((s) => ({
+      session_id: s.session_id,
+      hackerrank_username: s.hackerrank_username,
+      name: s.name,
+      room: s.room,
+      contest_slug: s.contest_slug,
+      chunk_count: s.chunk_count,
+      created_at: s.created_at,
+      status: s.status
+    }));
+  }
+
+  const query = new URLSearchParams();
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  const suffix = query.toString();
+  try {
+    const response = await request<RecordingSessionsResponse>(
+      `/api/admin/recording-sessions${suffix ? `?${suffix}` : ""}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.sessions;
+  } catch (cause) {
+    // Endpoint not deployed yet → degrade gracefully to the manual-username path.
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// ---- Demo recording dataset ----------------------------------------------
+// A small, self-contained set of fake students whose sessions carry screen
+// chunks so the recording-playback UI (search → timeline → player → auto-advance)
+// is fully testable OFFLINE. Each chunk's last_modified is placed on a real-time
+// line at chunkSeconds spacing, with a deliberate GAP in one session so the
+// timeline gap-rendering and seek-to-nearest logic are exercised. The actual clip
+// for every chunk is the bundled /sample.webm placeholder.
+const DEMO_CHUNK_SECONDS = 30;
+const DEMO_SAMPLE_CLIP = "/sample.webm";
+
+type DemoRecordingSeed = {
+  session_id: string;
+  hackerrank_username: string;
+  username_norm: string;
+  name: string;
+  room: string;
+  contest_slug: string;
+  status: string;
+  created_at: string;
+  chunk_count: number;
+  // Index offsets (0-based positions on the timeline). A jump between consecutive
+  // values models a recording gap. Defaults to contiguous 0..chunk_count-1.
+  gapAfterIndex?: number; // chunks after this 1-based index are shifted later
+  gapChunks?: number; // how many chunk-widths of gap to insert
+};
+
+const DEMO_RECORDING_SESSIONS: DemoRecordingSeed[] = [
+  {
+    session_id: "rec-asha-9f2a",
+    hackerrank_username: "Asha_R",
+    username_norm: "asha_r",
+    name: "Asha Ramanathan",
+    room: "Lab A-1",
+    contest_slug: "mcet-june-2026",
+    status: "ended",
+    created_at: "2026-06-05T09:00:00.000Z",
+    chunk_count: 8
+  },
+  {
+    session_id: "rec-karan-71b4",
+    hackerrank_username: "Karan_V",
+    username_norm: "karan_v",
+    name: "Karan Verma",
+    room: "Lab B-2",
+    contest_slug: "mcet-june-2026",
+    status: "ended",
+    // Late joiner: starts 2 minutes after the test start.
+    created_at: "2026-06-05T09:02:00.000Z",
+    chunk_count: 6,
+    // Gap: after the 3rd chunk, the recording dropped for ~1 chunk-width.
+    gapAfterIndex: 3,
+    gapChunks: 2
+  },
+  {
+    session_id: "rec-neha-3c10",
+    hackerrank_username: "Neha_S",
+    username_norm: "neha_s",
+    name: "Neha Sharma",
+    room: "Lab B-2",
+    contest_slug: "mcet-june-2026",
+    status: "active",
+    created_at: "2026-06-05T09:00:30.000Z",
+    chunk_count: 4
+  }
+];
+
+// Build the signed-evidence playlist for a demo session: one screen chunk per
+// index, last_modified stamped at chunkSeconds spacing from created_at (a chunk's
+// last_modified is its END time, matching the real "object finalized when the
+// 30s chunk closes" semantics the offset math relies on). An optional gap shifts
+// the tail later so the timeline shows a visible blank.
+function demoEvidenceFor(seed: DemoRecordingSeed): SessionEvidence[] {
+  const createdMs = Date.parse(seed.created_at);
+  const prefix = `contests/${seed.contest_slug}/sessions/${seed.username_norm}/${seed.session_id}/`;
+  const evidence: SessionEvidence[] = [];
+  for (let i = 1; i <= seed.chunk_count; i += 1) {
+    let position = i; // 1-based contiguous position on the timeline
+    if (seed.gapAfterIndex && i > seed.gapAfterIndex) position += seed.gapChunks ?? 1;
+    // last_modified = END of this chunk = createdMs + position*chunkSeconds.
+    const lastModifiedMs = createdMs + position * DEMO_CHUNK_SECONDS * 1000;
+    evidence.push({
+      key: `${prefix}screen/chunk-${String(i).padStart(5, "0")}.webm`,
+      size: 320_000 + i * 1000,
+      last_modified: new Date(lastModifiedMs).toISOString(),
+      download_url: DEMO_SAMPLE_CLIP
+    });
+  }
+  // Add a couple of non-screen files so filtering is exercised too.
+  evidence.push({ key: `${prefix}manifest.json`, size: 412, last_modified: seed.created_at, download_url: DEMO_SAMPLE_CLIP });
+  return evidence;
+}
+
+function demoRecordingSessionsFor(usernameNorm: string): AdminSessionsResponse["sessions"] {
+  return DEMO_RECORDING_SESSIONS
+    .filter((seed) => seed.username_norm === usernameNorm)
+    .map((seed) => ({
+      session_id: seed.session_id,
+      hackerrank_username: seed.hackerrank_username,
+      username_norm: seed.username_norm,
+      name: seed.name,
+      room: seed.room,
+      contest_slug: seed.contest_slug,
+      storage_prefix: `contests/${seed.contest_slug}/sessions/${seed.username_norm}/${seed.session_id}/`,
+      status: seed.status,
+      created_at: seed.created_at,
+      chunk_count: seed.chunk_count,
+      evidence: demoEvidenceFor(seed)
+    }));
 }
 
 export async function fetchAdminStats(password: string, contestSlug?: string, room?: string): Promise<AdminStatsResponse> {
