@@ -69,3 +69,20 @@ This is the first thing to read in the morning. Three sections, kept current thr
 - **Two items for your review:**
   1. Screen chunk-2+ PUTs to GCS signed URLs intermittently fail with net::ERR_CONNECTION_CLOSED on my home IPv6; chunk-1 succeeded. Pre-existing recorder code (untouched tonight) and it does NOT retry failed chunks — consider a retry queue as a follow-up.
   2. Remote-walkthrough stubs used (demo-only, no product change): fake getDisplayMedia, camera NotFoundError, clipboard stub (clipboard.readText would hang awaiting a permission prompt on the new origin — REAL candidates will see the prompt and click it; not a product bug).
+
+---
+## S2 roster login — BUILT + BROWSER-VERIFIED (~05:10)
+- **All 7 build tasks done via TDD** (commits 5b7c38f, 6118289, 0d59f47, 782b566, 5979d46, 925a160, f93b94a): backend roster store (versioned-replace, meta-written-last) + public exam-config + masked lookup + /api/session/start roster gate with server-side identity override; frontend pure CSV/TSV parser + mapping heuristics, types + api client with demo parity, admin rooms field + CandidateRosterSection, student IdentityLookupPanel + RoomField.
+- **Full suites green at HEAD:** backend 249/249 (node:test, incl. 17 new roster tests), frontend vitest 117/117 + tsc clean + `npm run lint` clean + build OK.
+- **Demo-mode browser walkthrough PASSED on :9222** (evidence: night-run/evidence/s2-verify-01…10.png), all 6 plan checks:
+  1. Settings: window around now + Rooms "Lab A-1, Lab B-2" saved; rooms text persists after Load current (also confirmed in demo localStorage).
+  2. Roster upload via hidden file input: preview 3/3 rows (quoted cell "Raman, Divya" parsed correctly), unique-ID auto-suggests Roll No, mappings auto-suggest Name/Email/Roll/Room (HR username correctly "not in this file") → "Roster saved: 3 students" + status "Roster active: 3 students · ID column Roll No".
+  3. Student page: "STEP 1 — CONFIRM YOUR IDENTITY" with label "Roll No"; wrong ID 99XX999 → "could not find that ID" error; lowercase `21cs001` → confirm card 21CS001 / Asha Raman / `as**@example.com` / Lab A-1 (normalization proven). **DOM-asserted: raw email + phone appear NOWHERE in the page HTML; only the masked email renders.**
+  4. After "Yes, this is me": name/roll/email prefilled + disabled, username editable (unmapped), room dropdown pre-selected Lab A-1 with both labs + "Other…" (selecting Other reveals free-text input); consent + username → "Start proctoring" enables (screen-share intentionally not completed — needs human gesture; gate itself is unit-test-verified server/demo-side).
+  5. "Not you? Re-enter ID" → full reset to the identity step (empty ID, Find me + Start disabled).
+  6. Admin "Clear roster" → "Roster cleared — student login no longer requires a roster match"; student reload → legacy details form (no identity step), room dropdown still present.
+
+### S2 judgment calls (review these)
+1. **Reused the already-running :5173 demo dev server** (VITE_DEMO_MODE=true, VITE_ADMIN_PASSWORD=dev) instead of starting a second instance with password "admin" as the plan literally said — per the leave-the-dev-server instruction; unlocked with "dev".
+2. **S1 FullscreenGate interaction noted, not a bug:** on the student page the first "Find me" click is consumed by the gate (enters fullscreen, stage 1→2); the second click performs the lookup. Expected S1 behavior (any click is the fullscreen gesture); real candidates hit the gate's own button first.
+3. Committed the 10 evidence screenshots alongside the notes (repo convention from S1/E2E sections), though the plan's commit listed only MORNING-NOTES.md.
