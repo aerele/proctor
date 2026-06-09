@@ -33,6 +33,29 @@ function normalizeStatus(id) {
 
 const isDone = (s) => Boolean(s && s.status && s.status.id >= 3);
 
+// Retry-After header -> milliseconds. Two RFC forms: delta-seconds ("2") or an
+// HTTP-date ("Wed, 21 Oct 2026 07:28:00 GMT"). Past dates clamp to 0 (retry
+// now); unparseable values return undefined (caller falls back to jitter).
+function parseRetryAfterMs(header) {
+  if (header == null || header === "") return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const dateMs = Date.parse(header);
+  if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
+  return undefined;
+}
+
+// Failed HTTP exchange -> Error carrying .status (+ .retryAfterMs when the
+// server sent Retry-After) so the exec queue layer (design §11 item 2) can
+// classify retryability and honor server-requested delays.
+function httpFailure(action, res) {
+  const error = new Error(`judge0 ${action} failed: ${res.status}`);
+  error.status = res.status;
+  const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
+  if (retryAfterMs !== undefined) error.retryAfterMs = retryAfterMs;
+  return error;
+}
+
 export function makeJudge0Adapter({ baseUrl, mode, apiKey, authToken, fetchImpl = fetch, pollIntervalMs = 1000, maxPolls = 90 }) {
   const headers = mode === "rapidapi"
     ? { "Content-Type": "application/json", "User-Agent": BROWSER_UA, "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com" }
@@ -60,7 +83,7 @@ export function makeJudge0Adapter({ baseUrl, mode, apiKey, authToken, fetchImpl 
     const res = await fetchImpl(`${baseUrl}/submissions/batch?base64_encoded=true&wait=false`, {
       method: "POST", headers, body: JSON.stringify({ submissions })
     });
-    if (!res.ok) throw new Error(`judge0 submit failed: ${res.status}`);
+    if (!res.ok) throw httpFailure("submit", res);
     const tokens = await res.json(); // [{token}, ...]
     return tokens.map((t) => t.token);
   }
@@ -76,7 +99,7 @@ export function makeJudge0Adapter({ baseUrl, mode, apiKey, authToken, fetchImpl 
   async function fetchChunk(tokens) {
     const q = tokens.join(",");
     const res = await fetchImpl(`${baseUrl}/submissions/batch?base64_encoded=true&tokens=${q}`, { headers });
-    if (!res.ok) throw new Error(`judge0 fetch failed: ${res.status}`);
+    if (!res.ok) throw httpFailure("fetch", res);
     const data = await res.json();
     return data.submissions;
   }
