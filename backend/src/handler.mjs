@@ -1,6 +1,8 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
+import { makeJudge0Adapter } from "./judge0Adapter.mjs";
+import { getProblem, LANGUAGE_IDS } from "./problems.mjs";
 
 let firestore = new Firestore();
 let storage = new Storage();
@@ -10,6 +12,24 @@ let storage = new Storage();
 export function __setClientsForTest({ firestore: fakeFirestore, storage: fakeStorage } = {}) {
   if (fakeFirestore) firestore = fakeFirestore;
   if (fakeStorage) storage = fakeStorage;
+}
+
+// Single adapter, built from env on first use. Tests inject a stub via
+// __setJudge0AdapterForTest (mirrors __setClientsForTest). Pass null to reset.
+let _judge0 = null;
+let _judge0Override = null;
+export function __setJudge0AdapterForTest(adapter) {
+  _judge0Override = adapter || null;
+}
+function judge0() {
+  if (_judge0Override) return _judge0Override;
+  if (!_judge0) {
+    _judge0 = makeJudge0Adapter({
+      baseUrl: JUDGE0_BASE_URL, mode: JUDGE0_MODE,
+      apiKey: JUDGE0_API_KEY, authToken: JUDGE0_AUTH_TOKEN
+    });
+  }
+  return _judge0;
 }
 
 const SESSION_COLLECTION = process.env.SESSION_COLLECTION || "proctor_sessions";
@@ -50,6 +70,13 @@ const CLAIM_TTL_MS = 10 * 60 * 1000;
 const REVIEW_ROSTER_LIMIT = 5000;
 const REVIEWS_QUERY_LIMIT = 20000;
 const EVIDENCE_BUCKET = process.env.EVIDENCE_BUCKET;
+const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "https://judge0-ce.p.rapidapi.com";
+const JUDGE0_MODE = process.env.JUDGE0_MODE || "rapidapi";
+const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY;
+const JUDGE0_AUTH_TOKEN = process.env.JUDGE0_AUTH_TOKEN;
+const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_submissions";
+const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
+const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
@@ -99,6 +126,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/resume") return send(res, 200, await resumeSession(req));
     if (req.method === "POST" && path === "/api/upload-url") return send(res, 200, await createUploadUrl(req));
     if (req.method === "POST" && path === "/api/events") return send(res, 200, await recordEvents(req));
+    if (req.method === "POST" && path === "/api/exec/run") return send(res, 200, await execRun(req));
     if (req.method === "POST" && path === "/api/review-file") return send(res, 200, await recordReviewFile(req));
     if (req.method === "POST" && path === "/api/heartbeat") return send(res, 200, await recordHeartbeat(req));
     if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
@@ -477,6 +505,24 @@ async function recordEvents(req) {
   await raiseSureShotAlertsFromEvents(session, cleanedEvents, alertSettings);
 
   return { ok: true, storage_key: eventKey };
+}
+
+async function execRun(req) {
+  const body = parseBody(req);
+  // Ownership gate: unknown session → 404; ended/locked/pending → 409/403.
+  const session = requireWritableSession(await getSession(String(body.session_id || "")));
+  const problem = getProblem(String(body.problem_id || ""));
+  if (!problem) return badRequest("unknown problem_id");
+  const languageId = LANGUAGE_IDS[String(body.language || "")];
+  if (!languageId) return badRequest("unsupported language");
+  const source = String(body.source_code || "");
+  const items = problem.sampleTests.map((t) => ({
+    languageId, source, stdin: t.input, expectedOutput: t.expected,
+    cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
+  }));
+  const results = await judge0().runBatch(items);
+  // echo sample input/expected for display (samples are NOT secret)
+  return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
 }
 
 async function recordReviewFile(req) {
