@@ -3,8 +3,11 @@ import { describe, it, expect } from "vitest";
 import {
   deriveStage, stageHint, topBarVisible, STAGE_META,
   formatWallClock, formatExamElapsed,
-  type StageInput
+  anomalyFromEvent, topBarReducer, initialTopBarState,
+  makeShellEvent, appendToBuffer,
+  type StageInput, type RestorePreconditions
 } from "./examShell";
+import type { ProctorEvent } from "../types";
 
 const base: StageInput = { fullscreen: true, gate: "form", status: "idle", examReleased: true };
 
@@ -100,5 +103,147 @@ describe("formatExamElapsed", () => {
   });
   it("clamps negatives to zero", () => {
     expect(formatExamElapsed(-5)).toBe("0:00:00");
+  });
+});
+
+describe("anomalyFromEvent", () => {
+  const anomalyCases: Array<[string, Record<string, unknown> | undefined, string]> = [
+    ["fullscreen_exit", undefined, "You left fullscreen."],
+    ["window_blur", undefined, "You switched to another window or application."],
+    ["page_hide", undefined, "This exam tab was hidden or closed."],
+    ["screen_share_stopped", { reason: "track_ended" }, "Screen sharing stopped."],
+    ["recording_error", { kind: "screen" }, "Screen recording hit an error."],
+    ["ip_address_changed", { previous: "1.2.3.4", current: "5.6.7.8" }, "Your network connection changed."],
+    ["integrity_checkpoint_missed", { checkpoint_id: "c1" }, "You missed an attendance check."]
+  ];
+  it.each(anomalyCases)("%s is an anomaly", (type, detail, message) => {
+    expect(anomalyFromEvent(type, detail)).toEqual({ anomaly: true, reason: type, message });
+  });
+  it("visibility_change is an anomaly ONLY when state is hidden", () => {
+    expect(anomalyFromEvent("visibility_change", { state: "hidden" })).toEqual({
+      anomaly: true, reason: "visibility_change", message: "This exam tab was hidden."
+    });
+    expect(anomalyFromEvent("visibility_change", { state: "visible" })).toEqual({ anomaly: false });
+  });
+  it("the expected end-of-test fullscreen_exit is NOT an anomaly", () => {
+    expect(anomalyFromEvent("fullscreen_exit", { expected: true })).toEqual({ anomaly: false });
+  });
+  it.each([
+    "fullscreen_enter", "window_focus", "before_unload", "clipboard_activity",
+    "reload_shortcut_blocked", "upload_error", "event_upload_error", "heartbeat_error",
+    "chunk_uploaded", "small_video_chunk_detected", "invalid_share_surface",
+    "integrity_checkpoint_shown", "integrity_checkpoint_confirmed", "integrity_notice",
+    "camera_microphone_optional_capture_failed", "camera_stopped", "microphone_stopped",
+    "editor_blur", "editor_focus", "editor_paste",
+    "onboarding_stage", "topbar_hidden", "topbar_restored"
+  ])("%s is NOT an anomaly", (type) => {
+    expect(anomalyFromEvent(type)).toEqual({ anomaly: false });
+  });
+});
+
+const evt = (type: string, detail?: Record<string, unknown>, at = "2026-06-10T01:00:00.000Z"): ProctorEvent =>
+  ({ type, timestamp: at, detail });
+
+const allClear: RestorePreconditions = { fullscreen: true, visible: true, recording: true };
+
+describe("topBarReducer", () => {
+  it("first anomaly while recording: hides the bar, increments the flag, emits ONE topbar_hidden", () => {
+    const { state, emit } = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1000 });
+    expect(state.barHidden).toBe(true);
+    expect(state.flagCount).toBe(1);
+    expect(state.activeReasons).toEqual([
+      { type: "window_blur", message: "You switched to another window or application.", at: "2026-06-10T01:00:00.000Z" }
+    ]);
+    expect(emit).toEqual({
+      type: "topbar_hidden",
+      detail: { reason: "You switched to another window or application.", trigger_type: "window_blur" }
+    });
+  });
+  it("anomaly while NOT recording: no-op (pre-recording exits only re-show the gate)", () => {
+    const { state, emit } = topBarReducer(initialTopBarState, { kind: "event", event: evt("fullscreen_exit"), recording: false, nowMs: 1000 });
+    expect(state).toBe(initialTopBarState);
+    expect(emit).toBeNull();
+  });
+  it("non-anomaly events never touch the bar", () => {
+    const { state, emit } = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_focus"), recording: true, nowMs: 1000 });
+    expect(state).toBe(initialTopBarState);
+    expect(emit).toBeNull();
+  });
+  it("episode dedupe: blur+hidden+fullscreen_exit in one excursion = ONE flag, reasons deduped by type, no second emission", () => {
+    let r = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1000 });
+    r = topBarReducer(r.state, { kind: "event", event: evt("visibility_change", { state: "hidden" }), recording: true, nowMs: 1100 });
+    expect(r.emit).toBeNull();
+    r = topBarReducer(r.state, { kind: "event", event: evt("fullscreen_exit"), recording: true, nowMs: 1200 });
+    expect(r.emit).toBeNull();
+    const again = topBarReducer(r.state, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1300 });
+    expect(again.emit).toBeNull();
+    expect(again.state.flagCount).toBe(1);
+    expect(again.state.activeReasons.map((x) => x.type)).toEqual(["window_blur", "visibility_change", "fullscreen_exit"]);
+  });
+  it("fullscreen_enter never auto-restores the bar", () => {
+    const hidden = topBarReducer(initialTopBarState, { kind: "event", event: evt("fullscreen_exit"), recording: true, nowMs: 1000 }).state;
+    const { state, emit } = topBarReducer(hidden, { kind: "event", event: evt("fullscreen_enter"), recording: true, nowMs: 2000 });
+    expect(state.barHidden).toBe(true);
+    expect(emit).toBeNull();
+  });
+  it("restore: rejected until ALL preconditions hold", () => {
+    const hidden = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1000 }).state;
+    for (const broken of [
+      { ...allClear, fullscreen: false },
+      { ...allClear, visible: false },
+      { ...allClear, recording: false }
+    ]) {
+      const r = topBarReducer(hidden, { kind: "restore", preconditions: broken, nowMs: 9000 });
+      expect(r.state.barHidden).toBe(true);
+      expect(r.emit).toBeNull();
+    }
+  });
+  it("restore with preconditions met: bar back, reasons cleared, flag persists, emits topbar_restored with hidden_ms + reasons", () => {
+    let r = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1000 });
+    r = topBarReducer(r.state, { kind: "event", event: evt("visibility_change", { state: "hidden" }), recording: true, nowMs: 1500 });
+    const restored = topBarReducer(r.state, { kind: "restore", preconditions: allClear, nowMs: 61_000 });
+    expect(restored.state).toEqual({ barHidden: false, flagCount: 1, activeReasons: [], hiddenAtMs: null });
+    expect(restored.emit).toEqual({
+      type: "topbar_restored",
+      detail: { hidden_ms: 60_000, reasons: ["window_blur", "visibility_change"] }
+    });
+  });
+  it("a SECOND episode after restore increments the flag to 2", () => {
+    let r = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1000 });
+    r = topBarReducer(r.state, { kind: "restore", preconditions: allClear, nowMs: 2000 });
+    r = topBarReducer(r.state, { kind: "event", event: evt("page_hide"), recording: true, nowMs: 3000 });
+    expect(r.state.barHidden).toBe(true);
+    expect(r.state.flagCount).toBe(2);
+    expect(r.emit?.type).toBe("topbar_hidden");
+  });
+  it("restore while not hidden: no-op, no emission", () => {
+    const r = topBarReducer(initialTopBarState, { kind: "restore", preconditions: allClear, nowMs: 1000 });
+    expect(r.state).toBe(initialTopBarState);
+    expect(r.emit).toBeNull();
+  });
+  it("session_ended while hidden: unhides (the DONE bar must render), flag persists, logs the restore", () => {
+    const hidden = topBarReducer(initialTopBarState, { kind: "event", event: evt("window_blur"), recording: true, nowMs: 1000 }).state;
+    const r = topBarReducer(hidden, { kind: "session_ended", nowMs: 5000 });
+    expect(r.state.barHidden).toBe(false);
+    expect(r.state.flagCount).toBe(1);
+    expect(r.emit).toEqual({ type: "topbar_restored", detail: { hidden_ms: 4000, reasons: ["window_blur"] } });
+  });
+});
+
+describe("makeShellEvent / appendToBuffer", () => {
+  it("makeShellEvent builds a ProctorEvent in the createUiEvent shape", () => {
+    expect(makeShellEvent("fullscreen_enter", { via: "gate" }, "2026-06-10T01:00:00.000Z", "visible")).toEqual({
+      type: "fullscreen_enter",
+      timestamp: "2026-06-10T01:00:00.000Z",
+      detail: { via: "gate" },
+      visibility_state: "visible"
+    });
+  });
+  it("appendToBuffer caps at 50, dropping the oldest", () => {
+    let buf: ProctorEvent[] = [];
+    for (let i = 0; i < 55; i++) buf = appendToBuffer(buf, makeShellEvent(`e${i}`, undefined, "t", "visible"));
+    expect(buf.length).toBe(50);
+    expect(buf[0].type).toBe("e5");
+    expect(buf[49].type).toBe("e54");
   });
 });

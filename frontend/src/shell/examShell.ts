@@ -8,7 +8,7 @@
 //
 // Design: docs/superpowers/specs/2026-06-09-s1-exam-shell-design.md
 
-import type { SessionStatus } from "../types";
+import type { ProctorEvent, SessionStatus } from "../types";
 
 // Mirrors StudentApp's `StudentGate` union (App.tsx) — declared here, not
 // imported, so the pure module has no dependency on App.tsx. The two unions
@@ -95,4 +95,150 @@ export function formatExamElapsed(totalSeconds: number): string {
   const seconds = safe % 60;
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+// ---- Spec §6: anomaly classification ---------------------------------------
+
+export type AnomalyVerdict =
+  | { anomaly: true; reason: string; message: string }
+  | { anomaly: false };
+
+// Friendly panel copy per anomaly event type (spec §6 table). Every event type
+// NOT in this map (editor_*, clipboard_activity, window_focus, infra errors,
+// the shell's own bookkeeping events, …) is a non-anomaly by construction.
+const ANOMALY_MESSAGES: Record<string, string> = {
+  fullscreen_exit: "You left fullscreen.",
+  window_blur: "You switched to another window or application.",
+  page_hide: "This exam tab was hidden or closed.",
+  screen_share_stopped: "Screen sharing stopped.",
+  recording_error: "Screen recording hit an error.",
+  ip_address_changed: "Your network connection changed.",
+  integrity_checkpoint_missed: "You missed an attendance check."
+};
+
+export function anomalyFromEvent(type: string, detail?: Record<string, unknown>): AnomalyVerdict {
+  if (type === "visibility_change") {
+    return detail?.state === "hidden"
+      ? { anomaly: true, reason: "visibility_change", message: "This exam tab was hidden." }
+      : { anomaly: false };
+  }
+  // The end-of-test exitFullscreen() is logged with detail.expected === true
+  // (spec §5.2) — never an anomaly.
+  if (type === "fullscreen_exit" && detail?.expected === true) return { anomaly: false };
+  const message = ANOMALY_MESSAGES[type];
+  return message ? { anomaly: true, reason: type, message } : { anomaly: false };
+}
+
+// ---- Spec §6/§7: top-bar vanish/restore reducer -----------------------------
+
+export type AnomalyReason = { type: string; message: string; at: string };
+
+export type TopBarState = {
+  barHidden: boolean;
+  // Permanent ⚑ chip: hide EPISODES this session (transitions count, not events).
+  flagCount: number;
+  // Current episode's reasons, deduped by type, in arrival order.
+  activeReasons: AnomalyReason[];
+  hiddenAtMs: number | null;
+};
+
+export const initialTopBarState: TopBarState = {
+  barHidden: false,
+  flagCount: 0,
+  activeReasons: [],
+  hiddenAtMs: null
+};
+
+export type RestorePreconditions = {
+  fullscreen: boolean;
+  visible: boolean;
+  recording: boolean;
+};
+
+export type TopBarAction =
+  // Every event flowing through StudentApp's addEvent funnel. `recording` is
+  // sampled at dispatch time — anomalies vanish the bar ONLY while recording
+  // (spec decision 4; the share-picker "starting" moment is therefore safe).
+  | { kind: "event"; event: ProctorEvent; recording: boolean; nowMs: number }
+  // Candidate clicked "I have fixed this". Preconditions are re-checked here —
+  // restore is a no-op unless ALL hold (spec §7.3).
+  | { kind: "restore"; preconditions: RestorePreconditions; nowMs: number }
+  // Test ended mid-episode: unhide so the DONE bar (with its permanent flag
+  // chip) renders. Not in the spec — see plan "resolutions" item 5.
+  | { kind: "session_ended"; nowMs: number };
+
+// Emissions the caller must send through the events pipeline (spec §6 episode
+// semantics: ONE topbar_hidden per excursion, ONE topbar_restored on restore).
+export type ShellEmission =
+  | { type: "topbar_hidden"; detail: { reason: string; trigger_type: string } }
+  | { type: "topbar_restored"; detail: { hidden_ms: number; reasons: string[] } };
+
+export type TopBarResult = { state: TopBarState; emit: ShellEmission | null };
+
+export function topBarReducer(state: TopBarState, action: TopBarAction): TopBarResult {
+  if (action.kind === "event") {
+    const verdict = anomalyFromEvent(action.event.type, action.event.detail);
+    if (!verdict.anomaly || !action.recording) return { state, emit: null };
+    const reason: AnomalyReason = { type: verdict.reason, message: verdict.message, at: action.event.timestamp };
+    if (!state.barHidden) {
+      // First anomaly of an episode: ONE topbar_hidden + ONE flag increment.
+      return {
+        state: { barHidden: true, flagCount: state.flagCount + 1, activeReasons: [reason], hiddenAtMs: action.nowMs },
+        emit: { type: "topbar_hidden", detail: { reason: verdict.message, trigger_type: verdict.reason } }
+      };
+    }
+    // Already hidden: append the reason (deduped by type) — no double-counting
+    // a single excursion that fires blur+hidden+fullscreen_exit together.
+    if (state.activeReasons.some((r) => r.type === reason.type)) return { state, emit: null };
+    return { state: { ...state, activeReasons: [...state.activeReasons, reason] }, emit: null };
+  }
+
+  if (action.kind === "restore") {
+    const { fullscreen, visible, recording } = action.preconditions;
+    if (!state.barHidden || !fullscreen || !visible || !recording) return { state, emit: null };
+    return restoreState(state, action.nowMs);
+  }
+
+  // session_ended
+  if (!state.barHidden) return { state, emit: null };
+  return restoreState(state, action.nowMs);
+}
+
+function restoreState(state: TopBarState, nowMs: number): TopBarResult {
+  return {
+    state: { ...state, barHidden: false, activeReasons: [], hiddenAtMs: null },
+    emit: {
+      type: "topbar_restored",
+      detail: {
+        hidden_ms: state.hiddenAtMs == null ? 0 : Math.max(0, nowMs - state.hiddenAtMs),
+        reasons: state.activeReasons.map((r) => r.type)
+      }
+    }
+  };
+}
+
+// ---- Spec §8: shell event helpers -------------------------------------------
+
+// Shell-emitted ProctorEvent — mirrors App.tsx createUiEvent, but pure:
+// timestamp and visibility_state are passed in by the DOM-aware caller.
+export function makeShellEvent(
+  type: string,
+  detail: Record<string, unknown> | undefined,
+  nowIso: string,
+  visibilityState: DocumentVisibilityState
+): ProctorEvent {
+  return { type, timestamp: nowIso, detail, visibility_state: visibilityState };
+}
+
+// Pre-session event buffer (spec §8): cap 50, oldest dropped. Best-effort
+// audit, not evidence of record — dropped silently if no session ever exists.
+export const SHELL_EVENT_BUFFER_CAP = 50;
+
+export function appendToBuffer(
+  buffer: ProctorEvent[],
+  event: ProctorEvent,
+  cap: number = SHELL_EVENT_BUFFER_CAP
+): ProctorEvent[] {
+  const next = [...buffer, event];
+  return next.length > cap ? next.slice(next.length - cap) : next;
 }
