@@ -232,7 +232,7 @@ test("POST /api/editor-events sanitizes events: truncates oversized strings, dro
     body: { session_id: "s1", problem_id: "sum-two", events: [{
       type: "T".repeat(200),                 // > 64 — must be capped
       timestamp: "S".repeat(100),            // > 40 — must be capped
-      detail: { text: "A".repeat(2000), nested: { deep: "B".repeat(900) } }, // > 500 — sanitizeObject caps
+      detail: { text: "A".repeat(2000), nested: { deep: "B".repeat(900) } }, // non-text strings > 500 — sanitizeObject caps
       injected_extra: "evil",                // unexpected key — must be dropped
       another_extra: { sneaky: true }        // unexpected key — must be dropped
     }] } }));
@@ -242,11 +242,91 @@ test("POST /api/editor-events sanitizes events: truncates oversized strings, dro
   const record = JSON.parse(storage._saved.get(keys[0]).trim());
   assert.equal(record.type.length, 64);
   assert.equal(record.timestamp.length, 40);
-  assert.equal(record.detail.text.length, 500);        // sanitizeObject caps strings at 500
-  assert.equal(record.detail.nested.deep.length, 500); // …recursively
+  // detail.text is paste-forensics payload: preserved up to 2000 chars (NOT the
+  // generic 500-char cap). Exactly 2000 chars → intact, no truncation flag.
+  assert.equal(record.detail.text.length, 2000);
+  assert.equal(record.detail.text_truncated, undefined);
+  assert.equal(record.detail.nested.deep.length, 500); // everything else stays capped at 500, recursively
   // ONLY the allow-listed shape persists — extra client keys are gone.
   assert.deepEqual(Object.keys(record).sort(),
     ["detail", "problem_id", "session_id", "timestamp", "type"]);
+});
+
+// ---- Paste forensics: detail.text gets its OWN 2000-char cap ---------------
+// The capture design stores up to 2000 chars of inserted text; sanitizeObject's
+// generic 500-char cap must NOT clip it.
+
+test("POST /api/editor-events preserves a 1500-char detail.text intact (no truncation flag)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  const text = "P".repeat(1500);
+  const res = await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: "sum-two", events: [
+      { type: "editor_insert", timestamp: "2026-06-09T10:00:00.000Z", detail: { text, len: 1500 } }
+    ] } }));
+  assert.equal(res.statusCode, 200);
+  const record = JSON.parse(storage._saved.get([...storage._saved.keys()][0]).trim());
+  assert.equal(record.detail.text, text);                // survives intact, all 1500 chars
+  assert.equal(record.detail.text_truncated, undefined); // not truncated → no flag
+  assert.equal(record.detail.len, 1500);                 // the rest of detail still sanitized normally
+});
+
+test("POST /api/editor-events caps a 3000-char detail.text at 2000 and sets text_truncated", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  const text = "Q".repeat(3000);
+  const res = await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: "sum-two", events: [
+      { type: "editor_insert", timestamp: "2026-06-09T10:00:00.000Z", detail: { text } }
+    ] } }));
+  assert.equal(res.statusCode, 200);
+  const record = JSON.parse(storage._saved.get([...storage._saved.keys()][0]).trim());
+  assert.equal(record.detail.text, text.slice(0, 2000)); // stored as the first 2000 chars
+  assert.equal(record.detail.text_truncated, true);      // flagged as clipped
+});
+
+// ---- problem_id coercion (adversarial review) -------------------------------
+// problem_id was stored verbatim from the client; it must be coerced to a
+// bounded string (or null) so an object/array can never land in storage.
+
+test("POST /api/editor-events coerces problem_id: object → bounded string, long string → 64 chars, missing → null", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  const event = { type: "editor_insert", timestamp: "2026-06-09T10:00:00.000Z", detail: {} };
+
+  // (a) object-valued problem_id → stored as a bounded STRING, never an object.
+  let res = await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: { evil: "payload" }, events: [event] } }));
+  assert.equal(res.statusCode, 200);
+  let record = JSON.parse(storage._saved.get([...storage._saved.keys()].at(-1)).trim());
+  assert.equal(typeof record.problem_id, "string");
+  assert.ok(record.problem_id.length <= 64);
+
+  // (b) oversized string problem_id → sliced to 64 chars.
+  res = await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: "x".repeat(500), events: [event] } }));
+  assert.equal(res.statusCode, 200);
+  record = JSON.parse(storage._saved.get([...storage._saved.keys()].at(-1)).trim());
+  assert.equal(record.problem_id, "x".repeat(64));
+
+  // (c) missing problem_id → null (unchanged behavior).
+  res = await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", events: [event] } }));
+  assert.equal(res.statusCode, 200);
+  record = JSON.parse(storage._saved.get([...storage._saved.keys()].at(-1)).trim());
+  assert.equal(record.problem_id, null);
 });
 
 // (b) source_code is capped at 65536 chars on BOTH exec endpoints — 400 before

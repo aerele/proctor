@@ -76,6 +76,8 @@ gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SERVICE_ACCOUNT" \
 
 gcloud builds submit backend --tag "$IMAGE"
 
+# --timeout 120s: /api/exec/* requests block while the Judge0 adapter polls for
+# results (up to ~90s); a 30s request timeout killed them mid-poll.
 gcloud run deploy "$SERVICE_NAME" \
   --image "$IMAGE" \
   --region "$REGION" \
@@ -86,7 +88,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --min-instances 0 \
   --max-instances 20 \
   --concurrency 100 \
-  --timeout 30s \
+  --timeout 120s \
   --set-env-vars="EVIDENCE_BUCKET=${EVIDENCE_BUCKET},ADMIN_PASSWORD=${ADMIN_PASSWORD},ALERTS_INGEST_API_KEY=${ALERTS_INGEST_API_KEY},ALERTS_COLLECTION=${ALERTS_COLLECTION},PUBLIC_APP_ORIGIN=${PUBLIC_APP_ORIGIN},SESSION_COLLECTION=${SESSION_COLLECTION},SETTINGS_COLLECTION=proctor_settings,URL_EXPIRY_SECONDS=900"
 
 echo "Backend URL:"

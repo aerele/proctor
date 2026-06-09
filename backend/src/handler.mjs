@@ -555,7 +555,14 @@ async function execSubmit(req) {
   }));
   const results = await judge0().runBatch(items);
   const passedCount = results.filter((r) => r.passed).length;
-  const verdict = passedCount === results.length ? "accepted" : "wrong_answer";
+  // Verdict rule: a judging_timeout is an INFRA failure (poll budget exhausted),
+  // not the candidate's fault — it must never collapse into "wrong_answer".
+  //   all passed            → accepted
+  //   any judging_timeout   → error
+  //   otherwise             → wrong_answer
+  const verdict = passedCount === results.length
+    ? "accepted"
+    : (results.some((r) => r.status === "judging_timeout") ? "error" : "wrong_answer");
 
   // Per-test results WITHOUT hidden inputs/expected (don't leak the test cases).
   // STORED only — never returned to the candidate (§9 lock below).
@@ -590,12 +597,15 @@ async function ingestEditorEvents(req) {
   // NEW allow-listed record per event — capped type/timestamp + sanitizeObject'd
   // detail (mirrors recordEvents) — so unexpected keys are dropped by
   // construction and oversized strings are truncated.
+  // problem_id is coerced to a bounded string (or null) — never stored verbatim,
+  // so an object/array from the client can't land in storage.
+  const problemId = String(body.problem_id || "").slice(0, 64) || null;
   const stamped = events.map((e) => ({
     type: String(e.type || "").slice(0, 64),
     timestamp: String(e.timestamp || "").slice(0, 40),
-    detail: sanitizeObject(e.detail || {}),
+    detail: sanitizeEditorDetail(e.detail),
     session_id: sessionId,
-    problem_id: body.problem_id || null
+    problem_id: problemId
   }));
 
   // Per-batch timestamped object under the session prefix (avoids read-modify-
@@ -2469,6 +2479,24 @@ function sanitizeObject(value) {
     if (typeof nested === "string") return nested.slice(0, 500);
     return nested;
   }));
+}
+
+// Editor-event detail sanitizer (paste forensics). detail.text carries up to
+// 2000 chars of inserted text by design; sanitizeObject's generic 500-char cap
+// would clip it. Pull text out first, sanitize the rest, then re-attach with
+// its OWN 2000-char cap plus a text_truncated flag when it was longer.
+const EDITOR_TEXT_MAX_LENGTH = 2000;
+function sanitizeEditorDetail(rawDetail) {
+  if (!rawDetail || typeof rawDetail !== "object" || Array.isArray(rawDetail)
+      || !("text" in rawDetail)) {
+    return sanitizeObject(rawDetail || {});
+  }
+  const { text, ...rest } = rawDetail;
+  const detail = sanitizeObject(rest);
+  const textStr = String(text);
+  detail.text = textStr.slice(0, EDITOR_TEXT_MAX_LENGTH);
+  if (textStr.length > EDITOR_TEXT_MAX_LENGTH) detail.text_truncated = true;
+  return detail;
 }
 
 function getClientIp(req) {
