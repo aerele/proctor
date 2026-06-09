@@ -32,6 +32,14 @@ function judge0() {
   return _judge0;
 }
 
+// Injectable epoch-ms clock for the per-session exec rate limiter (mirrors the
+// __setClientsForTest seam) so cooldown tests are deterministic. Production
+// always uses the real clock; pass null/undefined to restore it.
+let _execClock = () => Date.now();
+export function __setExecClockForTest(fn) {
+  _execClock = fn || (() => Date.now());
+}
+
 const SESSION_COLLECTION = process.env.SESSION_COLLECTION || "proctor_sessions";
 const SETTINGS_COLLECTION = process.env.SETTINGS_COLLECTION || "proctor_settings";
 const ALERTS_COLLECTION = process.env.ALERTS_COLLECTION || "proctor_alerts";
@@ -78,6 +86,14 @@ const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_su
 const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
 const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
 const MAX_SOURCE_CODE_LENGTH = 65536; // exec run/submit: cap candidate source size (security review)
+// Per-session exec rate limits (security review): the hosted Judge0 key is
+// METERED (pay-per-submission), so a leaked or looping session token must not
+// be able to drain it. One run per EXEC_RUN_COOLDOWN_SECONDS, one submit per
+// EXEC_SUBMIT_COOLDOWN_SECONDS, and at most EXEC_MAX_SUBMISSIONS_PER_SESSION
+// stored submissions per session+problem.
+const EXEC_RUN_COOLDOWN_SECONDS = Number(process.env.EXEC_RUN_COOLDOWN_SECONDS || "5");
+const EXEC_SUBMIT_COOLDOWN_SECONDS = Number(process.env.EXEC_SUBMIT_COOLDOWN_SECONDS || "20");
+const EXEC_MAX_SUBMISSIONS_PER_SESSION = Number(process.env.EXEC_MAX_SUBMISSIONS_PER_SESSION || "50");
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
@@ -169,7 +185,11 @@ export const api = async (req, res) => {
     const isIntentional = Boolean(error?.statusCode);
     if (isIntentional) {
       const message = String(error?.message || error);
-      return send(res, statusCode, { error: message, detail: message });
+      const body = { error: message, detail: message };
+      // Rate-limit rejections (429, exec limiter) carry a machine-readable
+      // retry hint inside the same JSON error shape as every other error.
+      if (error.retry_after_seconds !== undefined) body.retry_after_seconds = error.retry_after_seconds;
+      return send(res, statusCode, body);
     }
     return send(res, 500, { error: "Internal server error" });
   }
@@ -510,10 +530,74 @@ async function recordEvents(req) {
   return { ok: true, storage_key: eventKey };
 }
 
+// ---- Per-session exec rate limiting (security review) ----------------------
+// The metered Judge0 key must not be drainable by a looping/scripted session
+// token. In-memory, module-level state — fine for the current SINGLE-INSTANCE
+// Cloud Run deploy; with N instances each enforces its own window, so the
+// effective limit is up to N× looser. Move to Firestore/Redis if we scale out.
+// Entries are only created for sessions that passed the ownership gate (real
+// session tokens), and the idle sweep below bounds the Map regardless.
+const EXEC_LIMITER_PRUNE_MS = 60 * 60 * 1000;
+const execLimiter = new Map(); // session_id -> { lastRunMs, lastSubmitMs, submitCounts: Map(problem_id -> n), lastSeenMs }
+
+function execLimiterEntry(sessionId) {
+  const nowMs = _execClock();
+  // Cheap sweep on every call: drop sessions idle for over an hour so the Map
+  // never grows unboundedly on a long-lived instance. (The submit cap resets
+  // with a pruned entry; contest sessions are far shorter than the 1 h idle
+  // horizon, so that is acceptable.)
+  for (const [key, entry] of execLimiter) {
+    if (nowMs - entry.lastSeenMs > EXEC_LIMITER_PRUNE_MS) execLimiter.delete(key);
+  }
+  let entry = execLimiter.get(sessionId);
+  if (!entry) {
+    entry = { lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCounts: new Map(), lastSeenMs: nowMs };
+    execLimiter.set(sessionId, entry);
+  }
+  entry.lastSeenMs = nowMs;
+  return entry;
+}
+
+// 429 carrying the machine-readable retry hint the api() catch block forwards
+// into the JSON body (mirrors how every other intentional error is sent).
+function rateLimited(retryAfterSeconds) {
+  const error = httpError(429, "rate_limited");
+  error.retry_after_seconds = retryAfterSeconds;
+  return error;
+}
+
+// Cooldown CHECKS run right after the ownership gate (always before any judge0
+// work); the cooldown timestamps are RECORDED only when a request actually
+// dispatches to Judge0, so a validation-rejected request (400) never consumes
+// a slot.
+function checkExecRunLimit(sessionId) {
+  const entry = execLimiterEntry(sessionId);
+  const waitMs = EXEC_RUN_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastRunMs);
+  if (waitMs > 0) throw rateLimited(Math.ceil(waitMs / 1000));
+  return entry;
+}
+
+function checkExecSubmitLimit(sessionId, problemId) {
+  const entry = execLimiterEntry(sessionId);
+  const waitMs = EXEC_SUBMIT_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastSubmitMs);
+  if (waitMs > 0) throw rateLimited(Math.ceil(waitMs / 1000));
+  // Hard per-session+problem budget on STORED submissions. Only a successful
+  // store increments the count, so invalid problem ids can never grow the map.
+  // The budget resets only when the idle sweep prunes the whole entry — report
+  // that horizon as the retry hint.
+  if ((entry.submitCounts.get(problemId) || 0) >= EXEC_MAX_SUBMISSIONS_PER_SESSION) {
+    throw rateLimited(Math.ceil(EXEC_LIMITER_PRUNE_MS / 1000));
+  }
+  return entry;
+}
+
 async function execRun(req) {
   const body = parseBody(req);
+  const sessionId = String(body.session_id || "");
   // Ownership gate: unknown session → 404; ended/locked/pending → 409/403.
-  requireWritableSession(await getSession(String(body.session_id || "")));
+  requireWritableSession(await getSession(sessionId));
+  // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
+  const limiter = checkExecRunLimit(sessionId);
   const problem = getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
@@ -528,6 +612,9 @@ async function execRun(req) {
     languageId, source, stdin: t.input, expectedOutput: t.expected,
     cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
   }));
+  // Start the cooldown only now that the request actually reaches Judge0 — a
+  // validation-rejected request never consumes the slot.
+  limiter.lastRunMs = _execClock();
   const results = await judge0().runBatch(items);
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
@@ -538,6 +625,10 @@ async function execSubmit(req) {
   const sessionId = String(body.session_id || "");
   // Ownership gate (same as /api/events): unknown → 404; ended/locked/pending → 409/403.
   requireWritableSession(await getSession(sessionId));
+  // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
+  // The cap is keyed on the raw problem_id string; only stored submissions
+  // increment it, so invalid ids can never grow the per-session count map.
+  const limiter = checkExecSubmitLimit(sessionId, String(body.problem_id || ""));
   const problem = getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
@@ -553,6 +644,9 @@ async function execSubmit(req) {
     languageId, source, stdin: t.input, expectedOutput: t.expected,
     cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
   }));
+  // Start the cooldown only now that the request actually reaches Judge0 — a
+  // validation-rejected request never consumes the slot.
+  limiter.lastSubmitMs = _execClock();
   const results = await judge0().runBatch(items);
   const passedCount = results.filter((r) => r.passed).length;
   // Verdict rule: a judging_timeout is an INFRA failure (poll budget exhausted),
@@ -579,6 +673,10 @@ async function execSubmit(req) {
     source_code: source, verdict, passed_count: passedCount, total: results.length,
     tests, created_at: createdAt
   });
+
+  // Count the STORED submission against the per-session+problem budget
+  // (problem.id === the validated problem_id string the cap was checked with).
+  limiter.submitCounts.set(problem.id, (limiter.submitCounts.get(problem.id) || 0) + 1);
 
   // §9 lock: candidates see ONLY pass/fail counts on hidden tests. The stored
   // doc keeps the per-test detail for admin-side analysis; the response doesn't.

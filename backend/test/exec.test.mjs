@@ -12,9 +12,18 @@ process.env.SUBMISSIONS_COLLECTION = "exec_submissions";
 process.env.ADMIN_PASSWORD = "exec-admin-pass";
 
 const handler = await import("../src/handler.mjs?exec");
-const { api, __setClientsForTest, __setJudge0AdapterForTest } = handler;
+const { api, __setClientsForTest, __setJudge0AdapterForTest, __setExecClockForTest } = handler;
 
 import { getProblem, LANGUAGE_IDS } from "../src/problems.mjs";
+
+// Deterministic clock for the per-session exec rate limiter (the
+// __setExecClockForTest seam mirrors __setClientsForTest). All limiter state in
+// this module instance reads THIS clock, never Date.now(). Pre-existing exec
+// tests reuse session "s1", so they advance the clock (advanceClock) between
+// calls to step past cooldowns rather than weakening the limiter.
+let nowMs = Date.UTC(2026, 0, 1);
+__setExecClockForTest(() => nowMs);
+const advanceClock = (ms) => { nowMs += ms; };
 
 // Inline req/res mocks + fakes, copied from phase2.test.mjs (NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -224,6 +233,7 @@ test("POST /api/exec/run executes source against SAMPLE tests via the injected a
 });
 
 test("POST /api/exec/run 400 on unknown problem", async () => {
+  advanceClock(3600_000); // step past the run cooldown the previous test started for "s1"
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
@@ -295,6 +305,7 @@ test("POST /api/exec/submit runs HIDDEN tests, returns ONLY verdict + counts (§
 });
 
 test("POST /api/exec/submit: one failing hidden test -> verdict wrong_answer", async () => {
+  advanceClock(3600_000); // step past the submit cooldown the previous test started for "s1"
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
@@ -319,8 +330,13 @@ test("POST /api/exec/submit verdict: accepted / error (judging_timeout) / wrong_
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
   firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
-  const submit = () => call(makeReq({ method: "POST", path: "/api/exec/submit",
-    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  // Each branch submits for the SAME session "s1": advance the injected clock
+  // past the submit cooldown before every call so the limiter never interferes.
+  const submit = () => {
+    advanceClock(3600_000);
+    return call(makeReq({ method: "POST", path: "/api/exec/submit",
+      body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  };
 
   // Branch 1: every test passed → accepted.
   __setJudge0AdapterForTest({ runBatch: async (items) =>
@@ -364,5 +380,139 @@ test("POST /api/exec/submit rejects an unknown/ended session (ownership gate)", 
     body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
   assert.equal(res.statusCode, 409);
   assert.equal(firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0, 0); // nothing stored
+  __setJudge0AdapterForTest(null);
+});
+
+// ---- Per-session exec rate limiting (security review) ----------------------
+// The hosted Judge0 key is METERED — a leaked or looping session token must not
+// be able to drain it. Defaults under test: one run / 5 s, one submit / 20 s,
+// at most 50 stored submissions per session+problem. Violations are 429s that
+// carry a machine-readable retry_after_seconds in the standard JSON error body.
+// Every test below uses its own session id so limiter state never leaks across
+// tests; cooldown stepping uses the injected clock (advanceClock), never sleeps.
+
+// Seed an active session + a counting always-pass adapter for the limiter tests.
+function seedLimiterFixture(sessionId) {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc(sessionId).set({ session_id: sessionId, status: "active" });
+  const counter = { batches: 0 };
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    counter.batches += 1;
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+  return { firestore, counter };
+}
+const execReq = (path, sessionId) => makeReq({ method: "POST", path,
+  body: { session_id: sessionId, problem_id: "sum-two", language: "python", source_code: "x" } });
+
+test("exec rate limit: second /api/exec/run within the cooldown -> 429 + retry_after_seconds, no judge0 call; allowed after the clock passes the cooldown", async () => {
+  const { counter } = seedLimiterFixture("rl-run");
+  const run = () => call(execReq("/api/exec/run", "rl-run"));
+
+  let res = await run();
+  assert.equal(res.statusCode, 200);
+  assert.equal(counter.batches, 1);
+
+  // Immediately again (fake clock unmoved): rate-limited, judge0 NOT touched,
+  // and the body mirrors the standard error shape plus the retry hint.
+  res = await run();
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.error, "rate_limited");
+  assert.equal(typeof res.body.retry_after_seconds, "number");
+  assert.ok(res.body.retry_after_seconds >= 1 && res.body.retry_after_seconds <= 5);
+  assert.equal(counter.batches, 1);
+
+  // Advance the injected clock past the 5 s default cooldown: allowed again.
+  advanceClock(5_000);
+  res = await run();
+  assert.equal(res.statusCode, 200);
+  assert.equal(counter.batches, 2);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec rate limit: second /api/exec/submit within the cooldown -> 429 + retry_after_seconds, nothing stored; allowed after the cooldown", async () => {
+  const { firestore, counter } = seedLimiterFixture("rl-sub");
+  const submit = () => call(execReq("/api/exec/submit", "rl-sub"));
+  const subs = () => firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0;
+
+  let res = await submit();
+  assert.equal(res.statusCode, 200);
+  assert.equal(subs(), 1);
+
+  res = await submit();
+  assert.equal(res.statusCode, 429);
+  assert.equal(typeof res.body.retry_after_seconds, "number");
+  assert.ok(res.body.retry_after_seconds >= 1 && res.body.retry_after_seconds <= 20);
+  assert.equal(counter.batches, 1); // judge0 untouched on the limited call
+  assert.equal(subs(), 1);          // nothing extra stored
+
+  // Past the 20 s default submit cooldown: allowed again.
+  advanceClock(20_000);
+  res = await submit();
+  assert.equal(res.statusCode, 200);
+  assert.equal(subs(), 2);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec rate limit: 50-stored-submissions cap per session+problem -> 429 even after the cooldown has elapsed", async () => {
+  const { firestore, counter } = seedLimiterFixture("rl-cap");
+  // Step 21 s (> the 20 s cooldown, << the 1 h prune horizon) before each
+  // submit so ONLY the cap can reject.
+  const submit = () => { advanceClock(21_000); return call(execReq("/api/exec/submit", "rl-cap")); };
+  const subs = () => firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0;
+
+  for (let i = 0; i < 50; i++) {
+    const res = await submit();
+    assert.equal(res.statusCode, 200, `submission ${i + 1} of 50 should be allowed`);
+  }
+  assert.equal(subs(), 50);
+  assert.equal(counter.batches, 50);
+
+  // 51st: cooldown fully elapsed, but the per-session+problem budget holds.
+  let res = await submit();
+  assert.equal(res.statusCode, 429);
+  assert.equal(typeof res.body.retry_after_seconds, "number");
+  assert.equal(subs(), 50);
+  assert.equal(counter.batches, 50); // judge0 never reached
+
+  // Still capped after another minute — it's a budget, not a cooldown.
+  advanceClock(60_000);
+  res = await submit();
+  assert.equal(res.statusCode, 429);
+  assert.equal(subs(), 50);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec rate limit: different sessions are limited independently", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  for (const id of ["rl-ind-a", "rl-ind-b"]) {
+    firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({ session_id: id, status: "active" });
+  }
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+
+  let res = await call(execReq("/api/exec/run", "rl-ind-a"));
+  assert.equal(res.statusCode, 200);
+  // A different session at the SAME instant is not blocked by a's cooldown...
+  res = await call(execReq("/api/exec/run", "rl-ind-b"));
+  assert.equal(res.statusCode, 200);
+  // ...while a itself still is.
+  res = await call(execReq("/api/exec/run", "rl-ind-a"));
+  assert.equal(res.statusCode, 429);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec rate limit: a validation-rejected request does not consume the cooldown slot", async () => {
+  const { counter } = seedLimiterFixture("rl-val");
+  // Unknown problem -> 400 BEFORE any judge0 dispatch; must not start a cooldown.
+  let res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "rl-val", problem_id: "nope", language: "python", source_code: "x" } }));
+  assert.equal(res.statusCode, 400);
+  // An immediate VALID run is therefore still allowed.
+  res = await call(execReq("/api/exec/run", "rl-val"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(counter.batches, 1);
   __setJudge0AdapterForTest(null);
 });
