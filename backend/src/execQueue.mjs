@@ -41,6 +41,11 @@ export function makeExecQueue({
       try {
         return await fn();
       } catch (err) {
+        // .retryable === false takes PRECEDENCE over the status rule: the
+        // adapter marks every post-submit error non-retryable, because once a
+        // submit POST succeeded the submissions exist (and are billed) — a
+        // queue-level retry would re-submit and re-bill the whole batch.
+        if (err?.retryable === false) throw err;
         if (!RETRYABLE_STATUSES.has(err?.status) || attempt >= maxRetries) throw err;
         // Server-provided Retry-After wins; otherwise full jitter on an
         // exponential base so retry waves from many lanes don't synchronize.

@@ -159,6 +159,27 @@ test("non-retryable errors propagate immediately — no retry, no sleep", async 
   }
 });
 
+test("err.retryable === false is NEVER retried, even with a retryable status (precedence over the 429/5xx rule)", async () => {
+  // The adapter marks every post-submit error non-retryable: the submissions
+  // already exist (and are billed), so a queue retry would re-submit them.
+  for (const status of [429, 502, 503, 504]) {
+    const sleep = fakeSleep();
+    const q = makeExecQueue({ sleepImpl: sleep, randomImpl: () => 1 });
+    let calls = 0;
+    await assert.rejects(
+      q.enqueueRun(async () => {
+        calls++;
+        const err = errWithStatus(status, 100); // even with a Retry-After hint
+        err.retryable = false;
+        throw err;
+      }),
+      (err) => err.status === status && err.retryable === false
+    );
+    assert.equal(calls, 1); // no retry
+    assert.deepEqual(sleep.delays, []); // no sleep
+  }
+});
+
 test("err.retryAfterMs is honored over the jittered backoff when present", async () => {
   const sleep = fakeSleep();
   const q = makeExecQueue({ baseDelayMs: 1000, maxRetries: 3, sleepImpl: sleep, randomImpl: () => 0.5 });
