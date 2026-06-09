@@ -236,3 +236,60 @@ test("POST /api/exec/run rejects an unknown/ended session (ownership gate)", asy
   assert.equal(res.statusCode, 409);
   __setJudge0AdapterForTest(null);
 });
+
+test("POST /api/exec/submit runs HIDDEN tests, returns verdict + per-test pass/fail WITHOUT leaking inputs, and stores the submission", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  const seen = [];
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    seen.push(...items);
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0.01, memoryKb: 100 }));
+  } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "print(sum(map(int,input().split())))" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.verdict, "accepted");
+  assert.equal(res.body.total, 4);            // four hidden tests
+  assert.equal(res.body.passed_count, 4);
+  // per-test results must NOT include the hidden input/expected
+  assert.equal(res.body.tests[0].input, undefined);
+  assert.equal(res.body.tests[0].expected, undefined);
+  assert.equal(res.body.tests[0].passed, true);
+  assert.equal(seen.length, 4);               // judged against the 4 hidden tests
+  // The submission was stored in the injected fake Firestore (observable).
+  const subs = firestore._collections.get(process.env.SUBMISSIONS_COLLECTION);
+  assert.equal(subs.size, 1);
+  const stored = [...subs.values()][0];
+  assert.equal(stored.session_id, "s1");
+  assert.equal(stored.problem_id, "sum-two");
+  assert.equal(stored.verdict, "accepted");
+  __setJudge0AdapterForTest(null);
+});
+
+test("POST /api/exec/submit: one failing hidden test -> verdict wrong_answer", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async (items) => items.map((_, i) => ({ status: i === 2 ? "wrong_answer" : "accepted", passed: i !== 2, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  assert.equal(res.body.verdict, "wrong_answer");
+  assert.equal(res.body.passed_count, 3);
+  __setJudge0AdapterForTest(null);
+});
+
+test("POST /api/exec/submit rejects an unknown/ended session (ownership gate)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "ended" });
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not run for an ended session"); } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  assert.equal(res.statusCode, 409);
+  assert.equal(firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0, 0); // nothing stored
+  __setJudge0AdapterForTest(null);
+});

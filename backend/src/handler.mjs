@@ -127,6 +127,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/upload-url") return send(res, 200, await createUploadUrl(req));
     if (req.method === "POST" && path === "/api/events") return send(res, 200, await recordEvents(req));
     if (req.method === "POST" && path === "/api/exec/run") return send(res, 200, await execRun(req));
+    if (req.method === "POST" && path === "/api/exec/submit") return send(res, 200, await execSubmit(req));
     if (req.method === "POST" && path === "/api/review-file") return send(res, 200, await recordReviewFile(req));
     if (req.method === "POST" && path === "/api/heartbeat") return send(res, 200, await recordHeartbeat(req));
     if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
@@ -523,6 +524,41 @@ async function execRun(req) {
   const results = await judge0().runBatch(items);
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
+}
+
+async function execSubmit(req) {
+  const body = parseBody(req);
+  const sessionId = String(body.session_id || "");
+  // Ownership gate (same as /api/events): unknown → 404; ended/locked/pending → 409/403.
+  const session = requireWritableSession(await getSession(sessionId));
+  const problem = getProblem(String(body.problem_id || ""));
+  if (!problem) return badRequest("unknown problem_id");
+  const languageId = LANGUAGE_IDS[String(body.language || "")];
+  if (!languageId) return badRequest("unsupported language");
+  const source = String(body.source_code || "");
+
+  const items = problem.hiddenTests.map((t) => ({
+    languageId, source, stdin: t.input, expectedOutput: t.expected,
+    cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
+  }));
+  const results = await judge0().runBatch(items);
+  const passedCount = results.filter((r) => r.passed).length;
+  const verdict = passedCount === results.length ? "accepted" : "wrong_answer";
+
+  // Per-test results WITHOUT hidden inputs/expected (don't leak the test cases).
+  const tests = results.map((r, i) => ({ index: i, passed: r.passed, status: r.status, timeSec: r.timeSec }));
+
+  // Store the submission (low volume -> Firestore). handler.mjs uses inline
+  // new Date().toISOString() for timestamps everywhere — match that (no helper).
+  const createdAt = new Date().toISOString();
+  const submissionId = `${sessionId}:${problem.id}:${createdAt}`;
+  await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
+    session_id: sessionId, problem_id: problem.id, language: body.language,
+    source_code: source, verdict, passed_count: passedCount, total: results.length,
+    tests, created_at: createdAt
+  });
+
+  return { verdict, passed_count: passedCount, total: results.length, tests, submission_id: submissionId };
 }
 
 async function recordReviewFile(req) {
