@@ -343,3 +343,75 @@ test("POST /api/roster/lookup ignores entries from a previous roster version", a
   assert.equal(fresh.statusCode, 200);
   assert.equal(fresh.body.name, "Only One");
 });
+
+// ---- Task 3: roster gate on /api/session/start ------------------------------
+
+function startBody(overrides = {}) {
+  return {
+    hackerrank_username: "typed_user", name: "Typed Name", roll_number: "TYPED-1",
+    email: "typed@example.com", room: "Lab A-1", consent_accepted: true, ...overrides
+  };
+}
+
+test("start: roster configured + missing roster_unique_id -> 403 roster_id_required", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: startBody() }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.error, "roster_id_required");
+});
+
+test("start: unknown roster id -> 403 not_on_roster", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "99XX999" }) }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.error, "not_on_roster");
+});
+
+test("start: valid roster id -> session created with roster-overridden identity", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21cs001" }) }));
+  assert.equal(res.statusCode, 200);
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  const session = doc.data();
+  assert.equal(session.name, "Asha Raman");              // roster wins over "Typed Name"
+  assert.equal(session.email, "asha@example.com");       // raw roster email, not the typed/masked one
+  assert.equal(session.roll_number, "21CS001");
+  assert.equal(session.roster_unique_id, "21CS001");
+  assert.equal(session.roster_verified, true);
+  assert.equal(session.hackerrank_username, "typed_user"); // not mapped -> typed value kept
+});
+
+test("start: roster-mapped hackerrank_username overrides the typed one", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster({
+    columns: ["Roll No", "Student Name", "HR Handle"],
+    column_mapping: { name: "Student Name", hackerrank_username: "HR Handle", roll_number: "Roll No" },
+    rows: [{ "Roll No": "21CS001", "Student Name": "Asha Raman", "HR Handle": "asha_hr" }]
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21CS001" }) }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.hackerrank_username, "asha_hr");
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  assert.equal(doc.data().username_norm, "asha_hr");
+});
+
+test("start: NO roster configured -> legacy flow unchanged (regression)", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: startBody() }));
+  assert.equal(res.statusCode, 200);
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  assert.equal(doc.data().name, "Typed Name");
+  assert.equal(doc.data().roster_verified, false);
+  assert.equal(doc.data().roster_unique_id, "");
+});

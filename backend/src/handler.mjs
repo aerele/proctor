@@ -250,8 +250,31 @@ async function startSession(req) {
   }
   const settings = await validateProctorGate();
 
+  // S2 roster gate: when a roster is configured, starting REQUIRES a roster
+  // match, and mapped identity fields are overridden server-side from the
+  // matched entry — client-typed values are ignored for those fields, so a
+  // candidate can never start under an identity that is not on the roster.
+  // (Runs before the session_id replay check too: a replayed start must still
+  // carry a valid roster id; the client keeps it in form state.)
+  const rosterMeta = await getRosterMeta();
+  let rosterIdentity = null;
+  if (rosterMeta) {
+    if (!body.roster_unique_id) throw httpError(403, "roster_id_required");
+    const entry = await findRosterEntry(rosterMeta, String(body.roster_unique_id));
+    if (!entry) throw httpError(403, "not_on_roster");
+    const mapping = rosterMeta.column_mapping || {};
+    const fromRoster = (field) => (mapping[field] ? String(entry.fields?.[mapping[field]] || "") : "");
+    rosterIdentity = {
+      unique_id: entry.unique_id,
+      name: fromRoster("name"),
+      email: fromRoster("email"),
+      roll_number: fromRoster("roll_number"),
+      hackerrank_username: fromRoster("hackerrank_username")
+    };
+  }
+
   const now = new Date().toISOString();
-  const username = String(body.hackerrank_username).trim();
+  const username = String(rosterIdentity?.hackerrank_username || body.hackerrank_username).trim();
   const usernameNorm = normalizeUsername(username);
   const contestSlug = contestSlugFromUrl(settings.contest_url);
   const clientIp = getClientIp(req);
@@ -292,9 +315,11 @@ async function startSession(req) {
     session_id: sessionId,
     hackerrank_username: username,
     username_norm: usernameNorm,
-    name: String(body.name).trim(),
-    roll_number: String(body.roll_number).trim(),
-    email: String(body.email).trim(),
+    name: String(rosterIdentity?.name || body.name).trim(),
+    roll_number: String(rosterIdentity?.roll_number || body.roll_number).trim(),
+    email: String(rosterIdentity?.email || body.email).trim(),
+    roster_unique_id: rosterIdentity ? rosterIdentity.unique_id : "",
+    roster_verified: Boolean(rosterIdentity),
     room,
     contest_slug: contestSlug || "",
     // storage_prefix is the single source of truth for every per-session GCS
