@@ -397,3 +397,30 @@ export type SessionDetail = {
 export type SessionDetailsResponse = {
   details: SessionDetail[];
 };
+
+export type EditorEventType =
+  | "editor_insert" | "editor_delete" | "editor_replace" | "editor_paste"
+  | "editor_cursor" | "editor_selection" | "editor_focus" | "editor_blur"
+  | "code_run" | "code_submit";
+
+export type EditorEvent = {
+  type: EditorEventType;
+  timestamp: string;             // ISO
+  detail?: Record<string, unknown>;
+};
+
+export type ExecRequest = {
+  session_id: string;
+  problem_id: string;
+  language: "python" | "cpp" | "java" | "javascript";
+  source_code: string;
+};
+
+export type RunCaseResult = {
+  input: string; expected: string; passed: boolean;
+  status: string; stdout: string; stderr: string; compileOutput: string;
+};
+export type RunResult = { results: RunCaseResult[] };
+
+export type SubmitTest = { index: number; passed: boolean; status: string; timeSec: number | null };
+export type SubmitResult = { verdict: "accepted" | "wrong_answer"; passed_count: number; total: number; tests: SubmitTest[]; submission_id: string };
