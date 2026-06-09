@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import * as studentCopy from "./studentCopy";
@@ -8,7 +8,9 @@ import { topBarVisible } from "./shell/examShell";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { useExamShell } from "./shell/useExamShell";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
+import type { ApiError } from "./api";
 
 // Slice 1: the single config-driven problem solved in our own Monaco editor.
 // When a problem is configured, the CodingWorkspace IS the coding surface
@@ -1090,6 +1092,8 @@ function AdminApp() {
   const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
   const [alertSettingsLoading, setAlertSettingsLoading] = useState(false);
   const [alertSettingsMessage, setAlertSettingsMessage] = useState("");
+  // S2: room labels for the student room dropdown, edited as comma-separated text.
+  const [roomsText, setRoomsText] = useState("");
   // Review roster (multi-reviewer workflow): pasted usernames + the coverage
   // summary. `rosterUnavailable` flags a 404 (endpoint not deployed yet).
   const [rosterText, setRosterText] = useState("");
@@ -1313,6 +1317,7 @@ function AdminApp() {
         contest_url: response.contest_url || "",
         updated_at: response.updated_at
       });
+      setRoomsText((response.rooms ?? []).join(", "));
       setSettingsMessage("Loaded current gate.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1329,7 +1334,9 @@ function AdminApp() {
       const response = await saveProctorSettings(password, {
         start_at: localInputToIso(settings.start_at),
         end_at: localInputToIso(settings.end_at),
-        contest_url: settings.contest_url
+        contest_url: settings.contest_url,
+        // parseRosterInput = the existing comma/newline split + trim + dedupe.
+        rooms: parseRosterInput(roomsText)
       });
       setSettings({
         start_at: isoToLocalInput(response.start_at),
@@ -1337,6 +1344,7 @@ function AdminApp() {
         contest_url: response.contest_url || "",
         updated_at: response.updated_at
       });
+      setRoomsText((response.rooms ?? []).join(", "));
       setSettingsMessage("Saved. The time window is now the only start gate (no passcode).");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1762,6 +1770,7 @@ function AdminApp() {
           <Field label="Start time" type="datetime-local" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
           <Field label="End time" type="datetime-local" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
+          <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
           <div className="mt-6 flex flex-wrap gap-3 md:col-span-3">
             <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={loadSettings} disabled={settingsLoading}>
               Load current
@@ -1774,6 +1783,8 @@ function AdminApp() {
         {settingsMessage ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{settingsMessage}</div> : null}
         {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
       </section>
+
+      <CandidateRosterSection password={password} />
 
       <ReviewRosterSection
         text={rosterText}
@@ -1831,6 +1842,250 @@ function AdminApp() {
       {view === "recordings" ? <RecordingReview password={password} contestSlug={alertFilters.contest_slug} /> : null}
     </Shell>
   );
+}
+
+// SETTINGS tab — S2 candidate roster upload. The admin picks a CSV/TSV file, we
+// parse it CLIENT-SIDE (roster/parseRoster.ts), preview the first rows, choose
+// the unique-ID column (+ optional identity-field mappings, pre-suggested from
+// the headers), and POST structured rows to /api/admin/roster. While a roster
+// is configured, student login REQUIRES a roster match (enforced server-side).
+function CandidateRosterSection({ password }: { password: string }) {
+  const [status, setStatus] = useState<RosterStatus | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [parsed, setParsed] = useState<ParsedRoster | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [uniqueIdColumn, setUniqueIdColumn] = useState("");
+  const [mapping, setMapping] = useState<RosterFieldMapping>({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const refresh = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const next = await fetchRosterStatus(password);
+      if (next === null) setUnavailable(true);
+      else {
+        setUnavailable(false);
+        setStatus(next);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onFile = async (file: File | null) => {
+    setMessage("");
+    setError("");
+    if (!file) return;
+    const text = await file.text();
+    const result = parseRoster(text);
+    if (!result.columns.length || !result.rows.length) {
+      setParsed(null);
+      setError(result.errors[0] || "Could not read any rows from that file.");
+      return;
+    }
+    const suggestion = suggestMapping(result.columns);
+    setParsed(result);
+    setFileName(file.name);
+    setUniqueIdColumn(suggestion.uniqueIdColumn);
+    setMapping(suggestion.mapping);
+  };
+
+  const upload = async () => {
+    if (!parsed || !uniqueIdColumn) return;
+    setBusy(true);
+    setMessage("");
+    setError("");
+    try {
+      const response = await uploadRoster(password, {
+        unique_id_column: uniqueIdColumn,
+        columns: parsed.columns,
+        column_mapping: mapping,
+        rows: parsed.rows
+      });
+      if (response === null) {
+        setUnavailable(true);
+        return;
+      }
+      setMessage(
+        `Roster saved: ${response.count} students` +
+        (response.skipped.length ? `; ${response.skipped.length} row(s) skipped (${summarizeSkipped(response.skipped)})` : "") +
+        ". Student login now requires a roster match."
+      );
+      setParsed(null);
+      setFileName("");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    setMessage("");
+    setError("");
+    try {
+      const response = await clearRoster(password);
+      if (response === null) {
+        setUnavailable(true);
+        return;
+      }
+      setMessage("Roster cleared — student login no longer requires a roster match.");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mappingSelect = (field: keyof RosterFieldMapping, label: string) => (
+    <label className="block">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
+      <select
+        className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+        value={mapping[field] ?? ""}
+        onChange={(event) => setMapping({ ...mapping, [field]: event.target.value || undefined })}
+      >
+        <option value="">— not in this file —</option>
+        {(parsed?.columns ?? []).map((column) => (
+          <option key={column} value={column}>{column}</option>
+        ))}
+      </select>
+    </label>
+  );
+
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Users size={20} />
+          <div>
+            <h2 className="text-2xl font-semibold">Candidate roster</h2>
+            <p className="mt-1 text-sm text-muted">
+              Upload the student list (CSV/TSV, any columns) and pick the unique-ID column. While a roster is active, students must match it to log in.
+            </p>
+          </div>
+        </div>
+        <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" onClick={() => void refresh()} disabled={busy}>
+          <RefreshCw size={16} className={busy ? "animate-spin" : undefined} /> Reload
+        </button>
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-line bg-white p-4 text-sm text-muted">
+          The roster endpoints are not deployed on this backend yet.
+        </div>
+      ) : (
+        <>
+          <div className="rounded-md border border-line bg-white/60 p-3 text-sm">
+            {status?.configured ? (
+              <span>
+                <span className="font-semibold text-accent">Roster active:</span> {status.count} students · ID column <span className="font-mono">{status.unique_id_column}</span>
+                {status.updated_at ? <span className="text-muted"> · updated {new Date(status.updated_at).toLocaleString()}</span> : null}
+              </span>
+            ) : (
+              <span className="text-muted">No roster uploaded — student login is open (legacy form).</span>
+            )}
+          </div>
+
+          <div className="mt-4">
+            <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium">
+              <UploadCloud size={16} /> Choose roster file (.csv / .tsv)
+              <input
+                type="file"
+                accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
+                className="hidden"
+                onChange={(event) => void onFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            {fileName ? <span className="ml-3 text-sm text-muted">{fileName}</span> : null}
+          </div>
+
+          {parsed ? (
+            <div className="mt-4 space-y-4">
+              {parsed.errors.length ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+                  {parsed.errors.slice(0, 5).map((line) => <div key={line}>{line}</div>)}
+                  {parsed.errors.length > 5 ? <div>…and {parsed.errors.length - 5} more.</div> : null}
+                </div>
+              ) : null}
+
+              <div className="overflow-x-auto rounded-md border border-line">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-white/60 text-xs uppercase tracking-wide text-muted">
+                    <tr>{parsed.columns.map((column) => <th key={column} className="px-3 py-2">{column}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {parsed.rows.slice(0, 5).map((row, index) => (
+                      <tr key={index} className="border-t border-line">
+                        {parsed.columns.map((column) => <td key={column} className="px-3 py-2">{row[column]}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-muted">Showing first {Math.min(5, parsed.rows.length)} of {parsed.rows.length} rows.</p>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-accent">Unique-ID column (required)</span>
+                  <select
+                    className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+                    value={uniqueIdColumn}
+                    onChange={(event) => setUniqueIdColumn(event.target.value)}
+                  >
+                    {parsed.columns.map((column) => <option key={column} value={column}>{column}</option>)}
+                  </select>
+                </label>
+                {mappingSelect("name", "Name column")}
+                {mappingSelect("email", "Email column")}
+                {mappingSelect("roll_number", "Roll-number column")}
+                {mappingSelect("hackerrank_username", "HackerRank-username column")}
+                {mappingSelect("room", "Room column")}
+              </div>
+
+              <button
+                className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void upload()}
+                disabled={busy || !uniqueIdColumn}
+              >
+                <UploadCloud size={16} /> {busy ? "Uploading…" : `Upload roster (${parsed.rows.length} students)`}
+              </button>
+            </div>
+          ) : null}
+
+          {status?.configured ? (
+            <div className="mt-4">
+              <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-danger/40 px-4 py-2 text-sm font-medium text-danger disabled:opacity-50" onClick={() => void clear()} disabled={busy}>
+                <X size={16} /> Clear roster (open login)
+              </button>
+            </div>
+          ) : null}
+
+          {message ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{message}</div> : null}
+          {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+function summarizeSkipped(skipped: Array<{ row: number; reason: string }>) {
+  const counts = new Map<string, number>();
+  for (const item of skipped) counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
+  return [...counts.entries()].map(([reason, count]) => `${count}× ${reason}`).join(", ");
 }
 
 // SETTINGS tab — per-type proctor alert configuration (enable/disable + severity)
