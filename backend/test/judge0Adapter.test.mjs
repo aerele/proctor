@@ -15,6 +15,88 @@ function fakeFetch(script) {
   return fn;
 }
 
+// A fake fetch that always fails with the given HTTP status (+ optional
+// headers, matched case-insensitively like the real Headers.get).
+function failingFetch(status, headers = {}) {
+  const lower = {};
+  for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v;
+  return async () => ({
+    ok: false, status,
+    headers: { get: (name) => lower[String(name).toLowerCase()] ?? null },
+    json: async () => ({})
+  });
+}
+
+const ITEM = { languageId: 71, source: "x", stdin: "", expectedOutput: "ok", cpuTimeLimit: 5, memoryLimit: 128000 };
+
+test("failed submit carries .status so the exec queue can decide retryability", async () => {
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: failingFetch(503), pollIntervalMs: 0 });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 503);
+    assert.equal(err.retryAfterMs, undefined); // no Retry-After header sent
+    return true;
+  });
+});
+
+test("failed submit parses a SECONDS Retry-After header into .retryAfterMs", async () => {
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl: failingFetch(429, { "Retry-After": "2" }), pollIntervalMs: 0 });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 429);
+    assert.equal(err.retryAfterMs, 2000);
+    return true;
+  });
+});
+
+test("failed submit parses an HTTP-DATE Retry-After header into .retryAfterMs (clamped >= 0)", async () => {
+  // A date ~5 s in the future -> a positive ms delay no larger than 5 s.
+  const future = new Date(Date.now() + 5000).toUTCString();
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl: failingFetch(429, { "Retry-After": future }), pollIntervalMs: 0 });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 429);
+    assert.equal(typeof err.retryAfterMs, "number");
+    assert.ok(err.retryAfterMs > 0 && err.retryAfterMs <= 5000, `got ${err.retryAfterMs}`);
+    return true;
+  });
+  // A date in the PAST clamps to 0 (retry immediately), never negative.
+  const past = new Date(Date.now() - 5000).toUTCString();
+  const adapter2 = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl: failingFetch(429, { "Retry-After": past }), pollIntervalMs: 0 });
+  await assert.rejects(adapter2.runBatch([ITEM]), (err) => {
+    assert.equal(err.retryAfterMs, 0);
+    return true;
+  });
+});
+
+test("failed token POLL also carries .status + .retryAfterMs", async () => {
+  // Submit succeeds, then the batch GET fails 502 with Retry-After.
+  let call = 0;
+  const fetchImpl = async () => {
+    call++;
+    if (call === 1) return { ok: true, status: 200, json: async () => [{ token: "t" }] };
+    return { ok: false, status: 502,
+      headers: { get: (n) => (String(n).toLowerCase() === "retry-after" ? "1" : null) },
+      json: async () => ({}) };
+  };
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl, pollIntervalMs: 0 });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 502);
+    assert.equal(err.retryAfterMs, 1000);
+    return true;
+  });
+});
+
+test("an unparseable Retry-After header leaves .retryAfterMs undefined", async () => {
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl: failingFetch(429, { "Retry-After": "soon-ish" }), pollIntervalMs: 0 });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 429);
+    assert.equal(err.retryAfterMs, undefined);
+    return true;
+  });
+});
+
 test("runBatch: base64-encodes source/stdin, submits async, polls token, normalizes result", async () => {
   const fetch = fakeFetch([
     [{ token: "tok-1" }],                                   // POST /submissions/batch -> tokens
