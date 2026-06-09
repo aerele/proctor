@@ -27,7 +27,7 @@ test("runBatch: base64-encodes source/stdin, submits async, polls token, normali
     mode: "rapidapi", apiKey: "K", fetchImpl: fetch, pollIntervalMs: 0
   });
   const results = await adapter.runBatch([
-    { languageId: 71, source: "print('ok')", stdin: "", expectedOutput: "ok" }
+    { languageId: 71, source: "print('ok')", stdin: "", expectedOutput: "ok", cpuTimeLimit: 5, memoryLimit: 128000 }
   ]);
   // submit call was base64 + async
   const submit = fetch.calls[0];
@@ -39,6 +39,17 @@ test("runBatch: base64-encodes source/stdin, submits async, polls token, normali
   assert.ok(submit.opts.headers["User-Agent"].length > 0);
   const body = JSON.parse(submit.opts.body);
   assert.equal(body.submissions[0].source_code, Buffer.from("print('ok')").toString("base64"));
+  // Security: candidate code must NEVER get network on the shared CE instance
+  // (design §11 item 1) — sent explicitly on every submission.
+  assert.equal(body.submissions[0].enable_network, false);
+  // Full explicit limit set on every submission — never rely on server
+  // defaults (design §11, determinism under concurrent load).
+  assert.equal(body.submissions[0].cpu_time_limit, 5);
+  assert.equal(body.submissions[0].wall_time_limit, 10); // default 2x cpu
+  assert.equal(body.submissions[0].memory_limit, 128000);
+  assert.equal(body.submissions[0].stack_limit, 64000);
+  assert.equal(body.submissions[0].max_processes_and_or_threads, 60);
+  assert.equal(body.submissions[0].max_file_size, 1024);
   // normalized result
   assert.equal(results[0].status, "accepted");
   assert.equal(results[0].stdout, "ok\n");
@@ -56,6 +67,12 @@ test("runBatch: wrong output -> passed:false, status wrong_answer", async () => 
   const r = await adapter.runBatch([{ languageId: 71, source: "x", stdin: "", expectedOutput: "ok" }]);
   assert.equal(r[0].passed, false);
   assert.equal(r[0].status, "wrong_answer");
+  // Even when the item omits limits, the adapter must still send explicit
+  // numeric limits (stock CE defaults) — never fall through to server defaults.
+  const sub = JSON.parse(fetch.calls[0].opts.body).submissions[0];
+  assert.equal(sub.cpu_time_limit, 5);
+  assert.equal(sub.wall_time_limit, 10);
+  assert.equal(sub.memory_limit, 128000);
 });
 
 test("runBatch: compile error surfaces compile_output and status compile_error", async () => {
@@ -70,4 +87,94 @@ test("runBatch: compile error surfaces compile_output and status compile_error",
   assert.equal(r[0].status, "compile_error");
   assert.equal(r[0].compileOutput, "err: bad");
   assert.equal(r[0].passed, false);
+});
+
+test("runBatch: explicit wallTimeLimit is used; default 2x cpu is capped at 20", async () => {
+  const done = (token) => ({ token, status: { id: 3, description: "Accepted" },
+    stdout: Buffer.from("ok\n").toString("base64"), stderr: null, compile_output: null, time: "0.01", memory: 256 });
+  const fetch = fakeFetch([
+    [{ token: "a" }, { token: "b" }],
+    { submissions: [done("a"), done("b")] }
+  ]);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: fetch, pollIntervalMs: 0 });
+  await adapter.runBatch([
+    { languageId: 71, source: "x", stdin: "", expectedOutput: "ok", cpuTimeLimit: 5, memoryLimit: 128000, wallTimeLimit: 8 },
+    { languageId: 71, source: "y", stdin: "", expectedOutput: "ok", cpuTimeLimit: 15, memoryLimit: 128000 } // 2x15=30 -> cap 20
+  ]);
+  const body = JSON.parse(fetch.calls[0].opts.body);
+  assert.equal(body.submissions[0].wall_time_limit, 8);
+  assert.equal(body.submissions[1].wall_time_limit, 20);
+});
+
+test("runBatch: chunks submissions to <=20 per batch POST, results concatenated in order", async () => {
+  const N = 25;
+  const items = Array.from({ length: N }, (_, i) => ({
+    languageId: 71, source: `print(${i})`, stdin: "", expectedOutput: String(i),
+    cpuTimeLimit: 5, memoryLimit: 128000
+  }));
+  const doneSub = (i) => ({ token: `tok-${i}`, status: { id: 3, description: "Accepted" },
+    stdout: Buffer.from(`${i}\n`).toString("base64"), stderr: null, compile_output: null, time: "0.01", memory: 256 });
+  const fetch = fakeFetch([
+    Array.from({ length: 20 }, (_, i) => ({ token: `tok-${i}` })),            // POST chunk 1 -> 20 tokens
+    Array.from({ length: 5 }, (_, i) => ({ token: `tok-${20 + i}` })),        // POST chunk 2 -> 5 tokens
+    { submissions: Array.from({ length: 20 }, (_, i) => doneSub(i)) },        // GET chunk 1
+    { submissions: Array.from({ length: 5 }, (_, i) => doneSub(20 + i)) }     // GET chunk 2
+  ]);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: fetch, pollIntervalMs: 0 });
+  const results = await adapter.runBatch(items);
+  // two submit POSTs of 20 + 5
+  const posts = fetch.calls.filter((c) => c.opts && c.opts.method === "POST");
+  assert.equal(posts.length, 2);
+  assert.equal(JSON.parse(posts[0].opts.body).submissions.length, 20);
+  assert.equal(JSON.parse(posts[1].opts.body).submissions.length, 5);
+  // results concatenated in original item order
+  assert.equal(results.length, N);
+  for (let i = 0; i < N; i++) {
+    assert.equal(results[i].stdout, `${i}\n`);
+    assert.equal(results[i].passed, true);
+  }
+});
+
+test("runBatch: polls exhausted with submissions still queued/processing -> judging_timeout, not error", async () => {
+  const queued = { token: "t", status: { id: 2, description: "Processing" },
+    stdout: null, stderr: null, compile_output: null, time: null, memory: null };
+  const fetch = fakeFetch([
+    [{ token: "t" }],
+    { submissions: [queued] },
+    { submissions: [queued] }
+  ]);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: fetch, pollIntervalMs: 0, maxPolls: 2 });
+  const r = await adapter.runBatch([{ languageId: 71, source: "x", stdin: "", expectedOutput: "ok", cpuTimeLimit: 5, memoryLimit: 128000 }]);
+  assert.equal(r[0].status, "judging_timeout"); // distinguishable from "error"
+  assert.equal(r[0].passed, false);
+});
+
+test("runBatch: re-polls only unfinished tokens; finished results keep original order", async () => {
+  const doneA = { token: "tok-a", status: { id: 3, description: "Accepted" },
+    stdout: Buffer.from("A\n").toString("base64"), stderr: null, compile_output: null, time: "0.01", memory: 256 };
+  const pendingB = { token: "tok-b", status: { id: 1, description: "In Queue" },
+    stdout: null, stderr: null, compile_output: null, time: null, memory: null };
+  const doneB = { token: "tok-b", status: { id: 3, description: "Accepted" },
+    stdout: Buffer.from("B\n").toString("base64"), stderr: null, compile_output: null, time: "0.02", memory: 300 };
+  const fetch = fakeFetch([
+    [{ token: "tok-a" }, { token: "tok-b" }],
+    { submissions: [doneA, pendingB] },   // poll 1: a done, b queued
+    { submissions: [doneB] }              // poll 2: must ask ONLY for tok-b
+  ]);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: fetch, pollIntervalMs: 0 });
+  const results = await adapter.runBatch([
+    { languageId: 71, source: "a", stdin: "", expectedOutput: "A", cpuTimeLimit: 5, memoryLimit: 128000 },
+    { languageId: 71, source: "b", stdin: "", expectedOutput: "B", cpuTimeLimit: 5, memoryLimit: 128000 }
+  ]);
+  // second poll fetched only the unfinished token
+  const polls = fetch.calls.filter((c) => /tokens=/.test(c.url));
+  assert.equal(polls.length, 2);
+  assert.match(polls[0].url, /tokens=tok-a%2Ctok-b|tokens=tok-a,tok-b/);
+  assert.match(polls[1].url, /tokens=tok-b(&|$)/);
+  assert.ok(!/tok-a/.test(polls[1].url.split("tokens=")[1]));
+  // original order preserved
+  assert.equal(results[0].stdout, "A\n");
+  assert.equal(results[1].stdout, "B\n");
+  assert.equal(results[0].passed, true);
+  assert.equal(results[1].passed, true);
 });
