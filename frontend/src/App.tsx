@@ -116,11 +116,26 @@ function StudentApp() {
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
   const [pipAvailable, setPipAvailable] = useState(false);
   const [pipMessage, setPipMessage] = useState("");
+  // S2 roster login state. examConfig is the public pre-session config; the
+  // unique-ID -> confirm flow fills form.roster_unique_id, which the server
+  // re-verifies at /api/session/start (this client gate is UX only).
+  const [examConfig, setExamConfig] = useState<ExamConfig | null>(null);
+  const [uniqueIdInput, setUniqueIdInput] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupError, setLookupError] = useState("");
+  const [rosterMatch, setRosterMatch] = useState<RosterLookupResult | null>(null);
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
 
+  const rosterRequired = Boolean(examConfig?.roster_required);
+  const rosterConfirmed = Boolean(form.roster_unique_id);
+  // S2: while a roster is required and unconfirmed, the details form stays
+  // hidden behind the identity-confirm step.
+  const rosterGateActive = rosterRequired && !rosterConfirmed;
+
   const canStart = useMemo(() => {
     return Boolean(
+      (!rosterRequired || form.roster_unique_id) &&
       form.hackerrank_username.trim() &&
       form.name.trim() &&
       form.roll_number.trim() &&
@@ -128,7 +143,7 @@ function StudentApp() {
       form.room.trim() &&
       form.consent_accepted
     );
-  }, [form]);
+  }, [form, rosterRequired]);
 
   // S1 exam shell: EVERY proctor event (recorder onEvent + createUiEvent call
   // sites) already flows through this single funnel, so the shell taps it here
@@ -229,6 +244,19 @@ function StudentApp() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // S2: fetch the public exam config (roster gate + room list) once for the
+  // pre-session form. Fail-open on error: the server still enforces the roster
+  // at /api/session/start; a fetch failure only degrades the form UI.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchExamConfig().then((config) => {
+      if (!cancelled) setExamConfig(config);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -495,6 +523,53 @@ function StudentApp() {
     setStatus("idle");
   };
 
+  // S2: look up the typed unique ID against the server-side roster.
+  const lookupRosterId = async () => {
+    setLookupBusy(true);
+    setLookupError("");
+    try {
+      setRosterMatch(await rosterLookup(uniqueIdInput.trim()));
+    } catch (cause) {
+      setRosterMatch(null);
+      const status = (cause as ApiError)?.status;
+      setLookupError(
+        status === 404
+          ? "We could not find that ID on the student list. Check it and try again, or call an invigilator."
+          : cause instanceof Error ? cause.message : String(cause)
+      );
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
+  // "Yes, this is me": prefill the form from the roster record. Roster-sourced
+  // fields render disabled; the server overrides them again at start anyway
+  // (the roster is the identity source of truth — this is just honest UI).
+  const confirmRosterMatch = () => {
+    if (!rosterMatch) return;
+    setForm({
+      ...form,
+      roster_unique_id: rosterMatch.unique_id,
+      hackerrank_username: rosterMatch.hackerrank_username || form.hackerrank_username,
+      name: rosterMatch.name || form.name,
+      roll_number: rosterMatch.roll_number || form.roll_number,
+      email: rosterMatch.email_masked || form.email,
+      room: rosterMatch.room || form.room
+    });
+  };
+
+  const rejectRosterMatch = () => {
+    setRosterMatch(null);
+    setLookupError("");
+  };
+
+  const resetRosterIdentity = () => {
+    setRosterMatch(null);
+    setUniqueIdInput("");
+    setLookupError("");
+    setForm({ ...initialForm });
+  };
+
   const start = async () => {
     setError("");
     setStartError(null);
@@ -518,8 +593,14 @@ function StudentApp() {
         return;
       }
     } catch (cause) {
-      // Registration/gate failure (time window, network, etc.) — generic error.
-      setError(cause instanceof Error ? cause.message : String(cause));
+      // Registration/gate failure (time window, roster, network, ...). Roster
+      // codes get a specific human message; everything else stays generic.
+      const code = (cause as ApiError)?.code;
+      setError(
+        code === "not_on_roster" || code === "roster_id_required"
+          ? "Your ID was not matched on the student list. Use “Not you? Re-enter ID” to redo the identity step, or call an invigilator."
+          : cause instanceof Error ? cause.message : String(cause)
+      );
       setStatus("idle");
       return;
     }
@@ -844,26 +925,46 @@ function StudentApp() {
 
           {isFormStage ? (
             <>
-              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field label="HackerRank username" value={form.hackerrank_username} onChange={(value) => setForm({ ...form, hackerrank_username: value })} />
-                <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-                <Field label="Roll number" value={form.roll_number} onChange={(value) => setForm({ ...form, roll_number: value })} />
-                <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
-                <Field label="Room number" value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
-              </div>
-
-              <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
-                <input
-                  className="mt-1 h-4 w-4 accent-accent"
-                  type="checkbox"
-                  checked={form.consent_accepted}
-                  onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
+              {rosterRequired ? (
+                <IdentityLookupPanel
+                  label={examConfig?.unique_id_label ?? ""}
+                  value={uniqueIdInput}
+                  onChange={setUniqueIdInput}
+                  busy={lookupBusy}
+                  error={lookupError}
+                  match={rosterMatch}
+                  confirmed={rosterConfirmed}
+                  confirmedId={form.roster_unique_id}
+                  onLookup={() => void lookupRosterId()}
+                  onConfirm={confirmRosterMatch}
+                  onReject={rejectRosterMatch}
+                  onReset={resetRosterIdentity}
                 />
-                <span>
-                  I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
-                </span>
-              </label>
+              ) : null}
+              {!rosterGateActive ? (
+                <>
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Field label="HackerRank username" value={form.hackerrank_username} disabled={rosterConfirmed && Boolean(rosterMatch?.hackerrank_username)} onChange={(value) => setForm({ ...form, hackerrank_username: value })} />
+                    <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
+                    <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
+                    <Field label="Email" type="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
+                    <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                  </div>
+
+                  <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
+                    <input
+                      className="mt-1 h-4 w-4 accent-accent"
+                      type="checkbox"
+                      checked={form.consent_accepted}
+                      onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
+                    />
+                    <span>
+                      I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
+                    </span>
+                  </label>
+                </>
+              ) : null}
             </>
           ) : null}
 
@@ -2983,6 +3084,126 @@ function Field({ label, value, onChange, type = "text", disabled = false }: { la
     <label className="block">
       <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
       <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm disabled:bg-neutral-100" type={type} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+// S2 — roster identity gate (form stage, before the details form). Three
+// states: enter-ID, confirm-match, confirmed. The server re-verifies the ID at
+// /api/session/start, so this panel is UX only — never a security boundary.
+function IdentityLookupPanel({ label, value, onChange, busy, error, match, confirmed, confirmedId, onLookup, onConfirm, onReject, onReset }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  busy: boolean;
+  error: string;
+  match: RosterLookupResult | null;
+  confirmed: boolean;
+  confirmedId: string;
+  onLookup: () => void;
+  onConfirm: () => void;
+  onReject: () => void;
+  onReset: () => void;
+}) {
+  const idLabel = label || "Unique ID";
+  if (confirmed) {
+    return (
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/5 p-4">
+        <div className="flex items-center gap-2 text-sm">
+          <UserCheck size={18} className="text-accent" />
+          <span className="font-medium">Identity confirmed:</span>
+          <span className="font-mono">{confirmedId}</span>
+        </div>
+        <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium" onClick={onReset}>
+          Not you? Re-enter ID
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-5 rounded-lg border border-line bg-white/60 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-accent">Step 1 — confirm your identity</p>
+      <p className="mt-1 text-sm text-muted">
+        This exam uses a pre-registered student list. Enter your {idLabel} exactly as registered, then confirm the matched record.
+      </p>
+      {!match ? (
+        <>
+          <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+            <Field label={idLabel} value={value} onChange={onChange} />
+            <button
+              className="focus-ring mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={onLookup}
+              disabled={busy || !value.trim()}
+            >
+              <Search size={16} /> {busy ? "Checking…" : "Find me"}
+            </button>
+          </div>
+          {error ? <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
+        </>
+      ) : (
+        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-4">
+          <p className="text-sm font-semibold text-ink">Is this you?</p>
+          <dl className="mt-2 grid gap-x-6 gap-y-1 text-sm md:grid-cols-2">
+            <div><dt className="inline text-muted">{idLabel}: </dt><dd className="inline font-medium">{match.unique_id}</dd></div>
+            {match.name ? <div><dt className="inline text-muted">Name: </dt><dd className="inline font-medium">{match.name}</dd></div> : null}
+            {match.roll_number && match.roll_number !== match.unique_id ? (
+              <div><dt className="inline text-muted">Roll number: </dt><dd className="inline font-medium">{match.roll_number}</dd></div>
+            ) : null}
+            {match.email_masked ? <div><dt className="inline text-muted">Email: </dt><dd className="inline font-medium">{match.email_masked}</dd></div> : null}
+            {match.hackerrank_username ? <div><dt className="inline text-muted">HackerRank: </dt><dd className="inline font-medium">{match.hackerrank_username}</dd></div> : null}
+            {match.room ? <div><dt className="inline text-muted">Room: </dt><dd className="inline font-medium">{match.room}</dd></div> : null}
+          </dl>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white" onClick={onConfirm}>
+              <UserCheck size={16} /> Yes, this is me
+            </button>
+            <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium" onClick={onReject}>
+              No — search again
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// S2 — pre-fed room dropdown (+ "Other" free text). Falls back to the legacy
+// free-text field when the admin has not configured any rooms.
+function RoomField({ rooms, value, onChange }: { rooms: string[]; value: string; onChange: (value: string) => void }) {
+  const [otherMode, setOtherMode] = useState(() => value !== "" && !rooms.includes(value));
+  if (!rooms.length) {
+    return <Field label="Room number" value={value} onChange={onChange} />;
+  }
+  return (
+    <label className="block">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">Room number</span>
+      <select
+        className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+        value={otherMode ? "__other__" : value}
+        onChange={(event) => {
+          if (event.target.value === "__other__") {
+            setOtherMode(true);
+            onChange("");
+          } else {
+            setOtherMode(false);
+            onChange(event.target.value);
+          }
+        }}
+      >
+        <option value="">Select your room…</option>
+        {rooms.map((room) => (
+          <option key={room} value={room}>{room}</option>
+        ))}
+        <option value="__other__">Other…</option>
+      </select>
+      {otherMode ? (
+        <input
+          className="focus-ring mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+          placeholder="Type your room"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : null}
     </label>
   );
 }
