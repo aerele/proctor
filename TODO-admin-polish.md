@@ -38,6 +38,21 @@ Owner: **Ram**. Started 2026-06-08. **Batch COMPLETE + committed LOCALLY 2026-06
 4. **CodeEval / contest-eval adapter** — make it an easily-startable program; **investigate why the last run produced NO contest-eval alerts** and at least partially fix. (Two alert sources: proctor alerts + contest-eval alerts.)
 5. **Yesterday's forwarded voice messages** (Karthi forwarded them to the proctor topic 2026-06-09) — triage + detail into items here.
 
+## Proctoring / exam features — from the 2026-06-09 test-day feedback (do "right after"; several feed the own-editor slices)
+F1. **IP-address report.** Admin screen/status showing IP-wise count of logged-in users (catch candidates testing from *outside* the college). Group sessions by IP, flag clusters / off-campus IPs.
+F2. **OMR-style screen markers + local overlay detection.** Render OMR-like markers on screen — cover ALL edges (overlay/cheat tools are small and hug edges) plus a few middle/top/bottom points. A lightweight LOCAL process (JS, or a small packaged efficient binary) runs image recognition on the recorded screen frames (even on a weak CPU) to detect when markers are occluded/missing → an overlay tool is covering part of the screen. Emit **timestamped** alerts (jump-to-timestamp in the recording) naming WHICH markers vanished.
+F2.1 **Correlate with focus-change.** Marker-missing *without* a focus change = overlay tool for sure → the real, must-see alert. Marker-missing *with* a focus change + quick return (e.g. one accidental fullscreen exit) = mostly fine → tag the clip for review, not a hard alert.
+F2.2 **Fullscreen-exit handling (two alert types).** (a) the overlay alert above; (b) a big/scary/red **fullscreen-exit warning** — reuse the challenge from the earlier iframe session: candidate must type "I will not exit full screen again" within N seconds or the test is blocked/paused until someone re-admits them. Looked good before; polish it.
+F3. **Candidate intake + exam shell.**
+   - Room number = **pre-fed dropdown** + an "Other" free option.
+   - **Compulsory pre-fed student list upload.** Flexible columns (some colleges give email / extra fields). Designate a **unique-ID column**; candidate enters the unique ID first → the rest pre-fills → candidate confirms "yes, this is me" → enters. (This is the candidate-identity model — roster-based, NOT pure self-asserted; answers the own-editor Slice-1 identity question.)
+   - **Fullscreen-FIRST anti-proxy.** On opening the link: blank screen, "Go fullscreen now" BEFORE entering name; start proctoring/recording first, then proceed. Then "Welcome" + instructions (don't exit fullscreen / don't switch away → warning 1st time, blocked 2nd; warning-or-not is a configurable setting).
+   - **Unique test screen.** A full top bar showing time + candidate name + room; the bar **disappears on any anomaly** so invigilators can spot trouble from across the room. Name + ID on the bar → enables random ID-card spot-checks.
+   - **Attendance stats** from the uploaded list — taken / not-taken / absentees list (for the colleges).
+F4. **Dynamic time control.** Admin can update the test end-time live, and **"end now"** for everyone (set a new time or end immediately).
+
+NOTE: F3 (roster + ID-confirm login + fullscreen-first + unique top bar) and F4 (live time + end-now) are essentially the own-editor's **candidate-flow + contest-orchestration (Slice 3)**. F2/F2.1/F2.2 are proctoring-integrity features that pair with the editor's fullscreen lockdown. F1 is proctor admin analytics. Fold the overlapping ones into the relevant own-editor slices rather than building twice.
+
 ## Decisions log (admin-polish batch)
 - Backend + frontend CAN be changed/redeployed now (the "frozen, don't redeploy" rule was situational).
 - A2/A4 drill-down is powered by a NEW all-docs `GET /api/admin/sessions-list` (NOT `recording-sessions`, which omits zero-chunk sessions) so card counts == list counts and pending Approve reaches 2nd-device (zero-chunk) sessions.
