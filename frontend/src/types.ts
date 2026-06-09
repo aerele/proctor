@@ -424,4 +424,6 @@ export type RunResult = { results: RunCaseResult[] };
 
 // §9 lock: the submit response carries ONLY the verdict + pass/fail counts on the
 // hidden tests — no per-test array (the backend stores that detail admin-side only).
-export type SubmitResult = { verdict: "accepted" | "wrong_answer"; passed_count: number; total: number; submission_id: string };
+// "error" = the judging infrastructure failed (e.g. Judge0 timeout) — NOT a wrong
+// answer; the UI renders it neutrally and asks the candidate to submit again.
+export type SubmitResult = { verdict: "accepted" | "wrong_answer" | "error"; passed_count: number; total: number; submission_id: string };
