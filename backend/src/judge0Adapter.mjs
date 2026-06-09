@@ -137,10 +137,13 @@ export function makeJudge0Adapter({
     return data.submissions;
   }
 
-  async function fetchBatch(tokens) {
+  // Each chunked status GET runs inside the (optional) gate individually, so
+  // a slot is held per round-trip — never across the chunk loop as a whole.
+  async function fetchBatch(tokens, gate = (fn) => fn()) {
     const subs = [];
     for (let i = 0; i < tokens.length; i += BATCH_CHUNK) {
-      subs.push(...await fetchChunk(tokens.slice(i, i + BATCH_CHUNK)));
+      const chunk = tokens.slice(i, i + BATCH_CHUNK);
+      subs.push(...await gate(() => fetchChunk(chunk)));
     }
     return subs;
   }
@@ -148,8 +151,16 @@ export function makeJudge0Adapter({
   async function sleep(ms) { if (ms > 0) await sleepFn(ms); }
 
   return {
-    async runBatch(items) {
-      const tokens = await submitBatch(items);
+    // Optional async GATES (defect 3 — parked slots): submitGate wraps the
+    // submit POSTs, pollGate wraps EACH status-GET round-trip, and all waiting
+    // (inter-poll sleep, retry backoff) happens OUTSIDE any gate — so a queue
+    // lane slot is held per HTTP call, never across the whole ~90 s poll
+    // budget. With the lanes passed as gates, the queue's retry layer wraps
+    // ONLY the submit phase (consistent with the poll-retries-live-here rule).
+    async runBatch(items, { submitGate, pollGate } = {}) {
+      const viaSubmit = submitGate ?? ((fn) => fn());
+      const viaPoll = pollGate ?? ((fn) => fn());
+      const tokens = await viaSubmit(() => submitBatch(items));
       // The submissions now EXIST (and are billed). From here on, NO error may
       // escape as queue-retryable: transient poll failures are retried right
       // here against the GET only (never re-submitting), and whatever still
@@ -158,7 +169,9 @@ export function makeJudge0Adapter({
       const fetchBatchWithRetry = async (batchTokens) => {
         for (let attempt = 0; ; attempt++) {
           try {
-            return await fetchBatch(batchTokens);
+            // The poll gate bounds each GET round-trip ONLY — the backoff
+            // sleep below happens after the gate is released.
+            return await fetchBatch(batchTokens, viaPoll);
           } catch (err) {
             if (!POLL_RETRYABLE_STATUSES.has(err?.status) || pollRetryBudget <= 0) {
               throw markNonRetryable(err);

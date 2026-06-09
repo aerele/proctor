@@ -16,6 +16,9 @@ process.env.ADMIN_PASSWORD = "exec-admin-pass";
 process.env.EXEC_RUN_CONCURRENCY = "1";
 process.env.EXEC_SUBMIT_CONCURRENCY = "1";
 process.env.EXEC_MAX_QUEUE = "1";
+// The poll lane gets its OWN knob: the 1/1/1 lanes above exist to saturate the
+// submit-phase gates; polling must stay wide so it never interacts with them.
+process.env.EXEC_POLL_CONCURRENCY = "4";
 
 const handler = await import("../src/handler.mjs?exec");
 const { api, __setClientsForTest, __setJudge0AdapterForTest, __setExecClockForTest } = handler;
@@ -546,9 +549,15 @@ test("exec queue wiring: run-lane overflow -> immediate 429 queue_full; queued r
   }
   const gate = deferred();
   let batches = 0;
-  __setJudge0AdapterForTest({ runBatch: async (items) => {
-    batches++;
-    await gate.promise; // hold the lane until the test releases it
+  // Gate-aware stub (defect 3 wiring): the handler passes the lanes as
+  // gates, so the stub holds its "submit POST" INSIDE the submitGate — that
+  // is what parks a lane slot and makes the 1-deep run lane overflow.
+  __setJudge0AdapterForTest({ runBatch: async (items, gates = {}) => {
+    const submitGate = gates.submitGate ?? ((fn) => fn());
+    await submitGate(async () => {
+      batches++;
+      await gate.promise; // hold the lane until the test releases it
+    });
     return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
   } });
 
@@ -586,5 +595,134 @@ test("exec queue wiring: run-lane overflow -> immediate 429 queue_full; queued r
   const retry = await call(execReq("/api/exec/run", "qf-c"));
   assert.equal(retry.statusCode, 200);
   assert.equal(batches, 4);
+  __setJudge0AdapterForTest(null);
+});
+
+// ---- Engine-failure mapping + cooldown restore (review defect 2) ------------
+// Any failure of the queued judge0 call is the SERVER's fault, never the
+// candidate's: the cooldown slot must always be given back, and engine
+// failures (errors carrying .status — adapter HTTP errors, retry exhaustion)
+// must surface as an intentional 503 "judge_unavailable" with a retry hint,
+// not as a bare 500. Genuine programming errors (no .status) stay 500.
+
+test("exec engine failure on /api/exec/run: .status error -> 503 judge_unavailable + retry_after_seconds; cooldown NOT consumed", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("ef-run").set({ session_id: "ef-run", status: "active" });
+  let failNext = true;
+  let batches = 0;
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    if (failNext) {
+      // What the real adapter throws after its poll-retry budget is exhausted.
+      const err = new Error("judge0 fetch failed: 503");
+      err.status = 503;
+      err.retryable = false;
+      throw err;
+    }
+    batches++;
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  let res = await call(execReq("/api/exec/run", "ef-run"));
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.error, "judge_unavailable");
+  assert.equal(typeof res.body.retry_after_seconds, "number");
+
+  // The burned cooldown was restored: an IMMEDIATE retry (clock unmoved)
+  // passes the limiter and reaches judge0.
+  failNext = false;
+  res = await call(execReq("/api/exec/run", "ef-run"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(batches, 1);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec engine failure on /api/exec/submit: .status error -> 503 judge_unavailable; cooldown NOT consumed, nothing stored", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("ef-sub").set({ session_id: "ef-sub", status: "active" });
+  const subs = () => firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0;
+  let failNext = true;
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    if (failNext) {
+      const err = new Error("judge0 submit failed: 429");
+      err.status = 429;
+      throw err;
+    }
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  let res = await call(execReq("/api/exec/submit", "ef-sub"));
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.error, "judge_unavailable");
+  assert.equal(typeof res.body.retry_after_seconds, "number");
+  assert.equal(subs(), 0); // nothing stored on an engine failure
+
+  failNext = false;
+  res = await call(execReq("/api/exec/submit", "ef-sub"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(subs(), 1);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec engine failure: a plain programming Error (no .status) stays a bare 500 — but the cooldown is still restored", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("ef-bug").set({ session_id: "ef-bug", status: "active" });
+  let failNext = true;
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    if (failNext) throw new Error("TypeError: cannot read properties of undefined");
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  let res = await call(execReq("/api/exec/run", "ef-bug"));
+  assert.equal(res.statusCode, 500);
+  assert.equal(res.body.error, "Internal server error"); // generic — no detail leaked
+
+  // Cooldown restored even for the 500 path (server-side fault either way).
+  failNext = false;
+  res = await call(execReq("/api/exec/run", "ef-bug"));
+  assert.equal(res.statusCode, 200);
+  __setJudge0AdapterForTest(null);
+});
+
+// ---- Narrowed lane gating (review defect 3) ---------------------------------
+// The lanes gate only the submit POSTs; the ~90 s poll budget holds NO lane
+// slot. With the 1-wide run lane of this file, a second session's run must
+// reach its submit POST while the first batch is still polling.
+
+test("exec wiring: the run-lane slot is released after the submit phase — a second run proceeds while the first is still polling", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  for (const id of ["pw-a", "pw-b"]) {
+    firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({ session_id: id, status: "active" });
+  }
+  const pollPark = deferred();
+  let submits = 0;
+  __setJudge0AdapterForTest({ runBatch: async (items, gates = {}) => {
+    const submitGate = gates.submitGate ?? ((fn) => fn());
+    await submitGate(async () => { submits++; }); // quick submit POST
+    await pollPark.promise;                       // long poll phase, OUTSIDE the gate
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  const pA = call(execReq("/api/exec/run", "pw-a"));
+  await tick(); await tick();
+  assert.equal(submits, 1);
+
+  // A is now "polling" (parked) — B's submit POST must go through the SAME
+  // 1-wide run lane right now, not after A's poll budget ends.
+  const pB = call(execReq("/api/exec/run", "pw-b"));
+  await tick(); await tick();
+  assert.equal(submits, 2, "the run-lane slot was parked across the poll phase");
+
+  pollPark.resolve();
+  const [resA, resB] = await Promise.all([pA, pB]);
+  assert.equal(resA.statusCode, 200);
+  assert.equal(resB.statusCode, 200);
   __setJudge0AdapterForTest(null);
 });

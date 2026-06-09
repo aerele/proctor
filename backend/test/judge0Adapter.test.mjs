@@ -309,6 +309,77 @@ test("runBatch: polls exhausted with submissions still queued/processing -> judg
   assert.equal(r[0].passed, false);
 });
 
+// ---- Gated phases (defect 3: parked slots) ---------------------------------
+// runBatch accepts optional async gates: submit POSTs run inside submitGate,
+// each poll GET inside pollGate, and ALL waiting (inter-poll sleep, retry
+// backoff) happens OUTSIDE any gate — so a lane slot is never parked on a
+// sleeping batch.
+
+function gateRecorder(events) {
+  return (label) => async (fn) => {
+    events.push(`${label}-enter`);
+    try { return await fn(); } finally { events.push(`${label}-exit`); }
+  };
+}
+
+test("runBatch gates: submit POST inside submitGate, each poll GET inside pollGate, inter-poll sleep OUTSIDE any gate", async () => {
+  const pending = { token: "t", status: { id: 2 }, stdout: null, stderr: null, compile_output: null, time: null, memory: null };
+  const done = { token: "t", status: { id: 3 }, stdout: Buffer.from("ok\n").toString("base64"),
+    stderr: null, compile_output: null, time: "0.01", memory: 256 };
+  const fetch = fakeFetch([
+    [{ token: "t" }],
+    { submissions: [pending] },  // poll 1: still processing -> inter-poll sleep
+    { submissions: [done] }      // poll 2: done
+  ]);
+  const events = [];
+  const gate = gateRecorder(events);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: fetch,
+    pollIntervalMs: 7, sleepImpl: async (ms) => { events.push(`sleep-${ms}`); } });
+  const r = await adapter.runBatch([ITEM], { submitGate: gate("submit"), pollGate: gate("poll") });
+  assert.equal(r[0].passed, true);
+  assert.deepEqual(events, [
+    "submit-enter", "submit-exit",        // POST held a submit slot only
+    "poll-enter", "poll-exit",            // GET 1 held a poll slot only
+    "sleep-7",                            // inter-poll wait holds NO slot
+    "poll-enter", "poll-exit"             // GET 2
+  ]);
+});
+
+test("runBatch gates: the poll-retry BACKOFF sleep also happens outside the pollGate", async () => {
+  let call = 0;
+  const fetchImpl = async () => {
+    call++;
+    if (call === 1) return { ok: true, status: 200, json: async () => [{ token: "t" }] };
+    if (call === 2) return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({ submissions: [{ token: "t", status: { id: 3 },
+      stdout: Buffer.from("ok\n").toString("base64"), stderr: null, compile_output: null, time: "0.01", memory: 256 }] }) };
+  };
+  const events = [];
+  const gate = gateRecorder(events);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl,
+    pollIntervalMs: 0, randomImpl: () => 1,
+    sleepImpl: async (ms) => { events.push(`sleep-${ms}`); } });
+  const r = await adapter.runBatch([ITEM], { submitGate: gate("submit"), pollGate: gate("poll") });
+  assert.equal(r[0].passed, true);
+  assert.deepEqual(events, [
+    "submit-enter", "submit-exit",
+    "poll-enter", "poll-exit",            // failed GET: the gate is RELEASED…
+    "sleep-1000",                         // …before the backoff wait (1 * 1000 * 2^0)
+    "poll-enter", "poll-exit"             // internal retry re-enters the gate
+  ]);
+});
+
+test("runBatch without gates keeps working exactly as before (gates are optional)", async () => {
+  const fetch = fakeFetch([
+    [{ token: "t" }],
+    { submissions: [{ token: "t", status: { id: 3 }, stdout: Buffer.from("ok\n").toString("base64"),
+      stderr: null, compile_output: null, time: "0.01", memory: 256 }] }
+  ]);
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl: fetch, pollIntervalMs: 0 });
+  const r = await adapter.runBatch([ITEM]);
+  assert.equal(r[0].passed, true);
+});
+
 test("runBatch: re-polls only unfinished tokens; finished results keep original order", async () => {
   const doneA = { token: "tok-a", status: { id: 3, description: "Accepted" },
     stdout: Buffer.from("A\n").toString("base64"), stderr: null, compile_output: null, time: "0.01", memory: 256 };
