@@ -512,7 +512,7 @@ async function recordEvents(req) {
 async function execRun(req) {
   const body = parseBody(req);
   // Ownership gate: unknown session → 404; ended/locked/pending → 409/403.
-  const session = requireWritableSession(await getSession(String(body.session_id || "")));
+  requireWritableSession(await getSession(String(body.session_id || "")));
   const problem = getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   const languageId = LANGUAGE_IDS[String(body.language || "")];
@@ -531,7 +531,7 @@ async function execSubmit(req) {
   const body = parseBody(req);
   const sessionId = String(body.session_id || "");
   // Ownership gate (same as /api/events): unknown → 404; ended/locked/pending → 409/403.
-  const session = requireWritableSession(await getSession(sessionId));
+  requireWritableSession(await getSession(sessionId));
   const problem = getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   const languageId = LANGUAGE_IDS[String(body.language || "")];
@@ -547,19 +547,24 @@ async function execSubmit(req) {
   const verdict = passedCount === results.length ? "accepted" : "wrong_answer";
 
   // Per-test results WITHOUT hidden inputs/expected (don't leak the test cases).
+  // STORED only — never returned to the candidate (§9 lock below).
   const tests = results.map((r, i) => ({ index: i, passed: r.passed, status: r.status, timeSec: r.timeSec }));
 
   // Store the submission (low volume -> Firestore). handler.mjs uses inline
   // new Date().toISOString() for timestamps everywhere — match that (no helper).
+  // Doc id is a randomUUID — NOT composed from the client-supplied session_id
+  // (injection-shaped); session_id/problem_id/created_at stay as FIELDS.
   const createdAt = new Date().toISOString();
-  const submissionId = `${sessionId}:${problem.id}:${createdAt}`;
+  const submissionId = randomUUID();
   await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
     session_id: sessionId, problem_id: problem.id, language: body.language,
     source_code: source, verdict, passed_count: passedCount, total: results.length,
     tests, created_at: createdAt
   });
 
-  return { verdict, passed_count: passedCount, total: results.length, tests, submission_id: submissionId };
+  // §9 lock: candidates see ONLY pass/fail counts on hidden tests. The stored
+  // doc keeps the per-test detail for admin-side analysis; the response doesn't.
+  return { verdict, passed_count: passedCount, total: results.length, submission_id: submissionId };
 }
 
 async function ingestEditorEvents(req) {

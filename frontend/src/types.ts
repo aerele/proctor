@@ -422,5 +422,6 @@ export type RunCaseResult = {
 };
 export type RunResult = { results: RunCaseResult[] };
 
-export type SubmitTest = { index: number; passed: boolean; status: string; timeSec: number | null };
-export type SubmitResult = { verdict: "accepted" | "wrong_answer"; passed_count: number; total: number; tests: SubmitTest[]; submission_id: string };
+// §9 lock: the submit response carries ONLY the verdict + pass/fail counts on the
+// hidden tests — no per-test array (the backend stores that detail admin-side only).
+export type SubmitResult = { verdict: "accepted" | "wrong_answer"; passed_count: number; total: number; submission_id: string };
