@@ -36,3 +36,19 @@ This is the first thing to read in the morning. Three sections, kept current thr
 - **Judge0 key:** Karthi provides; kept SERVER-SIDE (backend env); used only for live integration tests. Build + test against mocks/demo until then — never block on it.
 - **Browser:** Chrome on :9222 (verified UP) for MCP integration testing.
 - **Machine must stay AWAKE** — the run only progresses while the machine is awake (it slept ~11h last night).
+
+---
+## §1 progress (as of ~01:25) — FIRM Slice 1: BUILT + FIXED + VERIFIED
+- **All 11 plan tasks done via TDD** (commits e5c0d2b…0328ef9), then **two adversarial review rounds fixed everything found**: round 1 (13 findings) → F1-F6 fix commits (d199ad5, fb670be, 5960988, aea48b2, 9c8923f); round 2 re-review (6 follow-ons) → 3a8a688 + 792eed9.
+- **Suites green at HEAD:** backend 183/183 (node:test), frontend vitest 30/30 + tsc clean + build OK.
+- **Browser demo verified on :9222** (student flow → RECORDING → Monaco → typed sum-two → Run 2/2 samples → Submit accepted 4/4 counts-only). Evidence: `night-run/evidence/slice1-workspace-typed.png`, `slice1-submit-accepted.png`. (Screen-share picker can't render in a remote-controlled browser, so the demo stubs getDisplayMedia with a fake monitor canvas stream via CDP initScript — demo technique only, no product change.)
+- Key hardening already in: enable_network:false + full explicit limits + ≤20 chunking + 90s poll budget + judging_timeout; UA header (RapidAPI 403 workaround); submit response = counts only (§9 lock); editor-event sanitization preserving 2000-char paste text; source cap 64KB; Object.hasOwn guards; Cloud Run timeout 30s→120s; own-editor copy gating (studentCopy.ts).
+
+## §2 judgment calls (review these)
+1. **judging_timeout → candidate verdict "error"** (neutral "Judging failed — submit again"), never wrong_answer: infra failures shouldn't read as candidate failures.
+2. **Hidden-test detail**: response carries verdict+counts ONLY; full per-test detail stays in the stored Firestore submission (admin-side).
+3. **Editor event text capped at 2000 chars/event** (text_truncated flag beyond) — paste forensics intact, storage bounded.
+4. **Submission doc ids = randomUUID()** (was session_id-composed — injection-shaped).
+5. **Cloud Run request timeout 120s** to fit the 90s judge poll budget.
+6. **Workspace REPLACES the HackerRank link** when a problem is configured; all candidate-facing copy switches via studentCopy.ts (HackerRank wording kept when no problem configured).
+7. **Usage throttle** (per your TG ask): one workflow at a time, gate at 90% of measured ceiling, idle till window reset if crossed.

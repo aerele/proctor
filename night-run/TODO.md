@@ -7,21 +7,21 @@ Work top-down. Read `GOAL.md` + `MORNING-NOTES.md` first. Each item: spec → pl
 - [x] Debug Chromium on :9222 (up).
 - [x] night-run workspace fresh; GOAL/MORNING-NOTES/NIGHT-LOG present.
 - [ ] **Sleep inhibitor armed** + laptop on AC + lid→do-nothing (Karthi/Ram, right before /goal).
-- [ ] Judge0 key supplied (optional for tonight — live smoke is a morning gate).
+- [x] Judge0 key supplied (optional for tonight — live smoke is a morning gate).
 
 ## FIRM — Slice 1 (must finish + test + audit)
 Detailed TDD tasks: `docs/superpowers/plans/2026-06-09-own-editor-slice1.md`. Summary:
-- [ ] T1 — `judge0Adapter.mjs` (swap-able; async batch; `enable_network:false`; base64; limits) + tests.
-- [ ] T2 — `problems.mjs` (sum-two: statement, language_ids, 2 sample + ≥4 hidden tests, limits) + test.
-- [ ] T3 — `POST /api/exec/run` (sample tests; `requireWritableSession`) + tests.
-- [ ] T4 — `POST /api/exec/submit` (hidden tests → verdict, no leaked inputs, store submission) + tests.
-- [ ] T5 — `POST /api/editor-events` (batch → GCS NDJSON under `sessionPrefix`) + tests.
-- [ ] T6 — frontend types (`EditorEvent`/`ExecRequest`/`RunResult`/`SubmitResult`).
-- [ ] T7 — `editorEvents.ts` pure mappers + coalescing + batcher (+ vitest).
-- [ ] T8 — api.ts: `sendEditorEvents`/`execRun`/`execSubmit` (+ demo branches; execRun demo returns BOTH samples).
-- [ ] T9 — `MonacoEditor.tsx` (lazy; keystroke/cursor/selection/paste/focus capture).
-- [ ] T10 — `CodingWorkspace.tsx` + render in `StudentApp` (gate `status==='recording'`).
-- [ ] T11 — E2E verify: backend `npm test` green; frontend `vitest` + `build`; demo-mode browser walkthrough on :9222 (screenshot); commit.
+- [x] T1 — `judge0Adapter.mjs` (swap-able; async batch; `enable_network:false`; base64; limits) + tests.
+- [x] T2 — `problems.mjs` (sum-two: statement, language_ids, 2 sample + ≥4 hidden tests, limits) + test.
+- [x] T3 — `POST /api/exec/run` (sample tests; `requireWritableSession`) + tests.
+- [x] T4 — `POST /api/exec/submit` (hidden tests → verdict, no leaked inputs, store submission) + tests.
+- [x] T5 — `POST /api/editor-events` (batch → GCS NDJSON under `sessionPrefix`) + tests.
+- [x] T6 — frontend types (`EditorEvent`/`ExecRequest`/`RunResult`/`SubmitResult`).
+- [x] T7 — `editorEvents.ts` pure mappers + coalescing + batcher (+ vitest).
+- [x] T8 — api.ts: `sendEditorEvents`/`execRun`/`execSubmit` (+ demo branches; execRun demo returns BOTH samples).
+- [x] T9 — `MonacoEditor.tsx` (lazy; keystroke/cursor/selection/paste/focus capture).
+- [x] T10 — `CodingWorkspace.tsx` + render in `StudentApp` (gate `status==='recording'`).
+- [x] T11 — E2E verify: backend `npm test` green; frontend `vitest` + `build`; demo-mode browser walkthrough on :9222 (screenshot); commit.
 - [ ] Add the adapter **queue + bounded-concurrency + 429 backoff + separate Run/Submit lanes** (design §11) — can be a focused add after T1–T11 land.
 
 ## STRETCH (priority order — each = spec → plan → build → test → commit)
