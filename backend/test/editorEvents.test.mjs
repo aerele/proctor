@@ -7,10 +7,11 @@ process.env.EVIDENCE_BUCKET = "editor-bucket";
 process.env.SESSION_COLLECTION = "editor_sessions";
 process.env.SETTINGS_COLLECTION = "editor_settings";
 process.env.EDITOR_EVENTS_COLLECTION = "editor-events";
+process.env.SUBMISSIONS_COLLECTION = "editor_submissions";
 process.env.ADMIN_PASSWORD = "editor-admin-pass";
 
 const handler = await import("../src/handler.mjs?editor");
-const { api, __setClientsForTest } = handler;
+const { api, __setClientsForTest, __setJudge0AdapterForTest } = handler;
 
 // Inline req/res + fakes, copied from phase2.test.mjs (NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -213,4 +214,93 @@ test("POST /api/editor-events rejects > MAX events with 400", async () => {
   const res = await call(makeReq({ method: "POST", path: "/api/editor-events",
     body: { session_id: "s1", problem_id: "p", events } }));
   assert.equal(res.statusCode, 400);
+});
+
+// ---- Security hardening (adversarial review) -------------------------------
+// (a) Each persisted editor event must be a NEW allow-listed object (mirrors
+// recordEvents): capped type/timestamp, sanitizeObject'd detail, NO raw client
+// keys spread through.
+
+test("POST /api/editor-events sanitizes events: truncates oversized strings, drops unexpected keys", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: "sum-two", events: [{
+      type: "T".repeat(200),                 // > 64 — must be capped
+      timestamp: "S".repeat(100),            // > 40 — must be capped
+      detail: { text: "A".repeat(2000), nested: { deep: "B".repeat(900) } }, // > 500 — sanitizeObject caps
+      injected_extra: "evil",                // unexpected key — must be dropped
+      another_extra: { sneaky: true }        // unexpected key — must be dropped
+    }] } }));
+  assert.equal(res.statusCode, 200);
+  const keys = [...storage._saved.keys()];
+  assert.equal(keys.length, 1);
+  const record = JSON.parse(storage._saved.get(keys[0]).trim());
+  assert.equal(record.type.length, 64);
+  assert.equal(record.timestamp.length, 40);
+  assert.equal(record.detail.text.length, 500);        // sanitizeObject caps strings at 500
+  assert.equal(record.detail.nested.deep.length, 500); // …recursively
+  // ONLY the allow-listed shape persists — extra client keys are gone.
+  assert.deepEqual(Object.keys(record).sort(),
+    ["detail", "problem_id", "session_id", "timestamp", "type"]);
+});
+
+// (b) source_code is capped at 65536 chars on BOTH exec endpoints — 400 before
+// any execution (the stub adapter throws if it is ever reached).
+
+test("POST /api/exec/run rejects source_code > 65536 chars with 400 (before any execution)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not execute oversized source"); } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "a".repeat(65537) } }));
+  assert.equal(res.statusCode, 400);
+  __setJudge0AdapterForTest(null);
+});
+
+test("POST /api/exec/submit rejects source_code > 65536 chars with 400 (nothing stored)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not execute oversized source"); } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "a".repeat(65537) } }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0, 0);
+  __setJudge0AdapterForTest(null);
+});
+
+// (c) Language lookup must reject prototype keys: "constructor" is NOT an own
+// key of LANGUAGE_IDS but indexes Object.prototype — it must 400, not execute.
+
+test("POST /api/exec/run rejects prototype-key language ('constructor') with 400", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not execute a prototype-key language"); } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "constructor", source_code: "x" } }));
+  assert.equal(res.statusCode, 400);
+  __setJudge0AdapterForTest(null);
+});
+
+test("POST /api/exec/submit rejects prototype-key language ('constructor') with 400", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not execute a prototype-key language"); } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "constructor", source_code: "x" } }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0, 0);
+  __setJudge0AdapterForTest(null);
 });

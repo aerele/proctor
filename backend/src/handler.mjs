@@ -77,6 +77,7 @@ const JUDGE0_AUTH_TOKEN = process.env.JUDGE0_AUTH_TOKEN;
 const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_submissions";
 const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
 const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
+const MAX_SOURCE_CODE_LENGTH = 65536; // exec run/submit: cap candidate source size (security review)
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
@@ -515,9 +516,14 @@ async function execRun(req) {
   requireWritableSession(await getSession(String(body.session_id || "")));
   const problem = getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
-  const languageId = LANGUAGE_IDS[String(body.language || "")];
+  // Own-key check first: a prototype key like "constructor" must not pass the
+  // truthiness test and reach the executor (security review).
+  const language = String(body.language || "");
+  if (!Object.hasOwn(LANGUAGE_IDS, language)) return badRequest("unsupported language");
+  const languageId = LANGUAGE_IDS[language];
   if (!languageId) return badRequest("unsupported language");
   const source = String(body.source_code || "");
+  if (source.length > MAX_SOURCE_CODE_LENGTH) return badRequest(`source_code too large (max ${MAX_SOURCE_CODE_LENGTH} chars)`);
   const items = problem.sampleTests.map((t) => ({
     languageId, source, stdin: t.input, expectedOutput: t.expected,
     cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
@@ -534,9 +540,14 @@ async function execSubmit(req) {
   requireWritableSession(await getSession(sessionId));
   const problem = getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
-  const languageId = LANGUAGE_IDS[String(body.language || "")];
+  // Own-key check first: a prototype key like "constructor" must not pass the
+  // truthiness test and reach the executor (security review).
+  const language = String(body.language || "");
+  if (!Object.hasOwn(LANGUAGE_IDS, language)) return badRequest("unsupported language");
+  const languageId = LANGUAGE_IDS[language];
   if (!languageId) return badRequest("unsupported language");
   const source = String(body.source_code || "");
+  if (source.length > MAX_SOURCE_CODE_LENGTH) return badRequest(`source_code too large (max ${MAX_SOURCE_CODE_LENGTH} chars)`);
 
   const items = problem.hiddenTests.map((t) => ({
     languageId, source, stdin: t.input, expectedOutput: t.expected,
@@ -575,7 +586,17 @@ async function ingestEditorEvents(req) {
   const events = Array.isArray(body.events) ? body.events : null;
   if (!events) return badRequest("events[] required");
   if (events.length > EDITOR_EVENTS_INGEST_LIMIT) return badRequest(`max ${EDITOR_EVENTS_INGEST_LIMIT} events per batch`);
-  const stamped = events.map((e) => ({ ...e, session_id: sessionId, problem_id: body.problem_id || null }));
+  // Security hardening: NEVER spread raw client objects into storage. Build a
+  // NEW allow-listed record per event — capped type/timestamp + sanitizeObject'd
+  // detail (mirrors recordEvents) — so unexpected keys are dropped by
+  // construction and oversized strings are truncated.
+  const stamped = events.map((e) => ({
+    type: String(e.type || "").slice(0, 64),
+    timestamp: String(e.timestamp || "").slice(0, 40),
+    detail: sanitizeObject(e.detail || {}),
+    session_id: sessionId,
+    problem_id: body.problem_id || null
+  }));
 
   // Per-batch timestamped object under the session prefix (avoids read-modify-
   // write races; the analytics slice concatenates them). Build the key with the
