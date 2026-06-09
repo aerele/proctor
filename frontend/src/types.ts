@@ -34,6 +34,10 @@ export type SessionStartResponse = {
   heartbeat_interval_seconds: number;
 };
 
+// Event `type` is an open string (the backend stores arbitrary types). S1
+// exam-shell client-emitted types riding this same pipeline:
+//   "fullscreen_enter" | "fullscreen_exit" (detail.expected=true at test end)
+//   "onboarding_stage" ({from,to,label}) | "topbar_hidden" | "topbar_restored".
 export type ProctorEvent = {
   type: string;
   timestamp: string;

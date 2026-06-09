@@ -4,6 +4,9 @@ import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSe
 import { RecordingReview } from "./RecordingReview";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import * as studentCopy from "./studentCopy";
+import { topBarVisible } from "./shell/examShell";
+import { ExamShellChrome } from "./shell/ExamShellChrome";
+import { useExamShell } from "./shell/useExamShell";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
@@ -124,9 +127,37 @@ function StudentApp() {
     );
   }, [form]);
 
+  // S1 exam shell: EVERY proctor event (recorder onEvent + createUiEvent call
+  // sites) already flows through this single funnel, so the shell taps it here
+  // for anomaly classification (spec §6). The ref breaks the definition cycle —
+  // the shell hook itself emits events through addEvent.
+  const shellTapRef = useRef<(event: ProctorEvent) => void>(() => undefined);
   const addEvent = (event: ProctorEvent) => {
+    shellTapRef.current(event);
     setEvents((current) => [event, ...current].slice(0, 16));
   };
+
+  // S1 exam shell: fullscreen truth, 1-5 stage, top-bar vanish/restore.
+  // examReleased is the S3 room-gate seam — S3 has NOT landed at HEAD, so the
+  // exam is always "released" (recording => stage 4 IN EXAM). When S3 lands,
+  // its waiting-room release state replaces this constant.
+  const shell = useExamShell({ gate, status, sessionId, examReleased: true, addEvent });
+  shellTapRef.current = shell.onShellEvent;
+
+  // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
+  const shellChrome = (
+    <ExamShellChrome
+      shell={shell}
+      gate={gate}
+      status={status}
+      identity={identity}
+      elapsedSeconds={elapsedSeconds}
+      examReleased={true}
+      ownEditor={OWN_EDITOR}
+    />
+  );
+  // The fixed bar needs page top padding only while it is actually rendered.
+  const shellPadTop = topBarVisible(shell.barHidden, gate);
 
   const speakIpChangeWarning = () => {
     const message = "Your IP is changing. Please be attended by our engineer at your institution.";
@@ -708,7 +739,8 @@ function StudentApp() {
   // ---- Blocked / non-running gate screens -------------------------------
   if (resuming) {
     return (
-      <Shell>
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         <section className="mx-auto max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
           <RefreshCw size={22} className="mx-auto animate-spin text-accent" />
           <p className="mt-3 text-sm text-muted">Restoring your proctoring session…</p>
@@ -719,8 +751,8 @@ function StudentApp() {
 
   if (gate === "pending_approval") {
     return (
-      <Shell>
-        <StudentStepBanner gate={gate} status={status} />
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
         <BlockedScreen
           tone="warning"
@@ -740,8 +772,8 @@ function StudentApp() {
 
   if (gate === "locked") {
     return (
-      <Shell>
-        <StudentStepBanner gate={gate} status={status} />
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
         <BlockedScreen
           tone="danger"
@@ -760,8 +792,8 @@ function StudentApp() {
 
   if (gate === "ended" || status === "ended") {
     return (
-      <Shell>
-        <StudentStepBanner gate="ended" status="ended" />
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
         <section className="mx-auto max-w-xl rounded-lg border border-accent/30 bg-accent/5 p-6 text-center shadow-subtle">
           <CheckCircle2 size={28} className="mx-auto text-accent" />
@@ -779,11 +811,8 @@ function StudentApp() {
   const isFormStage = gate === "form" && status !== "recording" && status !== "ending";
 
   return (
-    <Shell>
-      <StudentStepBanner gate={gate} status={status} />
-      {status === "recording" || status === "ending" ? (
-        <TimerBar status={status} elapsedSeconds={elapsedSeconds} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
-      ) : null}
+    <Shell padTop={shellPadTop}>
+      {shellChrome}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 
       {/* Pre-start: the rules are the headline, not a sidebar afterthought. The
@@ -926,7 +955,7 @@ function StudentApp() {
           ) : (
             <>
               <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
-              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} />
+              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
               <RulesPanel />
             </>
@@ -967,61 +996,6 @@ function createUiEvent(type: string, detail?: Record<string, unknown>): ProctorE
   };
 }
 
-// Guided step indicator (Epic 3): always shows the student where they are and
-// what the next action is, so they do not need to ask a proctor.
-function StudentStepBanner({ gate, status }: { gate: StudentGate; status: SessionStatus }) {
-  const steps = [
-    { key: "details", label: "Enter details" },
-    { key: "record", label: "Record + take test" },
-    { key: "end", label: "End test" }
-  ];
-  let activeIndex = 0;
-  let hint = "Fill in your details and consent, then start proctoring.";
-  if (status === "recording" || status === "ending") {
-    activeIndex = 1;
-    hint = SLICE1_PROBLEM
-      ? "Recording is active. Solve the problem in the coding workspace below and keep this tab running. End the test here when you submit."
-      : "Recording is active. Open HackerRank with the Start test button and keep this tab running. End the test here when you submit.";
-  } else if (gate === "running") {
-    activeIndex = 1;
-    hint = "Your session was restored. Press Resume recording to share your screen again and continue.";
-  } else if (gate === "pending_approval") {
-    activeIndex = 1;
-    hint = "Waiting for a proctor to approve this device. Stay on this page.";
-  } else if (gate === "locked") {
-    activeIndex = 1;
-    hint = "Your session is locked. Call a proctor to unlock you.";
-  } else if (gate === "ended" || status === "ended") {
-    activeIndex = 2;
-    hint = "Your test is complete. You may close this tab.";
-  }
-
-  return (
-    <section className="mb-5 rounded-lg border border-line bg-panel p-4 shadow-subtle">
-      <div className="flex flex-wrap items-center gap-2">
-        {steps.map((step, index) => (
-          <div key={step.key} className="flex items-center gap-2">
-            <span
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${
-                index < activeIndex
-                  ? "border-accent/30 bg-accent/10 text-accent"
-                  : index === activeIndex
-                    ? "border-ink bg-ink text-white"
-                    : "border-line bg-white text-muted"
-              }`}
-            >
-              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-white/20 text-[10px]">{index + 1}</span>
-              {step.label}
-            </span>
-            {index < steps.length - 1 ? <span className="text-muted">›</span> : null}
-          </div>
-        ))}
-      </div>
-      <p className="mt-3 text-sm leading-6 text-muted">{hint}</p>
-    </section>
-  );
-}
-
 // Prominent identity confirmation (Epic 3): the student sees exactly who the
 // session is registered to before and during the test.
 function IdentityCard({ identity }: { identity: { name: string; username: string; room: string } }) {
@@ -1059,24 +1033,6 @@ function BlockedScreen({ tone, icon, title, lines, onRefresh, error }: { tone: "
       </button>
       {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
     </section>
-  );
-}
-
-function TimerBar({ status, elapsedSeconds, startIp, currentIp, ipChanged }: { status: SessionStatus; elapsedSeconds: number; startIp: string; currentIp: string; ipChanged: boolean }) {
-  return (
-    <div className={`sticky top-0 z-10 mb-5 rounded-lg border px-4 py-3 text-white shadow-subtle ${ipChanged ? "border-danger/40 bg-danger" : "border-ink/10 bg-ink"}`}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <span className="text-sm font-semibold">Proctoring active</span>
-          <div className="mt-1 flex flex-wrap gap-2 text-xs text-white/80">
-            <span>Start IP: <span className="font-mono text-white">{startIp || "pending"}</span></span>
-            <span>Current IP: <span className="font-mono text-white">{currentIp || startIp || "pending"}</span></span>
-          </div>
-        </div>
-        <span className="font-mono text-lg font-semibold">{formatElapsed(elapsedSeconds)}</span>
-        <span className="rounded-full border border-white/20 px-3 py-1 text-xs uppercase">{ipChanged ? "ip changed" : status}</span>
-      </div>
-    </div>
   );
 }
 
@@ -2732,9 +2688,11 @@ function AlertField({ label, value, mono = false }: { label: string; value: stri
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+// padTop: StudentApp sets it while the fixed S1 ExamTopBar (64px) is rendered,
+// so the header/content start below the bar. AdminApp never passes it.
+function Shell({ children, padTop = false }: { children: React.ReactNode; padTop?: boolean }) {
   return (
-    <main className="min-h-screen bg-paper px-4 py-5 text-ink md:px-8">
+    <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${padTop ? "pt-20" : ""}`}>
       <div className="mx-auto max-w-6xl">
         <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
           <div className="flex items-center gap-3">
@@ -2762,13 +2720,6 @@ function isoToLocalInput(value?: string) {
 function localInputToIso(value: string) {
   if (!value) return "";
   return new Date(value).toISOString();
-}
-
-function formatElapsed(totalSeconds: number) {
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
 }
 
 function Field({ label, value, onChange, type = "text", disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; disabled?: boolean }) {
@@ -2823,7 +2774,10 @@ function recordingStateLabel(status: SessionStatus): { label: string; recording:
   return { label: "Not recording", recording: false };
 }
 
-function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState }) {
+// startIp/currentIp moved here from the deleted TimerBar (S1): close-up
+// diagnostics, not at-a-distance content. The ip-changed red treatment is
+// superseded by the shell's anomaly flow (ip_address_changed vanishes the bar).
+function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture, startIp, currentIp, ipChanged }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState; startIp: string; currentIp: string; ipChanged: boolean }) {
   const state = recordingStateLabel(status);
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
@@ -2844,6 +2798,8 @@ function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, man
         <Metric icon={<Camera size={16} />} label="Camera" value={mediaCapture.camera} />
         <Metric icon={<Mic size={16} />} label="Microphone" value={mediaCapture.microphone} />
         <Metric icon={<ClipboardList size={16} />} label="Manifest items" value={String(manifest.length)} />
+        <Metric icon={<Activity size={16} />} label="Start IP" value={startIp || "pending"} />
+        <Metric icon={<Activity size={16} />} label="Current IP" value={`${currentIp || startIp || "pending"}${ipChanged ? " (changed)" : ""}`} />
       </div>
       {sessionId ? <p className="mt-4 break-all font-mono text-xs text-muted">{sessionId}</p> : null}
     </section>
