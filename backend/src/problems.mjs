@@ -25,5 +25,7 @@ const PROBLEMS = {
 };
 
 export function getProblem(id) {
-  return PROBLEMS[id] || null;
+  // Own-key check: a prototype key like "constructor" indexes Object.prototype
+  // and would pass a truthiness test, returning a function → 500 in handlers.
+  return Object.hasOwn(PROBLEMS, id) ? PROBLEMS[id] : null;
 }

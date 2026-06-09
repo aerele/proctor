@@ -189,6 +189,15 @@ test("getProblem returns null for unknown id", () => {
   assert.equal(getProblem("nope"), null);
 });
 
+test("getProblem rejects prototype keys: 'constructor' is null, not a function", () => {
+  // "constructor"/"hasOwnProperty" are not own keys of PROBLEMS but index
+  // Object.prototype — a truthiness check would return a function and 500 in
+  // the handlers. Object.hasOwn must gate the lookup.
+  assert.equal(getProblem("constructor"), null);
+  assert.equal(getProblem("hasOwnProperty"), null);
+  assert.equal(getProblem("__proto__"), null);
+});
+
 test("POST /api/exec/run executes source against SAMPLE tests via the injected adapter", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
@@ -297,6 +306,51 @@ test("POST /api/exec/submit: one failing hidden test -> verdict wrong_answer", a
   assert.equal(res.body.passed_count, 3);
   // §9 lock holds on the failing path too: no per-test array in the response.
   assert.equal(res.body.tests, undefined);
+  __setJudge0AdapterForTest(null);
+});
+
+// Verdict rule (adversarial review): a judging_timeout is an INFRA failure, not
+// the candidate's fault — it must surface as "error", never "wrong_answer".
+//   all passed                         → accepted
+//   any judging_timeout among results  → error
+//   otherwise (real failures only)     → wrong_answer
+test("POST /api/exec/submit verdict: accepted / error (judging_timeout) / wrong_answer branches", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  const submit = () => call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+
+  // Branch 1: every test passed → accepted.
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  let res = await submit();
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.verdict, "accepted");
+
+  // Branch 2: ANY judging_timeout (even alongside real failures) → error.
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map((_, i) => ({
+      status: i === 1 ? "judging_timeout" : (i === 2 ? "wrong_answer" : "accepted"),
+      passed: i !== 1 && i !== 2,
+      stdout: "", stderr: "", compileOutput: "", timeSec: null, memoryKb: null
+    })) });
+  res = await submit();
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.verdict, "error");
+  // The stored submission carries the same infra-fault verdict (the fake
+  // Firestore Map preserves insertion order; the last doc is this submission).
+  const subs = firestore._collections.get(process.env.SUBMISSIONS_COLLECTION);
+  assert.equal([...subs.values()].at(-1).verdict, "error");
+
+  // Branch 3: failures with NO judging_timeout → wrong_answer.
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map((_, i) => ({ status: i === 0 ? "wrong_answer" : "accepted", passed: i !== 0, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  res = await submit();
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.verdict, "wrong_answer");
+
   __setJudge0AdapterForTest(null);
 });
 
