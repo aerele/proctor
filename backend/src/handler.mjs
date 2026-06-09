@@ -86,6 +86,22 @@ const JUDGE0_AUTH_TOKEN = process.env.JUDGE0_AUTH_TOKEN;
 const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_submissions";
 const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
 const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
+// S2 roster (compulsory roster login). One ACTIVE roster, global (like the
+// "active" settings doc). Meta lives in SETTINGS_COLLECTION under a distinct
+// doc id (mirrors ALERT_SETTINGS_ID); entries live in ROSTER_COLLECTION, one
+// doc per student keyed by the sanitized normalized unique-ID for O(1) login
+// lookups. Re-upload is a VERSIONED REPLACE: entries carry roster_version and
+// lookups ignore any entry whose version is not the meta's current one, so no
+// mass delete is ever needed and a half-failed upload never becomes active.
+const ROSTER_COLLECTION = process.env.ROSTER_COLLECTION || "proctor_roster";
+const ROSTER_META_ID = "roster_meta";
+const ROSTER_LIMIT = 5000;          // max rows per upload (mirrors REVIEW_ROSTER_LIMIT)
+const ROSTER_COLUMNS_LIMIT = 30;    // max columns kept per row
+const ROSTER_CELL_MAX = 200;        // max stored cell length
+const CONFIGURED_ROOMS_LIMIT = 50;  // max admin-configured room labels
+// The identity fields an admin may map roster columns onto. Mapped fields are
+// SERVER-OVERRIDDEN at session start: the roster is the identity source of truth.
+const ROSTER_MAPPABLE_FIELDS = ["name", "email", "roll_number", "hackerrank_username", "room"];
 const MAX_SOURCE_CODE_LENGTH = 65536; // exec run/submit: cap candidate source size (security review)
 // Per-session exec rate limits (security review): the hosted Judge0 key is
 // METERED (pay-per-submission), so a leaked or looping session token must not
@@ -170,6 +186,10 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/exec/run") return send(res, 200, await execRun(req));
     if (req.method === "POST" && path === "/api/exec/submit") return send(res, 200, await execSubmit(req));
     if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
+    if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig());
+    if (req.method === "POST" && path === "/api/roster/lookup") return send(res, 200, await rosterLookup(req));
+    if (req.method === "GET" && path === "/api/admin/roster") return send(res, 200, await adminGetRoster(req));
+    if (req.method === "POST" && path === "/api/admin/roster") return send(res, 200, await adminSaveRoster(req));
     if (req.method === "POST" && path === "/api/review-file") return send(res, 200, await recordReviewFile(req));
     if (req.method === "POST" && path === "/api/heartbeat") return send(res, 200, await recordHeartbeat(req));
     if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
@@ -1075,11 +1095,154 @@ async function adminSaveSettings(req) {
     passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
     end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
     end_code_preview: endCode ? maskPasscode(endCode) : (existing?.end_code_preview || ""),
+    // S2: room labels for the student room dropdown. An older admin UI that
+    // doesn't send rooms preserves the stored list.
+    rooms: normalizeRooms(Array.isArray(body.rooms) ? body.rooms : existing?.rooms),
     updated_at: now
   };
 
   await settingsRef().set(item);
   return publicSettings(item);
+}
+
+// ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
+
+function rosterMetaRef() {
+  return firestore.collection(SETTINGS_COLLECTION).doc(ROSTER_META_ID);
+}
+
+// The ACTIVE roster meta, or null when no roster is configured (never uploaded,
+// or cleared). Callers treat null as "roster gate off".
+async function getRosterMeta() {
+  const doc = await rosterMetaRef().get();
+  const meta = doc.exists ? doc.data() : null;
+  return meta && meta.configured ? meta : null;
+}
+
+// Unique-ID normalization: trim + lowercase + strip ALL whitespace, because
+// colleges format roll numbers inconsistently ("21 CS 001" ≡ "21CS001").
+function normalizeUniqueId(value) {
+  return String(value).trim().toLowerCase().replace(/\s+/g, "");
+}
+
+// Firestore-doc-id-safe form of a normalized unique id (no "/", never empty or
+// all-dots). Distinct ids that sanitize to the same doc id are detected at
+// upload time (the upload sees every row) and reported as duplicate skips.
+function rosterEntryId(uniqueIdNorm) {
+  const cleaned = String(uniqueIdNorm).replace(/[^a-z0-9@._-]/g, "_").slice(0, 200);
+  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
+  return cleaned;
+}
+
+// Admin-configured room labels: sanitizeRoom each, drop empties, dedupe
+// case-insensitively preserving first-seen casing, cap the list.
+function normalizeRooms(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of value) {
+    const room = sanitizeRoom(item);
+    if (!room || seen.has(room.toLowerCase())) continue;
+    seen.add(room.toLowerCase());
+    out.push(room);
+    if (out.length >= CONFIGURED_ROOMS_LIMIT) break;
+  }
+  return out;
+}
+
+// POST /api/admin/roster — replace the active roster ({clear:true} disables it).
+// The client parses the CSV; this endpoint receives structured rows. Entries are
+// written first (bounded concurrency), the meta doc LAST, so a crashed upload
+// never activates a half-written version.
+async function adminSaveRoster(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  if (body.clear === true) {
+    await rosterMetaRef().set({ configured: false, cleared_at: new Date().toISOString() });
+    return { ok: true, configured: false, count: 0, skipped: [] };
+  }
+  requireFields(body, ["unique_id_column", "columns", "rows"]);
+  const columns = Array.isArray(body.columns)
+    ? body.columns.map((c) => String(c).trim().slice(0, ROSTER_CELL_MAX)).filter(Boolean)
+    : [];
+  if (!columns.length) return badRequest("columns must be a non-empty array");
+  if (columns.length > ROSTER_COLUMNS_LIMIT) return badRequest(`max ${ROSTER_COLUMNS_LIMIT} columns`);
+  const uniqueIdColumn = String(body.unique_id_column).trim();
+  if (!columns.includes(uniqueIdColumn)) return badRequest("unique_id_column must be one of columns");
+  const rows = Array.isArray(body.rows) ? body.rows : null;
+  if (!rows || !rows.length) return badRequest("rows must be a non-empty array");
+  if (rows.length > ROSTER_LIMIT) return badRequest(`max ${ROSTER_LIMIT} roster rows`);
+
+  // Only known identity fields may be mapped, and only onto known columns.
+  const mapping = {};
+  for (const [field, column] of Object.entries(body.column_mapping || {})) {
+    if (!ROSTER_MAPPABLE_FIELDS.includes(field)) continue;
+    const col = String(column || "").trim();
+    if (col && columns.includes(col)) mapping[field] = col;
+  }
+
+  const version = randomUUID();
+  const now = new Date().toISOString();
+  const seen = new Set();
+  const entries = [];
+  const skipped = [];
+  rows.forEach((row, index) => {
+    const fields = {};
+    for (const column of columns) {
+      fields[column] = String(row?.[column] ?? "").trim().slice(0, ROSTER_CELL_MAX);
+    }
+    const uniqueId = fields[uniqueIdColumn];
+    if (!uniqueId) {
+      skipped.push({ row: index, reason: "empty_unique_id" });
+      return;
+    }
+    const entryId = rosterEntryId(normalizeUniqueId(uniqueId));
+    if (seen.has(entryId)) {
+      skipped.push({ row: index, reason: "duplicate_unique_id" });
+      return;
+    }
+    seen.add(entryId);
+    entries.push({
+      entryId,
+      item: {
+        unique_id: uniqueId,
+        unique_id_norm: normalizeUniqueId(uniqueId),
+        roster_version: version,
+        fields,
+        created_at: now
+      }
+    });
+  });
+  if (!entries.length) return badRequest("no valid roster rows (every row was skipped)");
+
+  await mapWithConcurrency(entries, 20, async ({ entryId, item }) => {
+    await firestore.collection(ROSTER_COLLECTION).doc(entryId).set(item);
+  });
+  await rosterMetaRef().set({
+    configured: true,
+    version,
+    unique_id_column: uniqueIdColumn,
+    column_mapping: mapping,
+    columns,
+    count: entries.length,
+    updated_at: now
+  });
+  return { ok: true, configured: true, count: entries.length, skipped };
+}
+
+// GET /api/admin/roster — meta summary ONLY (never the rows).
+async function adminGetRoster(req) {
+  requireAdmin(req);
+  const meta = await getRosterMeta();
+  if (!meta) return { configured: false };
+  return {
+    configured: true,
+    count: meta.count || 0,
+    unique_id_column: meta.unique_id_column || "",
+    column_mapping: meta.column_mapping || {},
+    columns: meta.columns || [],
+    updated_at: meta.updated_at || ""
+  };
 }
 
 // Run an async mapper over items with a bounded number of concurrent workers, so
@@ -2642,6 +2805,9 @@ function publicSettings(settings) {
     // recompute on read so an older settings doc (no stored slug) still reports
     // the right value. This is the slug all sure-shot alerts/sessions join on.
     contest_slug: settings?.contest_slug || contestSlugFromUrl(settings?.contest_url),
+    // S2: admin-configured room labels (student dropdown; later the invigilator
+    // portal). Sanitized + deduped on read as well as on save.
+    rooms: normalizeRooms(settings?.rooms),
     // Passcodes are removed (Phase 2, 0.1). These flags remain for backward
     // compatibility with any older admin UI; the backend no longer enforces them.
     passcode_set: Boolean(settings?.passcode_hash),
