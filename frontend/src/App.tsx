@@ -7,12 +7,20 @@ import { classifyStartError, createProctorRecorder, type MediaCaptureState, type
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
 // Slice 1: the single config-driven problem solved in our own Monaco editor.
-// Rendered inside StudentApp while recording is live; the contest_url
-// (HackerRank) path stays as a fallback until Slice 3 cuts over.
-const SLICE1_PROBLEM = {
+// When a problem is configured, the CodingWorkspace IS the coding surface
+// (design: own editor replaces HackerRank) — the contest_url "Start test" link
+// is NOT rendered. The link UI survives ONLY as the fallback for deployments
+// with no configured problem (set this to null to get the legacy link flow).
+type Slice1Problem = {
+  id: string;
+  title: string;
+  statement: string;
+  languages: readonly ("python" | "cpp" | "java" | "javascript")[];
+};
+const SLICE1_PROBLEM: Slice1Problem | null = {
   id: "sum-two", title: "Sum of Two Numbers",
   statement: "Read two integers a and b on one line separated by a space. Print a + b.",
-  languages: ["python","cpp","java","javascript"] as const
+  languages: ["python","cpp","java","javascript"]
 };
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
@@ -796,12 +804,14 @@ function StudentApp() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
               <h1 className="mt-2 text-2xl font-semibold text-ink">
-                {isFormStage ? "Register and start recording" : "HackerRank companion recording"}
+                {isFormStage ? "Register and start recording" : SLICE1_PROBLEM ? "Proctored coding test" : "HackerRank companion recording"}
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
                 {isFormStage
                   ? "Enter your details below, then start proctoring before you open the contest. When you start, your browser will ask which screen to share — choose Entire Screen."
-                  : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
+                  : SLICE1_PROBLEM
+                    ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
+                    : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
               </p>
             </div>
             <StatusPill status={status} />
@@ -883,7 +893,10 @@ function StudentApp() {
                 <PictureInPicture2 size={16} /> Camera pop-out
               </button>
             ) : null}
-            {status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error ? (
+            {/* Legacy external-contest fallback: shown ONLY when no Slice-1
+                problem is configured. With a problem configured the own-editor
+                CodingWorkspace below replaces this link entirely. */}
+            {!SLICE1_PROBLEM && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error ? (
               <a
                 className="focus-ring inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white"
                 href={contestUrl}
@@ -930,8 +943,10 @@ function StudentApp() {
 
       {/* Slice 1: own coding workspace (Monaco + Run/Submit), live only while
           recording so every editor event is tied to an actively recorded
-          session. The contest_url Start-test link above remains as a fallback. */}
-      {sessionId && status === "recording" && (
+          session. When a problem is configured this REPLACES the contest_url
+          Start-test surface (own editor replaces HackerRank); the link renders
+          only when SLICE1_PROBLEM is null. */}
+      {SLICE1_PROBLEM && sessionId && status === "recording" && (
         <div className="mt-5">
           <CodingWorkspace sessionId={sessionId} problem={SLICE1_PROBLEM} />
         </div>
@@ -971,7 +986,9 @@ function StudentStepBanner({ gate, status }: { gate: StudentGate; status: Sessio
   let hint = "Fill in your details and consent, then start proctoring.";
   if (status === "recording" || status === "ending") {
     activeIndex = 1;
-    hint = "Recording is active. Open HackerRank with the Start test button and keep this tab running. End the test here when you submit.";
+    hint = SLICE1_PROBLEM
+      ? "Recording is active. Solve the problem in the coding workspace below and keep this tab running. End the test here when you submit."
+      : "Recording is active. Open HackerRank with the Start test button and keep this tab running. End the test here when you submit.";
   } else if (gate === "running") {
     activeIndex = 1;
     hint = "Your session was restored. Press Resume recording to share your screen again and continue.";
