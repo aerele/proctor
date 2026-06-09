@@ -26,6 +26,8 @@ import type {
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
+  SessionDetail,
+  SessionDetailsResponse,
   SessionEvidence,
   SessionStartResponse,
   StudentForm,
@@ -546,6 +548,155 @@ export async function fetchRecordingSessions(password: string, contestSlug?: str
   }
 }
 
+// GET /api/admin/sessions-list — the ALL-DOCS (including zero-chunk) Sessions
+// drill-down that backs the stat-card counts. Unlike fetchRecordingSessions
+// (recorded-chunks-only playback picker), this lists EVERY session doc classified
+// by the SAME rules as the stat cards (status: '' = all; 'active' = active;
+// 'disconnected' = active && stale; literal otherwise), with room filtering — so
+// the list matches the cards and zero-chunk pending_approval sessions are reachable
+// for Approve. Returns `null` on 404 (endpoint not deployed yet) so the UI degrades
+// gracefully, same as fetchRecordingSessions. In demo mode it classifies the
+// SHARED admin population (DEMO_ALL_SESSIONS) — the SAME source fetchAdminStats
+// counts from, NOT the recording seeds — applying the same status + contest + room
+// filters and projecting the RecordingSession fields, so every drill-down list
+// count equals its stat card and the zero-chunk pending_approval sessions appear
+// with Approve exercisable.
+export async function fetchSessionsList(
+  password: string,
+  opts: { status?: string; contestSlug?: string; room?: string }
+): Promise<RecordingSession[] | null> {
+  const status = opts.status || "";
+  const contestSlug = opts.contestSlug || "";
+  const room = opts.room || "";
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const matchesStatus = (session: DemoAdminSessionRow) => {
+      switch (status) {
+        case "":
+          return true;
+        case "active":
+          return session.status === "active";
+        // "disconnected" = active && stale (newest liveness stamp older than the
+        // 45s window). Exactly the one old-heartbeat active row matches.
+        case "disconnected":
+          return session.status === "active" && session.stale === true;
+        case "locked":
+          return session.status === "locked";
+        case "pending_approval":
+          return session.status === "pending_approval";
+        case "ended":
+          return session.status === "ended";
+        default:
+          return false;
+      }
+    };
+    // Filter the SHARED admin population (same source the stat cards count from),
+    // so the drill-down list count always equals the card count for every status.
+    return DEMO_ALL_SESSIONS
+      .filter((session) => !contestSlug || session.contest_slug === contestSlug)
+      .filter((session) => !room || String(session.room || "") === room)
+      .filter(matchesStatus)
+      .map((session) => ({
+        session_id: session.session_id,
+        hackerrank_username: session.hackerrank_username || "",
+        name: session.name || "",
+        room: session.room || "",
+        contest_slug: session.contest_slug || "",
+        chunk_count: session.chunk_count,
+        created_at: session.created_at,
+        status: session.status || ""
+      }));
+  }
+
+  const query = new URLSearchParams();
+  if (status) query.set("status", status);
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  if (room) query.set("room", room);
+  const suffix = query.toString();
+  try {
+    const response = await request<RecordingSessionsResponse>(
+      `/api/admin/sessions-list${suffix ? `?${suffix}` : ""}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.sessions;
+  } catch (cause) {
+    // Endpoint not deployed yet → degrade gracefully (same as fetchRecordingSessions).
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// ---- Shared demo ADMIN dataset -------------------------------------------
+// The full session population the admin stat cards summarize AND the Sessions
+// drill-down list. In production both fetchAdminStats and fetchSessionsList read
+// the SAME Firestore session docs, so the card count always equals the list count
+// for every status. In demo mode we mirror that by deriving BOTH from this single
+// source — instead of the cards using a canned object while the list filtered the
+// near-empty live-session store (which made them disagree).
+//
+// Distribution (total 23): 6 active (exactly ONE stale → disconnected = 1),
+// 1 locked, 2 pending_approval (zero-chunk second-device sessions), 14 ended.
+type DemoAdminSessionRow = {
+  session_id: string;
+  hackerrank_username: string;
+  name: string;
+  room: string;
+  contest_slug: string;
+  status: "active" | "locked" | "pending_approval" | "ended";
+  chunk_count: number;
+  created_at: string;
+  // Deterministic "disconnected" marker: true on the one active row that should
+  // derive as disconnected, falsy/omitted on every other row. A flag (not
+  // wall-clock math) so the demo counts never drift as the page stays open.
+  stale?: boolean;
+};
+
+const DEMO_CONTEST_SLUG = "mcet-june-2026"; // the slug DEMO_RECORDING_SESSIONS uses
+
+// Base "now" for the demo created_at stamps, captured once at module load.
+const DEMO_NOW_MS = Date.now();
+const demoCreated = (offsetMin: number) => new Date(DEMO_NOW_MS - offsetMin * 60_000).toISOString();
+
+// The full demo admin session population both fetchAdminStats and fetchSessionsList
+// derive from — the single shared source that keeps every card count == its
+// drill-down list count.
+const DEMO_ALL_SESSIONS: DemoAdminSessionRow[] = [
+  // 6 active: 5 fresh + 1 stale (the stale one derives as disconnected).
+  { session_id: "live-arav-1a01", hackerrank_username: "Arav_M", name: "Arav Menon", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "active", chunk_count: 12, created_at: demoCreated(20) },
+  { session_id: "live-divya-1a02", hackerrank_username: "Divya_P", name: "Divya Pillai", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "active", chunk_count: 9, created_at: demoCreated(18) },
+  { session_id: "live-rohan-1a03", hackerrank_username: "Rohan_K", name: "Rohan Krishnan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "active", chunk_count: 15, created_at: demoCreated(22) },
+  { session_id: "live-sneha-1a04", hackerrank_username: "Sneha_B", name: "Sneha Bhat", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "active", chunk_count: 7, created_at: demoCreated(15) },
+  { session_id: "live-aditya-1a05", hackerrank_username: "Aditya_R", name: "Aditya Raghavan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "active", chunk_count: 11, created_at: demoCreated(19) },
+  // The ONE stale active row → derived "disconnected" (count = 1).
+  { session_id: "live-meera-1a06", hackerrank_username: "Meera_S", name: "Meera Subramani", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "active", chunk_count: 6, created_at: demoCreated(17), stale: true },
+  // 1 locked.
+  { session_id: "live-imran-2b01", hackerrank_username: "Imran_K", name: "Imran Khan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "locked", chunk_count: 8, created_at: demoCreated(16) },
+  // 2 pending_approval — zero-chunk second-device sessions (the case the fix
+  // makes reachable; these render the Approve action in the drill-down).
+  { session_id: "live-fatima-3c01", hackerrank_username: "Fatima_A", name: "Fatima Ansari", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "pending_approval", chunk_count: 0, created_at: demoCreated(4) },
+  { session_id: "live-vivek-3c02", hackerrank_username: "Vivek_N", name: "Vivek Nair", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "pending_approval", chunk_count: 0, created_at: demoCreated(3) },
+  // 14 ended.
+  { session_id: "live-asha-4d01", hackerrank_username: "Asha_R", name: "Asha Ramanathan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 18, created_at: demoCreated(120) },
+  { session_id: "live-karan-4d02", hackerrank_username: "Karan_V", name: "Karan Verma", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 16, created_at: demoCreated(118) },
+  { session_id: "live-neha-4d03", hackerrank_username: "Neha_S", name: "Neha Sharma", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 20, created_at: demoCreated(115) },
+  { session_id: "live-vikram-4d04", hackerrank_username: "Vikram_T", name: "Vikram Thiagarajan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 22, created_at: demoCreated(110) },
+  { session_id: "live-priya-4d05", hackerrank_username: "Priya_G", name: "Priya Gopal", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 14, created_at: demoCreated(108) },
+  { session_id: "live-sanjay-4d06", hackerrank_username: "Sanjay_M", name: "Sanjay Murthy", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 17, created_at: demoCreated(105) },
+  { session_id: "live-lakshmi-4d07", hackerrank_username: "Lakshmi_V", name: "Lakshmi Venkat", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 19, created_at: demoCreated(102) },
+  { session_id: "live-arjun-4d08", hackerrank_username: "Arjun_D", name: "Arjun Das", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 13, created_at: demoCreated(100) },
+  { session_id: "live-pooja-4d09", hackerrank_username: "Pooja_I", name: "Pooja Iyer", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 21, created_at: demoCreated(98) },
+  { session_id: "live-rahul-4d10", hackerrank_username: "Rahul_J", name: "Rahul Joshi", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 15, created_at: demoCreated(95) },
+  { session_id: "live-anita-4d11", hackerrank_username: "Anita_C", name: "Anita Chandran", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 18, created_at: demoCreated(92) },
+  { session_id: "live-deepak-4d12", hackerrank_username: "Deepak_R", name: "Deepak Rao", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 16, created_at: demoCreated(90) },
+  { session_id: "live-kavya-4d13", hackerrank_username: "Kavya_N", name: "Kavya Nambiar", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 23, created_at: demoCreated(88) },
+  { session_id: "live-suresh-4d14", hackerrank_username: "Suresh_B", name: "Suresh Babu", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 12, created_at: demoCreated(85) }
+];
+
+// Demo "disconnected" is a deterministic per-row `stale` flag on DEMO_ALL_SESSIONS
+// (not wall-clock math), so the demo counts never drift as the page stays open.
+// Production uses the real backend isStaleSession (handler.mjs) over live heartbeats.
+
 // GET /api/admin/submission-events — the SUBMISSION-TIME MARKERS for one user's
 // recording-review timeline (GREEN valid / RED invalid). Returns `null` on a 404
 // (endpoint not deployed yet) so the timeline simply renders WITHOUT markers
@@ -782,33 +933,31 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
-    const sessions = readDemoSessions();
-    // Distinct rooms come from the demo session store (contest-scoped, BEFORE the
-    // room filter) so the dropdown stays full. Fall back to the demo alert rooms
-    // when no sessions exist yet so the canned-number path still has a dropdown.
-    const demoRooms = sessions.length
-      ? [...new Set(sessions.filter((s) => !contestSlug || s.contest_slug === contestSlug).map((s) => String(s.room || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b))
-      : distinctDemoRooms(readDemoAlerts(), contestSlug);
-    // Derive live counts from the demo session store so the dashboard reflects
-    // whatever the student flow created. Fall back to canned numbers when empty.
-    if (!sessions.length) {
-      const canned = { live: 6, locked: 1, pending_approval: 2, finished: 14, disconnected: 1, total: 23, not_started_or_total: 23 };
-      return {
-        contest_slug: contestSlug || null,
-        room: room || null,
-        stats: canned,
-        rooms: demoRooms,
-        disconnected_staleness_ms: 45000
-      };
-    }
+    // Count from the SHARED admin population — the SAME source fetchSessionsList
+    // filters — so each card count equals its drill-down list count, mirroring
+    // production (where stats and sessions-list both read the same session docs).
+    const all = DEMO_ALL_SESSIONS;
+    // Distinct rooms come from the contest-scoped population BEFORE the room
+    // filter, so the Room dropdown stays full while the filter re-scopes counts.
+    const demoRooms = [
+      ...new Set(
+        all
+          .filter((s) => !contestSlug || s.contest_slug === contestSlug)
+          .map((s) => String(s.room || "").trim())
+          .filter(Boolean)
+      )
+    ].sort((a, b) => a.localeCompare(b));
     const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, total: 0, not_started_or_total: 0 };
-    for (const session of sessions) {
+    for (const session of all) {
       if (contestSlug && session.contest_slug !== contestSlug) continue;
       // Room scopes the COUNTS (but not the rooms dropdown, computed above).
       if (room && String(session.room || "") !== room) continue;
       stats.total += 1;
-      if (session.status === "active") stats.live += 1;
-      else if (session.status === "locked") stats.locked += 1;
+      if (session.status === "active") {
+        stats.live += 1;
+        // disconnected = active && stale (derived, not a separate status).
+        if (session.stale === true) stats.disconnected += 1;
+      } else if (session.status === "locked") stats.locked += 1;
       else if (session.status === "pending_approval") stats.pending_approval += 1;
       else if (session.status === "ended") stats.finished += 1;
     }
@@ -1357,6 +1506,85 @@ export async function fetchAllReviews(password: string): Promise<ReviewRecord[] 
     if ((cause as ApiError)?.status === 404) return null;
     throw cause;
   }
+}
+
+// POST /api/admin/session-details {usernames, contest_slug?} → one detail row per
+// INPUT username (in input order; found:false with blank fields when no session
+// matched). Backs the operator's "Download all details" CSV. Returns `null` on a
+// 404 (endpoint not deployed yet) so the button degrades gracefully. In demo mode
+// it resolves details from the demo session store + recording seeds.
+export async function fetchSessionDetails(
+  password: string,
+  usernames: string[],
+  contestSlug?: string
+): Promise<SessionDetail[] | null> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    return usernames.map((username) => demoSessionDetailFor(username, contestSlug));
+  }
+  try {
+    const response = await request<SessionDetailsResponse>("/api/admin/session-details", {
+      method: "POST",
+      headers: { "x-admin-password": password },
+      body: JSON.stringify({ usernames, contest_slug: contestSlug })
+    });
+    return response.details;
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// Resolve one demo session-detail row for a username (input order preserved by the
+// caller). Looks first at the demo student session store, then the recording seeds;
+// `found:false` (blank fields) when neither matches the username/contest scope.
+// The demo data carries no email/roll_number, so those stay blank in demo.
+function demoSessionDetailFor(username: string, contestSlug?: string): SessionDetail {
+  const usernameNorm = normalizeUsername(username);
+  const session = readDemoSessions().find(
+    (item) => item.username_norm === usernameNorm && (!contestSlug || item.contest_slug === contestSlug)
+  );
+  if (session) {
+    return {
+      username,
+      hackerrank_username: session.hackerrank_username,
+      name: session.name,
+      email: "",
+      roll_number: "",
+      room: session.room,
+      contest_slug: session.contest_slug,
+      status: session.status,
+      found: true
+    };
+  }
+  const seed = DEMO_RECORDING_SESSIONS.find(
+    (item) => item.username_norm === usernameNorm && (!contestSlug || item.contest_slug === contestSlug)
+  );
+  if (seed) {
+    return {
+      username,
+      hackerrank_username: seed.hackerrank_username,
+      name: seed.name,
+      email: "",
+      roll_number: "",
+      room: seed.room,
+      contest_slug: seed.contest_slug,
+      status: seed.status,
+      found: true
+    };
+  }
+  return {
+    username,
+    hackerrank_username: "",
+    name: "",
+    email: "",
+    roll_number: "",
+    room: "",
+    contest_slug: contestSlug ?? "",
+    status: "",
+    found: false
+  };
 }
 
 // ---- Demo review store ----------------------------------------------------

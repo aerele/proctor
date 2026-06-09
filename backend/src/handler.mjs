@@ -108,10 +108,12 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
     if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
+    if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
     if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
+    if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
     if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
     if (req.method === "GET" && path === "/api/admin/alerts") return send(res, 200, await adminAlerts(req));
     if (req.method === "POST" && path === "/api/admin/alert-action") return send(res, 200, await adminAlertAction(req));
@@ -847,6 +849,56 @@ async function adminRecordingSessions(req) {
   return { sessions };
 }
 
+// Sessions drill-down (admin): the ALL-DOCS (including zero-chunk) counterpart
+// to adminRecordingSessions. adminRecordingSessions intentionally lists only
+// sessions that actually recorded chunks (the playback picker), so it CANNOT
+// back the stat-card drill-down — a pending_approval second-device session has
+// chunk_count:0 and would be filtered out, hiding the very rows the
+// pending_approval Approve action needs to reach. This endpoint lists EVERY
+// session doc, classifies each by the SAME rules as adminStats (so the row
+// counts match the stat-card counts exactly), and supports room filtering, so
+// the console's per-stat-card drill-down lands on the right sessions.
+async function adminSessionsList(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+  const room = normalizeRoomFilter(req.query?.room);
+  const status = String(req.query?.status || "");
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  let docs = snapshot.docs.map((doc) => doc.data());
+  if (room) docs = docs.filter((doc) => String(doc.room || "") === room);
+  const nowMs = Date.now();
+  const matchesStatus = (doc) => {
+    switch (status) {
+      case "": return true;
+      case "active": return doc.status === "active";
+      case "disconnected": return doc.status === "active" && isStaleSession(doc, nowMs);
+      case "locked": return doc.status === "locked";
+      case "pending_approval": return doc.status === "pending_approval";
+      case "ended": return doc.status === "ended";
+      default: return false;
+    }
+  };
+  const sessions = docs
+    .filter(matchesStatus)
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+    .slice(0, 500)
+    .map((doc) => ({
+      session_id: doc.session_id,
+      hackerrank_username: doc.hackerrank_username || "",
+      name: doc.name || "",
+      room: doc.room || "",
+      contest_slug: doc.contest_slug || "",
+      chunk_count: Number(doc.chunk_count || 0),
+      created_at: doc.created_at || "",
+      status: doc.status || ""
+    }));
+  return { sessions };
+}
+
 // ---- Submission-time markers (poller-sourced) -----------------------------
 //
 // The contest-eval poller POSTs every code submission a student made (valid =
@@ -1186,6 +1238,85 @@ async function applySessionAction(action, session) {
   }
 
   return null;
+}
+
+// POST /api/admin/session-details — bulk-resolve student details for a list of
+// usernames, projected STRAIGHT from the session doc with ZERO GCS access. The
+// frontend roster view calls this with up to REVIEW_ROSTER_LIMIT usernames at
+// once, so it MUST NOT touch the bucket: a per-username endpoint that lists or
+// signs GCS objects (like adminSessions) re-creates the Cloud Run 500 fan-out.
+// adminRecordingSessions is unusable here because it omits email + roll_number.
+//
+// Response `details` preserves the INPUT order one-to-one; each input username
+// echoes back as `username` whether or not a session was found.
+async function adminSessionDetails(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  if (!Array.isArray(body.usernames)) return badRequest("usernames must be an array");
+  if (body.usernames.length > REVIEW_ROSTER_LIMIT) {
+    return badRequest(`Too many usernames in one request (max ${REVIEW_ROSTER_LIMIT})`);
+  }
+  const contestSlug = body.contest_slug !== undefined && body.contest_slug !== null
+    ? String(body.contest_slug)
+    : null;
+
+  // Bounded concurrency is SAFE here precisely because there is ZERO GCS — each
+  // worker does a single Firestore query — so a 5000-username call stays a
+  // reasonable fan-out of Firestore reads, never a GCS/IAM storm.
+  const details = await mapWithConcurrency(body.usernames, 12, async (u) => {
+    const blank = {
+      username: u,
+      hackerrank_username: "",
+      name: "",
+      email: "",
+      roll_number: "",
+      room: "",
+      contest_slug: "",
+      status: "",
+      found: false
+    };
+    const norm = normalizeUsername(u);
+    // A degenerate norm ('_') comes from a blank/'@'/'..'-style input that carries
+    // NO real username (sanitizeSegment collapses it). Querying username_norm=='_'
+    // would mass-match every such doc and project a wrong student, so don't query —
+    // emit the blank found:false record for that input.
+    if (norm === "_") return blank;
+    // normalizeUsername does NOT strip a leading '@' (sanitizeSegment maps it to
+    // '_'), so an '@alice' input normalizes to '_alice' while the student started
+    // as plain 'alice'. ONLY when the RAW input begins with '@' do we ALSO query
+    // the de-@ form, so '@alice' resolves to stored 'alice'. We must NOT derive the
+    // alt form from norm's leading '_' (that would conflate a GENUINE '_alice'
+    // username with 'alice').
+    const trimmed = String(u).trim();
+    const usernames = [norm];
+    if (trimmed.startsWith("@")) {
+      const deAt = normalizeUsername(trimmed.slice(1));
+      if (deAt !== "_" && !usernames.includes(deAt)) usernames.push(deAt);
+    }
+    let query = firestore
+      .collection(SESSION_COLLECTION)
+      .where("username_norm", "in", usernames);
+    if (contestSlug !== null) query = query.where("contest_slug", "==", contestSlug);
+    const snapshot = await query.limit(50).get();
+    const docs = snapshot.docs
+      .map((doc) => doc.data())
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    if (!docs.length) return blank;
+    const doc = docs[0];
+    return {
+      username: u,
+      hackerrank_username: doc.hackerrank_username || "",
+      name: doc.name || "",
+      email: doc.email || "",
+      roll_number: doc.roll_number || "",
+      room: doc.room || "",
+      contest_slug: doc.contest_slug || "",
+      status: doc.status || "",
+      found: true
+    };
+  });
+
+  return { details };
 }
 
 // ---- Multi-reviewer recording review (Phase 2) ----------------------------

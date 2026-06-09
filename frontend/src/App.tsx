@@ -1,9 +1,9 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, ListChecks, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -1072,7 +1072,13 @@ function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }:
   );
 }
 
-type AdminView = "stats" | "alerts" | "review" | "recordings" | "settings";
+type AdminView = "stats" | "alerts" | "sessions" | "review" | "recordings" | "settings";
+
+// A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
+// AdminStats card labels. "" = no status filter (the Total card). "disconnected"
+// has no literal session-doc status (it is a derived liveness state), so the
+// Sessions list treats it as the active sessions and shows an explanatory note.
+type SessionsStatusFilter = "" | "active" | "locked" | "pending_approval" | "ended" | "disconnected";
 
 function AdminApp() {
   const [view, setView] = useState<AdminView>("stats");
@@ -1106,6 +1112,14 @@ function AdminApp() {
   const [rosterMessage, setRosterMessage] = useState("");
   const [rosterUnavailable, setRosterUnavailable] = useState(false);
   const [exportingReviews, setExportingReviews] = useState(false);
+  // B: "Download all details" CSV button busy state (mirrors exportingReviews).
+  const [downloadingDetails, setDownloadingDetails] = useState(false);
+  // A2/A4: the GCS-free Sessions drill-down — its list, loading flag, and the
+  // status the active stat-card drilled into ("" = Total, no status filter).
+  const [sessionsList, setSessionsList] = useState<RecordingSession[] | null>(null);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsStatusFilter, setSessionsStatusFilter] = useState<SessionsStatusFilter>("");
+  const [sessionsUnavailable, setSessionsUnavailable] = useState(false);
 
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
@@ -1138,6 +1152,50 @@ function AdminApp() {
     } finally {
       setStatsLoading(false);
     }
+  };
+
+  // A2/A4: load the GCS-free Sessions drill-down list from the sessions-list
+  // endpoint, which returns ALL session docs classified by the SAME rules as the
+  // stat cards (so the list matches the card counts) and reaches zero-chunk
+  // pending_approval sessions the recorded-chunks-only picker would hide. The status
+  // is SERVER-driven: callers pass it explicitly via statusOverride to dodge the
+  // setState race (drillToSessions / the status dropdown set the filter state and
+  // load in the same tick, so reading sessionsStatusFilter here would be stale).
+  // A null response means the sessions-list endpoint is not deployed yet → the
+  // Sessions view shows a "not available" note.
+  const loadSessions = async (filters?: AlertFilters, statusOverride?: SessionsStatusFilter) => {
+    setSessionsLoading(true);
+    setError("");
+    try {
+      const active = filters ?? alertFilters;
+      const status = statusOverride ?? sessionsStatusFilter;
+      const list = await fetchSessionsList(password, {
+        status,
+        contestSlug: active.contest_slug,
+        room: active.room
+      });
+      if (list === null) {
+        setSessionsUnavailable(true);
+        setSessionsList([]);
+        return;
+      }
+      setSessionsUnavailable(false);
+      setSessionsList(list);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSessionsLoading(false);
+    }
+  };
+
+  // A2: open the Sessions drill-down from a clicked stat card. Sets the status
+  // filter, switches to the Sessions view, and loads the list under the current
+  // contest scope. The chosen status is passed EXPLICITLY into loadSessions so the
+  // right status loads without depending on the just-set (and still-stale) state.
+  const drillToSessions = (status: SessionsStatusFilter) => {
+    setSessionsStatusFilter(status);
+    setView("sessions");
+    void loadSessions(undefined, status);
   };
 
   // Auto-load alerts the first time the unlocked admin opens the alerts tab.
@@ -1383,6 +1441,22 @@ function AdminApp() {
     }
   };
 
+  // A4: APPROVE a pending session from the Sessions drill-down. Reuses the
+  // sessionAction plumbing ({action:'approve', session_id}), shows a transient
+  // success/error, then reloads the Sessions list and the live stats.
+  const approveSession = async (session: RecordingSession) => {
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await sessionAction(password, { action: "approve", session_id: session.session_id });
+      setActionMessage(`Approved ${session.hackerrank_username} (${response.updated.length} session(s)).`);
+      await loadSessions();
+      await loadStats();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   const loadAlertSettings = async () => {
     setAlertSettingsLoading(true);
     setError("");
@@ -1493,6 +1567,44 @@ function AdminApp() {
     }
   };
 
+  // DOWNLOAD ALL DETAILS CSV: resolve a candidate-detail row for each pasted
+  // username (POST /api/admin/session-details), build a CSV
+  // (header username,name,email,roll_number,room) with ONE row per INPUT username
+  // (blank cells when the candidate was not found, so the operator sees who is
+  // missing), and trigger a client download — mirrors exportReviewsCsv.
+  const downloadDetailsCsv = async () => {
+    setDownloadingDetails(true);
+    setRosterMessage("");
+    setError("");
+    try {
+      const usernames = parseRosterInput(rosterText);
+      const details = await fetchSessionDetails(password, usernames, alertFilters.contest_slug);
+      if (details === null) {
+        setRosterUnavailable(true);
+        return;
+      }
+      setRosterUnavailable(false);
+      const csv = buildDetailsCsv(details);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "candidate-details.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const missing = details.filter((d) => !d.found).length;
+      setRosterMessage(
+        `Exported details for ${details.length} username${details.length === 1 ? "" : "s"} to candidate-details.csv${missing ? ` (${missing} not found)` : ""}.`
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDownloadingDetails(false);
+    }
+  };
+
   // Auto-load the review roster summary the first time the Settings tab opens.
   useEffect(() => {
     if (!unlocked || view !== "settings" || rosterSummary !== null || rosterUnavailable) return;
@@ -1567,10 +1679,30 @@ function AdminApp() {
       <nav className="mb-5 flex flex-wrap gap-2" aria-label="Admin views">
         <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
         <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
+        <AdminTab active={view === "sessions"} onClick={() => { setView("sessions"); void loadSessions(); }} icon={<Users size={16} />} label="Sessions" />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
         <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
         <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
       </nav>
+
+      {/* A1: GLOBAL CONTEST FILTER — below the nav so it scopes EVERY tab. */}
+      <ContestFilterBanner
+        contestSlug={alertFilters.contest_slug ?? ""}
+        onApply={(slug) => {
+          const next = { ...alertFilters, contest_slug: slug };
+          setAlertFilters(next);
+          void loadStats(next);
+          if (alertsLoaded) void loadAlerts(next);
+          if (sessionsList !== null) void loadSessions(next);
+        }}
+        onClear={() => {
+          const next = { ...alertFilters, contest_slug: undefined };
+          setAlertFilters(next);
+          void loadStats(next);
+          if (alertsLoaded) void loadAlerts(next);
+          if (sessionsList !== null) void loadSessions(next);
+        }}
+      />
 
       {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
       {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
@@ -1587,6 +1719,26 @@ function AdminApp() {
             setAlertFilters(next);
             void loadStats(next);
           }}
+          onDrill={drillToSessions}
+        />
+      ) : null}
+
+      {view === "sessions" ? (
+        <SessionsView
+          sessions={sessionsList}
+          loading={sessionsLoading}
+          unavailable={sessionsUnavailable}
+          statusFilter={sessionsStatusFilter}
+          onStatusFilterChange={(status) => {
+            // The status filter is SERVER-side now: update the state AND reload the
+            // list with the new status passed explicitly (the state is still stale
+            // this tick), so the list re-matches the server-classified counts.
+            setSessionsStatusFilter(status);
+            void loadSessions(undefined, status);
+          }}
+          contestSlug={alertFilters.contest_slug ?? ""}
+          onRefresh={() => loadSessions()}
+          onApprove={(session) => void approveSession(session)}
         />
       ) : null}
 
@@ -1643,11 +1795,13 @@ function AdminApp() {
         summary={rosterSummary}
         loading={rosterLoading}
         exporting={exportingReviews}
+        downloadingDetails={downloadingDetails}
         message={rosterMessage}
         unavailable={rosterUnavailable}
         onSave={() => void saveReviewRosterNow()}
         onReload={() => void loadReviewRoster()}
         onExport={() => void exportReviewsCsv()}
+        onDownloadDetails={() => void downloadDetailsCsv()}
       />
 
       <ProctorAlertTypesSection
@@ -1688,7 +1842,7 @@ function AdminApp() {
       </>
       ) : null}
 
-      {view === "recordings" ? <RecordingReview password={password} /> : null}
+      {view === "recordings" ? <RecordingReview password={password} contestSlug={alertFilters.contest_slug} /> : null}
     </Shell>
   );
 }
@@ -1825,6 +1979,23 @@ function buildReviewsCsv(reviews: Array<{ username: string; reviewer_name: strin
   return [header, ...rows].join("\n");
 }
 
+// Build the candidate-details CSV: header `username,name,email,roll_number,room`,
+// one row per INPUT username (blank cells when the candidate was not found so the
+// operator can see who is missing). Every field goes through csvField (escaping).
+function buildDetailsCsv(details: SessionDetail[]): string {
+  const header = "username,name,email,roll_number,room";
+  const rows = details.map((d) =>
+    [
+      csvField(d.username),
+      csvField(d.found ? d.name : ""),
+      csvField(d.found ? d.email : ""),
+      csvField(d.found ? d.roll_number : ""),
+      csvField(d.found ? d.room : "")
+    ].join(",")
+  );
+  return [header, ...rows].join("\n");
+}
+
 // SETTINGS tab — REVIEW ROSTER. The operator pastes the usernames to be reviewed
 // (comma or newline separated; parsed/deduped client-side too), saves them, sees
 // a coverage summary, and exports all collected verdicts as a CSV. Degrades to a
@@ -1835,22 +2006,26 @@ function ReviewRosterSection({
   summary,
   loading,
   exporting,
+  downloadingDetails,
   message,
   unavailable,
   onSave,
   onReload,
-  onExport
+  onExport,
+  onDownloadDetails
 }: {
   text: string;
   onTextChange: (value: string) => void;
   summary: ReviewRosterSummary | null;
   loading: boolean;
   exporting: boolean;
+  downloadingDetails: boolean;
   message: string;
   unavailable: boolean;
   onSave: () => void;
   onReload: () => void;
   onExport: () => void;
+  onDownloadDetails: () => void;
 }) {
   // Live client-side count of what's currently in the textarea (after split/dedupe).
   const parsedCount = useMemo(() => parseRosterInput(text).length, [text]);
@@ -1901,6 +2076,13 @@ function ReviewRosterSection({
             >
               <Download size={16} className={exporting ? "animate-pulse" : undefined} /> {exporting ? "Exporting…" : "Export reviews CSV"}
             </button>
+            <button
+              className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50"
+              onClick={onDownloadDetails}
+              disabled={downloadingDetails || !parsedCount}
+            >
+              <Download size={16} className={downloadingDetails ? "animate-pulse" : undefined} /> {downloadingDetails ? "Downloading…" : "Download all details"}
+            </button>
           </div>
 
           {/* SUMMARY LINE from GET review-roster. */}
@@ -1927,7 +2109,68 @@ function ReviewRosterSection({
   );
 }
 
-function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void; rooms: string[]; room: string; onRoomChange: (room: string) => void }) {
+// A1: GLOBAL CONTEST FILTER banner, rendered below the nav so it shows on EVERY
+// tab. When a slug is set it shows an active chip with a Clear button; when empty
+// it shows a compact labeled input. Applying/clearing rescopes Stats, Alerts,
+// Sessions, and Recordings (the parent re-loads loaded data; the 5s poll re-keys
+// for Stats/Alerts only). Sessions is NOT auto-polled — the poll effect guards on
+// view==='stats'||'alerts' — so the parent re-loads the Sessions list explicitly
+// (on tab-open, stat-card drill, status change, Refresh, and post-approve).
+function ContestFilterBanner({ contestSlug, onApply, onClear }: { contestSlug: string; onApply: (slug: string) => void; onClear: () => void }) {
+  const [draft, setDraft] = useState("");
+  if (contestSlug) {
+    return (
+      <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-accent/30 bg-accent/5 p-3 text-sm">
+        <span className="inline-flex items-center gap-2 text-accent">
+          <ListFilter size={16} />
+          <span className="font-medium text-ink">Contest filter active:</span>
+          <span className="font-mono font-semibold text-ink">{contestSlug}</span>
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          className="focus-ring ml-auto inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-white px-3 text-xs font-medium text-ink hover:border-ink/40"
+        >
+          <X size={14} /> Clear
+        </button>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="mb-5 flex flex-wrap items-end gap-3 rounded-lg border border-line bg-panel p-3 shadow-subtle"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const next = draft.trim();
+        if (next) {
+          onApply(next);
+          setDraft("");
+        }
+      }}
+    >
+      <label className="block">
+        <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
+          <ListFilter size={13} /> Filter by contest slug
+        </span>
+        <input
+          className="focus-ring mt-1 h-9 w-56 rounded-md border border-line bg-white px-3 text-sm"
+          value={draft}
+          placeholder="all contests"
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={!draft.trim()}
+        className="focus-ring inline-flex h-9 items-center gap-1.5 rounded-md bg-ink px-4 text-xs font-medium text-white disabled:opacity-50"
+      >
+        Apply
+      </button>
+    </form>
+  );
+}
+
+function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange, onDrill }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void; rooms: string[]; room: string; onRoomChange: (room: string) => void; onDrill: (status: SessionsStatusFilter) => void }) {
   return (
     <section className="space-y-5">
       <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -1953,13 +2196,141 @@ function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange }
         <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading stats…" : "No stats loaded yet."}</div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-          <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} />
-          <StatCard label="Disconnected" value={stats.disconnected ?? 0} tone="danger" icon={<Activity size={18} />} />
-          <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} />
-          <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} />
-          <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} />
-          <StatCard label="Total" value={stats.total} tone="ink" icon={<Users size={18} />} />
+          <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} onClick={() => onDrill("active")} />
+          <StatCard label="Disconnected" value={stats.disconnected ?? 0} tone="danger" icon={<Activity size={18} />} onClick={() => onDrill("disconnected")} />
+          <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} onClick={() => onDrill("locked")} />
+          <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} onClick={() => onDrill("pending_approval")} />
+          <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} onClick={() => onDrill("ended")} />
+          <StatCard label="Total" value={stats.total} tone="ink" icon={<Users size={18} />} onClick={() => onDrill("")} />
           <StatCard label="Not started / total" value={stats.not_started_or_total ?? stats.total} tone="muted" icon={<Users size={18} />} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+// A2: status-filter options for the Sessions drill-down. "disconnected" has no
+// literal session-doc status (derived liveness), so the list treats it as the
+// active sessions and the view shows an explanatory note.
+const SESSIONS_STATUS_OPTIONS: Array<{ value: SessionsStatusFilter; label: string }> = [
+  { value: "", label: "All statuses" },
+  { value: "active", label: "Live" },
+  { value: "disconnected", label: "Disconnected" },
+  { value: "locked", label: "Locked" },
+  { value: "pending_approval", label: "Pending approval" },
+  { value: "ended", label: "Finished" }
+];
+
+// A2/A4: the GCS-free SESSIONS drill-down — a lightweight table of sessions from
+// fetchSessionsList (ALL session docs classified server-side to match the stat
+// cards), scoped to the global contest filter and room. The status filter is now
+// SERVER-side: changing it reloads from the server, so the rows already arrive
+// status-filtered and we render them directly (no client-side double-filtering).
+// When filtered to pending_approval, each row shows an Approve quick action (A4) —
+// which now reaches zero-chunk pending_approval sessions. Opened by clicking a stat
+// card on the Live stats dashboard.
+function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFilterChange, contestSlug, onRefresh, onApprove }: {
+  sessions: RecordingSession[] | null;
+  loading: boolean;
+  unavailable: boolean;
+  statusFilter: SessionsStatusFilter;
+  onStatusFilterChange: (status: SessionsStatusFilter) => void;
+  contestSlug: string;
+  onRefresh: () => void;
+  onApprove: (session: RecordingSession) => void;
+}) {
+  // The server already returns the rows status-filtered (classified to match the
+  // stat-card counts), so render them directly — no client-side re-filtering.
+  const rows = sessions ?? [];
+
+  return (
+    <section className="space-y-5">
+      <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Users size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">Sessions</h1>
+              <p className="mt-1 text-sm text-muted">
+                Drill into sessions by status{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}. Click a stat card on Live stats to jump straight to a status.
+              </p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <FilterSelect
+            label="Status"
+            value={statusFilter}
+            options={SESSIONS_STATUS_OPTIONS}
+            onChange={(value) => onStatusFilterChange(value as SessionsStatusFilter)}
+          />
+          <p className="text-xs text-muted">
+            Showing <span className="font-medium text-ink">{rows.length}</span> session{rows.length === 1 ? "" : "s"}.
+          </p>
+        </div>
+        {statusFilter === "disconnected" ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle size={14} /> "Disconnected" is a derived liveness state — the server classifies these as active sessions whose latest liveness signal has gone stale.
+          </p>
+        ) : null}
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          <AlertTriangle size={16} className="mr-2 inline" />
+          The sessions-list endpoint is not deployed yet, so the Sessions list is unavailable. Live stats still work; deploy the sessions-list API to enable this drill-down.
+        </div>
+      ) : sessions === null ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading sessions…" : "No sessions loaded yet."}</div>
+      ) : rows.length === 0 ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No sessions match this status.</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-line bg-panel shadow-subtle">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
+                <th className="px-4 py-3 font-semibold">Candidate</th>
+                <th className="px-4 py-3 font-semibold">Room</th>
+                <th className="px-4 py-3 font-semibold">Contest</th>
+                <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Chunks</th>
+                <th className="px-4 py-3 font-semibold">Started</th>
+                {statusFilter === "pending_approval" ? <th className="px-4 py-3 font-semibold">Action</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s) => (
+                <tr key={s.session_id} className="border-b border-line/60 last:border-0">
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-ink">{s.hackerrank_username}</div>
+                    {s.name ? <div className="text-xs text-muted">{s.name}</div> : null}
+                  </td>
+                  <td className="px-4 py-3 text-muted">{s.room || "—"}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-muted">{s.contest_slug || "—"}</td>
+                  <td className="px-4 py-3">
+                    <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{s.status}</span>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-muted">{s.chunk_count}</td>
+                  <td className="px-4 py-3 text-xs text-muted">{s.created_at ? new Date(s.created_at).toLocaleString() : "—"}</td>
+                  {statusFilter === "pending_approval" ? (
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => onApprove(s)}
+                        disabled={s.status !== "pending_approval"}
+                        className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                      >
+                        <CheckCircle2 size={14} /> Approve
+                      </button>
+                    </td>
+                  ) : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </section>
@@ -1982,7 +2353,7 @@ function RoomFilter({ rooms, value, onChange }: { rooms: string[]; value: string
   );
 }
 
-function StatCard({ label, value, tone, icon }: { label: string; value: number; tone: "accent" | "danger" | "warning" | "muted" | "ink"; icon: React.ReactNode }) {
+function StatCard({ label, value, tone, icon, onClick }: { label: string; value: number; tone: "accent" | "danger" | "warning" | "muted" | "ink"; icon: React.ReactNode; onClick?: () => void }) {
   const toneStyles: Record<typeof tone, string> = {
     accent: "border-accent/30 bg-accent/5 text-accent",
     danger: "border-danger/30 bg-danger/5 text-danger",
@@ -1990,15 +2361,29 @@ function StatCard({ label, value, tone, icon }: { label: string; value: number; 
     muted: "border-line bg-white text-muted",
     ink: "border-ink/20 bg-ink/5 text-ink"
   };
-  return (
-    <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>
+  const inner = (
+    <>
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wide">{label}</span>
         {icon}
       </div>
       <p className="mt-3 text-3xl font-semibold text-ink">{value}</p>
-    </div>
+    </>
   );
+  // A2: clickable cards become buttons (cursor-pointer + hover ring); plain cards
+  // keep the existing div. Tone styles are identical in both branches.
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`focus-ring block w-full cursor-pointer rounded-lg border p-5 text-left shadow-subtle transition hover:ring-2 hover:ring-ink/20 ${toneStyles[tone]}`}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>{inner}</div>;
 }
 
 const ACTION_LABELS: Array<{ action: SessionAction; label: string; destructive: boolean }> = [
@@ -2132,15 +2517,8 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
             onChange={(value) => onFiltersChange({ ...filters, severity: value ? (value as AlertSeverity) : undefined })}
           />
           <RoomFilter rooms={rooms} value={filters.room ?? ""} onChange={(room) => onFiltersChange({ ...filters, room: room || undefined })} />
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted">Contest slug</span>
-            <input
-              className="focus-ring mt-1 h-10 w-48 rounded-md border border-line bg-white px-3 text-sm"
-              value={filters.contest_slug ?? ""}
-              placeholder="all contests"
-              onChange={(event) => onFiltersChange({ ...filters, contest_slug: event.target.value || undefined })}
-            />
-          </label>
+          {/* A1: the contest filter is now the GLOBAL banner below the nav; the
+              per-console contest input was removed to avoid two sources of truth. */}
           <label className="mb-2 flex items-center gap-2 text-sm">
             <input
               className="h-4 w-4 accent-accent"
