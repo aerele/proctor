@@ -274,3 +274,72 @@ test("settings rooms: sanitized + deduped on save and returned by GET", async ()
   const get = await call(makeReq({ method: "GET", path: "/api/admin/settings", headers: ADMIN }));
   assert.deepEqual(get.body.rooms, ["Lab A-1", "Lab B-2", "BadRoom"]);
 });
+
+// ---- Task 2: public exam-config + lookup -----------------------------------
+
+test("GET /api/exam-config: roster off + no rooms -> all-empty config", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { roster_required: false, unique_id_label: "", rooms: [] });
+});
+
+test("GET /api/exam-config reflects the roster label + configured rooms", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore, { rooms: ["Lab A-1", "Lab B-2"] });
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
+  assert.deepEqual(res.body, { roster_required: true, unique_id_label: "Roll No", rooms: ["Lab A-1", "Lab B-2"] });
+});
+
+test("POST /api/roster/lookup returns ONLY confirmation-safe fields (masked email, no extra columns)", async () => {
+  freshClients();
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "21CS001" } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, {
+    found: true,
+    unique_id: "21CS001",
+    name: "Asha Raman",
+    roll_number: "21CS001",
+    room: "",
+    hackerrank_username: "",
+    email_masked: "as**@example.com"
+  });
+  const raw = JSON.stringify(res.body);
+  assert.equal(raw.includes("asha@example.com"), false); // raw email never leaves
+  assert.equal(raw.includes("9999999999"), false);       // unmapped Phone never leaves
+});
+
+test("POST /api/roster/lookup normalizes case + whitespace", async () => {
+  freshClients();
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "  21 cs 001 " } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.unique_id, "21CS001");
+});
+
+test("POST /api/roster/lookup: unknown id -> 404; no roster -> 404", async () => {
+  freshClients();
+  const noRoster = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "x" } }));
+  assert.equal(noRoster.statusCode, 404);
+  assert.equal(noRoster.body.error, "roster_not_configured");
+  await uploadSampleRoster();
+  const unknown = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "99XX999" } }));
+  assert.equal(unknown.statusCode, 404);
+  assert.equal(unknown.body.error, "not_on_roster");
+});
+
+test("POST /api/roster/lookup ignores entries from a previous roster version", async () => {
+  freshClients();
+  await uploadSampleRoster();
+  // A second upload REPLACES the first: old-version entries become invisible.
+  await uploadSampleRoster({
+    rows: [{ "Roll No": "99ZZ999", "Student Name": "Only One", "Email ID": "o@example.com", "Phone": "" }]
+  });
+  const stale = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "21CS001" } }));
+  assert.equal(stale.statusCode, 404);
+  const fresh = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "99zz999" } }));
+  assert.equal(fresh.statusCode, 200);
+  assert.equal(fresh.body.name, "Only One");
+});
