@@ -18,10 +18,45 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { sendEvents } from "../api";
 import type { ProctorEvent, SessionStatus } from "../types";
 import {
-  appendToBuffer, deriveStage, initialTopBarState, makeShellEvent, topBarReducer, STAGE_META,
+  appendToBuffer, deriveStage, deserializeShellState, makeShellEvent, serializeShellState,
+  shellStateStorageKey, topBarReducer, STAGE_META,
   type AnomalyReason, type RestorePreconditions, type ShellGate, type Stage,
   type TopBarAction, type TopBarState
 } from "./examShell";
+
+// localStorage access for the persisted top-bar state (FIX: the ⚑ flag chip
+// used to be evadable by reload — React state reset while the session itself
+// resumed). All decisions live in the pure serialize/deserialize functions in
+// examShell.ts; these wrappers only guard against storage being unavailable
+// (private mode, quota). NOTE: a candidate can still hand-delete the key —
+// that is the client-side trust limit; the server-side event stream remains
+// the durable record of hide/restore episodes.
+function readStoredShellState(sessionId: string): string | null {
+  if (!sessionId) return null;
+  try {
+    return window.localStorage.getItem(shellStateStorageKey(sessionId));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredShellState(sessionId: string, state: TopBarState): void {
+  if (!sessionId) return;
+  try {
+    window.localStorage.setItem(shellStateStorageKey(sessionId), serializeShellState(state));
+  } catch {
+    // Storage unavailable — the server events remain the durable record.
+  }
+}
+
+function clearStoredShellState(sessionId: string): void {
+  if (!sessionId) return;
+  try {
+    window.localStorage.removeItem(shellStateStorageKey(sessionId));
+  } catch {
+    // Storage unavailable — nothing to clear.
+  }
+}
 
 export type ExamShellApi = {
   fullscreen: boolean;
@@ -48,10 +83,17 @@ export function useExamShell(opts: {
 
   const [fullscreen, setFullscreen] = useState<boolean>(() => Boolean(document.fullscreenElement));
   const [pageVisible, setPageVisible] = useState<boolean>(() => document.visibilityState === "visible");
-  const [barState, setBarState] = useState<TopBarState>(initialTopBarState);
+  // Reducer initial state: rehydrated from the persisted per-session copy when
+  // the hook mounts with an already-resumed sessionId (defensive parse — a
+  // missing/tampered key yields the fresh initial state).
+  const [barState, setBarState] = useState<TopBarState>(() => deserializeShellState(readStoredShellState(sessionId)));
 
   // Refs so the stable listeners/callbacks always see current values.
-  const barRef = useRef<TopBarState>(initialTopBarState);
+  const barRef = useRef<TopBarState>(barState);
+  // Which sessionId the reducer state was last rehydrated for. App.tsx resumes
+  // the session AFTER mount (async), so sessionId usually arrives late — the
+  // first dispatch or the sessionId effect (whichever runs first) rehydrates.
+  const hydratedSidRef = useRef<string>(sessionId);
   const statusRef = useRef(status);
   const sessionIdRef = useRef(sessionId);
   const addEventRef = useRef(addEvent);
@@ -73,19 +115,40 @@ export function useExamShell(opts: {
     };
   }, []);
 
+  // Rehydrate the reducer state from storage exactly once per sessionId. Runs
+  // lazily at the top of dispatch (so a DOM event firing between the resume
+  // and the sessionId effect can never persist over the stored episode) and
+  // eagerly from the sessionId effect below.
+  const ensureHydrated = useMemo(() => {
+    return () => {
+      const sid = sessionIdRef.current;
+      if (!sid || hydratedSidRef.current === sid) return;
+      hydratedSidRef.current = sid;
+      const raw = readStoredShellState(sid);
+      if (raw == null) return; // fresh session — nothing stored, keep current state
+      const restored = deserializeShellState(raw);
+      barRef.current = restored;
+      setBarState(restored);
+    };
+  }, []);
+
   // Single dispatch path into the pure reducer; emissions happen here (outside
   // any React state updater). Reentrancy is safe: barRef is updated BEFORE the
   // emission, and the emitted bookkeeping events classify as non-anomalies.
+  // Every transition is persisted per session so a reload cannot launder the
+  // flag chip or an active hide episode.
   const dispatch = useMemo(() => {
     return (action: TopBarAction) => {
+      ensureHydrated();
       const { state, emit } = topBarReducer(barRef.current, action);
       if (state !== barRef.current) {
         barRef.current = state;
         setBarState(state);
+        writeStoredShellState(sessionIdRef.current, state);
       }
       if (emit) emitShellEvent(emit.type, emit.detail);
     };
-  }, [emitShellEvent]);
+  }, [emitShellEvent, ensureHydrated]);
 
   const onShellEvent = useMemo(() => {
     return (event: ProctorEvent) => {
@@ -117,6 +180,11 @@ export function useExamShell(opts: {
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, []);
 
+  // Rehydrate as soon as the (resumed or fresh) sessionId arrives.
+  useEffect(() => {
+    if (sessionId) ensureHydrated();
+  }, [sessionId, ensureHydrated]);
+
   // Flush the pre-session buffer once a session exists (§8). Best-effort.
   useEffect(() => {
     if (!sessionId || bufferRef.current.length === 0) return;
@@ -142,6 +210,9 @@ export function useExamShell(opts: {
   useEffect(() => {
     if (stage !== 5) return;
     dispatch({ kind: "session_ended", nowMs: Date.now() });
+    // Session over: drop the persisted shell state (the dispatch above already
+    // persisted the unhidden state; the remove wins because it runs after).
+    clearStoredShellState(sessionIdRef.current);
     if (document.fullscreenElement) {
       expectedExitRef.current = true;
       void document.exitFullscreen().catch(() => {

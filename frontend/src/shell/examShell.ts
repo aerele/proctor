@@ -56,6 +56,20 @@ export function topBarVisible(barHidden: boolean, gate: ShellGate): boolean {
   return !barHidden && gate !== "locked";
 }
 
+// FullscreenGate overlay visibility. The overlay renders only when out of
+// fullscreen, before DONE, and while no anomaly episode owns fullscreen
+// re-entry (the AnomalyPanel has its own button, §5.2). The locked screen also
+// suppresses it: a locked candidate can do nothing about fullscreen, so the
+// locked message takes precedence over the gate.
+export function fullscreenGateVisible(input: {
+  fullscreen: boolean;
+  stage: Stage;
+  barHidden: boolean;
+  gate: ShellGate;
+}): boolean {
+  return !input.fullscreen && input.stage < 5 && !input.barHidden && input.gate !== "locked";
+}
+
 // Spec §7.4: the one-line close-up hint under the bar — survives from the
 // deleted StudentStepBanner. ownEditor mirrors App.tsx's OWN_EDITOR; only the
 // in-exam hint is surface-specific (own-editor copy must not say HackerRank).
@@ -215,6 +229,60 @@ function restoreState(state: TopBarState, nowMs: number): TopBarResult {
       }
     }
   };
+}
+
+// ---- Top-bar state persistence (per session) --------------------------------
+//
+// A page reload used to reset barHidden/flagCount/activeReasons while the
+// session itself resumed via localStorage — a candidate could launder the ⚑
+// flag chip with F5. The reducer state is therefore serialized per session id
+// on every transition and rehydrated as the reducer's initial state on resume.
+//
+// TRUST LIMIT: this is client-side only. A candidate can still hand-delete the
+// localStorage key (or edit it — tampering is detected only as a malformed
+// shape and resets to the initial state). The server-side event stream
+// (topbar_hidden / topbar_restored) remains the durable record of episodes;
+// this persistence merely keeps the on-screen chip honest across reloads.
+
+export function shellStateStorageKey(sessionId: string): string {
+  return `aerele-proctor-shell-state-${sessionId}`;
+}
+
+// Explicit field pick so accidental extra in-memory fields never leak to disk.
+export function serializeShellState(state: TopBarState): string {
+  return JSON.stringify({
+    barHidden: state.barHidden,
+    flagCount: state.flagCount,
+    activeReasons: state.activeReasons,
+    hiddenAtMs: state.hiddenAtMs
+  });
+}
+
+// Defensive parse: anything that is not exactly the persisted shape (malformed
+// JSON, wrong types, missing fields, negative/fractional counts) falls back to
+// the fresh initial state — never a half-applied object.
+export function deserializeShellState(raw: string | null): TopBarState {
+  if (raw == null) return initialTopBarState;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return initialTopBarState;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return initialTopBarState;
+  const { barHidden, flagCount, activeReasons, hiddenAtMs } = parsed as Record<string, unknown>;
+  if (typeof barHidden !== "boolean") return initialTopBarState;
+  if (typeof flagCount !== "number" || !Number.isInteger(flagCount) || flagCount < 0) return initialTopBarState;
+  if (hiddenAtMs !== null && typeof hiddenAtMs !== "number") return initialTopBarState;
+  if (!Array.isArray(activeReasons)) return initialTopBarState;
+  const reasons: AnomalyReason[] = [];
+  for (const entry of activeReasons) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return initialTopBarState;
+    const { type, message, at } = entry as Record<string, unknown>;
+    if (typeof type !== "string" || typeof message !== "string" || typeof at !== "string") return initialTopBarState;
+    reasons.push({ type, message, at });
+  }
+  return { barHidden, flagCount, activeReasons: reasons, hiddenAtMs };
 }
 
 // ---- Spec §8: shell event helpers -------------------------------------------
