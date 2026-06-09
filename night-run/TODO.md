@@ -25,7 +25,7 @@ Detailed TDD tasks: `docs/superpowers/plans/2026-06-09-own-editor-slice1.md`. Su
 - [ ] Add the adapter **queue + bounded-concurrency + 429 backoff + separate Run/Submit lanes** (design §11) — can be a focused add after T1–T11 land.
 
 ## STRETCH (priority order — each = spec → plan → build → test → commit)
-- [ ] S1 — Fullscreen-first onboarding + unique top bar (vanishes on anomaly) + 1–5 onboarding progress (at-a-distance invigilation).
+- [x] S1 — Fullscreen-first onboarding + unique top bar (vanishes on anomaly) + 1–5 onboarding progress (at-a-distance invigilation).
 - [ ] S2 — Roster upload (flexible columns + designated unique-ID) + unique-ID-confirm login + room dropdown (+ "Other").
 - [ ] S3 — Invigilator portal (NO signed-QR): room OTP/passcode distribution + **start-now/allow-all bypass** + basic room stats + selective alerts.
 - [ ] S4 — Problem authoring: question bank + sample/hidden test cases + time/memory limits + scoring (replaces the placeholder problem).

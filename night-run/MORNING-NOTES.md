@@ -52,3 +52,10 @@ This is the first thing to read in the morning. Three sections, kept current thr
 5. **Cloud Run request timeout 120s** to fit the 90s judge poll budget.
 6. **Workspace REPLACES the HackerRank link** when a problem is configured; all candidate-facing copy switches via studentCopy.ts (HackerRank wording kept when no problem configured).
 7. **Usage throttle** (per your TG ask): one workflow at a time, gate at 90% of measured ceiling, idle till window reset if crossed.
+
+---
+## S1 exam shell — BUILT + BROWSER-VERIFIED (~02:10)
+- 5 TDD commits (a79b326, 14bb70a, 9ce1526, 8d7a7c6, 0ce7640): pure stage logic + anomaly reducer (61 vitest tests), useExamShell hook, ExamTopBar/FullscreenGate/AnomalyPanel, StudentApp wiring. Suites: 91/91 vitest + tsc + build + backend 232/232.
+- **Full 10-point demo browser walkthrough PASSED on :9222** (evidence: night-run/evidence/s1-01…s1-10*.png): gate(ticking clock)→DETAILS→IN EXAM bar(name/room/REC/elapsed)→blur vanishes bar + anomaly panel→stacked fullscreen reason gates restore→restore ⚑1→event audit (topbar_hidden/restored, onboarding_stage, fullscreen_enter/exit)→second episode ⚑2→END: 5 DONE bar persists chip, fullscreen exited→pre-recording exit returns GATE (no anomaly, form value preserved).
+- Live bonus finding: integrity checkpoint expiring mid-end-flow counted as a third ⚑ — correct per the pinned anomaly list (session_ended reducer path exercised live).
+- Review findings being fixed (wsc2n21df): ⚑ persistence across reload (was React-state-only — evadable); locked screen vs gate overlay precedence. Judgment call: client-side persistence is a deterrent, server events remain the durable record.
