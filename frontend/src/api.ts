@@ -8,6 +8,8 @@ import type {
   AlertSettings,
   AlertsResponse,
   BeaconKind,
+  EditorEvent,
+  ExecRequest,
   HeartbeatResponse,
   ProctorAlertTypeConfig,
   ProctorEvent,
@@ -23,6 +25,7 @@ import type {
   ReviewsResponse,
   ReviewVerdict,
   ReviewVerdictResponse,
+  RunResult,
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
@@ -33,6 +36,7 @@ import type {
   StudentForm,
   SubmissionEvent,
   SubmissionEventsResponse,
+  SubmitResult,
   UploadManifestItem,
   UploadUrlResponse
 } from "./types";
@@ -1758,4 +1762,35 @@ function getDemoSettings(): (ProctorSettings & { passcode?: string; end_code?: s
 function maskPasscode(value = "") {
   if (!value) return "";
   return `${"*".repeat(Math.max(0, value.length - 2))}${value.slice(-2)}`;
+}
+
+// ---- Coding workspace: editor-event capture + code execution ---------------
+
+export async function sendEditorEvents(sessionId: string, problemId: string, events: EditorEvent[]): Promise<void> {
+  if (demoMode) return;                       // demo: don't post
+  await request<{ ok: boolean }>("/api/editor-events", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, problem_id: problemId, events })
+  });
+}
+
+export async function execRun(req: ExecRequest): Promise<RunResult> {
+  if (demoMode) {
+    await wait(300);
+    // The sum-two problem has TWO samples; return both so the demo matches the
+    // real /api/exec/run shape (Task 3 asserts results.length === 2).
+    return { results: [
+      { input: "2 3\n", expected: "5", passed: true, status: "accepted", stdout: "5", stderr: "", compileOutput: "" },
+      { input: "10 20\n", expected: "30", passed: true, status: "accepted", stdout: "30", stderr: "", compileOutput: "" }
+    ] };
+  }
+  return request<RunResult>("/api/exec/run", { method: "POST", body: JSON.stringify(req) });
+}
+
+export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
+  if (demoMode) {
+    await wait(500);
+    return { verdict: "accepted", passed_count: 4, total: 4, tests: [0,1,2,3].map((i)=>({index:i,passed:true,status:"accepted",timeSec:0.01})), submission_id: "demo" };
+  }
+  return request<SubmitResult>("/api/exec/submit", { method: "POST", body: JSON.stringify(req) });
 }
