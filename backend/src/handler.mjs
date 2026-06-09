@@ -128,6 +128,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/events") return send(res, 200, await recordEvents(req));
     if (req.method === "POST" && path === "/api/exec/run") return send(res, 200, await execRun(req));
     if (req.method === "POST" && path === "/api/exec/submit") return send(res, 200, await execSubmit(req));
+    if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
     if (req.method === "POST" && path === "/api/review-file") return send(res, 200, await recordReviewFile(req));
     if (req.method === "POST" && path === "/api/heartbeat") return send(res, 200, await recordHeartbeat(req));
     if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
@@ -559,6 +560,26 @@ async function execSubmit(req) {
   });
 
   return { verdict, passed_count: passedCount, total: results.length, tests, submission_id: submissionId };
+}
+
+async function ingestEditorEvents(req) {
+  const body = parseBody(req);
+  const sessionId = String(body.session_id || "");
+  // Ownership gate (same as /api/events): unknown → 404; ended/locked/pending → 409/403.
+  const session = requireWritableSession(await getSession(sessionId));
+  const events = Array.isArray(body.events) ? body.events : null;
+  if (!events) return badRequest("events[] required");
+  if (events.length > EDITOR_EVENTS_INGEST_LIMIT) return badRequest(`max ${EDITOR_EVENTS_INGEST_LIMIT} events per batch`);
+  const stamped = events.map((e) => ({ ...e, session_id: sessionId, problem_id: body.problem_id || null }));
+
+  // Per-batch timestamped object under the session prefix (avoids read-modify-
+  // write races; the analytics slice concatenates them). Build the key with the
+  // existing sessionPrefix() + the same inline ISO-timestamp + randomUUID()
+  // pattern recordEvents uses — randomUUID is already imported at the top.
+  const key = `${sessionPrefix(session)}${EDITOR_EVENTS_COLLECTION}/${new Date().toISOString()}-${randomUUID()}.ndjson`;
+  await putJsonl(key, stamped); // putJsonl already serializes records -> NDJSON via bucket().file(key).save(...)
+
+  return { ok: true, stored: events.length };
 }
 
 async function recordReviewFile(req) {
