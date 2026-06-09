@@ -1245,6 +1245,68 @@ async function adminGetRoster(req) {
   };
 }
 
+// GET /api/exam-config — PUBLIC (the student form renders before any session
+// exists). Returns only non-sensitive config: whether the roster gate is on,
+// what to call the unique-ID field, and the room labels. Fail-open client-side
+// is safe because /api/session/start re-enforces the roster gate regardless.
+async function publicExamConfig() {
+  const [settings, meta] = await Promise.all([getSettings(), getRosterMeta()]);
+  return {
+    roster_required: Boolean(meta),
+    unique_id_label: meta?.unique_id_column || "",
+    rooms: normalizeRooms(settings?.rooms)
+  };
+}
+
+// The ACTIVE-version roster entry for a unique id, or null. Entries from a
+// previous upload (stale roster_version) are invisible.
+async function findRosterEntry(meta, uniqueId) {
+  const norm = normalizeUniqueId(uniqueId);
+  if (!norm) return null;
+  const doc = await firestore.collection(ROSTER_COLLECTION).doc(rosterEntryId(norm)).get();
+  const entry = doc.exists ? doc.data() : null;
+  if (!entry || entry.roster_version !== meta.version) return null;
+  return entry;
+}
+
+// Mask an email for the public confirm card: keep at most 2 leading chars of
+// the local part + the full domain ("asha@x.com" -> "as**@x.com").
+function maskEmail(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  const at = text.indexOf("@");
+  if (at <= 0) return `${text.slice(0, 2)}***`;
+  const local = text.slice(0, at);
+  const keep = Math.min(2, local.length);
+  return `${local.slice(0, keep)}${"*".repeat(Math.max(1, local.length - keep))}${text.slice(at)}`;
+}
+
+// POST /api/roster/lookup — PUBLIC unique-ID-confirm login, step 1. Returns the
+// MINIMUM confirmation set: mapped name/roll/room/username + MASKED email.
+// Unmapped extra columns (phone numbers, ...) and the raw email NEVER leave via
+// this route — the raw email reaches the session doc only through the
+// server-side override at /api/session/start. Enumeration risk is an accepted,
+// documented limitation (spec §7).
+async function rosterLookup(req) {
+  const body = parseBody(req);
+  requireFields(body, ["unique_id"]);
+  const meta = await getRosterMeta();
+  if (!meta) throw httpError(404, "roster_not_configured");
+  const entry = await findRosterEntry(meta, String(body.unique_id));
+  if (!entry) throw httpError(404, "not_on_roster");
+  const mapping = meta.column_mapping || {};
+  const field = (name) => (mapping[name] ? String(entry.fields?.[mapping[name]] || "") : "");
+  return {
+    found: true,
+    unique_id: entry.unique_id,
+    name: field("name"),
+    roll_number: field("roll_number"),
+    room: field("room"),
+    hackerrank_username: field("hackerrank_username"),
+    email_masked: maskEmail(field("email"))
+  };
+}
+
 // Run an async mapper over items with a bounded number of concurrent workers, so
 // a single request can't fan out into hundreds of simultaneous GCS/IAM calls.
 async function mapWithConcurrency(items, limit, fn) {
