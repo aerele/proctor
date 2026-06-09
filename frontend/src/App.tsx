@@ -2,8 +2,18 @@ import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCi
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
+import { CodingWorkspace } from "./coding/CodingWorkspace";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+
+// Slice 1: the single config-driven problem solved in our own Monaco editor.
+// Rendered inside StudentApp while recording is live; the contest_url
+// (HackerRank) path stays as a fallback until Slice 3 cuts over.
+const SLICE1_PROBLEM = {
+  id: "sum-two", title: "Sum of Two Numbers",
+  statement: "Read two integers a and b on one line separated by a space. Print a + b.",
+  languages: ["python","cpp","java","javascript"] as const
+};
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -917,6 +927,15 @@ function StudentApp() {
           )}
         </aside>
       </div>
+
+      {/* Slice 1: own coding workspace (Monaco + Run/Submit), live only while
+          recording so every editor event is tied to an actively recorded
+          session. The contest_url Start-test link above remains as a fallback. */}
+      {sessionId && status === "recording" && (
+        <div className="mt-5">
+          <CodingWorkspace sessionId={sessionId} problem={SLICE1_PROBLEM} />
+        </div>
+      )}
 
       <section className="mt-5 rounded-lg border border-line bg-panel p-5">
         <div className="mb-4 flex items-center gap-2">
