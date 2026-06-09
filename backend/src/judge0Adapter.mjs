@@ -65,6 +65,13 @@ function httpFailure(action, res) {
 // retryable:false so the queue never retries it.
 const POLL_RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 
+// Submit-POST statuses that are AMBIGUOUS about billing: a gateway can return
+// 502/504 AFTER the upstream already accepted (and billed) the submissions, so
+// a queue-level re-POST risks a double bill. Only 429/503 — pushback the
+// engine sends BEFORE doing any work — stay queue-retryable for the submit
+// phase. (Poll GETs are idempotent, so 502/504 remain retryable there.)
+const SUBMIT_AMBIGUOUS_STATUSES = new Set([502, 504]);
+
 // Mark an error as never-queue-retryable (see POLL_RETRYABLE_STATUSES above).
 function markNonRetryable(err) {
   if (err && typeof err === "object") err.retryable = false;
@@ -106,9 +113,23 @@ export function makeJudge0Adapter({
     const res = await fetchImpl(`${baseUrl}/submissions/batch?base64_encoded=true&wait=false`, {
       method: "POST", headers, body: JSON.stringify({ submissions })
     });
-    if (!res.ok) throw httpFailure("submit", res);
-    const tokens = await res.json(); // [{token}, ...]
-    return tokens.map((t) => t.token);
+    if (!res.ok) {
+      const err = httpFailure("submit", res);
+      // 502/504 may have billed upstream (see SUBMIT_AMBIGUOUS_STATUSES) —
+      // never let the queue re-POST them.
+      if (SUBMIT_AMBIGUOUS_STATUSES.has(err.status)) markNonRetryable(err);
+      throw err;
+    }
+    // The POST returned 2xx: the submissions now EXIST (and are billed). Any
+    // failure from here on (e.g. the body failing to parse) must carry an
+    // EXPLICIT retryable:false set at this billing point — never rely on the
+    // error merely lacking .status.
+    try {
+      const tokens = await res.json(); // [{token}, ...]
+      return tokens.map((t) => t.token);
+    } catch (err) {
+      throw markNonRetryable(err);
+    }
   }
 
   async function submitBatch(items) {
