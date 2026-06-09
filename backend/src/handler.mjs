@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
+import { makeExecQueue } from "./execQueue.mjs";
 import { getProblem, LANGUAGE_IDS } from "./problems.mjs";
 
 let firestore = new Firestore();
@@ -94,6 +95,20 @@ const MAX_SOURCE_CODE_LENGTH = 65536; // exec run/submit: cap candidate source s
 const EXEC_RUN_COOLDOWN_SECONDS = Number(process.env.EXEC_RUN_COOLDOWN_SECONDS || "5");
 const EXEC_SUBMIT_COOLDOWN_SECONDS = Number(process.env.EXEC_SUBMIT_COOLDOWN_SECONDS || "20");
 const EXEC_MAX_SUBMISSIONS_PER_SESSION = Number(process.env.EXEC_MAX_SUBMISSIONS_PER_SESSION || "50");
+// Backpressure between candidates and the engine (design §11 item 2): ONE
+// process-wide queue with independent Run/Submit lanes so a submit storm never
+// starves quick sample runs. Lane saturation queues up to EXEC_MAX_QUEUE, then
+// rejects (QueueFullError -> HTTP 429 below). Concurrency is env-tuned to the
+// purchased RapidAPI quota; transient 429/5xx from the engine retry INSIDE the
+// queue with exponential backoff + jitter (honoring Retry-After).
+const EXEC_RUN_CONCURRENCY = Number(process.env.EXEC_RUN_CONCURRENCY || "2");
+const EXEC_SUBMIT_CONCURRENCY = Number(process.env.EXEC_SUBMIT_CONCURRENCY || "4");
+const EXEC_MAX_QUEUE = Number(process.env.EXEC_MAX_QUEUE || "200");
+const execQueue = makeExecQueue({
+  runConcurrency: EXEC_RUN_CONCURRENCY,
+  submitConcurrency: EXEC_SUBMIT_CONCURRENCY,
+  maxQueue: EXEC_MAX_QUEUE
+});
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
@@ -566,10 +581,22 @@ function rateLimited(retryAfterSeconds) {
   return error;
 }
 
+// Exec-queue overflow -> intentional 429 (same statusCode mapping as
+// httpError/badRequest). "queue_full" is distinguishable from the limiter's
+// "rate_limited": the server is busy, the candidate did nothing wrong — the
+// retry hint just says "back off briefly and try again".
+const QUEUE_FULL_RETRY_SECONDS = 2;
+function queueFull() {
+  const error = httpError(429, "queue_full");
+  error.retry_after_seconds = QUEUE_FULL_RETRY_SECONDS;
+  return error;
+}
+
 // Cooldown CHECKS run right after the ownership gate (always before any judge0
-// work); the cooldown timestamps are RECORDED only when a request actually
-// dispatches to Judge0, so a validation-rejected request (400) never consumes
-// a slot.
+// work); the cooldown timestamps are RECORDED only when a request is accepted
+// into the exec queue (validation fully passed), so a validation-rejected
+// request (400) never consumes a slot — and a queue-full rejection RESTORES
+// the slot (server busy, not the candidate's fault).
 function checkExecRunLimit(sessionId) {
   const entry = execLimiterEntry(sessionId);
   const waitMs = EXEC_RUN_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastRunMs);
@@ -612,10 +639,26 @@ async function execRun(req) {
     languageId, source, stdin: t.input, expectedOutput: t.expected,
     cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
   }));
-  // Start the cooldown only now that the request actually reaches Judge0 — a
-  // validation-rejected request never consumes the slot.
+  // Start the cooldown at ENQUEUE time, once validation has fully passed — a
+  // validation-rejected request never consumes the slot, and consuming it on
+  // queue ACCEPTANCE (not dispatch) stops a session from stacking queued runs
+  // while one is parked in the lane.
+  const prevLastRunMs = limiter.lastRunMs;
   limiter.lastRunMs = _execClock();
-  const results = await judge0().runBatch(items);
+  let results;
+  try {
+    // Through the run lane of the exec queue (design §11 item 2) — bounded
+    // concurrency toward the metered engine; retries happen inside the queue.
+    results = await execQueue.enqueueRun(() => judge0().runBatch(items));
+  } catch (error) {
+    if (error?.name === "QueueFullError") {
+      // Queue overflow is the SERVER being busy, not the candidate's fault:
+      // give the cooldown slot back, then surface the intentional 429.
+      limiter.lastRunMs = prevLastRunMs;
+      throw queueFull();
+    }
+    throw error;
+  }
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
 }
@@ -644,10 +687,26 @@ async function execSubmit(req) {
     languageId, source, stdin: t.input, expectedOutput: t.expected,
     cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
   }));
-  // Start the cooldown only now that the request actually reaches Judge0 — a
-  // validation-rejected request never consumes the slot.
+  // Start the cooldown at ENQUEUE time, once validation has fully passed — a
+  // validation-rejected request never consumes the slot, and consuming it on
+  // queue ACCEPTANCE (not dispatch) stops a session from stacking queued
+  // submits while one is parked in the lane.
+  const prevLastSubmitMs = limiter.lastSubmitMs;
   limiter.lastSubmitMs = _execClock();
-  const results = await judge0().runBatch(items);
+  let results;
+  try {
+    // Through the submit lane of the exec queue (design §11 item 2) — its own
+    // lane, so a submit storm never starves the quick sample-run lane.
+    results = await execQueue.enqueueSubmit(() => judge0().runBatch(items));
+  } catch (error) {
+    if (error?.name === "QueueFullError") {
+      // Queue overflow is the SERVER being busy, not the candidate's fault:
+      // give the cooldown slot back, then surface the intentional 429.
+      limiter.lastSubmitMs = prevLastSubmitMs;
+      throw queueFull();
+    }
+    throw error;
+  }
   const passedCount = results.filter((r) => r.passed).length;
   // Verdict rule: a judging_timeout is an INFRA failure (poll budget exhausted),
   // not the candidate's fault — it must never collapse into "wrong_answer".

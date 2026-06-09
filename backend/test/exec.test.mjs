@@ -10,6 +10,12 @@ process.env.SESSION_COLLECTION = "exec_sessions";
 process.env.SETTINGS_COLLECTION = "exec_settings";
 process.env.SUBMISSIONS_COLLECTION = "exec_submissions";
 process.env.ADMIN_PASSWORD = "exec-admin-pass";
+// Tiny exec-queue lanes (design §11 item 2) so the queue-full -> 429 wiring is
+// testable with three concurrent requests. Every other test in this file runs
+// ONE exec call at a time, so 1-deep lanes never interfere with them.
+process.env.EXEC_RUN_CONCURRENCY = "1";
+process.env.EXEC_SUBMIT_CONCURRENCY = "1";
+process.env.EXEC_MAX_QUEUE = "1";
 
 const handler = await import("../src/handler.mjs?exec");
 const { api, __setClientsForTest, __setJudge0AdapterForTest, __setExecClockForTest } = handler;
@@ -514,5 +520,71 @@ test("exec rate limit: a validation-rejected request does not consume the cooldo
   res = await call(execReq("/api/exec/run", "rl-val"));
   assert.equal(res.statusCode, 200);
   assert.equal(counter.batches, 1);
+  __setJudge0AdapterForTest(null);
+});
+
+// ---- Exec queue wiring (design §11 item 2) ----------------------------------
+// A module-level queue sits between the handlers and judge0(): the run lane
+// here is 1-wide with 1 queued slot (env at the top of this file), so a THIRD
+// concurrent run must be rejected by the queue as an HTTP 429 "queue_full" —
+// distinguishable from the limiter's "rate_limited". Three different sessions
+// are used so the per-session rate limiter never fires.
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+const tick = () => new Promise((r) => setImmediate(r));
+
+test("exec queue wiring: run-lane overflow -> immediate 429 queue_full; queued runs + submits still complete; the rejection consumes no cooldown", async () => {
+  advanceClock(3600_000); // fresh cooldown horizon for the sessions below
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  for (const id of ["qf-a", "qf-b", "qf-c"]) {
+    firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({ session_id: id, status: "active" });
+  }
+  const gate = deferred();
+  let batches = 0;
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    batches++;
+    await gate.promise; // hold the lane until the test releases it
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  // Two concurrent runs: A dispatches (active), B parks in the 1-deep queue.
+  const pA = call(execReq("/api/exec/run", "qf-a"));
+  const pB = call(execReq("/api/exec/run", "qf-b"));
+  await tick(); await tick();
+  assert.equal(batches, 1); // only A reached judge0; B is queued, not dropped
+
+  // Third concurrent run: the queue is full -> rejected IMMEDIATELY (no
+  // waiting on the gate), as a 429 with the machine-readable queue_full error.
+  const pC = call(execReq("/api/exec/run", "qf-c"));
+  let cSettled = false;
+  pC.then(() => { cSettled = true; });
+  await tick(); await tick();
+  assert.equal(cSettled, true, "queue-full rejection must not wait for a lane slot");
+
+  // The submit lane is INDEPENDENT: a submit is accepted (parks/dispatches in
+  // its own lane) even while the run lane is saturated.
+  const pSubmit = call(execReq("/api/exec/submit", "qf-a"));
+
+  gate.resolve();
+  const [resA, resB, resC, resSubmit] = await Promise.all([pA, pB, pC, pSubmit]);
+  assert.equal(resA.statusCode, 200);
+  assert.equal(resB.statusCode, 200); // queued, never dropped
+  assert.equal(resSubmit.statusCode, 200);
+  assert.equal(resC.statusCode, 429);
+  assert.equal(resC.body.error, "queue_full"); // NOT the limiter's "rate_limited"
+  assert.equal(typeof resC.body.retry_after_seconds, "number");
+  assert.equal(batches, 3); // A + B + submit dispatched; C never reached judge0
+
+  // A queue-full rejection is the SERVER being busy — it must not consume the
+  // session's run cooldown: with the lane idle again (clock unmoved), an
+  // immediate retry for qf-c succeeds instead of 429 rate_limited.
+  const retry = await call(execReq("/api/exec/run", "qf-c"));
+  assert.equal(retry.statusCode, 200);
+  assert.equal(batches, 4);
   __setJudge0AdapterForTest(null);
 });
