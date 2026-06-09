@@ -55,7 +55,7 @@ test("lanes run jobs up to their concurrency; excess queues FIFO and drains in o
   gates[2].resolve();
   await tick();
   assert.deepEqual(await Promise.all(jobs), [0, 1, 2]); // results map to callers in order
-  assert.deepEqual(q.stats(), { run: { active: 0, queued: 0 }, submit: { active: 0, queued: 0 } });
+  assert.deepEqual(q.stats(), { run: { active: 0, queued: 0 }, submit: { active: 0, queued: 0 }, poll: { active: 0, queued: 0 } });
 });
 
 test("lane independence: a saturated run lane never blocks the submit lane (and vice versa)", async () => {
@@ -107,7 +107,7 @@ test("maxQueue bounds each lane independently (submit lane still accepts when ru
   const submitActive = q.enqueueSubmit(() => submitGate.promise);
   const submitQueued = q.enqueueSubmit(async () => "sq");
   await tick();
-  assert.deepEqual(q.stats(), { run: { active: 1, queued: 1 }, submit: { active: 1, queued: 1 } });
+  assert.deepEqual(q.stats(), { run: { active: 1, queued: 1 }, submit: { active: 1, queued: 1 }, poll: { active: 0, queued: 0 } });
   runGate.resolve("ra"); submitGate.resolve("sa");
   assert.deepEqual(await Promise.all([runActive, runQueued, submitActive, submitQueued]), ["ra", "rq", "sa", "sq"]);
 });
@@ -207,27 +207,80 @@ test("a failing job frees its slot: the lane keeps draining after a rejection", 
 
 test("stats() reports both lanes' live active/queued counts", async () => {
   const q = makeExecQueue({ runConcurrency: 2, submitConcurrency: 1, sleepImpl: fakeSleep() });
-  assert.deepEqual(q.stats(), { run: { active: 0, queued: 0 }, submit: { active: 0, queued: 0 } });
+  assert.deepEqual(q.stats(), { run: { active: 0, queued: 0 }, submit: { active: 0, queued: 0 }, poll: { active: 0, queued: 0 } });
   const g = deferred();
   const jobs = [
     q.enqueueRun(() => g.promise), q.enqueueRun(() => g.promise), q.enqueueRun(() => g.promise),
     q.enqueueSubmit(() => g.promise), q.enqueueSubmit(() => g.promise)
   ];
   await tick();
-  assert.deepEqual(q.stats(), { run: { active: 2, queued: 1 }, submit: { active: 1, queued: 1 } });
+  assert.deepEqual(q.stats(), { run: { active: 2, queued: 1 }, submit: { active: 1, queued: 1 }, poll: { active: 0, queued: 0 } });
   g.resolve("x");
   assert.deepEqual(await Promise.all(jobs), ["x", "x", "x", "x", "x"]);
-  assert.deepEqual(q.stats(), { run: { active: 0, queued: 0 }, submit: { active: 0, queued: 0 } });
+  assert.deepEqual(q.stats(), { run: { active: 0, queued: 0 }, submit: { active: 0, queued: 0 }, poll: { active: 0, queued: 0 } });
 });
 
-test("defaults: runConcurrency 2, submitConcurrency 4, maxQueue 200", async () => {
+test("defaults: runConcurrency 2, submitConcurrency 4, pollConcurrency 16, maxQueue 200", async () => {
   const q = makeExecQueue({ sleepImpl: fakeSleep() });
   const g = deferred();
   const jobs = [];
   for (let i = 0; i < 10; i++) jobs.push(q.enqueueRun(() => g.promise));
   for (let i = 0; i < 10; i++) jobs.push(q.enqueueSubmit(() => g.promise));
+  for (let i = 0; i < 20; i++) jobs.push(q.enqueuePoll(() => g.promise));
   await tick();
-  assert.deepEqual(q.stats(), { run: { active: 2, queued: 8 }, submit: { active: 4, queued: 6 } });
+  assert.deepEqual(q.stats(), { run: { active: 2, queued: 8 }, submit: { active: 4, queued: 6 }, poll: { active: 16, queued: 4 } });
   g.resolve("d");
   await Promise.all(jobs);
+});
+
+// ---- Poll lane (defect 3: parked slots) ------------------------------------
+// The poll lane only BOUNDS concurrent status GETs toward the engine; transient
+// poll-failure retries live inside the judge0 adapter (defect 1), so this lane
+// must never add its own retry layer on top, and it has its own (generous)
+// queue bound so the tiny run/submit maxQueue knobs never choke polling.
+
+test("poll lane: FIFO with its own concurrency; overflow rejects with QueueFullError at pollMaxQueue", async () => {
+  const q = makeExecQueue({ pollConcurrency: 1, pollMaxQueue: 1, sleepImpl: fakeSleep() });
+  const gate = deferred();
+  const active = q.enqueuePoll(() => gate.promise);
+  const queued = q.enqueuePoll(async () => "queued-done");
+  await tick();
+  assert.deepEqual(q.stats().poll, { active: 1, queued: 1 });
+  await assert.rejects(q.enqueuePoll(async () => "overflow"), (err) => {
+    assert.equal(err.name, "QueueFullError");
+    assert.ok(err instanceof QueueFullError);
+    return true;
+  });
+  gate.resolve("active-done");
+  assert.equal(await active, "active-done");
+  assert.equal(await queued, "queued-done");
+});
+
+test("poll lane: NEVER retries — even a transient 429/5xx propagates after one attempt (adapter owns poll retries)", async () => {
+  for (const status of [429, 502, 503, 504]) {
+    const sleep = fakeSleep();
+    const q = makeExecQueue({ sleepImpl: sleep, randomImpl: () => 1 });
+    let calls = 0;
+    await assert.rejects(
+      q.enqueuePoll(async () => { calls++; throw errWithStatus(status); }),
+      (err) => err.status === status
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(sleep.delays, []);
+  }
+});
+
+test("poll lane: defaults to its own generous maxQueue (1000), independent of the run/submit maxQueue", async () => {
+  // run/submit maxQueue of 0 would choke their lanes — the poll lane must not
+  // inherit it. With maxQueue 0 and pollConcurrency 1, a SECOND poll job still
+  // parks (pollMaxQueue default 1000) instead of rejecting.
+  const q = makeExecQueue({ pollConcurrency: 1, maxQueue: 0, sleepImpl: fakeSleep() });
+  const gate = deferred();
+  const active = q.enqueuePoll(() => gate.promise);
+  const queued = q.enqueuePoll(async () => "still-accepted");
+  await tick();
+  assert.deepEqual(q.stats().poll, { active: 1, queued: 1 });
+  gate.resolve("a");
+  assert.equal(await active, "a");
+  assert.equal(await queued, "still-accepted");
 });

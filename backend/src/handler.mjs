@@ -97,17 +97,26 @@ const EXEC_SUBMIT_COOLDOWN_SECONDS = Number(process.env.EXEC_SUBMIT_COOLDOWN_SEC
 const EXEC_MAX_SUBMISSIONS_PER_SESSION = Number(process.env.EXEC_MAX_SUBMISSIONS_PER_SESSION || "50");
 // Backpressure between candidates and the engine (design §11 item 2): ONE
 // process-wide queue with independent Run/Submit lanes so a submit storm never
-// starves quick sample runs. Lane saturation queues up to EXEC_MAX_QUEUE, then
-// rejects (QueueFullError -> HTTP 429 below). Concurrency is env-tuned to the
-// purchased RapidAPI quota; transient 429/5xx from the engine retry INSIDE the
-// queue with exponential backoff + jitter (honoring Retry-After).
+// starves quick sample runs. The lanes are passed to the adapter as GATES: a
+// run/submit slot is held only across the submit POSTs, each status GET takes
+// a (wide) poll-lane slot, and nothing holds any slot while a batch sleeps
+// through its ~90 s poll budget — a few stuck judgings can't starve the lanes.
+// Lane saturation queues up to EXEC_MAX_QUEUE (the poll lane has its own
+// generous bound), then rejects (QueueFullError -> HTTP 429 below).
+// Concurrency is env-tuned to the purchased RapidAPI quota; transient 429/5xx
+// from the submit POSTs retry INSIDE the queue with exponential backoff +
+// jitter (honoring Retry-After), while poll-phase retries live inside the
+// adapter (a queue-level retry would re-submit an already-billed batch).
 const EXEC_RUN_CONCURRENCY = Number(process.env.EXEC_RUN_CONCURRENCY || "2");
 const EXEC_SUBMIT_CONCURRENCY = Number(process.env.EXEC_SUBMIT_CONCURRENCY || "4");
+const EXEC_POLL_CONCURRENCY = Number(process.env.EXEC_POLL_CONCURRENCY || "16");
 const EXEC_MAX_QUEUE = Number(process.env.EXEC_MAX_QUEUE || "200");
 const execQueue = makeExecQueue({
   runConcurrency: EXEC_RUN_CONCURRENCY,
   submitConcurrency: EXEC_SUBMIT_CONCURRENCY,
+  pollConcurrency: EXEC_POLL_CONCURRENCY,
   maxQueue: EXEC_MAX_QUEUE
+  // pollMaxQueue stays at its generous default (1000).
 });
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
@@ -592,6 +601,19 @@ function queueFull() {
   return error;
 }
 
+// Engine failure -> intentional 503 (review defect 2). Adapter errors carry
+// .status (HTTP failures toward Judge0, including retry exhaustion in the
+// queue or the adapter's poll budget); they must never surface as a bare 500.
+// "judge_unavailable" mirrors queue_full/rate_limited: machine-readable error
+// + retry hint in the standard JSON body. Errors WITHOUT .status are genuine
+// programming errors and keep propagating as 500.
+const JUDGE_UNAVAILABLE_RETRY_SECONDS = 10;
+function judgeUnavailable() {
+  const error = httpError(503, "judge_unavailable");
+  error.retry_after_seconds = JUDGE_UNAVAILABLE_RETRY_SECONDS;
+  return error;
+}
+
 // Cooldown CHECKS run right after the ownership gate (always before any judge0
 // work); the cooldown timestamps are RECORDED only when a request is accepted
 // into the exec queue (validation fully passed), so a validation-rejected
@@ -647,17 +669,20 @@ async function execRun(req) {
   limiter.lastRunMs = _execClock();
   let results;
   try {
-    // Through the run lane of the exec queue (design §11 item 2) — bounded
-    // concurrency toward the metered engine; retries happen inside the queue.
-    results = await execQueue.enqueueRun(() => judge0().runBatch(items));
+    // The exec-queue lanes gate the engine phases (design §11 item 2): the
+    // run lane bounds (and retries) the submit POSTs, the poll lane bounds
+    // each status GET — no slot is parked across the inter-poll waits.
+    results = await judge0().runBatch(items, {
+      submitGate: (fn) => execQueue.enqueueRun(fn),
+      pollGate: (fn) => execQueue.enqueuePoll(fn)
+    });
   } catch (error) {
-    if (error?.name === "QueueFullError") {
-      // Queue overflow is the SERVER being busy, not the candidate's fault:
-      // give the cooldown slot back, then surface the intentional 429.
-      limiter.lastRunMs = prevLastRunMs;
-      throw queueFull();
-    }
-    throw error;
+    // ANY failure here is the SERVER's side, never the candidate's: always
+    // give the cooldown slot back before mapping the error.
+    limiter.lastRunMs = prevLastRunMs;
+    if (error?.name === "QueueFullError") throw queueFull();
+    if (typeof error?.status === "number") throw judgeUnavailable();
+    throw error; // genuine programming error -> bare 500
   }
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
@@ -695,17 +720,20 @@ async function execSubmit(req) {
   limiter.lastSubmitMs = _execClock();
   let results;
   try {
-    // Through the submit lane of the exec queue (design §11 item 2) — its own
-    // lane, so a submit storm never starves the quick sample-run lane.
-    results = await execQueue.enqueueSubmit(() => judge0().runBatch(items));
+    // The submit lane (its own lane, so a submit storm never starves the
+    // quick sample-run lane) gates the submit POSTs; the shared poll lane
+    // bounds each status GET — no slot is parked across inter-poll waits.
+    results = await judge0().runBatch(items, {
+      submitGate: (fn) => execQueue.enqueueSubmit(fn),
+      pollGate: (fn) => execQueue.enqueuePoll(fn)
+    });
   } catch (error) {
-    if (error?.name === "QueueFullError") {
-      // Queue overflow is the SERVER being busy, not the candidate's fault:
-      // give the cooldown slot back, then surface the intentional 429.
-      limiter.lastSubmitMs = prevLastSubmitMs;
-      throw queueFull();
-    }
-    throw error;
+    // ANY failure here is the SERVER's side, never the candidate's: always
+    // give the cooldown slot back before mapping the error.
+    limiter.lastSubmitMs = prevLastSubmitMs;
+    if (error?.name === "QueueFullError") throw queueFull();
+    if (typeof error?.status === "number") throw judgeUnavailable();
+    throw error; // genuine programming error -> bare 500
   }
   const passedCount = results.filter((r) => r.passed).length;
   // Verdict rule: a judging_timeout is an INFRA failure (poll budget exhausted),
