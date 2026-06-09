@@ -69,9 +69,12 @@ test("failed submit parses an HTTP-DATE Retry-After header into .retryAfterMs (c
   });
 });
 
-test("failed token POLL also carries .status + .retryAfterMs", async () => {
-  // Submit succeeds, then the batch GET fails 502 with Retry-After.
+test("failed token POLL also carries .status + .retryAfterMs — and is marked retryable:false (tokens exist; a queue retry would re-bill)", async () => {
+  // Submit succeeds, then EVERY batch GET fails 502 with Retry-After: the
+  // adapter retries the GET internally (honoring Retry-After), then gives up
+  // with a non-queue-retryable error.
   let call = 0;
+  const delays = [];
   const fetchImpl = async () => {
     call++;
     if (call === 1) return { ok: true, status: 200, json: async () => [{ token: "t" }] };
@@ -79,10 +82,85 @@ test("failed token POLL also carries .status + .retryAfterMs", async () => {
       headers: { get: (n) => (String(n).toLowerCase() === "retry-after" ? "1" : null) },
       json: async () => ({}) };
   };
-  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl, pollIntervalMs: 0 });
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl, pollIntervalMs: 0,
+    sleepImpl: async (ms) => { delays.push(ms); } });
   await assert.rejects(adapter.runBatch([ITEM]), (err) => {
     assert.equal(err.status, 502);
     assert.equal(err.retryAfterMs, 1000);
+    assert.equal(err.retryable, false);
+    return true;
+  });
+  // ONE submit POST + initial GET + the 5-deep internal poll-retry budget; the
+  // server's Retry-After (1 s) was honored on every internal retry.
+  assert.equal(call, 1 + 1 + 5);
+  assert.deepEqual(delays, [1000, 1000, 1000, 1000, 1000]);
+});
+
+test("transient poll failure is retried INSIDE the adapter (no re-submit) with the jittered backoff when no Retry-After is sent", async () => {
+  let call = 0;
+  let posts = 0;
+  const delays = [];
+  const fetchImpl = async (url, opts = {}) => {
+    call++;
+    if ((opts.method || "GET") === "POST") { posts++; return { ok: true, status: 200, json: async () => [{ token: "t" }] }; }
+    if (call <= 3) return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({ submissions: [{ token: "t", status: { id: 3 },
+      stdout: Buffer.from("ok\n").toString("base64"), stderr: null, compile_output: null, time: "0.01", memory: 256 }] }) };
+  };
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl, pollIntervalMs: 0,
+    sleepImpl: async (ms) => { delays.push(ms); }, randomImpl: () => 0.5 });
+  const r = await adapter.runBatch([ITEM]);
+  assert.equal(r[0].passed, true);
+  assert.equal(posts, 1); // never re-submitted
+  // Two failed GETs -> two internal retries with full-jitter exponential
+  // backoff: 0.5 * 1000 * 2^0 = 500, 0.5 * 1000 * 2^1 = 1000.
+  assert.deepEqual(delays, [500, 1000]);
+});
+
+test("a NON-transient poll failure (e.g. 400) is not retried at all and is marked retryable:false", async () => {
+  let call = 0;
+  const delays = [];
+  const fetchImpl = async () => {
+    call++;
+    if (call === 1) return { ok: true, status: 200, json: async () => [{ token: "t" }] };
+    return { ok: false, status: 400, headers: { get: () => null }, json: async () => ({}) };
+  };
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl, pollIntervalMs: 0,
+    sleepImpl: async (ms) => { delays.push(ms); } });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 400);
+    assert.equal(err.retryable, false);
+    return true;
+  });
+  assert.equal(call, 2); // submit + the single failed GET
+  assert.deepEqual(delays, []);
+});
+
+test("a failed submit POST (no POST ever succeeded) stays QUEUE-retryable: .retryable is NOT set", async () => {
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl: failingFetch(503), pollIntervalMs: 0, sleepImpl: async () => {} });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 503);
+    assert.equal(err.retryable, undefined); // queue may re-POST: nothing was billed
+    return true;
+  });
+});
+
+test("a later submit CHUNK failing after an earlier chunk succeeded is marked retryable:false (the earlier chunk is already billed)", async () => {
+  const N = 25; // two chunks: 20 + 5
+  const items = Array.from({ length: N }, (_, i) => ({
+    languageId: 71, source: `print(${i})`, stdin: "", expectedOutput: String(i), cpuTimeLimit: 5, memoryLimit: 128000
+  }));
+  let posts = 0;
+  const fetchImpl = async () => {
+    posts++;
+    if (posts === 1) return { ok: true, status: 200, json: async () => Array.from({ length: 20 }, (_, i) => ({ token: `tok-${i}` })) };
+    return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
+  };
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K", fetchImpl, pollIntervalMs: 0, sleepImpl: async () => {} });
+  await assert.rejects(adapter.runBatch(items), (err) => {
+    assert.equal(err.status, 503);
+    assert.equal(err.retryable, false); // chunk 1's 20 submissions already exist
     return true;
   });
 });

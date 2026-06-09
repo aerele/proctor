@@ -56,7 +56,30 @@ function httpFailure(action, res) {
   return error;
 }
 
-export function makeJudge0Adapter({ baseUrl, mode, apiKey, authToken, fetchImpl = fetch, pollIntervalMs = 1000, maxPolls = 90 }) {
+// Transient engine pushback worth retrying INSIDE the adapter during the poll
+// phase (same set the exec queue uses). Poll retries must never escape to the
+// queue: once the submit POST succeeded the submissions exist (and are
+// BILLED), and a queue-level retry re-runs the whole batch — re-submitting and
+// re-billing it. So transient poll failures are retried here, against the GET
+// only, and whatever still escapes after the submit phase carries
+// retryable:false so the queue never retries it.
+const POLL_RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+
+// Mark an error as never-queue-retryable (see POLL_RETRYABLE_STATUSES above).
+function markNonRetryable(err) {
+  if (err && typeof err === "object") err.retryable = false;
+  return err;
+}
+
+export function makeJudge0Adapter({
+  baseUrl, mode, apiKey, authToken, fetchImpl = fetch, pollIntervalMs = 1000, maxPolls = 90,
+  // Internal poll-phase retry budget (TOTAL extra GETs per runBatch, across
+  // all poll rounds) + the same backoff shape the exec queue uses: server
+  // Retry-After wins, else full jitter on an exponential base.
+  maxPollRetries = 5, pollRetryBaseDelayMs = 1000,
+  sleepImpl, randomImpl = Math.random
+}) {
+  const sleepFn = sleepImpl ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const headers = mode === "rapidapi"
     ? { "Content-Type": "application/json", "User-Agent": BROWSER_UA, "X-RapidAPI-Key": apiKey, "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com" }
     : { "Content-Type": "application/json", "User-Agent": BROWSER_UA, "X-Auth-Token": authToken };
@@ -90,8 +113,18 @@ export function makeJudge0Adapter({ baseUrl, mode, apiKey, authToken, fetchImpl 
 
   async function submitBatch(items) {
     const tokens = [];
+    let anyChunkSucceeded = false;
     for (let i = 0; i < items.length; i += BATCH_CHUNK) {
-      tokens.push(...await submitChunk(items.slice(i, i + BATCH_CHUNK)));
+      try {
+        tokens.push(...await submitChunk(items.slice(i, i + BATCH_CHUNK)));
+        anyChunkSucceeded = true;
+      } catch (err) {
+        // A failed POST created nothing, so retrying it is safe — but once ANY
+        // earlier chunk POST succeeded, those submissions are already billed:
+        // a queue-level retry would re-submit (and re-bill) them.
+        if (anyChunkSucceeded) throw markNonRetryable(err);
+        throw err;
+      }
     }
     return tokens;
   }
@@ -112,45 +145,76 @@ export function makeJudge0Adapter({ baseUrl, mode, apiKey, authToken, fetchImpl 
     return subs;
   }
 
-  async function sleep(ms) { if (ms > 0) await new Promise((r) => setTimeout(r, ms)); }
+  async function sleep(ms) { if (ms > 0) await sleepFn(ms); }
 
   return {
     async runBatch(items) {
       const tokens = await submitBatch(items);
-      const subs = new Array(tokens.length).fill(null);
-      // Poll only UNFINISHED tokens each round-trip (status id 1/2) to cut
-      // request volume on the hosted tier (design §11).
-      let pendingIdx = tokens.map((_, i) => i);
-      for (let poll = 0; poll < maxPolls && pendingIdx.length > 0; poll++) {
-        if (poll > 0) await sleep(pollIntervalMs);
-        const fetched = await fetchBatch(pendingIdx.map((i) => tokens[i]));
-        const stillPending = [];
-        fetched.forEach((s, j) => {
-          const idx = pendingIdx[j];
-          subs[idx] = s;
-          if (!isDone(s)) stillPending.push(idx);
-        });
-        pendingIdx = stillPending;
-      }
-      return subs.map((s, idx) => {
-        // Never fetched (poll budget 0) -> never finished judging.
-        if (!s) {
-          return { status: "judging_timeout", passed: false, stdout: "", stderr: "", compileOutput: "", timeSec: null, memoryKb: null };
+      // The submissions now EXIST (and are billed). From here on, NO error may
+      // escape as queue-retryable: transient poll failures are retried right
+      // here against the GET only (never re-submitting), and whatever still
+      // fails is marked retryable:false before it propagates.
+      let pollRetryBudget = maxPollRetries;
+      const fetchBatchWithRetry = async (batchTokens) => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await fetchBatch(batchTokens);
+          } catch (err) {
+            if (!POLL_RETRYABLE_STATUSES.has(err?.status) || pollRetryBudget <= 0) {
+              throw markNonRetryable(err);
+            }
+            pollRetryBudget--;
+            const delayMs = typeof err.retryAfterMs === "number"
+              ? err.retryAfterMs
+              : randomImpl() * pollRetryBaseDelayMs * 2 ** attempt;
+            await sleep(delayMs);
+          }
         }
-        const status = normalizeStatus(s.status?.id);
-        const stdout = unb64(s.stdout);
-        const expected = items[idx].expectedOutput ?? "";
-        const passed = status === "accepted" && stdout.trim() === String(expected).trim();
-        return {
-          status: passed ? "accepted" : (status === "accepted" ? "wrong_answer" : status),
-          passed,
-          stdout,
-          stderr: unb64(s.stderr),
-          compileOutput: unb64(s.compile_output),
-          timeSec: s.time ? Number(s.time) : null,
-          memoryKb: s.memory ?? null
-        };
-      });
+      };
+      try {
+        const subs = new Array(tokens.length).fill(null);
+        // Poll only UNFINISHED tokens each round-trip (status id 1/2) to cut
+        // request volume on the hosted tier (design §11).
+        let pendingIdx = tokens.map((_, i) => i);
+        for (let poll = 0; poll < maxPolls && pendingIdx.length > 0; poll++) {
+          if (poll > 0) await sleep(pollIntervalMs);
+          const fetched = await fetchBatchWithRetry(pendingIdx.map((i) => tokens[i]));
+          const stillPending = [];
+          fetched.forEach((s, j) => {
+            const idx = pendingIdx[j];
+            subs[idx] = s;
+            if (!isDone(s)) stillPending.push(idx);
+          });
+          pendingIdx = stillPending;
+        }
+        return normalizeResults(subs, items);
+      } catch (err) {
+        // Belt-and-braces: anything unexpected in the poll/normalize phase
+        // (not just HTTP failures) must also never trigger a queue re-submit.
+        throw markNonRetryable(err);
+      }
     }
   };
+
+  function normalizeResults(subs, items) {
+    return subs.map((s, idx) => {
+      // Never fetched (poll budget 0) -> never finished judging.
+      if (!s) {
+        return { status: "judging_timeout", passed: false, stdout: "", stderr: "", compileOutput: "", timeSec: null, memoryKb: null };
+      }
+      const status = normalizeStatus(s.status?.id);
+      const stdout = unb64(s.stdout);
+      const expected = items[idx].expectedOutput ?? "";
+      const passed = status === "accepted" && stdout.trim() === String(expected).trim();
+      return {
+        status: passed ? "accepted" : (status === "accepted" ? "wrong_answer" : status),
+        passed,
+        stdout,
+        stderr: unb64(s.stderr),
+        compileOutput: unb64(s.compile_output),
+        timeSec: s.time ? Number(s.time) : null,
+        memoryKb: s.memory ?? null
+      };
+    });
+  }
 }
