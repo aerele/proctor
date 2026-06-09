@@ -86,3 +86,8 @@ This is the first thing to read in the morning. Three sections, kept current thr
 1. **Reused the already-running :5173 demo dev server** (VITE_DEMO_MODE=true, VITE_ADMIN_PASSWORD=dev) instead of starting a second instance with password "admin" as the plan literally said — per the leave-the-dev-server instruction; unlocked with "dev".
 2. **S1 FullscreenGate interaction noted, not a bug:** on the student page the first "Find me" click is consumed by the gate (enters fullscreen, stage 1→2); the second click performs the lookup. Expected S1 behavior (any click is the fullscreen gesture); real candidates hit the gate's own button first.
 3. Committed the 10 evidence screenshots alongside the notes (repo convention from S1/E2E sections), though the plan's commit listed only MORNING-NOTES.md.
+
+## S2 roster login — BUILT + VERIFIED (~05:05)
+- 8/8 plan tasks (5b7c38f…da8c99b): roster store w/ versioned replace, public exam-config + masked lookup, server-side roster gate on session start (identity override + roster_verified stamp), pure CSV/TSV parser (10 vitest), api client + demo parity, admin rooms+roster UI, student identity-confirm + room dropdown, demo browser verification (done by the workflow's own final task on :5173).
+- Suites: backend 249/249, frontend 117/117 + tsc + build.
+- Review minors being fixed in the S3 workflow's first step: exact-norm check after sanitized-doc-id lookup; version-prefixed entry ids (re-upload window); mapped-blank-cell → ignore typed for name/email/roll. **Morning call:** hackerrank_username KEEPS the typed fallback when roster cell is blank (session key; blank would strand the candidate) — veto if you want strict.

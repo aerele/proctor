@@ -26,7 +26,7 @@ Detailed TDD tasks: `docs/superpowers/plans/2026-06-09-own-editor-slice1.md`. Su
 
 ## STRETCH (priority order — each = spec → plan → build → test → commit)
 - [x] S1 — Fullscreen-first onboarding + unique top bar (vanishes on anomaly) + 1–5 onboarding progress (at-a-distance invigilation).
-- [ ] S2 — Roster upload (flexible columns + designated unique-ID) + unique-ID-confirm login + room dropdown (+ "Other").
+- [x] S2 — Roster upload (flexible columns + designated unique-ID) + unique-ID-confirm login + room dropdown (+ "Other").
 - [ ] S3 — Invigilator portal (NO signed-QR): room OTP/passcode distribution + **start-now/allow-all bypass** + basic room stats + selective alerts.
 - [ ] S4 — Problem authoring: question bank + sample/hidden test cases + time/memory limits + scoring (replaces the placeholder problem).
 - [ ] S5 — Dynamic time + "end now" (admin).
