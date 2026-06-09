@@ -1,11 +1,12 @@
 // frontend/src/shell/examShell.test.ts
 import { describe, it, expect } from "vitest";
 import {
-  deriveStage, stageHint, topBarVisible, STAGE_META,
+  deriveStage, stageHint, topBarVisible, fullscreenGateVisible, STAGE_META,
   formatWallClock, formatExamElapsed,
   anomalyFromEvent, topBarReducer, initialTopBarState,
+  serializeShellState, deserializeShellState, shellStateStorageKey,
   makeShellEvent, appendToBuffer,
-  type StageInput, type RestorePreconditions
+  type StageInput, type RestorePreconditions, type TopBarState
 } from "./examShell";
 import type { ProctorEvent } from "../types";
 
@@ -59,6 +60,25 @@ describe("topBarVisible", () => {
     expect(topBarVisible(false, "ended")).toBe(true);
     expect(topBarVisible(true, "running")).toBe(false);
     expect(topBarVisible(false, "locked")).toBe(false);
+  });
+});
+
+describe("fullscreenGateVisible", () => {
+  it("shows the gate when out of fullscreen pre-DONE with no anomaly episode", () => {
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 1, barHidden: false, gate: "form" })).toBe(true);
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 3, barHidden: false, gate: "running" })).toBe(true);
+  });
+  it("hides the gate while in fullscreen", () => {
+    expect(fullscreenGateVisible({ fullscreen: true, stage: 2, barHidden: false, gate: "form" })).toBe(false);
+  });
+  it("hides the gate at stage 5 DONE", () => {
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 5, barHidden: false, gate: "ended" })).toBe(false);
+  });
+  it("hides the gate while an anomaly episode owns fullscreen re-entry", () => {
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 4, barHidden: true, gate: "running" })).toBe(false);
+  });
+  it("locked + not fullscreen: gate hidden — the locked message takes precedence", () => {
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 3, barHidden: false, gate: "locked" })).toBe(false);
   });
 });
 
@@ -227,6 +247,79 @@ describe("topBarReducer", () => {
     expect(r.state.barHidden).toBe(false);
     expect(r.state.flagCount).toBe(1);
     expect(r.emit).toEqual({ type: "topbar_restored", detail: { hidden_ms: 4000, reasons: ["window_blur"] } });
+  });
+});
+
+describe("shellStateStorageKey", () => {
+  it("namespaces the persisted shell state per session id", () => {
+    expect(shellStateStorageKey("abc-123")).toBe("aerele-proctor-shell-state-abc-123");
+  });
+});
+
+describe("serializeShellState / deserializeShellState", () => {
+  const midEpisode: TopBarState = {
+    barHidden: true,
+    flagCount: 3,
+    activeReasons: [
+      { type: "window_blur", message: "You switched to another window or application.", at: "2026-06-10T01:00:00.000Z" },
+      { type: "visibility_change", message: "This exam tab was hidden.", at: "2026-06-10T01:00:01.000Z" }
+    ],
+    hiddenAtMs: 12_345
+  };
+
+  it("round-trips a mid-episode state (reasons keep type/message/at; hiddenAtMs survives)", () => {
+    expect(deserializeShellState(serializeShellState(midEpisode))).toEqual(midEpisode);
+  });
+  it("round-trips a calm state with prior flags", () => {
+    const calm: TopBarState = { barHidden: false, flagCount: 2, activeReasons: [], hiddenAtMs: null };
+    expect(deserializeShellState(serializeShellState(calm))).toEqual(calm);
+  });
+  it("round-trips the initial state", () => {
+    expect(deserializeShellState(serializeShellState(initialTopBarState))).toEqual(initialTopBarState);
+  });
+  it("missing key (null) => fresh initial state", () => {
+    expect(deserializeShellState(null)).toEqual(initialTopBarState);
+  });
+  it("malformed JSON => fresh initial state", () => {
+    expect(deserializeShellState("{nope")).toEqual(initialTopBarState);
+    expect(deserializeShellState("")).toEqual(initialTopBarState);
+  });
+  it("non-object payloads => fresh initial state", () => {
+    expect(deserializeShellState("42")).toEqual(initialTopBarState);
+    expect(deserializeShellState("\"hi\"")).toEqual(initialTopBarState);
+    expect(deserializeShellState("null")).toEqual(initialTopBarState);
+    expect(deserializeShellState("[]")).toEqual(initialTopBarState);
+  });
+  it("tampered field types => fresh initial state", () => {
+    const tampered: Array<Record<string, unknown>> = [
+      { ...midEpisode, barHidden: "false" },
+      { ...midEpisode, flagCount: "0" },
+      { ...midEpisode, flagCount: -1 },
+      { ...midEpisode, flagCount: 1.5 },
+      { ...midEpisode, activeReasons: "none" },
+      { ...midEpisode, activeReasons: [{ type: 7, message: "x", at: "t" }] },
+      { ...midEpisode, activeReasons: [null] },
+      { ...midEpisode, hiddenAtMs: "12345" }
+    ];
+    for (const bad of tampered) {
+      expect(deserializeShellState(JSON.stringify(bad))).toEqual(initialTopBarState);
+    }
+  });
+  it("missing fields => fresh initial state (a hand-edited partial object never half-applies)", () => {
+    expect(deserializeShellState(JSON.stringify({ flagCount: 1 }))).toEqual(initialTopBarState);
+    expect(deserializeShellState(JSON.stringify({ barHidden: true, flagCount: 1, activeReasons: [] }))).toEqual(initialTopBarState);
+  });
+  it("extra unknown fields are dropped, known fields kept", () => {
+    const withExtra = { ...midEpisode, sneaky: true };
+    expect(deserializeShellState(JSON.stringify(withExtra))).toEqual(midEpisode);
+  });
+  it("serialize emits only the persisted fields", () => {
+    expect(JSON.parse(serializeShellState(midEpisode))).toEqual({
+      barHidden: true,
+      flagCount: 3,
+      activeReasons: midEpisode.activeReasons,
+      hiddenAtMs: 12_345
+    });
   });
 });
 

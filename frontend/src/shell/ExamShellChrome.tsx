@@ -7,7 +7,7 @@
 // Bar presence semantics: bar = all good; NO bar = walk over.
 
 import type { SessionStatus } from "../types";
-import { stageHint, topBarVisible, type ShellGate } from "./examShell";
+import { fullscreenGateVisible, stageHint, topBarVisible, type ShellGate } from "./examShell";
 import { AnomalyPanel } from "./AnomalyPanel";
 import { ExamTopBar } from "./ExamTopBar";
 import { FullscreenGate } from "./FullscreenGate";
@@ -24,8 +24,10 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
 }) {
   const barVisible = topBarVisible(shell.barHidden, gate);
   // While an anomaly episode is active the AnomalyPanel owns fullscreen
-  // re-entry; the pre-recording gate overlay stays out of its way (§5.2).
-  const gateVisible = !shell.fullscreen && shell.stage < 5 && !shell.barHidden;
+  // re-entry; the pre-recording gate overlay stays out of its way (§5.2). The
+  // locked screen also takes precedence over the overlay — pure decision in
+  // examShell.fullscreenGateVisible.
+  const gateVisible = fullscreenGateVisible({ fullscreen: shell.fullscreen, stage: shell.stage, barHidden: shell.barHidden, gate });
 
   return (
     <>
