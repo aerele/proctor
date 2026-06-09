@@ -5,6 +5,9 @@ export type StudentForm = {
   email: string;
   room: string;
   consent_accepted: boolean;
+  // S2: the roster unique-ID the candidate confirmed ("" when no roster / not
+  // yet confirmed). Sent to /api/session/start, which re-verifies it.
+  roster_unique_id: string;
 };
 
 // Lifecycle status of the session as reported by the backend (Phase 2). Distinct
@@ -78,6 +81,8 @@ export type ProctorSettings = {
   start_at: string;
   end_at: string;
   contest_url?: string;
+  // S2: admin-configured room labels for the student room dropdown.
+  rooms?: string[];
   // Passcodes are removed (Phase 2). These remain optional/backward-compatible so
   // an older settings doc still parses; the start/end flow no longer reads them.
   passcode?: string;
@@ -431,3 +436,60 @@ export type RunResult = { results: RunCaseResult[] };
 // "error" = the judging infrastructure failed (e.g. Judge0 timeout) — NOT a wrong
 // answer; the UI renders it neutrally and asks the candidate to submit again.
 export type SubmitResult = { verdict: "accepted" | "wrong_answer" | "error"; passed_count: number; total: number; submission_id: string };
+
+// ---- S2 roster login --------------------------------------------------------
+
+// Public pre-session exam config (GET /api/exam-config, no auth): drives the
+// student form mode (roster gate on/off, unique-ID field label, room list).
+export type ExamConfig = {
+  roster_required: boolean;
+  unique_id_label: string;
+  rooms: string[];
+};
+
+// Identity fields a roster column can be mapped onto (matches the backend's
+// ROSTER_MAPPABLE_FIELDS and roster/parseRoster.ts RosterFieldMapping).
+export type RosterColumnMapping = {
+  name?: string;
+  email?: string;
+  roll_number?: string;
+  hackerrank_username?: string;
+  room?: string;
+};
+
+// POST /api/admin/roster — the client parses the CSV; the backend stores rows.
+export type RosterUploadRequest = {
+  unique_id_column: string;
+  columns: string[];
+  column_mapping: RosterColumnMapping;
+  rows: Array<Record<string, string>>;
+};
+
+export type RosterUploadResponse = {
+  ok: boolean;
+  configured: boolean;
+  count: number;
+  skipped: Array<{ row: number; reason: string }>;
+};
+
+// GET /api/admin/roster — meta only (never the rows).
+export type RosterStatus = {
+  configured: boolean;
+  count?: number;
+  unique_id_column?: string;
+  column_mapping?: RosterColumnMapping;
+  columns?: string[];
+  updated_at?: string;
+};
+
+// POST /api/roster/lookup — confirmation-safe fields ONLY (email masked,
+// unmapped extra columns never returned).
+export type RosterLookupResult = {
+  found: boolean;
+  unique_id: string;
+  name: string;
+  roll_number: string;
+  room: string;
+  hackerrank_username: string;
+  email_masked: string;
+};

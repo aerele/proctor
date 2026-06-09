@@ -47,7 +47,8 @@ const initialForm: StudentForm = {
   roll_number: "",
   email: "",
   room: "",
-  consent_accepted: false
+  consent_accepted: false,
+  roster_unique_id: ""
 };
 
 const integrityNotices = studentCopy.integrityNotices(OWN_EDITOR);
