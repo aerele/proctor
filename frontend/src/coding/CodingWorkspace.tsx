@@ -2,9 +2,18 @@
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
 import { execRun, execSubmit, sendEditorEvents } from "../api";
 import { EventBatcher } from "./editorEvents";
+import { presentSubmitResult, type SubmitTone } from "./submitVerdict";
 import type { EditorEvent, RunResult, SubmitResult } from "../types";
 
 const MonacoEditor = lazy(() => import("./MonacoEditor").then((m) => ({ default: m.MonacoEditor })));
+
+// Banner styling per submit tone. "neutral" (verdict "error": judging infra
+// failed) deliberately avoids the red failure styling — it is not a wrong answer.
+const SUBMIT_TONE_CLASSES: Record<SubmitTone, string> = {
+  success: "border-green-300 bg-green-50",
+  failure: "border-red-300 bg-red-50",
+  neutral: "border-line bg-panel text-muted"
+};
 
 const STARTERS: Record<string, string> = {
   python: "a, b = map(int, input().split())\nprint(a + b)\n",
@@ -70,11 +79,14 @@ export function CodingWorkspace({ sessionId, problem }: {
             ))}
           </div>
         )}
-        {submit && (
-          <div className={`rounded-md border p-3 text-sm ${submit.verdict==="accepted" ? "border-green-300 bg-green-50" : "border-red-300 bg-red-50"}`}>
-            Verdict: <span className="font-semibold">{submit.verdict}</span> — {submit.passed_count}/{submit.total} hidden tests passed.
-          </div>
-        )}
+        {submit && (() => {
+          const presentation = presentSubmitResult(submit);
+          return (
+            <div className={`rounded-md border p-3 text-sm ${SUBMIT_TONE_CLASSES[presentation.tone]}`}>
+              {presentation.message}
+            </div>
+          );
+        })()}
       </section>
     </div>
   );

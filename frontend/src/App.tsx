@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
+import * as studentCopy from "./studentCopy";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 
@@ -23,6 +24,11 @@ const SLICE1_PROBLEM: Slice1Problem | null = {
   languages: ["python","cpp","java","javascript"]
 };
 
+// Candidate-facing copy is surface-specific: with the own-editor problem
+// configured, no student string may direct the candidate to HackerRank (see
+// studentCopy.ts). Admin text and the "HackerRank username" field keep the name.
+const OWN_EDITOR = SLICE1_PROBLEM !== null;
+
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
 
@@ -41,20 +47,7 @@ const initialForm: StudentForm = {
   consent_accepted: false
 };
 
-const integrityNotices = [
-  "Your screen recording is being uploaded throughout the assessment for review.",
-  "The shared screen is recorded directly so capture continues while this proctor tab is hidden.",
-  "If a camera is available, keep your face visible in the self-view throughout the assessment.",
-  "Clipboard snapshot and paste activity inside this session are part of the integrity record.",
-  "Focus changes, hidden page states, refreshes, and exits are logged and may require explanation.",
-  "Stopping screen sharing before submission is treated as a serious proctoring violation.",
-  "HackerRank submissions may be checked for similarity, unusual structure, and copied code patterns.",
-  "Shortlisted candidates must be ready to explain and modify their submitted code live.",
-  "Suspicious username/session behavior may lead to manual verification before shortlisting.",
-  "Upload gaps, missing recording chunks, and interrupted sessions are reviewed before results are accepted.",
-  "Any unexplained proctoring anomaly can affect shortlisting even if the code passes all tests.",
-  "Selection depends on score, originality, explanation, and clean proctoring evidence."
-];
+const integrityNotices = studentCopy.integrityNotices(OWN_EDITOR);
 
 const checkpointMessages = [
   "Confirm immediately that you are present and working alone.",
@@ -572,7 +565,7 @@ function StudentApp() {
       status: "screen_and_focus_review_active",
       explanation: "Candidate-facing UI shows tab/focus review as active. Browser tab inventory requires a managed browser extension; full-screen recording and focus events are used in this web-only build."
     };
-    setTabAudit("Tab/focus review active. Keep only HackerRank and this proctor session open; other activity may be visible in the shared-screen recording.");
+    setTabAudit(studentCopy.tabAuditMessage(OWN_EDITOR));
     await uploadReviewFile(activeSessionId, "tabs", [tabRecord]);
     addEvent({
       type: "tabs_review_uploaded",
@@ -808,7 +801,7 @@ function StudentApp() {
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
                 {isFormStage
-                  ? "Enter your details below, then start proctoring before you open the contest. When you start, your browser will ask which screen to share — choose Entire Screen."
+                  ? studentCopy.formStageIntro(OWN_EDITOR)
                   : SLICE1_PROBLEM
                     ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
                     : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
@@ -1091,7 +1084,7 @@ function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }:
   return (
     <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4">
       <p className="text-sm font-semibold text-danger">End test confirmation</p>
-      <p className="mt-1 text-sm leading-6 text-ink">End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below.</p>
+      <p className="mt-1 text-sm leading-6 text-ink">{studentCopy.endTestConfirmation(OWN_EDITOR)}</p>
       <label className="mt-4 flex gap-3 rounded-md border border-line bg-white/70 p-3 text-sm leading-6 text-muted">
         <input className="mt-1 h-4 w-4 accent-danger" type="checkbox" checked={assuranceAccepted} onChange={(event) => onAssuranceChange(event.target.checked)} />
         <span>I assure that I worked independently, did not copy, did not use AI/external help, and submitted only my own solution.</span>
@@ -2913,39 +2906,19 @@ function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit
 
 // Single source of truth for the test rules. The prominent PreStartRules block
 // (pre-start) and the compact RulesPanel reminder (during recording) both read
-// this so the rules never drift between the two surfaces.
-const TEST_RULES: Array<{ icon: React.ReactNode; title: string; body: string }> = [
-  {
-    icon: <MonitorUp size={18} />,
-    title: "Share your ENTIRE SCREEN",
-    body: "When prompted, choose Entire Screen — not a tab, window, or browser. Tab/window sharing is rejected and recording will not start."
-  },
-  {
-    icon: <Video size={18} />,
-    title: "Keep recording running",
-    body: "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have fully submitted on HackerRank."
-  },
-  {
-    icon: <Eye size={18} />,
-    title: "Stay on HackerRank and this tab",
-    body: "Don't switch to other tabs, apps, or windows. Focus changes, hidden states, and exits are logged and may need explanation."
-  },
-  {
-    icon: <Copy size={18} />,
-    title: "No copy / paste or outside help",
-    body: "Clipboard and paste activity is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
-  },
-  {
-    icon: <Camera size={18} />,
-    title: "Keep your camera visible",
-    body: "If a camera is available, keep the self-view (or its pop-out) visible while you work in HackerRank. Microphone is captured when available."
-  },
-  {
-    icon: <ClipboardCheck size={18} />,
-    title: "End the test here when done",
-    body: "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
-  }
+// this so the rules never drift between the two surfaces. The TEXT lives in
+// studentCopy.testRules (own-editor vs HackerRank variants, unit-tested); this
+// zips it with one icon per rule, in the same fixed order.
+const TEST_RULE_ICONS: React.ReactNode[] = [
+  <MonitorUp size={18} />,   // Share your ENTIRE SCREEN
+  <Video size={18} />,       // Keep recording running
+  <Eye size={18} />,         // Stay on (HackerRank and) this tab
+  <Copy size={18} />,        // No copy / paste or outside help
+  <Camera size={18} />,      // Keep your camera visible
+  <ClipboardCheck size={18} /> // End the test here when done
 ];
+const TEST_RULES: Array<{ icon: React.ReactNode; title: string; body: string }> =
+  studentCopy.testRules(OWN_EDITOR).map((rule, index) => ({ icon: TEST_RULE_ICONS[index], ...rule }));
 
 // PROMINENT pre-start rules — the candidate reads this before the form. This is
 // the headline of the page at the form stage, not a sidebar afterthought.
