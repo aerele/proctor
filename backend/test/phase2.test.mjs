@@ -54,8 +54,8 @@ function makeFakeFirestore() {
 
   function makeQuery(name, filters) {
     return {
-      where(field, _op, value) {
-        return makeQuery(name, [...filters, { field, value }]);
+      where(field, op, value) {
+        return makeQuery(name, [...filters, { field, op, value }]);
       },
       limit() {
         return this;
@@ -63,8 +63,14 @@ function makeFakeFirestore() {
       async get() {
         const store = getCollection(name);
         let docs = [...store.values()];
-        for (const { field, value } of filters) {
-          docs = docs.filter((doc) => doc[field] === value);
+        for (const { field, op, value } of filters) {
+          // Mirror the Firestore operators the handler actually uses: scalar
+          // equality and the `in` membership test (a small value array).
+          if (op === "in") {
+            docs = docs.filter((doc) => Array.isArray(value) && value.includes(doc[field]));
+          } else {
+            docs = docs.filter((doc) => doc[field] === value);
+          }
         }
         return { docs: docs.map((data) => ({ data: () => data })) };
       }
@@ -761,6 +767,192 @@ test("session-action: requires admin password", async () => {
 });
 
 // =====================================================================
+// Bulk session details — POST /api/admin/session-details
+// =====================================================================
+
+async function sessionDetails(usernames, contestSlug, headers = ADMIN_HEADERS) {
+  const body = { usernames };
+  if (contestSlug !== undefined) body.contest_slug = contestSlug;
+  return call(makeReq({ method: "POST", path: "/api/admin/session-details", headers, body }));
+}
+
+test("session-details: projects details straight from the session doc, ZERO GCS access", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, {
+    hackerrank_username: "Alice",
+    name: "Alice Example",
+    email: "alice@example.com",
+    roll_number: "R-1",
+    room: "Lab-3"
+  });
+
+  // Fail the test if the handler touches GCS at all — the whole point of this
+  // endpoint is to avoid the per-username getFiles/getSignedUrl fan-out.
+  const noGcs = {
+    bucket() {
+      throw new Error("session-details must not touch GCS");
+    }
+  };
+  __setClientsForTest({ firestore, storage: noGcs });
+
+  const res = await sessionDetails(["Alice"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.details.length, 1);
+  const d = res.body.details[0];
+  assert.equal(d.username, "Alice", "echoes the input username");
+  assert.equal(d.hackerrank_username, "Alice");
+  assert.equal(d.name, "Alice Example");
+  assert.equal(d.email, "alice@example.com", "email projected (recording-sessions omits this)");
+  assert.equal(d.roll_number, "R-1", "roll_number projected (recording-sessions omits this)");
+  assert.equal(d.room, "Lab-3");
+  assert.equal(d.contest_slug, "coding-contest-mcet-june-2026-slot-2");
+  assert.equal(d.status, "active");
+  assert.equal(d.found, true);
+  // No signed-url / evidence fields leak into the details shape.
+  assert.equal(Object.prototype.hasOwnProperty.call(d, "evidence"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(d, "download_url"), false);
+});
+
+test("session-details: preserves input ORDER and emits found:false for unknown usernames", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "Alice", name: "Alice Example", email: "a@x.com", roll_number: "R-1" });
+  await start(firestore, storage, { hackerrank_username: "Bob", name: "Bob Example", email: "b@x.com", roll_number: "R-2" });
+
+  // Order: a known one, an unknown one, another known one. Response must mirror
+  // the input order exactly.
+  const res = await sessionDetails(["Bob", "Nobody", "Alice"]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.details.map((d) => d.username), ["Bob", "Nobody", "Alice"], "input order preserved");
+  assert.deepEqual(res.body.details.map((d) => d.found), [true, false, true]);
+
+  const missing = res.body.details[1];
+  assert.equal(missing.found, false);
+  assert.equal(missing.username, "Nobody", "unknown username still echoes the input");
+  for (const field of ["hackerrank_username", "name", "email", "roll_number", "room", "contest_slug", "status"]) {
+    assert.equal(missing[field], "", `unknown username has empty ${field}`);
+  }
+});
+
+test("session-details: picks the NEWEST session per username (created_at desc)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Two sessions for the same user; force distinct created_at and a distinguishing
+  // field so we can tell which one was projected.
+  const first = await start(firestore, storage, { hackerrank_username: "Alice", name: "Old Name", email: "old@x.com" });
+  await call(makeReq({ method: "POST", path: "/api/admin/session-action", headers: ADMIN_HEADERS, body: { action: "end", session_id: first.body.session_id } }));
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  store.set(first.body.session_id, { ...store.get(first.body.session_id), created_at: "2026-06-05T00:00:00.000Z" });
+  const second = await start(firestore, storage, { hackerrank_username: "Alice", name: "New Name", email: "new@x.com" });
+  store.set(second.body.session_id, { ...store.get(second.body.session_id), created_at: "2026-06-07T00:00:00.000Z" });
+
+  const res = await sessionDetails(["Alice"]);
+  assert.equal(res.body.details[0].name, "New Name", "newest session wins");
+  assert.equal(res.body.details[0].email, "new@x.com");
+});
+
+test("session-details: '@'-prefixed input resolves to the same session (alt-norm match)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Student started WITHOUT the '@'; username_norm is 'alice'.
+  await start(firestore, storage, { hackerrank_username: "Alice", name: "Alice Example", email: "a@x.com" });
+
+  // Roster entry typed WITH the '@' → normalizeUsername('@alice') === '_alice';
+  // the alt-norm ('alice') must still find the session.
+  const res = await sessionDetails(["@alice"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.details[0].found, true, "'@alice' resolves via alt-norm to 'alice'");
+  assert.equal(res.body.details[0].username, "@alice", "echoes the exact input form");
+  assert.equal(res.body.details[0].name, "Alice Example");
+});
+
+test("session-details: a GENUINE '_alice' username is NOT conflated with 'alice'", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Two DISTINCT students: one whose HackerRank handle is literally '_alice'
+  // (username_norm '_alice'), and a separate 'alice' (username_norm 'alice').
+  const us = await start(firestore, storage, { hackerrank_username: "_alice", name: "Underscore Alice", email: "underscore@x.com" });
+  const pl = await start(firestore, storage, { hackerrank_username: "alice", name: "Plain Alice", email: "plain@x.com" });
+  // Pin distinct created_at so any newest-first tie-break is deterministic.
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  store.set(us.body.session_id, { ...store.get(us.body.session_id), created_at: "2026-06-05T00:00:00.000Z" });
+  store.set(pl.body.session_id, { ...store.get(pl.body.session_id), created_at: "2026-06-07T00:00:00.000Z" });
+
+  // Querying the literal '_alice' (no leading '@') must NOT fall back to 'alice'.
+  // BEFORE the fix, '_alice' normalized to '_alice' and the alt-norm derived
+  // 'alice' from the leading '_', wrongly merging the two distinct students.
+  const underscore = await sessionDetails(["_alice"]);
+  assert.equal(underscore.body.details[0].found, true);
+  assert.equal(underscore.body.details[0].name, "Underscore Alice", "'_alice' resolves to the real '_alice' student, not 'alice'");
+  assert.equal(underscore.body.details[0].email, "underscore@x.com");
+
+  // And 'alice' (no leading '@') still resolves to the plain student only.
+  const plain = await sessionDetails(["alice"]);
+  assert.equal(plain.body.details[0].found, true);
+  assert.equal(plain.body.details[0].name, "Plain Alice");
+  assert.equal(plain.body.details[0].email, "plain@x.com");
+});
+
+test("session-details: a degenerate input ('@' / blank) does NOT query and is found:false", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "alice", name: "Plain Alice", email: "plain@x.com" });
+
+  // A bare '@' normalizes to '_' (degenerate); it must not mass-match docs.
+  const res = await sessionDetails(["@"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.details[0].found, false, "bare '@' carries no username → found:false");
+  assert.equal(res.body.details[0].username, "@", "echoes the input form");
+  assert.equal(res.body.details[0].name, "");
+});
+
+test("session-details: contest_slug scopes the match", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "Alice", name: "Alice Example", email: "a@x.com" });
+  const contestSlug = "coding-contest-mcet-june-2026-slot-2";
+
+  // Right slug → found; a different slug → not found (scoped out).
+  const hit = await sessionDetails(["Alice"], contestSlug);
+  assert.equal(hit.body.details[0].found, true);
+  const miss = await sessionDetails(["Alice"], "some-other-contest");
+  assert.equal(miss.body.details[0].found, false, "wrong contest_slug excludes the session");
+});
+
+test("session-details: caps usernames at REVIEW_ROSTER_LIMIT (5000) with a 400", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const tooMany = Array.from({ length: 5001 }, (_, i) => `u${i}`);
+  const res = await sessionDetails(tooMany);
+  assert.equal(res.statusCode, 400);
+});
+
+test("session-details: usernames must be an array (400)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/session-details", headers: ADMIN_HEADERS, body: { usernames: "Alice" } }));
+  assert.equal(res.statusCode, 400);
+});
+
+test("session-details: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetails(["Alice"], undefined, {});
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
 // Recording playback picker — GET /api/admin/recording-sessions
 // =====================================================================
 
@@ -818,6 +1010,110 @@ test("recording-sessions: requires admin password", async () => {
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
   const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: {} }));
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
+// Sessions drill-down — GET /api/admin/sessions-list (all docs, classified to
+// match the stat-card counts; the all-docs counterpart to recording-sessions).
+// =====================================================================
+
+function sessionsList(query = {}, headers = ADMIN_HEADERS) {
+  return call(makeReq({ method: "GET", path: "/api/admin/sessions-list", headers, query }));
+}
+
+// Force a session doc into a given status without going through an action (used
+// to set up locked/ended fixtures deterministically).
+function setStatus(firestore, sessionId, status) {
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  store.set(sessionId, { ...store.get(sessionId), status });
+}
+
+test("sessions-list: a pending_approval session with chunk_count:0 IS returned (NOT recording-filtered)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // carol starts twice → the second is pending_approval, chunk_count:0, and
+  // would be DROPPED by recording-sessions' chunk_count>0 filter.
+  await start(firestore, storage, { hackerrank_username: "carol" });
+  const second = await start(firestore, storage, { hackerrank_username: "carol" });
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  assert.equal(store.get(second.body.session_id).status, "pending_approval", "second device is pending_approval");
+  assert.equal(store.get(second.body.session_id).chunk_count, 0, "and recorded zero chunks");
+
+  const res = await sessionsList({ status: "pending_approval" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 1, "the zero-chunk pending session is listed");
+  assert.equal(res.body.sessions[0].session_id, second.body.session_id);
+  assert.equal(res.body.sessions[0].chunk_count, 0);
+  assert.equal(res.body.sessions[0].status, "pending_approval");
+  // Lightweight contract identical to recording-sessions: no evidence / signed urls.
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body.sessions[0], "evidence"), false);
+});
+
+test("sessions-list: status='' returns ALL session docs (incl. zero-chunk)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // active alice, ended bob, pending carol(2nd) → three docs total, zero chunks each.
+  await start(firestore, storage, { hackerrank_username: "alice" });
+  const bob = await start(firestore, storage, { hackerrank_username: "bob" });
+  await call(makeReq({ method: "POST", path: "/api/session/end", body: { session_id: bob.body.session_id, assurance_accepted: true } }));
+  await start(firestore, storage, { hackerrank_username: "carol" });
+  await start(firestore, storage, { hackerrank_username: "carol" });
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 4, "all four docs returned regardless of status/chunks");
+  // Row shape matches recording-sessions exactly.
+  for (const field of ["session_id", "hackerrank_username", "name", "room", "contest_slug", "chunk_count", "created_at", "status"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(res.body.sessions[0], field), `expected field ${field}`);
+  }
+});
+
+test("sessions-list: status='locked' returns ONLY locked docs", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "alice" }); // active
+  const bob = await start(firestore, storage, { hackerrank_username: "bob" });
+  setStatus(firestore, bob.body.session_id, "locked");
+
+  const res = await sessionsList({ status: "locked" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 1, "only the locked doc");
+  assert.equal(res.body.sessions[0].session_id, bob.body.session_id);
+  assert.equal(res.body.sessions[0].status, "locked");
+});
+
+test("sessions-list: contest_slug and room scope the result", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const contestSlug = "coding-contest-mcet-june-2026-slot-2";
+  // Two rooms in the same contest.
+  await start(firestore, storage, { hackerrank_username: "alice", room: "Lab-3" });
+  await start(firestore, storage, { hackerrank_username: "bob", room: "Lab-4" });
+
+  // contest_slug scope: both are in this contest, so status='' returns both.
+  const all = await sessionsList({ contest_slug: contestSlug });
+  assert.equal(all.body.sessions.length, 2, "both contest docs returned");
+  // A non-matching contest_slug excludes everything.
+  const none = await sessionsList({ contest_slug: "some-other-contest" });
+  assert.equal(none.body.sessions.length, 0, "wrong contest_slug excludes all");
+
+  // room scope: only the Lab-3 session.
+  const lab3 = await sessionsList({ contest_slug: contestSlug, room: "Lab-3" });
+  assert.equal(lab3.body.sessions.length, 1, "only the Lab-3 session");
+  assert.equal(lab3.body.sessions[0].room, "Lab-3");
+  assert.equal(lab3.body.sessions[0].hackerrank_username, "alice");
+});
+
+test("sessions-list: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionsList({ status: "" }, {});
   assert.equal(res.statusCode, 401);
 });
 

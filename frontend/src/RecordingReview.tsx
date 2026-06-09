@@ -211,9 +211,12 @@ function parseTimeInput(raw: string): number {
 
 type Props = {
   password: string;
+  // Global contest filter (App.tsx alertFilters.contest_slug). When set, the
+  // recording-sessions picker is scoped to that contest. Empty/undefined = all.
+  contestSlug?: string;
 };
 
-export function RecordingReview({ password }: Props) {
+export function RecordingReview({ password, contestSlug }: Props) {
   // Picker: the lightweight recording-sessions list (null until loaded; an empty
   // array means "endpoint not deployed" → manual username entry).
   const [recordingSessions, setRecordingSessions] = useState<RecordingSession[] | null>(null);
@@ -242,6 +245,10 @@ export function RecordingReview({ password }: Props) {
 
   // "Jump to time" input (mm:ss / h:mm:ss / bare-minutes), parsed on submit.
   const [jumpInput, setJumpInput] = useState("");
+  // A3: the summary-stats card is the first-class readout; the continuous scrubber
+  // + its footer are a "timeline detail" drill-down behind this toggle (default on
+  // so the existing scrubber stays visible until the operator collapses it).
+  const [showTimelineDetail, setShowTimelineDetail] = useState(true);
   // DRAG-SCRUB state: while the playhead is being dragged we show a live preview
   // time WITHOUT seeking the <video> on every mousemove (seek only on release, so
   // a 2-hour scrub stays smooth). `null` when not dragging.
@@ -284,12 +291,14 @@ export function RecordingReview({ password }: Props) {
   const [rewatchUsername, setRewatchUsername] = useState<string | null>(null);
   // The username currently loaded into the player (used to detect "no recording").
 
-  // ---- Load the lightweight picker list once. -----------------------------
+  // ---- Load the lightweight picker list. Re-runs when the global contest filter
+  // changes so the picker stays scoped to the selected contest. ---------------
   useEffect(() => {
     let cancelled = false;
+    setPickerLoaded(false);
     void (async () => {
       try {
-        const list = await fetchRecordingSessions(password);
+        const list = await fetchRecordingSessions(password, contestSlug || undefined);
         if (cancelled) return;
         if (list === null) {
           setEndpointAvailable(false);
@@ -306,7 +315,7 @@ export function RecordingReview({ password }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [password]);
+  }, [password, contestSlug]);
 
   // The active session object + its playlist, recomputed when the selection or
   // the test-start anchor changes.
@@ -370,6 +379,9 @@ export function RecordingReview({ password }: Props) {
 
   const validCount = useMemo(() => markers.filter((m) => m.event.valid).length, [markers]);
   const invalidCount = markers.length - validCount;
+
+  // A3: total recording-gap duration (seconds) across all gaps, for the summary card.
+  const totalGapSeconds = useMemo(() => gaps.reduce((sum, g) => sum + (g.toSec - g.fromSec), 0), [gaps]);
 
   // ---- Load a chosen user's sessions (with signed evidence). --------------
   // `silentIfEmpty` (review mode) suppresses the "No sessions found" banner so
@@ -1250,7 +1262,46 @@ export function RecordingReview({ password }: Props) {
                 </div>
               </div>
 
-              {/* TIMELINE scrubber */}
+              {/* SUMMARY STATS — a first-class readout of the loaded recording:
+                  chunks, sessions, events (valid/invalid), time range, and
+                  recording gaps. Always shown; the continuous scrubber below is a
+                  drill-down behind the "Show timeline detail" toggle. */}
+              <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">Summary</h2>
+                  <button
+                    type="button"
+                    onClick={() => setShowTimelineDetail((v) => !v)}
+                    aria-expanded={showTimelineDetail}
+                    className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                  >
+                    {showTimelineDetail ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {showTimelineDetail ? "Hide timeline detail" : "Show timeline detail"}
+                  </button>
+                </div>
+                <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                  <SummaryStat label="Total chunks" value={String(playlist.length)} />
+                  <SummaryStat label="Sessions covered" value={String(sessions.length)} />
+                  <SummaryStat
+                    label="Events processed"
+                    value={String(markers.length)}
+                    hint={markers.length ? `✓ ${validCount} valid · ✗ ${invalidCount} invalid` : "no submission events"}
+                  />
+                  <SummaryStat
+                    label="Time range"
+                    value={`${formatClock(span.start)}–${formatClock(span.end)}`}
+                  />
+                  <SummaryStat
+                    label="Recording gaps"
+                    value={String(gaps.length)}
+                    hint={gaps.length ? `${formatClock(totalGapSeconds)} total` : "no gaps"}
+                  />
+                </dl>
+              </div>
+
+              {/* TIMELINE scrubber — drill-down behind the summary toggle. */}
+              {showTimelineDetail ? (
+              <>
               {playlist.length ? (
                 <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
                   {/* The bar carries generous vertical padding: VALID submission
@@ -1404,11 +1455,24 @@ export function RecordingReview({ password }: Props) {
                   This session has no screen-recording chunks to play.
                 </div>
               )}
+              </>
+              ) : null}
             </>
           )}
         </div>
       </div>
     </section>
+  );
+}
+
+// A3: one labeled metric cell inside the recording-review SUMMARY STATS card.
+function SummaryStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-md border border-line bg-white/60 p-3">
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</dt>
+      <dd className="mt-1 font-mono text-lg font-semibold text-ink">{value}</dd>
+      {hint ? <dd className="mt-0.5 text-[11px] text-muted">{hint}</dd> : null}
+    </div>
   );
 }
 

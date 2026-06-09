@@ -377,3 +377,23 @@ export type ReviewRecord = {
 export type ReviewsResponse = {
   reviews: ReviewRecord[];
 };
+
+// POST /api/admin/session-details — the operator pastes a roster of usernames and
+// gets back the full candidate-detail row for each (one per INPUT username, in
+// input order). `found` is false when no session doc matched that username, so the
+// "Download all details" CSV can still emit a row (blank cells) for the missing.
+export type SessionDetail = {
+  username: string;
+  hackerrank_username: string;
+  name: string;
+  email: string;
+  roll_number: string;
+  room: string;
+  contest_slug: string;
+  status: string;
+  found: boolean;
+};
+
+export type SessionDetailsResponse = {
+  details: SessionDetail[];
+};
