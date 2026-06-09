@@ -237,7 +237,7 @@ test("POST /api/exec/run rejects an unknown/ended session (ownership gate)", asy
   __setJudge0AdapterForTest(null);
 });
 
-test("POST /api/exec/submit runs HIDDEN tests, returns verdict + per-test pass/fail WITHOUT leaking inputs, and stores the submission", async () => {
+test("POST /api/exec/submit runs HIDDEN tests, returns ONLY verdict + counts (§9 lock: no per-test array), and stores the full submission", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
@@ -253,18 +253,35 @@ test("POST /api/exec/submit runs HIDDEN tests, returns verdict + per-test pass/f
   assert.equal(res.body.verdict, "accepted");
   assert.equal(res.body.total, 4);            // four hidden tests
   assert.equal(res.body.passed_count, 4);
-  // per-test results must NOT include the hidden input/expected
-  assert.equal(res.body.tests[0].input, undefined);
-  assert.equal(res.body.tests[0].expected, undefined);
-  assert.equal(res.body.tests[0].passed, true);
+  // §9 lock: the candidate-facing response carries NO per-test array at all —
+  // only the verdict + pass/fail counts (+ submission_id).
+  assert.equal(res.body.tests, undefined);
+  assert.deepEqual(
+    Object.keys(res.body).sort(),
+    ["passed_count", "submission_id", "total", "verdict"]
+  );
   assert.equal(seen.length, 4);               // judged against the 4 hidden tests
   // The submission was stored in the injected fake Firestore (observable).
   const subs = firestore._collections.get(process.env.SUBMISSIONS_COLLECTION);
   assert.equal(subs.size, 1);
+  // Doc id is a randomUUID (NOT a session_id-composed string — injection-shaped).
+  const storedId = [...subs.keys()][0];
+  assert.match(storedId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  assert.equal(res.body.submission_id, storedId);
   const stored = [...subs.values()][0];
+  // session_id/problem_id/created_at remain FIELDS on the stored doc.
   assert.equal(stored.session_id, "s1");
   assert.equal(stored.problem_id, "sum-two");
   assert.equal(stored.verdict, "accepted");
+  assert.ok(stored.created_at);
+  // The STORED doc keeps the full per-test detail (admin-side analysis), still
+  // WITHOUT the hidden inputs/expected.
+  assert.ok(Array.isArray(stored.tests));
+  assert.equal(stored.tests.length, 4);
+  assert.equal(stored.tests[0].passed, true);
+  assert.equal(stored.tests[0].status, "accepted");
+  assert.equal(stored.tests[0].input, undefined);
+  assert.equal(stored.tests[0].expected, undefined);
   __setJudge0AdapterForTest(null);
 });
 
@@ -278,6 +295,8 @@ test("POST /api/exec/submit: one failing hidden test -> verdict wrong_answer", a
     body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
   assert.equal(res.body.verdict, "wrong_answer");
   assert.equal(res.body.passed_count, 3);
+  // §9 lock holds on the failing path too: no per-test array in the response.
+  assert.equal(res.body.tests, undefined);
   __setJudge0AdapterForTest(null);
 });
 
