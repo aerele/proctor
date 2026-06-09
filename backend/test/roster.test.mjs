@@ -217,17 +217,18 @@ test("POST /api/admin/roster stores entries + meta; skips dup/empty ids; drops u
     { row: 2, reason: "duplicate_unique_id" },
     { row: 3, reason: "empty_unique_id" }
   ]);
-  // Entries keyed by the normalized unique id.
-  const entry = await firestore.collection(process.env.ROSTER_COLLECTION).doc("21cs001").get();
-  assert.equal(entry.exists, true);
-  assert.equal(entry.data().unique_id, "21CS001");
-  assert.equal(entry.data().unique_id_norm, "21cs001");
-  assert.equal(entry.data().fields["Student Name"], "Asha Raman");
   // Meta written LAST under the settings collection.
   const meta = await firestore.collection(process.env.SETTINGS_COLLECTION).doc("roster_meta").get();
   assert.equal(meta.data().configured, true);
   assert.equal(meta.data().count, 2);
   assert.equal(meta.data().unique_id_column, "Roll No");
+  // Entries keyed by version + normalized unique id (v<version>:<norm>).
+  const entry = await firestore.collection(process.env.ROSTER_COLLECTION)
+    .doc(`v${meta.data().version}:21cs001`).get();
+  assert.equal(entry.exists, true);
+  assert.equal(entry.data().unique_id, "21CS001");
+  assert.equal(entry.data().unique_id_norm, "21cs001");
+  assert.equal(entry.data().fields["Student Name"], "Asha Raman");
   assert.equal(meta.data().version, entry.data().roster_version);
   // Unknown mapping keys (phone) dropped; known ones kept.
   assert.deepEqual(meta.data().column_mapping, { name: "Student Name", email: "Email ID", roll_number: "Roll No" });
@@ -330,6 +331,25 @@ test("POST /api/roster/lookup: unknown id -> 404; no roster -> 404", async () =>
   assert.equal(unknown.body.error, "not_on_roster");
 });
 
+test("POST /api/roster/lookup: doc-id sanitization collision (different norm, same doc id) -> 404", async () => {
+  freshClients();
+  await uploadSampleRoster({
+    rows: [{ "Roll No": "2021#CS#001", "Student Name": "Hash Id", "Email ID": "hash@example.com", "Phone": "" }]
+  });
+  // "2021#CS#001" and "2021$CS$001" BOTH sanitize to doc id "2021_cs_001" but
+  // normalize differently — the collider must NOT resolve the stored entry.
+  const collide = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "2021$CS$001" } }));
+  assert.equal(collide.statusCode, 404);
+  assert.equal(collide.body.error, "not_on_roster");
+  // "." is doc-id-safe, so "2021.CS.001" maps to a DIFFERENT doc id -> plain miss.
+  const dotted = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "2021.CS.001" } }));
+  assert.equal(dotted.statusCode, 404);
+  // The exact-norm guard must not break the legit lookup.
+  const real = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: " 2021#cs#001 " } }));
+  assert.equal(real.statusCode, 200);
+  assert.equal(real.body.unique_id, "2021#CS#001");
+});
+
 test("POST /api/roster/lookup ignores entries from a previous roster version", async () => {
   freshClients();
   await uploadSampleRoster();
@@ -342,6 +362,36 @@ test("POST /api/roster/lookup ignores entries from a previous roster version", a
   const fresh = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "99zz999" } }));
   assert.equal(fresh.statusCode, 200);
   assert.equal(fresh.body.name, "Only One");
+});
+
+test("re-upload window: version-N entries stay resolvable while version-N+1 entries are written (meta not flipped)", async () => {
+  const { firestore } = freshClients();
+  await uploadSampleRoster();
+  // Simulate the overwrite window through the REAL write path: the second
+  // upload writes all its entry docs but crashes before flipping the meta doc.
+  const realCollection = firestore.collection.bind(firestore);
+  firestore.collection = (name) => {
+    const col = realCollection(name);
+    if (name !== process.env.SETTINGS_COLLECTION) return col;
+    const realDoc = col.doc.bind(col);
+    col.doc = (id) => {
+      const docRef = realDoc(id);
+      if (id === "roster_meta") {
+        docRef.set = async () => { throw new Error("simulated crash before meta flip"); };
+      }
+      return docRef;
+    };
+    return col;
+  };
+  const crashed = await uploadSampleRoster({
+    rows: [{ "Roll No": "21CS001", "Student Name": "Overwriter", "Email ID": "o@example.com", "Phone": "" }]
+  });
+  assert.equal(crashed.statusCode, 500);
+  firestore.collection = realCollection;
+  // Mid-window the ACTIVE (version-N) entry must still resolve untouched.
+  const res = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "21CS001" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.name, "Asha Raman"); // version-N data, not "Overwriter"
 });
 
 // ---- Task 3: roster gate on /api/session/start ------------------------------
@@ -403,6 +453,44 @@ test("start: roster-mapped hackerrank_username overrides the typed one", async (
   assert.equal(res.body.hackerrank_username, "asha_hr");
   const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
   assert.equal(doc.data().username_norm, "asha_hr");
+});
+
+test("start: mapped-but-blank cells store EMPTY name/email/roll_number — typed values IGNORED (spec §2.5)", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster({
+    columns: ["ID", "Student Name", "Email ID", "Roll"],
+    unique_id_column: "ID",
+    column_mapping: { name: "Student Name", email: "Email ID", roll_number: "Roll" },
+    rows: [{ ID: "21CS009", "Student Name": "", "Email ID": "", Roll: "" }]
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21CS009" }) }));
+  assert.equal(res.statusCode, 200);
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  const session = doc.data();
+  assert.equal(session.name, "");        // NOT "Typed Name"
+  assert.equal(session.email, "");       // NOT "typed@example.com"
+  assert.equal(session.roll_number, ""); // NOT "TYPED-1"
+  assert.equal(session.roster_verified, true);
+  assert.equal(session.hackerrank_username, "typed_user"); // unmapped -> typed value kept
+});
+
+test("start: mapped-but-blank hackerrank_username KEEPS the typed value (deliberate session-key exception)", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster({
+    columns: ["Roll No", "Student Name", "HR Handle"],
+    column_mapping: { name: "Student Name", hackerrank_username: "HR Handle", roll_number: "Roll No" },
+    rows: [{ "Roll No": "21CS001", "Student Name": "Asha Raman", "HR Handle": "" }]
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21CS001" }) }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.hackerrank_username, "typed_user");
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  assert.equal(doc.data().username_norm, "typed_user");
+  assert.equal(doc.data().name, "Asha Raman"); // mapped non-blank cells still override
 });
 
 test("start: NO roster configured -> legacy flow unchanged (regression)", async () => {

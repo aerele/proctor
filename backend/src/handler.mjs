@@ -264,17 +264,29 @@ async function startSession(req) {
     if (!entry) throw httpError(403, "not_on_roster");
     const mapping = rosterMeta.column_mapping || {};
     const fromRoster = (field) => (mapping[field] ? String(entry.fields?.[mapping[field]] || "") : "");
+    // Spec §2.5: a MAPPED field is authoritative even when the student's cell
+    // is blank — the client-typed value is IGNORED (empty string stored), never
+    // silently substituted. Unmapped fields keep the typed value.
+    const mappedOrTyped = (field) => (mapping[field] ? fromRoster(field) : String(body[field] ?? ""));
     rosterIdentity = {
       unique_id: entry.unique_id,
-      name: fromRoster("name"),
-      email: fromRoster("email"),
-      roll_number: fromRoster("roll_number"),
-      hackerrank_username: fromRoster("hackerrank_username")
+      name: mappedOrTyped("name"),
+      email: mappedOrTyped("email"),
+      roll_number: mappedOrTyped("roll_number"),
+      // DELIBERATE EXCEPTION (on the morning-review list): hackerrank_username
+      // keeps the typed fallback even when mapped-but-blank, because it is the
+      // session key — storing "" would strand the candidate mid-exam with a
+      // session no proctor tooling can match to a contest user.
+      hackerrank_username: fromRoster("hackerrank_username") || String(body.hackerrank_username ?? "")
     };
   }
 
+  // With a roster match the rosterIdentity value is used AS-IS (it may
+  // legitimately be "" for a mapped-but-blank cell); otherwise the typed value.
+  const identityOf = (field) => String((rosterIdentity ? rosterIdentity[field] : body[field]) ?? "").trim();
+
   const now = new Date().toISOString();
-  const username = String(rosterIdentity?.hackerrank_username || body.hackerrank_username).trim();
+  const username = identityOf("hackerrank_username");
   const usernameNorm = normalizeUsername(username);
   const contestSlug = contestSlugFromUrl(settings.contest_url);
   const clientIp = getClientIp(req);
@@ -315,9 +327,9 @@ async function startSession(req) {
     session_id: sessionId,
     hackerrank_username: username,
     username_norm: usernameNorm,
-    name: String(rosterIdentity?.name || body.name).trim(),
-    roll_number: String(rosterIdentity?.roll_number || body.roll_number).trim(),
-    email: String(rosterIdentity?.email || body.email).trim(),
+    name: identityOf("name"),
+    roll_number: identityOf("roll_number"),
+    email: identityOf("email"),
     roster_unique_id: rosterIdentity ? rosterIdentity.unique_id : "",
     roster_verified: Boolean(rosterIdentity),
     room,
@@ -1150,13 +1162,19 @@ function normalizeUniqueId(value) {
   return String(value).trim().toLowerCase().replace(/\s+/g, "");
 }
 
-// Firestore-doc-id-safe form of a normalized unique id (no "/", never empty or
-// all-dots). Distinct ids that sanitize to the same doc id are detected at
-// upload time (the upload sees every row) and reported as duplicate skips.
-function rosterEntryId(uniqueIdNorm) {
+// Firestore doc id for a roster entry: roster VERSION + doc-id-safe form of the
+// normalized unique id (no "/", never empty or all-dots). The version prefix
+// means a re-upload writes onto FRESH doc ids, so ACTIVE-version entries stay
+// resolvable for the whole write window and only become invisible when the meta
+// flips. Old-version docs are left behind (storage grows by one roster per
+// upload; cleanup deliberately deferred). Distinct ids that sanitize to the
+// same doc id are detected at upload time (the upload sees every row) and
+// reported as duplicate skips; lookup-side collisions are rejected by the exact
+// unique_id_norm check in findRosterEntry.
+function rosterEntryId(version, uniqueIdNorm) {
   const cleaned = String(uniqueIdNorm).replace(/[^a-z0-9@._-]/g, "_").slice(0, 200);
-  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
-  return cleaned;
+  const safe = cleaned === "" || /^\.+$/.test(cleaned) ? "_" : cleaned;
+  return `v${version}:${safe}`;
 }
 
 // Admin-configured room labels: sanitizeRoom each, drop empties, dedupe
@@ -1221,7 +1239,7 @@ async function adminSaveRoster(req) {
       skipped.push({ row: index, reason: "empty_unique_id" });
       return;
     }
-    const entryId = rosterEntryId(normalizeUniqueId(uniqueId));
+    const entryId = rosterEntryId(version, normalizeUniqueId(uniqueId));
     if (seen.has(entryId)) {
       skipped.push({ row: index, reason: "duplicate_unique_id" });
       return;
@@ -1288,9 +1306,12 @@ async function publicExamConfig() {
 async function findRosterEntry(meta, uniqueId) {
   const norm = normalizeUniqueId(uniqueId);
   if (!norm) return null;
-  const doc = await firestore.collection(ROSTER_COLLECTION).doc(rosterEntryId(norm)).get();
+  const doc = await firestore.collection(ROSTER_COLLECTION).doc(rosterEntryId(meta.version, norm)).get();
   const entry = doc.exists ? doc.data() : null;
-  if (!entry || entry.roster_version !== meta.version) return null;
+  // Doc-id sanitization can COLLAPSE distinct normalized ids onto one doc id
+  // ("2021#cs#001" and "2021$cs$001" both become "2021_cs_001"), so the fetched
+  // entry must also carry the EXACT normalized id that was looked up.
+  if (!entry || entry.roster_version !== meta.version || entry.unique_id_norm !== norm) return null;
   return entry;
 }
 
