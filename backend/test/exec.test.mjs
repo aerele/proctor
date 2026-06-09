@@ -188,3 +188,51 @@ test("getProblem returns the slice-1 problem with samples, hidden tests, languag
 test("getProblem returns null for unknown id", () => {
   assert.equal(getProblem("nope"), null);
 });
+
+test("POST /api/exec/run executes source against SAMPLE tests via the injected adapter", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // Seed an ACTIVE session so the ownership gate passes (id = "s1").
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  // Inject a stub adapter via the NEW test seam (mirrors __setClientsForTest).
+  __setJudge0AdapterForTest({
+    runBatch: async (items) => items.map((it) => ({
+      status: "accepted", passed: String(it.stdin).trim() === "2 3", stdout: "5",
+      stderr: "", compileOutput: "", timeSec: 0.01, memoryKb: 100
+    }))
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "print(sum(map(int,input().split())))" } }));
+  assert.equal(res.statusCode, 200);
+  assert.ok(Array.isArray(res.body.results));
+  assert.equal(res.body.results.length, 2);              // two sample tests
+  assert.equal(res.body.results[0].input, "2 3\n");      // sample input echoed for display
+  assert.equal(res.body.results[0].passed, true);
+  __setJudge0AdapterForTest(null); // reset the seam
+});
+
+test("POST /api/exec/run 400 on unknown problem", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "active" });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "nope", language: "python", source_code: "x" } }));
+  assert.equal(res.statusCode, 400);
+});
+
+test("POST /api/exec/run rejects an unknown/ended session (ownership gate)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({ session_id: "s1", status: "ended" });
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not run for an ended session"); } });
+  // ended session → requireWritableSession throws 409 BEFORE any adapter call.
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  assert.equal(res.statusCode, 409);
+  __setJudge0AdapterForTest(null);
+});
