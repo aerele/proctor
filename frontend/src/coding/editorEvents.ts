@@ -1,7 +1,18 @@
 // frontend/src/coding/editorEvents.ts
 import type { EditorEvent } from "../types";
 
-export type ContentChange = { rangeLength: number; text: string; rangeStartLine: number; rangeStartCol: number };
+export type ContentChange = {
+  rangeLength: number;
+  text: string;
+  rangeStartLine: number;
+  rangeStartCol: number;
+  rangeEndLine: number;
+  rangeEndCol: number;
+};
+
+// Stored text cap per change event (design §4.2: events carry text + full range;
+// paste content arrives through these change events, so cap pathological inserts).
+export const MAX_STORED_TEXT_CHARS = 2000;
 
 export function mapContentChange(c: ContentChange, timestamp: string): EditorEvent {
   const insertedLen = c.text.length;
@@ -10,7 +21,17 @@ export function mapContentChange(c: ContentChange, timestamp: string): EditorEve
   if (insertedLen > 0 && deletedLen > 0) type = "editor_replace";
   else if (deletedLen > 0) type = "editor_delete";
   else type = "editor_insert";
-  return { type, timestamp, detail: { insertedLen, deletedLen, line: c.rangeStartLine, col: c.rangeStartCol } };
+  const detail: Record<string, unknown> = {
+    insertedLen,
+    deletedLen,
+    text: insertedLen > MAX_STORED_TEXT_CHARS ? c.text.slice(0, MAX_STORED_TEXT_CHARS) : c.text,
+    startLine: c.rangeStartLine,
+    startCol: c.rangeStartCol,
+    endLine: c.rangeEndLine,
+    endCol: c.rangeEndCol,
+  };
+  if (insertedLen > MAX_STORED_TEXT_CHARS) detail.truncated = true;
+  return { type, timestamp, detail };
 }
 
 export function mapPaste(p: { len: number; line: number; col: number }, timestamp: string): EditorEvent {

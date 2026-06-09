@@ -17,7 +17,14 @@ export function MonacoEditor({ language, value, onChange, onEvent }: {
     editor.onDidChangeModelContent((ev) => {
       for (const c of ev.changes) {
         onEvent(mapContentChange(
-          { rangeLength: c.rangeLength, text: c.text, rangeStartLine: c.range.startLineNumber, rangeStartCol: c.range.startColumn },
+          {
+            rangeLength: c.rangeLength,
+            text: c.text,
+            rangeStartLine: c.range.startLineNumber,
+            rangeStartCol: c.range.startColumn,
+            rangeEndLine: c.range.endLineNumber,
+            rangeEndCol: c.range.endColumn,
+          },
           new Date().toISOString()
         ));
       }
