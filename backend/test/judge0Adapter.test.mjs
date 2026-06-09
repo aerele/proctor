@@ -146,6 +146,42 @@ test("a failed submit POST (no POST ever succeeded) stays QUEUE-retryable: .retr
   });
 });
 
+test("a 502/504 submit POST is AMBIGUOUS (a gateway can fail after the upstream billed) -> marked retryable:false; only 429/503 stay queue-retryable", async () => {
+  for (const status of [502, 504]) {
+    const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+      fetchImpl: failingFetch(status), pollIntervalMs: 0, sleepImpl: async () => {} });
+    await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+      assert.equal(err.status, status);
+      assert.equal(err.retryable, false); // ambiguous: the upstream may already have billed
+      return true;
+    });
+  }
+  // 429 (like the 503 covered above) is unambiguous pushback sent BEFORE any
+  // work — it must stay queue-retryable (.retryable not set).
+  const adapter429 = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl: failingFetch(429), pollIntervalMs: 0, sleepImpl: async () => {} });
+  await assert.rejects(adapter429.runBatch([ITEM]), (err) => {
+    assert.equal(err.status, 429);
+    assert.equal(err.retryable, undefined);
+    return true;
+  });
+});
+
+test("a failure AFTER a 2xx submit POST (res.json() throws) is marked retryable:false at the billing point", async () => {
+  // The POST itself succeeded -> the submissions EXIST (and are billed). Any
+  // failure from here on must carry an EXPLICIT retryable:false, never rely on
+  // the error merely lacking .status.
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => { throw new Error("malformed body"); } });
+  const adapter = makeJudge0Adapter({ baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl, pollIntervalMs: 0, sleepImpl: async () => {} });
+  await assert.rejects(adapter.runBatch([ITEM]), (err) => {
+    assert.equal(err.message, "malformed body");
+    assert.equal(err.status, undefined); // no HTTP failure — the POST was 2xx
+    assert.equal(err.retryable, false);  // explicit, not implicit
+    return true;
+  });
+});
+
 test("a later submit CHUNK failing after an earlier chunk succeeded is marked retryable:false (the earlier chunk is already billed)", async () => {
   const N = 25; // two chunks: 20 + 5
   const items = Array.from({ length: N }, (_, i) => ({

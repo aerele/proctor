@@ -726,3 +726,166 @@ test("exec wiring: the run-lane slot is released after the submit phase — a se
   assert.equal(resB.statusCode, 200);
   __setJudge0AdapterForTest(null);
 });
+
+// ---- Cooldown restore race ---------------------------------------------------
+// Request A consumes the cooldown slot, parks in the engine for LONGER than the
+// cooldown, and then fails. By that time a newer request B has legitimately
+// consumed the slot again (its own stamp). A's restore-on-failure must be
+// CONDITIONAL — restore only if the limiter still holds the value A wrote — so
+// it never clobbers B's newer stamp (which would let a third request C slip
+// past B's still-running cooldown).
+
+test("exec run cooldown restore race: a failed slow run must NOT clobber a newer run's cooldown stamp", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("race-run").set({ session_id: "race-run", status: "active" });
+  const hangA = deferred();
+  let batches = 0;
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    batches++;
+    if (batches === 1) await hangA.promise; // A parks inside the engine, then fails
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  // A consumes the run cooldown at t0 and parks in the engine.
+  const pA = call(execReq("/api/exec/run", "race-run"));
+  await tick(); await tick();
+  assert.equal(batches, 1);
+
+  // 6 s later — past the 5 s run cooldown — B legitimately runs and writes its
+  // OWN cooldown stamp (t0+6s).
+  advanceClock(6_000);
+  const resB = await call(execReq("/api/exec/run", "race-run"));
+  assert.equal(resB.statusCode, 200);
+  assert.equal(batches, 2);
+
+  // NOW A's engine call fails. A's restore must observe that its stamp was
+  // already replaced by B's newer one and leave the limiter alone.
+  hangA.reject(Object.assign(new Error("judge0 fetch failed: 503"), { status: 503, retryable: false }));
+  const resA = await pA;
+  assert.equal(resA.statusCode, 503);
+
+  // 1 s after B's stamp: still inside B's 5 s cooldown — C must be rejected.
+  // (A clobbering restore would have reset the stamp and let C sail through.)
+  advanceClock(1_000);
+  const resC = await call(execReq("/api/exec/run", "race-run"));
+  assert.equal(resC.statusCode, 429);
+  assert.equal(resC.body.error, "rate_limited");
+  assert.equal(batches, 2); // C never reached the engine
+
+  // After B's cooldown fully elapses the session runs again normally.
+  advanceClock(5_000);
+  const resD = await call(execReq("/api/exec/run", "race-run"));
+  assert.equal(resD.statusCode, 200);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec submit cooldown restore race: a failed slow submit must NOT clobber a newer submit's cooldown stamp", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("race-sub").set({ session_id: "race-sub", status: "active" });
+  const hangA = deferred();
+  let batches = 0;
+  __setJudge0AdapterForTest({ runBatch: async (items) => {
+    batches++;
+    if (batches === 1) await hangA.promise;
+    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
+  } });
+
+  // A consumes the submit cooldown at t0 and parks in the engine.
+  const pA = call(execReq("/api/exec/submit", "race-sub"));
+  await tick(); await tick();
+  assert.equal(batches, 1);
+
+  // 21 s later — past the 20 s submit cooldown — B submits and re-stamps.
+  advanceClock(21_000);
+  const resB = await call(execReq("/api/exec/submit", "race-sub"));
+  assert.equal(resB.statusCode, 200);
+
+  // A fails late; its conditional restore must leave B's newer stamp intact.
+  hangA.reject(Object.assign(new Error("judge0 fetch failed: 503"), { status: 503, retryable: false }));
+  const resA = await pA;
+  assert.equal(resA.statusCode, 503);
+
+  // 1 s after B's stamp: still inside B's 20 s cooldown — C must be 429.
+  advanceClock(1_000);
+  const resC = await call(execReq("/api/exec/submit", "race-sub"));
+  assert.equal(resC.statusCode, 429);
+  assert.equal(resC.body.error, "rate_limited");
+  assert.equal(batches, 2); // C never reached the engine
+  __setJudge0AdapterForTest(null);
+});
+
+// ---- Store failure AFTER a successful (billed) engine run ---------------------
+// The hidden-test batch already ran — and was BILLED — by the time the
+// submission doc is stored. A Firestore failure at that point must not discard
+// the computed verdict with a 500: the candidate gets the verdict back with
+// stored:false (no submission_id), the cooldown stays consumed (the engine run
+// happened), and the stored-submissions budget is NOT charged (nothing stored).
+
+test("exec submit: Firestore store fails after a successful engine run -> 200 with verdict + stored:false, no submission_id; cooldown consumed; budget not charged", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  // Wrap the fake so set() throws for the SUBMISSIONS collection only — every
+  // other collection (sessions gate) keeps working.
+  let storeFails = true;
+  const realCollection = firestore.collection.bind(firestore);
+  firestore.collection = (name) => {
+    const col = realCollection(name);
+    if (name !== process.env.SUBMISSIONS_COLLECTION) return col;
+    const realDoc = col.doc.bind(col);
+    return {
+      ...col,
+      doc(id) {
+        const d = realDoc(id);
+        return {
+          ...d,
+          async set(...args) {
+            if (storeFails) throw new Error("firestore unavailable");
+            return d.set(...args);
+          }
+        };
+      }
+    };
+  };
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("sf-sub").set({ session_id: "sf-sub", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  const subs = () => firestore._collections.get(process.env.SUBMISSIONS_COLLECTION)?.size || 0;
+
+  const res = await call(execReq("/api/exec/submit", "sf-sub"));
+  // The billed verdict comes back instead of a 500 — flagged as un-stored.
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.verdict, "accepted");
+  assert.equal(res.body.passed_count, 4);
+  assert.equal(res.body.total, 4);
+  assert.equal(res.body.stored, false);
+  assert.equal(res.body.submission_id, undefined);
+  assert.deepEqual(Object.keys(res.body).sort(), ["passed_count", "stored", "total", "verdict"]);
+  assert.equal(subs(), 0); // nothing made it into Firestore
+
+  // The cooldown stays CONSUMED — the engine run was billed, so an immediate
+  // retry (clock unmoved) is rate-limited like any other back-to-back submit.
+  const retry = await call(execReq("/api/exec/submit", "sf-sub"));
+  assert.equal(retry.statusCode, 429);
+  assert.equal(retry.body.error, "rate_limited");
+
+  // The un-stored submission did NOT count against the 50-stored budget: with
+  // the store healthy again, the session still has its FULL budget of 50.
+  storeFails = false;
+  for (let i = 0; i < 50; i++) {
+    advanceClock(21_000);
+    const ok = await call(execReq("/api/exec/submit", "sf-sub"));
+    assert.equal(ok.statusCode, 200, `stored submission ${i + 1} of 50 should be allowed`);
+    assert.equal(ok.body.submission_id !== undefined, true);
+  }
+  assert.equal(subs(), 50);
+  // ...and the 51st stored one is capped as usual.
+  advanceClock(21_000);
+  const capped = await call(execReq("/api/exec/submit", "sf-sub"));
+  assert.equal(capped.statusCode, 429);
+  __setJudge0AdapterForTest(null);
+});

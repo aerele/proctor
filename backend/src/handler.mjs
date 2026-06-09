@@ -666,7 +666,8 @@ async function execRun(req) {
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued runs
   // while one is parked in the lane.
   const prevLastRunMs = limiter.lastRunMs;
-  limiter.lastRunMs = _execClock();
+  const runStampMs = _execClock();
+  limiter.lastRunMs = runStampMs;
   let results;
   try {
     // The exec-queue lanes gate the engine phases (design §11 item 2): the
@@ -677,9 +678,11 @@ async function execRun(req) {
       pollGate: (fn) => execQueue.enqueuePoll(fn)
     });
   } catch (error) {
-    // ANY failure here is the SERVER's side, never the candidate's: always
-    // give the cooldown slot back before mapping the error.
-    limiter.lastRunMs = prevLastRunMs;
+    // ANY failure here is the SERVER's side, never the candidate's: give the
+    // cooldown slot back before mapping the error — but ONLY if the limiter
+    // still holds the stamp THIS request wrote. A slow failing request must
+    // never clobber the newer stamp a later request legitimately recorded.
+    if (limiter.lastRunMs === runStampMs) limiter.lastRunMs = prevLastRunMs;
     if (error?.name === "QueueFullError") throw queueFull();
     if (typeof error?.status === "number") throw judgeUnavailable();
     throw error; // genuine programming error -> bare 500
@@ -717,7 +720,8 @@ async function execSubmit(req) {
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued
   // submits while one is parked in the lane.
   const prevLastSubmitMs = limiter.lastSubmitMs;
-  limiter.lastSubmitMs = _execClock();
+  const submitStampMs = _execClock();
+  limiter.lastSubmitMs = submitStampMs;
   let results;
   try {
     // The submit lane (its own lane, so a submit storm never starves the
@@ -728,9 +732,11 @@ async function execSubmit(req) {
       pollGate: (fn) => execQueue.enqueuePoll(fn)
     });
   } catch (error) {
-    // ANY failure here is the SERVER's side, never the candidate's: always
-    // give the cooldown slot back before mapping the error.
-    limiter.lastSubmitMs = prevLastSubmitMs;
+    // ANY failure here is the SERVER's side, never the candidate's: give the
+    // cooldown slot back before mapping the error — but ONLY if the limiter
+    // still holds the stamp THIS request wrote. A slow failing request must
+    // never clobber the newer stamp a later request legitimately recorded.
+    if (limiter.lastSubmitMs === submitStampMs) limiter.lastSubmitMs = prevLastSubmitMs;
     if (error?.name === "QueueFullError") throw queueFull();
     if (typeof error?.status === "number") throw judgeUnavailable();
     throw error; // genuine programming error -> bare 500
@@ -755,11 +761,20 @@ async function execSubmit(req) {
   // (injection-shaped); session_id/problem_id/created_at stay as FIELDS.
   const createdAt = new Date().toISOString();
   const submissionId = randomUUID();
-  await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
-    session_id: sessionId, problem_id: problem.id, language: body.language,
-    source_code: source, verdict, passed_count: passedCount, total: results.length,
-    tests, created_at: createdAt
-  });
+  try {
+    await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
+      session_id: sessionId, problem_id: problem.id, language: body.language,
+      source_code: source, verdict, passed_count: passedCount, total: results.length,
+      tests, created_at: createdAt
+    });
+  } catch (error) {
+    // The engine run already happened (and was BILLED) — a store failure must
+    // not discard the verdict with a 500. Surface it flagged as un-stored (no
+    // submission_id), keep the cooldown consumed (the run was real), and do
+    // NOT charge the stored-submissions budget (nothing was stored).
+    console.error(`Failed to store submission ${submissionId} for session ${sessionId}: ${error?.message || error}`);
+    return { verdict, passed_count: passedCount, total: results.length, stored: false };
+  }
 
   // Count the STORED submission against the per-session+problem budget
   // (problem.id === the validated problem_id string the cap was checked with).

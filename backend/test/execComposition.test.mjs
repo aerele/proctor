@@ -120,6 +120,30 @@ test("composition: submit POST 503s twice then succeeds -> queue retries are fin
   assert.equal(results[0].status, "accepted");
 });
 
+test("composition: submit POST 502 is AMBIGUOUS (gateway may answer after the upstream billed) -> the queue does NOT retry; error surfaces", async () => {
+  const fetchImpl = scriptedFetch({
+    postResponses: [failure(502)],
+    getResponses: []
+  });
+  const adapter = makeJudge0Adapter({
+    baseUrl: "u", mode: "rapidapi", apiKey: "K",
+    fetchImpl, pollIntervalMs: 0, sleepImpl: noSleep, randomImpl: () => 1
+  });
+  const q = makeExecQueue({ sleepImpl: noSleep, randomImpl: () => 1, maxRetries: 3 });
+  await assert.rejects(
+    adapter.runBatch([ITEM], gatesFor(q)),
+    (err) => {
+      assert.equal(err.status, 502);
+      assert.equal(err.retryable, false);
+      return true;
+    }
+  );
+  // A 502 from the submit POST may mean the upstream already accepted (and
+  // billed) the submissions before the gateway failed — re-POSTing risks a
+  // double bill, so exactly ONE POST may ever happen.
+  assert.equal(fetchImpl.posts(), 1, "ambiguous 502 submit POST must never be re-POSTed");
+});
+
 // ---- DEFECT 3: parked slots (gated wiring — the handler's shape) ------------
 // The handler now passes the lanes as GATES: the run/submit lane wraps only
 // the submit POSTs (so queue retries wrap only the submit phase), the poll
