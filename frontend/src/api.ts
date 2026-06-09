@@ -9,6 +9,7 @@ import type {
   AlertsResponse,
   BeaconKind,
   EditorEvent,
+  ExamConfig,
   ExecRequest,
   HeartbeatResponse,
   ProctorAlertTypeConfig,
@@ -25,6 +26,11 @@ import type {
   ReviewsResponse,
   ReviewVerdict,
   ReviewVerdictResponse,
+  RosterColumnMapping,
+  RosterLookupResult,
+  RosterStatus,
+  RosterUploadRequest,
+  RosterUploadResponse,
   RunResult,
   ServerSessionStatus,
   SessionActionRequest,
@@ -50,6 +56,7 @@ const demoAlertsKey = "aerele-proctor-demo-alerts";
 const demoAlertSettingsKey = "aerele-proctor-demo-alert-settings";
 const demoReviewRosterKey = "aerele-proctor-demo-review-roster";
 const demoReviewVerdictsKey = "aerele-proctor-demo-review-verdicts";
+const demoRosterKey = "aerele-proctor-demo-roster";
 export const adminPassword = import.meta.env.VITE_ADMIN_PASSWORD ?? "";
 // C1: when set, the unlock gate compares the sha256 hash of the typed password
 // to this embedded hash (so the plain password is never shipped in the bundle).
@@ -219,7 +226,21 @@ export async function startSession(form: StudentForm, existingSessionId?: string
 
     const contestUrl = settings.contest_url || "";
     const contestSlug = contestSlugFromUrl(contestUrl);
-    const usernameNorm = normalizeUsername(form.hackerrank_username);
+
+    // S2 roster gate (demo parity with the backend): roster configured -> start
+    // requires a roster match, and roster-mapped fields win over typed ones.
+    const demoRosterHit = form.roster_unique_id ? demoRosterEntryFor(form.roster_unique_id) : null;
+    if (getDemoRoster()) {
+      if (!form.roster_unique_id) throw demoApiError(403, "roster_id_required");
+      if (!demoRosterHit) throw demoApiError(403, "not_on_roster");
+    }
+    const demoMapping = demoRosterHit?.roster.column_mapping ?? {};
+    const rosterUsername = demoRosterHit && demoMapping.hackerrank_username
+      ? (demoRosterHit.row[demoMapping.hackerrank_username] ?? "").trim() : "";
+    const rosterName = demoRosterHit && demoMapping.name
+      ? (demoRosterHit.row[demoMapping.name] ?? "").trim() : "";
+    const effectiveUsername = rosterUsername || form.hackerrank_username.trim();
+    const usernameNorm = normalizeUsername(effectiveUsername);
 
     // Idempotent replay: same session_id this browser already owns → return it.
     if (existingSessionId) {
@@ -239,9 +260,9 @@ export async function startSession(form: StudentForm, existingSessionId?: string
     const session: DemoSession = {
       session_id: sessionId,
       status: hasConflict ? "pending_approval" : "active",
-      hackerrank_username: form.hackerrank_username.trim(),
+      hackerrank_username: effectiveUsername,
       username_norm: usernameNorm,
-      name: form.name.trim(),
+      name: rosterName || form.name.trim(),
       room: form.room.trim(),
       contest_slug: contestSlug,
       storage_prefix: demoStoragePrefix(contestSlug, usernameNorm, sessionId),
@@ -261,6 +282,7 @@ export async function startSession(form: StudentForm, existingSessionId?: string
       email: form.email,
       room: form.room,
       consent_accepted: form.consent_accepted,
+      ...(form.roster_unique_id ? { roster_unique_id: form.roster_unique_id } : {}),
       ...(existingSessionId ? { session_id: existingSessionId } : {})
     })
   });
@@ -321,6 +343,7 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       start_at: settings.start_at,
       end_at: settings.end_at,
       contest_url: settings.contest_url || "",
+      rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
       // Passcodes are removed from the start/end flow, but we keep persisting any
       // value an older field still sends so the stored doc stays compatible.
       passcode: settings.passcode || getDemoSettings()?.passcode || "",
@@ -1762,6 +1785,184 @@ function getDemoSettings(): (ProctorSettings & { passcode?: string; end_code?: s
 function maskPasscode(value = "") {
   if (!value) return "";
   return `${"*".repeat(Math.max(0, value.length - 2))}${value.slice(-2)}`;
+}
+
+// ---- S2 roster (compulsory roster login) ------------------------------------
+// Spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md
+
+function demoApiError(status: number, code: string): ApiError {
+  const error = new Error(code) as ApiError;
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+function getDemoRoster(): RosterUploadRequest | null {
+  const raw = window.localStorage.getItem(demoRosterKey);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RosterUploadRequest;
+  } catch {
+    return null;
+  }
+}
+
+// Mirrors the backend normalizeUniqueId: trim + lowercase + strip ALL whitespace.
+function normalizeUniqueId(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
+}
+
+// Mirrors the backend maskEmail ("asha@x.com" -> "as**@x.com").
+function maskEmail(value: string) {
+  if (!value) return "";
+  const at = value.indexOf("@");
+  if (at <= 0) return `${value.slice(0, 2)}***`;
+  const local = value.slice(0, at);
+  const keep = Math.min(2, local.length);
+  return `${local.slice(0, keep)}${"*".repeat(Math.max(1, local.length - keep))}${value.slice(at)}`;
+}
+
+function demoRosterEntryFor(uniqueId: string): { roster: RosterUploadRequest; row: Record<string, string> } | null {
+  const roster = getDemoRoster();
+  if (!roster) return null;
+  const norm = normalizeUniqueId(uniqueId);
+  const row = roster.rows.find((r) => normalizeUniqueId(r[roster.unique_id_column] ?? "") === norm);
+  return row ? { roster, row } : null;
+}
+
+// GET /api/exam-config — public student-page config. FAIL-OPEN on any error:
+// the roster gate is re-enforced server-side at /api/session/start, so a config
+// fetch failure can never bypass it — it only degrades the form UI.
+export async function fetchExamConfig(): Promise<ExamConfig> {
+  if (demoMode) {
+    await wait(80);
+    const roster = getDemoRoster();
+    return {
+      roster_required: Boolean(roster),
+      unique_id_label: roster?.unique_id_column ?? "",
+      rooms: getDemoSettings()?.rooms ?? []
+    };
+  }
+  try {
+    return await request<ExamConfig>("/api/exam-config", { method: "GET" });
+  } catch {
+    return { roster_required: false, unique_id_label: "", rooms: [] };
+  }
+}
+
+// POST /api/roster/lookup — unique-ID-confirm login, step 1. Throws ApiError
+// (status 404, code not_on_roster/roster_not_configured) when unmatched.
+export async function rosterLookup(uniqueId: string): Promise<RosterLookupResult> {
+  if (demoMode) {
+    await wait(200);
+    const hit = demoRosterEntryFor(uniqueId);
+    if (!hit) throw demoApiError(404, "not_on_roster");
+    const { roster, row } = hit;
+    const mapped = (field: keyof RosterColumnMapping) => {
+      const column = roster.column_mapping[field];
+      return column ? (row[column] ?? "").trim() : "";
+    };
+    return {
+      found: true,
+      unique_id: (row[roster.unique_id_column] ?? "").trim(),
+      name: mapped("name"),
+      roll_number: mapped("roll_number"),
+      room: mapped("room"),
+      hackerrank_username: mapped("hackerrank_username"),
+      email_masked: maskEmail(mapped("email"))
+    };
+  }
+  return request<RosterLookupResult>("/api/roster/lookup", {
+    method: "POST",
+    body: JSON.stringify({ unique_id: uniqueId })
+  });
+}
+
+// GET /api/admin/roster — roster meta (never the rows). `null` on 404 so the
+// Settings UI can show "not deployed yet" (same degrade as review-roster).
+export async function fetchRosterStatus(password: string): Promise<RosterStatus | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    const roster = getDemoRoster();
+    return roster
+      ? {
+          configured: true,
+          count: roster.rows.length,
+          unique_id_column: roster.unique_id_column,
+          column_mapping: roster.column_mapping,
+          columns: roster.columns,
+          updated_at: new Date().toISOString()
+        }
+      : { configured: false };
+  }
+  try {
+    return await request<RosterStatus>("/api/admin/roster", {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/roster — upload (replace) the roster. `null` on 404.
+export async function uploadRoster(password: string, payload: RosterUploadRequest): Promise<RosterUploadResponse | null> {
+  if (demoMode) {
+    await wait(200);
+    assertDemoAdmin(password);
+    // Mirror the backend skip rules so the demo reports realistic counts.
+    const seen = new Set<string>();
+    const rows: Array<Record<string, string>> = [];
+    const skipped: Array<{ row: number; reason: string }> = [];
+    payload.rows.forEach((row, index) => {
+      const uniqueId = (row[payload.unique_id_column] ?? "").trim();
+      if (!uniqueId) {
+        skipped.push({ row: index, reason: "empty_unique_id" });
+        return;
+      }
+      const norm = normalizeUniqueId(uniqueId);
+      if (seen.has(norm)) {
+        skipped.push({ row: index, reason: "duplicate_unique_id" });
+        return;
+      }
+      seen.add(norm);
+      rows.push(row);
+    });
+    window.localStorage.setItem(demoRosterKey, JSON.stringify({ ...payload, rows }));
+    return { ok: true, configured: true, count: rows.length, skipped };
+  }
+  try {
+    return await request<RosterUploadResponse>("/api/admin/roster", {
+      method: "POST",
+      headers: { "x-admin-password": password },
+      body: JSON.stringify(payload)
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/roster {clear:true} — roster off (login reverts to legacy).
+export async function clearRoster(password: string): Promise<{ ok: boolean } | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    window.localStorage.removeItem(demoRosterKey);
+    return { ok: true };
+  }
+  try {
+    return await request<{ ok: boolean }>("/api/admin/roster", {
+      method: "POST",
+      headers: { "x-admin-password": password },
+      body: JSON.stringify({ clear: true })
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
 }
 
 // ---- Coding workspace: editor-event capture + code execution ---------------
