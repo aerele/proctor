@@ -434,6 +434,28 @@ test("room-gate: attempt cap -> 429 too_many_attempts (even with the right code)
   assert.equal(poll.body.exam_started, false);
 });
 
+// S3 nit: a malformed GATE_ATTEMPT_LIMIT env value (Number("abc") -> NaN) must
+// NOT silently disable the brute-force cap. A fresh module instance reads the
+// bad env at ITS load time; the cap must still fire at the safe default of 20.
+test("room-gate: a non-numeric GATE_ATTEMPT_LIMIT still enforces a finite cap (default 20)", async () => {
+  process.env.GATE_ATTEMPT_LIMIT = "not-a-number";
+  const h3 = await import("../src/handler.mjs?invigilator-badcap");
+  delete process.env.GATE_ATTEMPT_LIMIT; // restore for any later imports
+  const firestore = makeFakeFirestore();
+  h3.__setClientsForTest({ firestore, storage: makeFakeStorage() });
+  const call3 = async (req) => { const res = makeRes(); await h3.api(req, res); return res; };
+  seedSettings(firestore);
+  // A session already at 20 attempts must be capped even with the right code —
+  // proving NaN did not collapse the limit to "no cap".
+  seedSession(firestore, "s1", { gate_attempt_count: 20 });
+  const released = await call3(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  const res = await call3(makeReq({ method: "POST", path: "/api/session/room-gate",
+    body: { session_id: "s1", code: released.body.gate.otp } }));
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.error, "too_many_attempts");
+});
+
 test("room-gate: unknown session 404; ended session 409 (ownership gate)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
@@ -504,13 +526,15 @@ test("GET /api/invigilator/room: room-scoped stats + least-privilege rows + gate
   assert.deepEqual(res.body.stats,
     { live: 2, locked: 1, pending_approval: 0, finished: 1, disconnected: 1, started: 1, total: 4 });
   assert.equal(res.body.sessions.length, 4);
-  const row = res.body.sessions.find((r) => r.session_id === "a1");
-  assert.equal(row.name, "Alice A");
+  // M12/M13: rows are identified by name/roll/username — NOT session_id (the
+  // bearer credential), which is removed from the projection entirely.
+  const row = res.body.sessions.find((r) => r.name === "Alice A");
   assert.equal(row.roll_number, "R1");
+  assert.ok(!("session_id" in row), "session row must not carry the session_id bearer token");
   // least-privilege: NO email / IP / storage fields on rows
   assert.ok(!("email" in row) && !("start_ip" in row) && !("current_ip" in row) && !("storage_prefix" in row));
-  assert.equal(res.body.sessions.find((r) => r.session_id === "a2").stale, true);
-  assert.equal(res.body.sessions.find((r) => r.session_id === "a4").exam_started_at, fresh);
+  assert.equal(res.body.sessions.find((r) => r.name === "Bob B").stale, true);
+  assert.equal(res.body.sessions.find((r) => r.name === "Dan D").exam_started_at, fresh);
   // gate present with the released OTP
   assert.match(res.body.gate.otp, /^\d{6}$/);
   // alerts: room-scoped, archived excluded, NO media fields
@@ -518,17 +542,65 @@ test("GET /api/invigilator/room: room-scoped stats + least-privilege rows + gate
   assert.ok(!("video_key" in res.body.alerts[0]) && !("download_url" in res.body.alerts[0]));
 });
 
+// M12 + M13: invigilator least-privilege. Session rows and alert rows must NOT
+// carry session_id (the SOLE bearer credential for candidate write endpoints —
+// an invigilator could /api/session/end a candidate's exam). Alert rows must
+// also drop the free-text `detail` field: the ip_changed alert embeds
+// "IP changed from X to Y", leaking candidate IPs. Invigilators identify
+// candidates by name/roll/username, not session_id, and read presence not IPs.
+test("GET /api/invigilator/room: rows + alerts carry NO session_id; ip_changed alert leaks no IP or detail", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "a1");
+  // An ip_changed proctor alert whose detail embeds the candidate's IPs (exactly
+  // what recordHeartbeat writes via upsertProctorAlert).
+  seedAlert(firestore, "ip1", {
+    id: "ip1", type: "ip_changed", severity: "warning", title: "IP address changed",
+    detail: "IP changed from 203.0.113.7 to 198.51.100.42", session_id: "a1",
+    video_key: undefined
+  });
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(res.statusCode, 200);
+
+  // No session row leaks the session_id bearer token.
+  const row = res.body.sessions.find((r) => r.session_id === undefined ? false : true);
+  assert.equal(row, undefined, "no session row should carry session_id");
+  for (const r of res.body.sessions) assert.ok(!("session_id" in r));
+
+  // The alert row keeps only type/severity/title/timestamp/hackerrank_username —
+  // no session_id, no free-text detail.
+  assert.equal(res.body.alerts.length, 1);
+  const alert = res.body.alerts[0];
+  assert.ok(!("session_id" in alert), "alert must not carry session_id");
+  assert.ok(!("detail" in alert), "alert must not carry the free-text detail");
+  assert.deepEqual(Object.keys(alert).sort(),
+    ["hackerrank_username", "id", "severity", "timestamp", "title", "type"]);
+
+  // Belt-and-braces: NO candidate IP substring anywhere in the response.
+  const raw = JSON.stringify(res.body);
+  assert.equal(raw.includes("203.0.113.7"), false);
+  assert.equal(raw.includes("198.51.100.42"), false);
+  // And the session_id value "a1" must not appear as a bearer token in any
+  // sessions[] / alerts[] row (it may still legitimately appear in other places
+  // it is NOT a credential, e.g. storage keys — but we removed those too).
+  assert.equal(JSON.stringify({ sessions: res.body.sessions, alerts: res.body.alerts }).includes("\"a1\""), false);
+});
+
 test("GET /api/invigilator/room: room=_ selects blank-room sessions; room param required", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
-  seedSession(firestore, "u1", { room: "" });
+  seedSession(firestore, "u1", { room: "", name: "Unassigned U", username_norm: "uuu", hackerrank_username: "U" });
   seedSession(firestore, "a1");
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
     query: { room: "_" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.room_key, "_");
-  assert.deepEqual(res.body.sessions.map((r) => r.session_id), ["u1"]);
+  // Rows identify by name/roll/username, not session_id (M13 removes it).
+  assert.deepEqual(res.body.sessions.map((r) => r.name), ["Unassigned U"]);
+  assert.ok(!("session_id" in res.body.sessions[0]));
   const missing = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
     headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(missing.statusCode, 400);
