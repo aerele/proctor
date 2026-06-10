@@ -152,6 +152,27 @@ All routes live in `backend/src/handler.mjs`. Auth columns: **x-api-key** =
 Any other path → `404`. Intentional 4xx errors echo a `detail` message; unexpected
 errors return a generic `500` with no internal detail.
 
+### Templates + multi-problem contests (S-I, backend)
+
+Contests carry an **ordered `problems[]`** (`{problem_id, points, order}`;
+`points: null` = use the bank problem's points). Legacy single-problem reads
+(`settings.problem_id`) keep working unchanged through the
+`contestProblemEntries` shim — zero migration. **Templates**
+(`/api/admin/templates`, `template`, `template-update`, `template-archive`,
+`template-clone`) are reusable contest blueprints: instantiating one
+(`POST /api/admin/contests` with `template_slug`) **snapshot-copies** the
+problem list + defaults onto the contest — later template edits change
+nothing — while problem **content** stays live from the bank, made safe by the
+live-reference guard (delete/unpublish of a referenced problem → `409`
+`problem_referenced`; hidden-test edits against an open contest demand a typed
+`confirm_live_edit`). The built-in **`system-check` preset** instantiates the
+always-open day-before lab-check contest (one trivial problem, no room gate,
+1-day evidence retention); a Firestore template doc with the same slug shadows
+it. Exec cooldowns are **per (session, problem)** with a
+one-in-flight-per-session guard; `session/start`/`resume` serve `problems[]` +
+`submissions_summary` + `submit_budget` (the single `problem` field remains
+for one release as `problems[0]`).
+
 ### Shared alert contract
 
 Every producer and the backend agree on this shape (required on ingest: `source`,
