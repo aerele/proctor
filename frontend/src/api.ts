@@ -18,6 +18,8 @@ import type {
   InvigilatorOverviewResponse,
   InvigilatorRoomResponse,
   InvigilatorSessionRow,
+  IpReportResponse,
+  IpReportScope,
   ProblemDoc,
   ProblemSummary,
   ProctorAlertTypeConfig,
@@ -60,6 +62,7 @@ import type {
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
+import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
@@ -753,6 +756,24 @@ const DEMO_ALL_SESSIONS: DemoAdminSessionRow[] = [
   { session_id: "live-suresh-4d14", hackerrank_username: "Suresh_B", name: "Suresh Babu", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 12, created_at: demoCreated(85) }
 ];
 
+// S7 demo IP assignment: each demo room sits behind one NAT IP (the normal
+// campus picture), with deterministic overrides painting the anomalies the
+// report exists to catch — an off-campus active candidate, an ended outlier
+// (visible under scope=all), and one mid-exam IP change.
+const DEMO_IP_OVERRIDES: Record<string, { ip: string; start_ip?: string }> = {
+  "live-sneha-1a04": { ip: "198.51.100.42" },
+  "live-vikram-4d04": { ip: "192.0.2.77" },
+  "live-divya-1a02": { ip: "203.0.113.11", start_ip: "198.51.100.7" }
+};
+
+function demoIpFor(session: DemoAdminSessionRow): { ip: string; start_ip: string; ip_change_count: number } {
+  const override = DEMO_IP_OVERRIDES[session.session_id];
+  const roomIp = session.room === "Lab A-1" ? "203.0.113.10" : "203.0.113.11";
+  const ip = override?.ip ?? roomIp;
+  const startIp = override?.start_ip ?? ip;
+  return { ip, start_ip: startIp, ip_change_count: startIp !== ip ? 1 : 0 };
+}
+
 // Demo "disconnected" is a deterministic per-row `stale` flag on DEMO_ALL_SESSIONS
 // (not wall-clock math), so the demo counts never drift as the page stays open.
 // Production uses the real backend isStaleSession (handler.mjs) over live heartbeats.
@@ -1080,6 +1101,64 @@ export async function fetchAttendance(password: string, contestSlug?: string): P
   const suffix = query.toString();
   try {
     return await request<AttendanceReport>(`/api/admin/attendance${suffix ? `?${suffix}` : ""}`, {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// S7 — GET /api/admin/ip-report: IP-wise counts of logged-in users (the
+// proxy-detection signal). Returns null on 404 (endpoint not deployed yet) so
+// the IP-report tab degrades gracefully, mirroring fetchSessionsList. The demo
+// branch derives the report from the SHARED admin population (DEMO_ALL_SESSIONS)
+// + the deterministic demoIpFor assignment, so demo numbers reconcile with the
+// demo stat cards by construction.
+export async function fetchIpReport(
+  password: string,
+  opts: { contestSlug?: string; scope?: IpReportScope }
+): Promise<IpReportResponse | null> {
+  const scope: IpReportScope = opts.scope ?? "live";
+  const contestSlug = opts.contestSlug || "";
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const rows: IpRow[] = DEMO_ALL_SESSIONS
+      .filter((session) => !contestSlug || session.contest_slug === contestSlug)
+      .filter((session) => scope === "all" || session.status !== "ended")
+      .map((session) => {
+        const assigned = demoIpFor(session);
+        return {
+          session_id: session.session_id,
+          hackerrank_username: session.hackerrank_username,
+          name: session.name,
+          room: session.room,
+          status: session.status,
+          created_at: session.created_at,
+          ip: assigned.ip,
+          start_ip: assigned.start_ip,
+          ip_change_count: assigned.ip_change_count
+        };
+      });
+    const ips = groupIpEntries(rows);
+    return {
+      contest_slug: contestSlug || null,
+      room: null,
+      scope,
+      ...summarizeIpEntries(ips, rows),
+      ips,
+      ips_truncated: false
+    };
+  }
+
+  const query = new URLSearchParams();
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  if (scope !== "live") query.set("scope", scope);
+  const suffix = query.toString();
+  try {
+    return await request<IpReportResponse>(`/api/admin/ip-report${suffix ? `?${suffix}` : ""}`, {
       method: "GET",
       headers: { "x-admin-password": password }
     });
