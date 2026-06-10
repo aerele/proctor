@@ -68,3 +68,16 @@ Fix AFTER the night-run tasks close. From live testing the deployed proctor:
 4. **Switch-away**: long/frequent switch-aways → backend notification to proctor (review video, then decide) instead of auto-blocking with no reason; avoid repeated spurious blocks when something environmental retriggers it.
 5. **Per-session enforcement override**: admin/invigilator can disable a specific anomaly enforcement for ONE user session (legit environment problems).
 6. **Escalation ladder**: L1 = typed-warning acknowledgement (self-serve); L2 = locked, requires a code from the room proctor (ties into S3 invigilator portal). Optionally "get approval before block" mode.
+
+## 2026-06-10 morning live-test feedback round 2 (Karthi voice, TG ~11:25 + ~11:28) — admin panel [F6]
+Karthi reviewed the DEPLOYED admin panel (stale image, predates S2-S7). Do BEFORE resuming the night-run close-out walkthrough; redeploy addresses item 5.
+1. **Alerts: bulk archive** — bulk actions exist but bulk archive is missing. Add it.
+2. **Alerts: bulk select** — explicitly asked before (BACKLOG item 3 below: "bulk-select, grouping, easier triage") but never built. Add checkboxes + select-all-over-current-filter + bulk actions on the selection. ALSO: run a verification sweep over ALL past asks (incl. BACKLOG item 5's 2026-06-09 forwarded voice messages) to confirm nothing else was lost.
+3. **Session detail card/page** — clicking a session in the Sessions list opens a card/page: basic info + current status, basic stats (events, submissions count + times, chunks/duration), view recordings / view events from there, and ONLY the actions valid for the current status (ended → view recordings/events; pending_approval → approve; live → end; etc.).
+4. **Alert actions rework** — unclear what "bypass" does. Rethink the per-alert actions: hover tooltips explaining each action, group them, show only actions that make sense for that alert kind/status (no Approve on everything). Be smart per alert type.
+5. **Roster/room upload not visible on deployed** — it IS in local commits (S2); fix = redeploy both images. Deploy and tell Karthi; he'll test later.
+6. **Camera/other recordings** — screen recordings are visible in review; if camera or other recording sources are saved too, surface that they exist and make them viewable somewhere.
+7. **Recordings timeline: events + alerts overlay** — show tagged events AND alerts on the recording timeline, time-coded, filterable (beyond the existing summary): a log list where clicking an entry jumps the scrubber to that timestamp. "Make it very usable" — user-POV usability is the bar.
+
+## LAST GOAL (after everything else) — recording encoding optimization [F7]
+Research-first, then DISCUSS with Karthi before building: best encoding/codec + settings for screen recordings where most of the frame is static (small incremental updates). Evaluate size vs quality vs CPU on candidate laptops (weak CPUs), browser MediaRecorder support (VP9/AV1/H.264 profiles, keyframe interval, bitrate modes), and what the review pipeline/video worker can ingest. Deliverable: comparison + recommendation, NOT an unilateral implementation.
