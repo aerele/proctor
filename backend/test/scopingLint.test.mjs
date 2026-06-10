@@ -18,7 +18,15 @@ const CHOKEPOINT_FILE = "contests.mjs";
 // Legacy call sites grandfathered at S-B (pre-contests code paths; they migrate
 // through scopedQuery stage by stage). Counts are exact on purpose: additions
 // AND removals both surface here.
-const LEGACY_ALLOWLIST = { "handler.mjs": 16 };
+// S-C migrated all 12 admin/invigilator READ sites through scopedQuery
+// (16 → 4). The 4 that stay raw are deliberate:
+//   - findLiveSessionFor      start-path lock check; slug comes from the
+//                             session context, "" IS the legacy scope
+//   - endAllLiveSessions      settings-driven end-now sweep, same "" semantics
+//   - resolveActionTargets    bulk POST body where an EXPLICIT "" filter is a
+//                             meaningful value (legacy scope), unlike the GETs
+//   - adminSessionDetails     same explicit-"" body contract
+const LEGACY_ALLOWLIST = { "handler.mjs": 4 };
 
 test("scoping lint: contest_slug filters = pinned legacy sites + exactly one chokepoint", () => {
   const counts = {};
