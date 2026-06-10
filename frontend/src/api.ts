@@ -12,9 +12,12 @@ import type {
   ExamConfig,
   ExecRequest,
   HeartbeatResponse,
+  ProblemDoc,
+  ProblemSummary,
   ProctorAlertTypeConfig,
   ProctorEvent,
   ProctorSettings,
+  PublicProblem,
   RecordingSession,
   RecordingSessionsResponse,
   ReviewMineResponse,
@@ -196,6 +199,7 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
     blocked_by_session_id: session.blocked_by_session_id,
     start_ip: session.start_ip,
     contest_url: contestUrl,
+    problem: demoActiveProblem(),
     upload_config: {
       chunk_seconds: 20,
       video_bits_per_second: 750_000,
@@ -343,6 +347,7 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       start_at: settings.start_at,
       end_at: settings.end_at,
       contest_url: settings.contest_url || "",
+      problem_id: settings.problem_id || "",
       rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
       // Passcodes are removed from the start/end flow, but we keep persisting any
       // value an older field still sends so the stored doc stays compatible.
@@ -1996,4 +2001,128 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
     return { verdict: "accepted", passed_count: 4, total: 4, score: 100, max_points: 100, submission_id: "demo" };
   }
   return request<SubmitResult>("/api/exec/submit", { method: "POST", body: JSON.stringify(req) });
+}
+
+// ---- S4: problem bank (admin authoring) -------------------------------------
+
+const demoProblemsKey = "aerele-proctor-demo-problems";
+
+// Demo mirror of the backend's built-in seed (problems.mjs SEED_PROBLEMS).
+const DEMO_SEED_PROBLEMS: ProblemDoc[] = [{
+  id: "sum-two",
+  title: "Sum of Two Numbers",
+  statement: "Read two integers a and b on one line separated by a space. Print a + b.",
+  languages: ["python", "cpp", "java", "javascript"],
+  cpuTimeLimit: 5, memoryLimit: 128000, points: 100,
+  scoring: "per_test", status: "published",
+  sampleTests: [{ input: "2 3\n", expected: "5" }, { input: "10 20\n", expected: "30" }],
+  hiddenTests: [
+    { input: "0 0\n", expected: "0" }, { input: "-5 5\n", expected: "0" },
+    { input: "1000000 1\n", expected: "1000001" }, { input: "-100 -200\n", expected: "-300" }
+  ]
+}];
+
+function readDemoProblems(): ProblemDoc[] {
+  try {
+    const raw = window.localStorage.getItem(demoProblemsKey);
+    return raw ? (JSON.parse(raw) as ProblemDoc[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeDemoProblems(problems: ProblemDoc[]): void {
+  window.localStorage.setItem(demoProblemsKey, JSON.stringify(problems));
+}
+
+// Demo id resolution: an authored demo problem wins; the seed answers only when
+// no demo doc exists (mirrors the backend bank-shadows-seed rule).
+function findDemoProblem(id: string): ProblemDoc | null {
+  return readDemoProblems().find((p) => p.id === id)
+    ?? DEMO_SEED_PROBLEMS.find((p) => p.id === id)
+    ?? null;
+}
+
+// Candidate view of the demo active problem — published only, never hiddenTests.
+function demoActiveProblem(): PublicProblem | null {
+  const problemId = getDemoSettings()?.problem_id || "";
+  if (!problemId) return null;
+  const p = findDemoProblem(problemId);
+  if (!p || p.status !== "published") return null;
+  return {
+    id: p.id, title: p.title, statement: p.statement, languages: p.languages,
+    points: p.points, cpuTimeLimit: p.cpuTimeLimit, memoryLimit: p.memoryLimit,
+    sampleTests: p.sampleTests
+  };
+}
+
+export async function fetchProblems(password: string): Promise<ProblemSummary[]> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    return readDemoProblems()
+      .map((p) => ({
+        id: p.id, title: p.title, status: p.status, points: p.points, scoring: p.scoring,
+        languages: p.languages, sample_count: p.sampleTests.length, hidden_count: p.hiddenTests.length,
+        updated_at: p.updated_at || ""
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+  const response = await request<{ problems: ProblemSummary[] }>("/api/admin/problems", {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+  return response.problems;
+}
+
+export async function fetchProblemDetail(password: string, id: string): Promise<ProblemDoc> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const found = readDemoProblems().find((p) => p.id === id);
+    if (!found) throw new Error("Problem not found");
+    return found;
+  }
+  const response = await request<{ problem: ProblemDoc }>(`/api/admin/problem?id=${encodeURIComponent(id)}`, {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+  return response.problem;
+}
+
+export async function saveProblem(password: string, problem: ProblemDoc): Promise<ProblemDoc> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const now = new Date().toISOString();
+    const all = readDemoProblems();
+    const existing = all.find((p) => p.id === problem.id);
+    const item: ProblemDoc = { ...problem, created_at: existing?.created_at || now, updated_at: now };
+    writeDemoProblems([...all.filter((p) => p.id !== problem.id), item]);
+    return item;
+  }
+  const response = await request<{ ok: boolean; problem: ProblemDoc }>("/api/admin/problems", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(problem)
+  });
+  return response.problem;
+}
+
+export async function deleteProblem(password: string, id: string): Promise<void> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    writeDemoProblems(readDemoProblems().filter((p) => p.id !== id));
+    const settings = getDemoSettings();
+    if (settings && settings.problem_id === id) {
+      window.localStorage.setItem(demoSettingsKey, JSON.stringify({ ...settings, problem_id: "" }));
+    }
+    return;
+  }
+  await request<{ ok: boolean }>("/api/admin/problem-delete", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ id })
+  });
 }
