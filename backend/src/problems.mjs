@@ -25,7 +25,10 @@ export const PROBLEM_BOUNDS = {
   CPU_MAX: 15,
   MEMORY_MIN: 16000,
   MEMORY_MAX: 512000,
-  POINTS_MAX: 1000
+  POINTS_MAX: 1000,
+  // S-I §1.2 (vision §2.5): free-form bank tags for the admin picker/filter.
+  TAGS_MAX: 10,
+  TAG_PATTERN: /^[a-z0-9-]{1,30}$/
 };
 
 const SCORING_MODES = ["per_test", "all_or_nothing"];
@@ -82,6 +85,19 @@ export async function getProblem(id) {
   }
   const seed = Object.hasOwn(SEED_PROBLEMS, key) ? SEED_PROBLEMS[key] : null;
   return seed && seed.status === "published" ? seed : null;
+}
+
+// S-I: the ADMIN/guard read path — doc-or-seed, ANY status. Templates may
+// reference drafts and the live-reference guard must see draft docs, so this
+// deliberately skips getProblem's published-only filter. NEVER candidate-facing.
+export async function getBankProblem(id) {
+  const key = String(id || "");
+  if (!isValidProblemId(key)) return null;
+  if (store) {
+    const doc = await store.getFirestore().collection(store.collection).doc(key).get();
+    if (doc.exists) return doc.data();
+  }
+  return Object.hasOwn(SEED_PROBLEMS, key) ? SEED_PROBLEMS[key] : null;
 }
 
 // Submit-time scoring (stored on the submission + returned with the verdict).
@@ -162,11 +178,25 @@ export function validateProblemInput(body) {
   const hidden = cleanTests(body?.hiddenTests, PROBLEM_BOUNDS.HIDDEN_TESTS_MAX, "hiddenTests");
   if (!hidden.ok) return hidden;
 
+  // S-I §1.2: optional tags — trimmed, lowercased, deduped; bounded charset/
+  // length/count so the admin filter UI never renders unbounded garbage.
+  let tags = [];
+  if (body?.tags !== undefined) {
+    if (!Array.isArray(body.tags)) return invalid("tags must be an array");
+    tags = [...new Set(body.tags.map((tag) => String(tag).trim().toLowerCase()))];
+    if (tags.length > PROBLEM_BOUNDS.TAGS_MAX) return invalid(`tags: max ${PROBLEM_BOUNDS.TAGS_MAX}`);
+    for (const tag of tags) {
+      if (!PROBLEM_BOUNDS.TAG_PATTERN.test(tag)) {
+        return invalid("tags must be 1-30 chars of lowercase letters/digits/hyphens");
+      }
+    }
+  }
+
   return {
     ok: true,
     problem: {
       id, title, statement, languages,
-      cpuTimeLimit, memoryLimit, points, scoring, status,
+      cpuTimeLimit, memoryLimit, points, scoring, status, tags,
       sampleTests: samples.tests, hiddenTests: hidden.tests
     }
   };

@@ -1386,6 +1386,7 @@ async function adminListProblems(req) {
       points: p.points ?? 100,
       scoring: p.scoring || "per_test",
       languages: p.languages || [],
+      tags: Array.isArray(p.tags) ? p.tags : [], // S-I §1.2 (legacy docs → [])
       sample_count: (p.sampleTests || []).length,
       hidden_count: (p.hiddenTests || []).length,
       updated_at: p.updated_at || ""
