@@ -57,12 +57,23 @@ export function testRules(ownEditor: boolean): TestRuleCopy[] {
 // Consent-checkbox sentence (form stage). The own-editor variant discloses that
 // editor keystrokes (full text + timing) are recorded, since Slice 1 captures
 // every keystroke in the coding workspace; the HackerRank fallback has no own
-// editor, so it must NOT claim keystroke capture.
+// editor, so it must NOT claim keystroke capture. TRUTHFUL capture wording
+// (post-F6): the recorded webm is the screen stream + mixed microphone audio;
+// the camera is a live monitor (self-view) only and is never recorded — the
+// consent must not claim a camera recording that does not exist.
 export function consentDisclosure(ownEditor: boolean): string {
   const editorClause = ownEditor
     ? " Everything I type in the coding editor, including keystroke timing, is recorded."
     : "";
-  return `I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment.${editorClause} I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.`;
+  return `I have read the rules above and consent to screen recording, microphone recording where available, and live camera monitoring for this hiring assessment.${editorClause} I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.`;
+}
+
+// Candidate-facing capture-state label for the CAMERA row/pill: the camera is
+// a live monitor only (self-view / pop-out) and is never part of the recorded
+// video, so its internal "recording" state must not read as "recorded". Every
+// other state (stopped / permission_denied / ...) passes through unchanged.
+export function cameraStateLabel(state: string): string {
+  return state === "recording" ? "monitored, not recorded" : state;
 }
 
 // EndTestPanel confirmation copy (shown when the candidate presses End test).

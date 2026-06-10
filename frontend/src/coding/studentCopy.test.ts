@@ -9,6 +9,7 @@
 // both flows.
 import { describe, it, expect } from "vitest";
 import {
+  cameraStateLabel,
   consentDisclosure,
   endTestConfirmation,
   formStageIntro,
@@ -145,6 +146,30 @@ describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", 
     for (const s of legacyStrings) {
       expect(s).not.toContain(KEYSTROKE_DISCLOSURE);
       expect(s.toLowerCase()).not.toContain("coding editor");
+    }
+  });
+});
+
+// F6 review / post-F6 wording fix: the camera is a LIVE MONITOR only — its
+// stream is never part of the recorded video (the webm is the direct screen
+// stream + mixed mic audio). No candidate-facing string may claim the camera
+// is recorded, and the capture-state readout must say "monitored".
+describe("camera is monitored, not recorded", () => {
+  it("cameraStateLabel rewords the recorder's 'recording' state as monitored-only", () => {
+    expect(cameraStateLabel("recording")).toBe("monitored, not recorded");
+  });
+
+  it("cameraStateLabel passes the other capture states through unchanged", () => {
+    for (const state of ["inactive", "stopped", "error", "permission_denied", "unavailable"]) {
+      expect(cameraStateLabel(state)).toBe(state);
+    }
+  });
+
+  it("the consent sentence never claims camera recording (both surfaces)", () => {
+    for (const ownEditor of [true, false]) {
+      expect(consentDisclosure(ownEditor)).not.toMatch(/camera and microphone recording/i);
+      expect(consentDisclosure(ownEditor).toLowerCase()).toContain("camera");
+      expect(consentDisclosure(ownEditor).toLowerCase()).toContain("monitor");
     }
   });
 });

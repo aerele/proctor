@@ -3,6 +3,7 @@ import {
   ALERT_ACTION_INFO,
   SESSION_ACTION_INFO,
   SESSION_ACTION_ORDER,
+  alertJoinState,
   bulkSessionActionsFor,
   joinableSessions,
   sessionForAlert,
@@ -59,7 +60,22 @@ describe("validSessionActionsFor", () => {
 });
 
 describe("sessionForAlert", () => {
-  it("joins by session_id when the alert has one (even an ended session)", () => {
+  it("joins by session_id when the alert has a live one", () => {
+    const joined = sessionForAlert({ session_id: "s-active", hackerrank_username: "Arav_M" }, sessions);
+    expect(joined?.session_id).toBe("s-active");
+    expect(joined?.status).toBe("active");
+  });
+
+  // F6 review: an alert pinned to its candidate's OLD ended attempt must not
+  // strand the row on archive-only while the candidate is live on a NEWER
+  // session — consistent with the username path, Lock/End stay reachable.
+  it("an alert joined to its OWN ended session falls back to the candidate's latest LIVE session", () => {
+    const joined = sessionForAlert({ session_id: "s-neha-old", hackerrank_username: "Neha_S" }, sessions);
+    expect(joined?.session_id).toBe("s-neha-new");
+    expect(joined?.status).toBe("disconnected");
+  });
+
+  it("keeps the ended direct join when the candidate has NO live session (truthful ended context)", () => {
     const joined = sessionForAlert({ session_id: "s-ended", hackerrank_username: "Asha_R" }, sessions);
     expect(joined?.session_id).toBe("s-ended");
     expect(joined?.status).toBe("ended");
@@ -121,6 +137,24 @@ describe("joinableSessions", () => {
 
   it("returns null when the endpoint is unavailable (null result)", () => {
     expect(joinableSessions(null)).toBeNull();
+  });
+});
+
+describe("alertJoinState", () => {
+  it("is 'joined' whenever a usable sessions list is in hand", () => {
+    expect(alertJoinState(sessions, false)).toBe("joined");
+    // Stale data kept across a failed refresh still beats dropping the join.
+    expect(alertJoinState(sessions, true)).toBe("joined");
+  });
+
+  it("is 'fallback' (full action set) when the list never loaded and nothing failed — 404/truncated/first load", () => {
+    expect(alertJoinState(null, false)).toBe("fallback");
+  });
+
+  // F6 review: a non-404 sessions-list failure must not blank the console NOR
+  // pretend every action applies — rows degrade to archive-only with a note.
+  it("is 'unavailable' (archive-only + note) when the join fetch failed with no data to keep", () => {
+    expect(alertJoinState(null, true)).toBe("unavailable");
   });
 });
 

@@ -112,3 +112,32 @@ export function describeRecordingContents(state: CaptureState | null | undefined
   const camera = CAMERA_CONTENTS[state.camera];
   return camera ? `${base}; ${camera}` : base;
 }
+
+// ---- F6 review: the session card's Recordings-tab deep-link affordances ----
+// Both buttons jump to the Recordings tab scoped to this candidate/session.
+// "View recording" additionally needs playable chunks; "View events" does not —
+// the activity log there (events + alerts + submissions) renders without a
+// single recorded chunk (/api/admin/session-events is chunk-independent).
+// `dataAvailable` is false ONLY in demo mode for candidates outside the seeded
+// recording dataset (the deep link would dead-end in "No sessions found").
+
+export type DeepLinkAffordance = { disabled: boolean; tip: string };
+
+const DEMO_NO_DATA_TIP =
+  "Demo mode: this candidate has no seeded recording data, so the Recordings tab cannot load them. Open Asha_R, Karan_V, Neha_S or Vikram_T instead.";
+
+export function viewRecordingAffordance(chunkCount: number, dataAvailable: boolean): DeepLinkAffordance {
+  if (!dataAvailable) return { disabled: true, tip: DEMO_NO_DATA_TIP };
+  if (!Number.isFinite(chunkCount) || chunkCount <= 0) {
+    return { disabled: true, tip: "No recorded chunks yet — there is nothing to play for this session. Use “View events” for the chunk-free activity log." };
+  }
+  return { disabled: false, tip: "Open the Recordings tab with this candidate's recording loaded and this session selected." };
+}
+
+export function viewEventsAffordance(dataAvailable: boolean): DeepLinkAffordance {
+  if (!dataAvailable) return { disabled: true, tip: DEMO_NO_DATA_TIP };
+  return {
+    disabled: false,
+    tip: "Open this session's activity log on the Recordings tab (events, alerts, submission times) — available even when nothing was recorded."
+  };
+}

@@ -89,6 +89,16 @@ const EVENT_LABELS: Record<string, string> = {
 const DETAIL_SUMMARY_MAX_ENTRIES = 3;
 const DETAIL_SUMMARY_VALUE_MAX = 80;
 
+// F6 review: the backend caps event DETAIL strings but not the type field —
+// clamp it defensively before it reaches labels/tooltips/log rows so a buggy
+// or hostile emitter can't smear an arbitrarily long string across the UI.
+export const EVENT_TYPE_MAX = 80;
+
+export function clampEventType(type: string): string {
+  const text = String(type ?? "");
+  return text.length > EVENT_TYPE_MAX ? `${text.slice(0, EVENT_TYPE_MAX)}…` : text;
+}
+
 // (timestamp − testStart) in seconds; null when either side is invalid so the
 // caller can drop the entry instead of plotting it at NaN.
 export function offsetSecFor(timestamp: string, testStartMs: number): number | null {
@@ -113,7 +123,7 @@ export function eventLabel(type: string, detail?: Record<string, string | number
     if (state === "visible") return "Tab visible";
     return "Tab visibility changed";
   }
-  return EVENT_LABELS[type] ?? type.replace(/_/g, " ");
+  return EVENT_LABELS[type] ?? clampEventType(type).replace(/_/g, " ");
 }
 
 // Compact one-liner from the (already small, scalar-only) event detail:
@@ -185,8 +195,8 @@ export function buildTimelineLog(params: {
     entries.push({
       kind: "event",
       // Index keeps ids unique even for identical repeated events.
-      id: `event:${index}:${event.type}@${event.timestamp}`,
-      type: event.type,
+      id: `event:${index}:${clampEventType(event.type)}@${event.timestamp}`,
+      type: clampEventType(event.type),
       offsetSec,
       timestamp: event.timestamp,
       label: eventLabel(event.type, event.detail),

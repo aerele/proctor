@@ -83,7 +83,6 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   let combinedStream: MediaStream | null = null;
   let recorder: MediaRecorder | null = null;
   let segmentTimer: number | undefined;
-  let drawFrameId: number | undefined;
   let stopping = false;
   let chunkIndex = 0;
   let uploadQueue = Promise.resolve();
@@ -98,15 +97,11 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     microphone: "inactive"
   };
 
-  const screenVideo = document.createElement("video");
-  const cameraVideo = document.createElement("video");
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d", { alpha: false });
-
-  screenVideo.muted = true;
-  screenVideo.playsInline = true;
-  cameraVideo.muted = true;
-  cameraVideo.playsInline = true;
+  // NOTE: the old camera-over-screen canvas compositor was removed — the ONLY
+  // recording path is startDirectScreenRecordingStream (direct display stream +
+  // mixed mic audio), chosen so capture survives a hidden proctor tab. The
+  // camera is still ACQUIRED (startCameraAndMicrophone) for the live self-view
+  // and state tracking, but its frames are never drawn into the recording.
 
   let fatalStatusHandled = false;
 
@@ -340,7 +335,6 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       stopping = true;
       if (heartbeatTimer) window.clearInterval(heartbeatTimer);
       if (segmentTimer) window.clearTimeout(segmentTimer);
-      if (drawFrameId) window.cancelAnimationFrame(drawFrameId);
       unbindPageEvents();
       emit("session_stop_requested");
 
@@ -349,8 +343,6 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       screenStream?.getTracks().forEach((track) => track.stop());
       cameraStream?.getTracks().forEach((track) => track.stop());
       combinedStream?.getTracks().forEach((track) => track.stop());
-      screenVideo.srcObject = null;
-      cameraVideo.srcObject = null;
       options.onCameraStream?.(null);
       updateMediaState("screen", "stopped");
       updateMediaState("camera", keepOptionalMediaFinalState(mediaState.camera));
@@ -474,81 +466,6 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       microphone_audio: Boolean(audioTrack),
       reason: "Direct display stream is used so recording continues when the proctor tab is hidden."
     });
-  }
-
-  async function ensureVideoReady(video: HTMLVideoElement, kind: string) {
-    if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
-      await new Promise<void>((resolve) => {
-        const timer = window.setTimeout(resolve, 1500);
-        video.addEventListener("loadedmetadata", () => {
-          window.clearTimeout(timer);
-          resolve();
-        }, { once: true });
-      });
-    }
-
-    try {
-      await video.play();
-    } catch (error) {
-      emit("media_preview_play_error", { kind, message: String(error) });
-    }
-  }
-
-  function drawCompositeFrame() {
-    if (!context || stopping) return;
-
-    context.fillStyle = "#0a1a3f";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    drawContain(screenVideo, 0, 0, canvas.width, canvas.height);
-
-    if (cameraStream?.getVideoTracks()[0]?.readyState === "live") {
-      const margin = Math.max(12, Math.round(canvas.width * 0.015));
-      const overlayWidth = Math.round(canvas.width * 0.2);
-      const overlayHeight = Math.round(overlayWidth * 3 / 4);
-      const x = canvas.width - overlayWidth - margin;
-      const y = canvas.height - overlayHeight - margin;
-      context.fillStyle = "rgba(10, 26, 63, 0.78)";
-      roundRect(x - 4, y - 4, overlayWidth + 8, overlayHeight + 8, 8);
-      context.fill();
-      drawCover(cameraVideo, x, y, overlayWidth, overlayHeight);
-      context.strokeStyle = "rgba(255, 255, 255, 0.85)";
-      context.lineWidth = 2;
-      roundRect(x, y, overlayWidth, overlayHeight, 6);
-      context.stroke();
-    }
-
-    drawFrameId = window.requestAnimationFrame(drawCompositeFrame);
-  }
-
-  function drawContain(video: HTMLVideoElement, x: number, y: number, width: number, height: number) {
-    const sourceWidth = video.videoWidth || width;
-    const sourceHeight = video.videoHeight || height;
-    const scale = Math.min(width / sourceWidth, height / sourceHeight);
-    const drawWidth = sourceWidth * scale;
-    const drawHeight = sourceHeight * scale;
-    context?.drawImage(video, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
-  }
-
-  function drawCover(video: HTMLVideoElement, x: number, y: number, width: number, height: number) {
-    const sourceWidth = video.videoWidth || width;
-    const sourceHeight = video.videoHeight || height;
-    const scale = Math.max(width / sourceWidth, height / sourceHeight);
-    const cropWidth = width / scale;
-    const cropHeight = height / scale;
-    const cropX = (sourceWidth - cropWidth) / 2;
-    const cropY = (sourceHeight - cropHeight) / 2;
-    context?.drawImage(video, cropX, cropY, cropWidth, cropHeight, x, y, width, height);
-  }
-
-  function roundRect(x: number, y: number, width: number, height: number, radius: number) {
-    if (!context) return;
-    context.beginPath();
-    context.moveTo(x + radius, y);
-    context.arcTo(x + width, y, x + width, y + height, radius);
-    context.arcTo(x + width, y + height, x, y + height, radius);
-    context.arcTo(x, y + height, x, y, radius);
-    context.arcTo(x, y, x + width, y, radius);
-    context.closePath();
   }
 
   function startSegmentRecorder() {

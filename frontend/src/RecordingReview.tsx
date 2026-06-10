@@ -265,6 +265,9 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // recording-state) + the candidate's ALERTS, for the activity overlay + log.
   // Both degrade to empty (no markers) when unavailable — never block playback.
   const [sessionEvents, setSessionEvents] = useState<SessionEventItem[]>([]);
+  // F6 review: true when the backend capped the event stream (the activity log
+  // shows a "first N events" note instead of presenting a partial log as full).
+  const [sessionEventsTruncated, setSessionEventsTruncated] = useState(false);
   const [candidateAlerts, setCandidateAlerts] = useState<Alert[]>([]);
   // Activity-log filter state — everything on by default (usability bar).
   const [logFilters, setLogFilters] = useState<TimelineLogFilters>(DEFAULT_LOG_FILTERS);
@@ -431,16 +434,23 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
     const sessionId = session?.session_id ? String(session.session_id) : "";
     if (!sessionId) {
       setSessionEvents([]);
+      setSessionEventsTruncated(false);
       setCandidateAlerts([]);
       return;
     }
     let cancelled = false;
     void (async () => {
       try {
-        const events = await fetchSessionEvents(password, sessionId);
-        if (!cancelled) setSessionEvents(events ?? []);
+        const result = await fetchSessionEvents(password, sessionId);
+        if (!cancelled) {
+          setSessionEvents(result?.events ?? []);
+          setSessionEventsTruncated(result?.truncated === true);
+        }
       } catch {
-        if (!cancelled) setSessionEvents([]);
+        if (!cancelled) {
+          setSessionEvents([]);
+          setSessionEventsTruncated(false);
+        }
       }
       try {
         const response = await fetchAlerts(password, {
@@ -1677,6 +1687,8 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   counts={logCounts}
                   filters={logFilters}
                   onFilters={setLogFilters}
+                  eventsTruncated={sessionEventsTruncated}
+                  eventsShown={sessionEvents.length}
                   onJump={(offsetSec) =>
                     seekToTestTime(Math.max(span.start, Math.min(offsetSec, span.end)), wantPlaying())
                   }
@@ -1727,12 +1739,18 @@ function ActivityLogPanel({
   counts,
   filters,
   onFilters,
+  eventsTruncated,
+  eventsShown,
   onJump
 }: {
   entries: TimelineLogEntry[];
   counts: { alerts: number; events: number; submissions: number };
   filters: TimelineLogFilters;
   onFilters: (next: TimelineLogFilters) => void;
+  /** F6 review: the backend capped the event stream — say so (with the count
+   * actually shown) instead of presenting a partial log as the full story. */
+  eventsTruncated: boolean;
+  eventsShown: number;
   onJump: (offsetSec: number) => void;
 }) {
   const total = counts.alerts + counts.events + counts.submissions;
@@ -1777,6 +1795,12 @@ function ActivityLogPanel({
           </select>
         </div>
       </div>
+
+      {eventsTruncated ? (
+        <p className="mt-2 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+          <AlertTriangle size={13} /> Showing the first {eventsShown} events — the event log was truncated server-side.
+        </p>
+      ) : null}
 
       {entries.length ? (
         <ol className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
