@@ -2,6 +2,7 @@ import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCi
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
+import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
@@ -1772,17 +1773,14 @@ function AdminApp() {
   };
 
   const toggleSelected = (key: string) => {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setSelected((current) => toggleId(current, key));
   };
 
   // ARCHIVE a single alert (or a set of ids) then refresh the alerts list so the
   // change is visible immediately. In demo mode the api mutates the demo store, so
-  // the reload reflects the archive flag.
+  // the reload reflects the archive flag. F6.2: only the just-archived ids leave
+  // the selection — the rest survives (it's ids-based, so auto-refresh keeps it);
+  // unarchive keeps the selection so the admin can act on the restored alerts.
   const archiveAlerts = async (ids: string[], action: "archive" | "unarchive" = "archive") => {
     if (!ids.length) return;
     setError("");
@@ -1791,7 +1789,7 @@ function AdminApp() {
       const response = await alertAction(password, { action, ids });
       setActionMessage(`${action === "archive" ? "Archived" : "Unarchived"} ${response.updated.length} alert(s)${response.missing.length ? ` (${response.missing.length} missing)` : ""}.`);
       await loadAlerts();
-      setSelected(new Set());
+      if (action === "archive") setSelected((current) => removeFromSelection(current, ids));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -2167,6 +2165,8 @@ function AdminApp() {
           rooms={rooms}
           selected={selected}
           onToggleSelected={toggleSelected}
+          onSelectAll={(ids) => setSelected((current) => addAllToSelection(current, ids))}
+          onClearSelection={() => setSelected(new Set())}
           onFiltersChange={(next) => {
             setAlertFilters(next);
             void loadAlerts(next);
@@ -3495,7 +3495,7 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onToggleSelected, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
+function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onToggleSelected, onSelectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
   alerts: Alert[];
   loading: boolean;
   loaded: boolean;
@@ -3503,6 +3503,8 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
   rooms: string[];
   selected: Set<string>;
   onToggleSelected: (key: string) => void;
+  onSelectAll: (ids: string[]) => void;
+  onClearSelection: () => void;
   onFiltersChange: (filters: AlertFilters) => void;
   onRefresh: () => void;
   onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
@@ -3510,13 +3512,12 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
   onApproveArchive: (alert: Alert) => void;
 }) {
   // Unique candidate usernames in the current (selected) alert set, for bulk actions.
-  const selectedUsernames = useMemo(() => {
-    const usernames = new Set<string>();
-    for (const alert of alerts) {
-      if (selected.has(alert.id)) usernames.add(alert.hackerrank_username);
-    }
-    return [...usernames];
-  }, [alerts, selected]);
+  const selectedUsernames = useMemo(() => usernamesForSelection(alerts, selected), [alerts, selected]);
+  // F6.2: ids of the CURRENTLY FILTERED list — the scope of "Select all". The
+  // selected Set may also hold off-screen ids (selection survives refresh and
+  // filter changes); bulk archive acts on ALL selected ids, not just visible ones.
+  const visibleIds = useMemo(() => alerts.map((alert) => alert.id), [alerts]);
+  const allSelected = isAllSelected(selected, visibleIds);
 
   return (
     <>
@@ -3566,6 +3567,48 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
           <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(alerts.filter((alert) => alert.severity === "critical").length)} />
           <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(alerts.filter((alert) => alert.severity === "warning").length)} />
         </div>
+
+        {/* F6.1-2 selection bar: select-all over the CURRENTLY FILTERED list,
+            selected count, clear, and bulk archive/unarchive on ALL selected ids. */}
+        {alerts.length || selected.size ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                className="h-4 w-4 accent-accent"
+                type="checkbox"
+                checked={allSelected}
+                onChange={() => (allSelected ? onClearSelection() : onSelectAll(visibleIds))}
+              />
+              Select all ({alerts.length})
+            </label>
+            <span className="text-sm font-medium">{selected.size} selected</span>
+            {selected.size ? (
+              <>
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                >
+                  Clear selection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onArchive([...selected], "archive")}
+                  className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                >
+                  <Archive size={14} /> Archive selected
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onArchive([...selected], "unarchive")}
+                  className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                >
+                  <ArchiveRestore size={14} /> Unarchive selected
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
 
         {selectedUsernames.length ? (
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
