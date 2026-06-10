@@ -4,7 +4,7 @@ import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRos
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
-import { alertsForSession, approxRecordingSeconds, formatApproxDuration } from "./admin/sessionDetail";
+import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration } from "./admin/sessionDetail";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
@@ -3343,6 +3343,34 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
           <Metric icon={<CheckCircle2 size={16} />} label="Submissions" value={submissions === null ? "…" : String(sortedSubmissions.length)} />
           {detail ? <Metric icon={<Activity size={16} />} label="Events" value={`${detail.event_count} (${detail.clipboard_event_count} clipboard · ${detail.focus_event_count} focus)`} /> : null}
         </div>
+
+        {/* CAPTURE — F6.6: last-reported per-source capture state (from the
+            heartbeat's composite recording_state). The recorded webm is the
+            direct screen stream with mic audio mixed in; the camera is
+            live-monitor only and never produces a separate file — the labels
+            say so plainly. Hidden until a composite heartbeat reported it. */}
+        {detail?.capture_state ? (
+          <div className="mt-4 rounded-md border border-line bg-white/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Capture — last reported</p>
+            <ul className="mt-2 space-y-1.5 text-xs">
+              <li className="flex flex-wrap items-center gap-2">
+                <MonitorUp size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="w-24 font-medium text-ink">Screen</span>
+                <span className="text-muted">{captureSourceLabel("screen", detail.capture_state.screen)}</span>
+              </li>
+              <li className="flex flex-wrap items-center gap-2">
+                <Camera size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="w-24 font-medium text-ink">Camera</span>
+                <span className="text-muted">{captureSourceLabel("camera", detail.capture_state.camera)}</span>
+              </li>
+              <li className="flex flex-wrap items-center gap-2">
+                <Mic size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="w-24 font-medium text-ink">Microphone</span>
+                <span className="text-muted">{captureSourceLabel("microphone", detail.capture_state.microphone)}</span>
+              </li>
+            </ul>
+          </div>
+        ) : null}
 
         {/* SUBMISSION TIMES — newest-last, capped so a heavy solver stays tidy. */}
         {sortedSubmissions.length ? (

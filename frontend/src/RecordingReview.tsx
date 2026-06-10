@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
+import { describeRecordingContents } from "./admin/sessionDetail";
 import {
   DEFAULT_LOG_FILTERS,
   alertsForCandidate,
@@ -1238,6 +1239,12 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   {activeSession.room ? ` · Room ${activeSession.room}` : ""}
                   {" · "}timeline labels are relative to the test start above ({formatClock(span.end)} long
                   {spanDuration >= 3600 ? ", h:mm:ss" : ", mm:ss"}).
+                </p>
+                {/* F6.6 — what THIS recording contains, from the session's
+                    last-reported capture state (the camera is live-monitor
+                    only and is never part of the recorded video). */}
+                <p className="mt-1 text-xs text-muted">
+                  Recording contains: {describeRecordingContents(activeSession.capture_state)}.
                 </p>
               </div>
 

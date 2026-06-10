@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alertsForSession, approxRecordingSeconds, formatApproxDuration } from "./sessionDetail";
+import { alertsForSession, approxRecordingSeconds, captureSourceLabel, describeRecordingContents, formatApproxDuration } from "./sessionDetail";
 
 describe("approxRecordingSeconds", () => {
   it("is chunk_count × 30s (the fixed recorder chunk length)", () => {
@@ -68,5 +68,67 @@ describe("alertsForSession", () => {
   it("excludes another session's alerts even for the same candidate", () => {
     const alerts = [{ id: "a1", session_id: "s-2", hackerrank_username: "Asha_R" }];
     expect(alertsForSession(alerts, session)).toHaveLength(0);
+  });
+});
+
+// F6.6 — per-source capture-state labels for the session detail card. The
+// recorded webm is the DIRECT screen stream + mixed mic audio; the camera is
+// live-monitor only and is NEVER part of the recorded video, so the labels
+// must say that in plain language instead of implying a camera file exists.
+describe("captureSourceLabel", () => {
+  it("labels the screen states plainly", () => {
+    expect(captureSourceLabel("screen", "recording")).toBe("recording");
+    expect(captureSourceLabel("screen", "stopped")).toBe("stopped mid-exam");
+    expect(captureSourceLabel("screen", "error")).toBe("capture error");
+    expect(captureSourceLabel("screen", "inactive")).toBe("not started");
+  });
+
+  it("a recording camera is live-monitor only — never claims a camera recording exists", () => {
+    expect(captureSourceLabel("camera", "recording")).toBe("on (live monitor only — not in the recorded video)");
+  });
+
+  it("labels denied/missing camera and microphone plainly", () => {
+    expect(captureSourceLabel("camera", "permission_denied")).toBe("permission denied");
+    expect(captureSourceLabel("camera", "unavailable")).toBe("no camera detected");
+    expect(captureSourceLabel("microphone", "permission_denied")).toBe("permission denied");
+    expect(captureSourceLabel("microphone", "unavailable")).toBe("no microphone detected");
+  });
+
+  it("a recording microphone says its audio lands inside the screen video", () => {
+    expect(captureSourceLabel("microphone", "recording")).toBe("recording (audio mixed into the screen video)");
+  });
+
+  it("an unexpected state falls back to 'unknown'", () => {
+    expect(captureSourceLabel("camera", "unknown")).toBe("unknown");
+    expect(captureSourceLabel("microphone", "weird")).toBe("unknown");
+  });
+});
+
+// F6.6 — the recordings-review header line: what does the loaded recording
+// actually contain, derived from the same per-source capture state.
+describe("describeRecordingContents", () => {
+  it("screen + mic audio when the microphone was recording", () => {
+    expect(describeRecordingContents({ screen: "recording", camera: "recording", microphone: "recording" }))
+      .toBe("screen video + microphone audio; camera live-monitored only (not recorded)");
+  });
+
+  it("screen only when the microphone permission was denied", () => {
+    expect(describeRecordingContents({ screen: "recording", camera: "permission_denied", microphone: "permission_denied" }))
+      .toBe("screen video only — microphone permission denied; camera permission denied");
+  });
+
+  it("screen only when no microphone was detected", () => {
+    expect(describeRecordingContents({ screen: "recording", camera: "unavailable", microphone: "unavailable" }))
+      .toBe("screen video only — no microphone detected; no camera detected");
+  });
+
+  it("notes a microphone that stopped mid-exam", () => {
+    expect(describeRecordingContents({ screen: "recording", camera: "recording", microphone: "stopped" }))
+      .toBe("screen video — microphone stopped mid-exam; camera live-monitored only (not recorded)");
+  });
+
+  it("degrades to a no-detail line when the state was never reported (legacy sessions)", () => {
+    expect(describeRecordingContents(null)).toBe("screen video — capture detail not reported for this session");
+    expect(describeRecordingContents(undefined)).toBe("screen video — capture detail not reported for this session");
   });
 });

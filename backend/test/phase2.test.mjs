@@ -1193,6 +1193,90 @@ test("session-detail: requires admin password", async () => {
 });
 
 // =====================================================================
+// Capture state — F6.6: the heartbeat already persists the recorder's
+// composite recording_state ("combined:X;screen:Y;camera:Z;microphone:W")
+// on the session doc; the admin surfaces get it back as a STRUCTURED
+// per-source capture_state so the session card and the recordings header
+// can say what the recording actually contains.
+// =====================================================================
+
+function heartbeatWith(sessionId, recordingState) {
+  return call(makeReq({
+    method: "POST",
+    path: "/api/heartbeat",
+    body: { session_id: sessionId, recording_state: recordingState, visibility_state: "visible" }
+  }));
+}
+
+test("capture-state: session-detail exposes the per-source state parsed from the heartbeat", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage);
+  await heartbeatWith(started.body.session_id, "combined:recording;screen:recording;camera:permission_denied;microphone:recording");
+
+  const res = await sessionDetail({ session_id: started.body.session_id });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.session.capture_state, {
+    screen: "recording",
+    camera: "permission_denied",
+    microphone: "recording"
+  });
+});
+
+test("capture-state: a bare legacy recording_state (or none yet) → capture_state null", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+
+  // No heartbeat yet — nothing reported.
+  const fresh = await start(firestore, storage);
+  const before = await sessionDetail({ session_id: fresh.body.session_id });
+  assert.equal(before.body.session.capture_state, null);
+
+  // Legacy bare string — no per-source segments to project.
+  await heartbeatWith(fresh.body.session_id, "recording");
+  const after = await sessionDetail({ session_id: fresh.body.session_id });
+  assert.equal(after.body.session.capture_state, null);
+});
+
+test("capture-state: an unexpected segment value projects as 'unknown' (never leaks raw)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage);
+  await heartbeatWith(started.body.session_id, "combined:recording;screen:recording;camera:weird-future-state;microphone:unavailable");
+
+  const res = await sessionDetail({ session_id: started.body.session_id });
+  assert.deepEqual(res.body.session.capture_state, {
+    screen: "recording",
+    camera: "unknown",
+    microphone: "unavailable"
+  });
+});
+
+test("capture-state: GET /api/admin/sessions rows carry capture_state (recordings header)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage, { hackerrank_username: "alice" });
+  await heartbeatWith(started.body.session_id, "combined:recording;screen:recording;camera:unavailable;microphone:permission_denied");
+
+  const res = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/sessions",
+    headers: ADMIN_HEADERS,
+    query: { username: "alice" }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.sessions[0].capture_state, {
+    screen: "recording",
+    camera: "unavailable",
+    microphone: "permission_denied"
+  });
+});
+
+// =====================================================================
 // Submission-time markers — POST /api/submission-events + GET /api/admin/submission-events
 // =====================================================================
 
