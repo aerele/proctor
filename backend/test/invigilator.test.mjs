@@ -285,3 +285,79 @@ test("CORS allows the x-invigilator-password header", async () => {
   assert.equal(res.statusCode, 204);
   assert.match(res.headers["access-control-allow-headers"], /x-invigilator-password/);
 });
+
+// ---- Task 2: release-code + open-room ---------------------------------------
+
+test("POST /api/invigilator/release-code: 6-digit OTP, idempotent re-display, regenerate mints fresh", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const first = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.body.contest_slug, "kec-2026");
+  assert.equal(first.body.gate.mode, "otp");
+  assert.match(first.body.gate.otp, /^\d{6}$/);
+  assert.equal(first.body.gate.released_by, "Priya");
+  // stored under the deterministic gate id
+  const gates = firestore._collections.get(process.env.ROOM_GATES_COLLECTION);
+  assert.ok(gates.has("gate:kec-2026:Lab A-1"));
+  // idempotent: a portal reload re-displays the SAME code
+  const second = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  assert.equal(second.body.gate.otp, first.body.gate.otp);
+  // regenerate writes a NEW gate doc (released_by proves the rewrite — the new
+  // random code itself could collide one-in-a-million, so don't assert on it)
+  const regen = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Asha", regenerate: true } }));
+  assert.match(regen.body.gate.otp, /^\d{6}$/);
+  assert.equal(regen.body.gate.released_by, "Asha");
+});
+
+test("POST /api/invigilator/open-room: start-now marks the room OPEN and keeps prior release info", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const released = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  const open = await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Asha" } }));
+  assert.equal(open.statusCode, 200);
+  assert.equal(open.body.gate.mode, "open");
+  assert.equal(open.body.gate.opened_by, "Asha");
+  assert.equal(open.body.gate.released_by, "Priya");                  // preserved
+  assert.equal(open.body.gate.otp, released.body.gate.otp);           // preserved (re-arm support)
+});
+
+test("release-code / open-room: 400 room_gate_disabled when the admin toggle is off", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore, { room_gate_enabled: false });
+  const release = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  assert.equal(release.statusCode, 400);
+  assert.equal(release.body.error, "room_gate_disabled");
+  const open = await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  assert.equal(open.statusCode, 400);
+});
+
+test("release-code for the unassigned pseudo-room ('_') stores key '_' with a blank label", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const res = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "_", invigilator_name: "Priya" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.gate.room_key, "_");
+  assert.equal(res.body.gate.room, "");
+  assert.ok(firestore._collections.get(process.env.ROOM_GATES_COLLECTION).has("gate:kec-2026:_"));
+});

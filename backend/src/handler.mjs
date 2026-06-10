@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
@@ -139,6 +139,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 // S3 invigilator portal: a SEPARATE shared password so invigilators never hold
 // the admin credential. Closed-by-default when unset (mirrors ALERTS_INGEST_API_KEY).
 const INVIGILATOR_PASSWORD = process.env.INVIGILATOR_PASSWORD;
+const ROOM_GATES_COLLECTION = process.env.ROOM_GATES_COLLECTION || "proctor_room_gates";
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
@@ -220,6 +221,8 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/review-mine") return send(res, 200, await adminReviewMine(req));
     if (req.method === "GET" && path === "/api/admin/reviews") return send(res, 200, await adminReviews(req));
     if (req.method === "GET" && path === "/api/invigilator/overview") return send(res, 200, await invigilatorOverview(req));
+    if (req.method === "POST" && path === "/api/invigilator/release-code") return send(res, 200, await invigilatorReleaseCode(req));
+    if (req.method === "POST" && path === "/api/invigilator/open-room") return send(res, 200, await invigilatorOpenRoom(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
@@ -2733,6 +2736,116 @@ async function invigilatorOverview(req) {
     rooms: distinctRooms(docs),
     has_unassigned: docs.some((doc) => !String(doc.room || "").trim())
   };
+}
+
+// Room start gate (S3). ONE doc per (contest, room); deterministic id so
+// re-releases upsert (mirrors the live-lock id pattern). The OTP is stored in
+// PLAINTEXT deliberately: it is a short-lived room-coordination code the
+// invigilator must be able to RE-DISPLAY (portal reload, board rewrite), not a
+// credential guarding data; online guessing is bounded by the per-session
+// attempt cap in sessionRoomGate.
+function gateRoomKey(room) {
+  const cleaned = sanitizeRoom(room === undefined || room === null ? "" : room);
+  return cleaned || "_";
+}
+
+function roomGateRef(contestSlug, roomKey) {
+  return firestore.collection(ROOM_GATES_COLLECTION).doc(`gate:${contestSlug || "_"}:${roomKey}`);
+}
+
+async function getRoomGate(contestSlug, roomKey) {
+  const doc = await roomGateRef(contestSlug, roomKey).get();
+  return doc.exists ? doc.data() : null;
+}
+
+function generateRoomOtp() {
+  return String(randomInt(0, 1000000)).padStart(6, "0");
+}
+
+// Public projection of a gate doc — exactly what invigilator endpoints return.
+function publicRoomGate(gate) {
+  if (!gate) return null;
+  return {
+    room: gate.room || "",
+    room_key: gate.room_key,
+    mode: gate.mode,
+    otp: gate.otp || "",
+    released_at: gate.released_at || null,
+    released_by: gate.released_by || "",
+    opened_at: gate.opened_at || null,
+    opened_by: gate.opened_by || "",
+    updated_at: gate.updated_at || ""
+  };
+}
+
+// Gate mutations require the admin to have ENABLED the room gate (the admin
+// checkbox is also the admin-side master bypass: turning it off releases
+// everyone on their next poll).
+async function requireGateEnabledSettings() {
+  const settings = await getSettings();
+  if (!settings?.room_gate_enabled) badRequest("room_gate_disabled");
+  return settings;
+}
+
+// POST /api/invigilator/release-code — mint (or re-display) the room's 6-digit
+// start OTP. Idempotent by default: an existing OTP is returned unchanged so a
+// portal reload never silently invalidates the code already on the board; pass
+// regenerate:true for a fresh one. Calling this on an OPEN room re-arms the
+// OTP gate (late arrivals) — already-released candidates keep exam_started_at.
+async function invigilatorReleaseCode(req) {
+  requireInvigilator(req);
+  const body = parseBody(req);
+  requireFields(body, ["room"]);
+  const settings = await requireGateEnabledSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const roomKey = gateRoomKey(body.room);
+  const existing = await getRoomGate(contestSlug, roomKey);
+  if (existing && existing.mode === "otp" && existing.otp && body.regenerate !== true) {
+    return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(existing) };
+  }
+  const now = new Date().toISOString();
+  const item = {
+    contest_slug: contestSlug,
+    room: roomKey === "_" ? "" : sanitizeRoom(body.room),
+    room_key: roomKey,
+    mode: "otp",
+    otp: generateRoomOtp(),
+    released_at: now,
+    released_by: String(body.invigilator_name || "").slice(0, 120),
+    opened_at: existing?.opened_at || null,
+    opened_by: existing?.opened_by || "",
+    updated_at: now
+  };
+  await roomGateRef(contestSlug, roomKey).set(item);
+  return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
+}
+
+// POST /api/invigilator/open-room — start-now / allow-all: marks the room OPEN
+// so every waiting candidate's next gate poll admits them without a code. This
+// is the room-scoped parallel of the admin's master switch (room_gate_enabled).
+async function invigilatorOpenRoom(req) {
+  requireInvigilator(req);
+  const body = parseBody(req);
+  requireFields(body, ["room"]);
+  const settings = await requireGateEnabledSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const roomKey = gateRoomKey(body.room);
+  const existing = await getRoomGate(contestSlug, roomKey);
+  const now = new Date().toISOString();
+  const item = {
+    contest_slug: contestSlug,
+    room: roomKey === "_" ? "" : sanitizeRoom(body.room),
+    room_key: roomKey,
+    mode: "open",
+    otp: existing?.otp || "",
+    released_at: existing?.released_at || null,
+    released_by: existing?.released_by || "",
+    opened_at: now,
+    opened_by: String(body.invigilator_name || "").slice(0, 120),
+    updated_at: now
+  };
+  await roomGateRef(contestSlug, roomKey).set(item);
+  return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
 }
 
 // ---- Proctor alert settings (admin) ----------------------------------------
