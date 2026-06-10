@@ -1,10 +1,10 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
-import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
-import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration } from "./admin/sessionDetail";
+import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "./admin/alertActions";
+import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, viewEventsAffordance, viewRecordingAffordance } from "./admin/sessionDetail";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
@@ -1450,7 +1450,14 @@ function AdminApp() {
   // truncated (live rows may be missing — joinableSessions) → rows fall back
   // to the full action set (incomplete data must not lose admin capability).
   const [alertSessions, setAlertSessions] = useState<RecordingSession[] | null>(null);
+  // F6 review: true when the last sessions-list fetch FAILED (non-404). With
+  // no join data to keep, rows degrade to archive-only + a "session status
+  // unavailable" note (alertJoinState) instead of guessing at actions.
+  const [alertSessionsFailed, setAlertSessionsFailed] = useState(false);
 
+  // F6 review: the join fetch is DECOUPLED from the alerts load — a failing
+  // sessions-list must never blank the alerts console (the join is an
+  // enhancement; the alerts are the product).
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
     setError("");
@@ -1460,12 +1467,12 @@ function AdminApp() {
       setAlerts(sorted);
       if (response.rooms) setRooms(response.rooms);
       setAlertsLoaded(true);
-      await loadAlertSessions(filters);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setAlertsLoading(false);
     }
+    await loadAlertSessions(filters);
   };
 
   // F6.4: refresh the status-join data for the alerts console. Errors are
@@ -1477,8 +1484,11 @@ function AdminApp() {
       const active = filters ?? alertFilters;
       const list = await fetchSessionsList(password, { status: "", contestSlug: active.contest_slug });
       setAlertSessions(joinableSessions(list));
+      setAlertSessionsFailed(false);
     } catch {
-      // Keep the previous join data — stale statuses beat dropping the buttons.
+      // Keep any previous join data — stale statuses beat dropping the buttons.
+      // The failed flag only bites when there is nothing kept (alertJoinState).
+      setAlertSessionsFailed(true);
     }
   };
 
@@ -1607,24 +1617,33 @@ function AdminApp() {
     void (async () => {
       setAlertsLoading(true);
       setError("");
-      try {
-        // F6.4: the status-join data loads alongside the alerts themselves so
-        // the first render already shows the contextual action buttons.
-        const [response, sessions] = await Promise.all([
-          fetchAlerts(password, alertFilters),
-          fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
-        ]);
-        if (cancelled) return;
+      // F6.4: the status-join data loads alongside the alerts themselves so the
+      // first render already shows the contextual action buttons. F6 review:
+      // the two fetches are DECOUPLED (allSettled) — a non-404 sessions-list
+      // failure must not blank the console; the alerts render and the rows
+      // degrade per alertJoinState (archive-only + note).
+      const [alertsResult, sessionsResult] = await Promise.allSettled([
+        fetchAlerts(password, alertFilters),
+        fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
+      ]);
+      if (cancelled) return;
+      if (alertsResult.status === "fulfilled") {
+        const response = alertsResult.value;
         const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
         setAlerts(sorted);
-        setAlertSessions(joinableSessions(sessions));
         if (response.rooms) setRooms(response.rooms);
         setAlertsLoaded(true);
-      } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        if (!cancelled) setAlertsLoading(false);
+      } else {
+        const cause = alertsResult.reason;
+        setError(cause instanceof Error ? cause.message : String(cause));
       }
+      if (sessionsResult.status === "fulfilled") {
+        setAlertSessions(joinableSessions(sessionsResult.value));
+        setAlertSessionsFailed(false);
+      } else {
+        setAlertSessionsFailed(true);
+      }
+      setAlertsLoading(false);
     })();
     return () => {
       cancelled = true;
@@ -1676,17 +1695,28 @@ function AdminApp() {
           if (response.rooms) setRooms(response.rooms);
         } else {
           // F6.4: the join data refreshes on the same cadence as the alerts so
-          // the contextual buttons track live status changes.
-          const [response, sessions] = await Promise.all([
+          // the contextual buttons track live status changes. F6 review:
+          // decoupled (allSettled) — one stream failing must not drop the other.
+          const [alertsResult, sessionsResult] = await Promise.allSettled([
             fetchAlerts(password, alertFilters),
             fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
           ]);
           if (cancelled) return;
-          const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-          setAlerts(sorted);
-          setAlertSessions(joinableSessions(sessions));
-          if (response.rooms) setRooms(response.rooms);
-          setAlertsLoaded(true);
+          if (alertsResult.status === "fulfilled") {
+            const response = alertsResult.value;
+            const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+            setAlerts(sorted);
+            if (response.rooms) setRooms(response.rooms);
+            setAlertsLoaded(true);
+          }
+          if (sessionsResult.status === "fulfilled") {
+            setAlertSessions(joinableSessions(sessionsResult.value));
+            setAlertSessionsFailed(false);
+          } else {
+            // Keep any previous join data (stale beats dropping the buttons);
+            // the flag only bites when nothing was ever kept (alertJoinState).
+            setAlertSessionsFailed(true);
+          }
         }
       } catch {
         // Swallow poll errors so a transient failure doesn't spam the banner;
@@ -2262,6 +2292,7 @@ function AdminApp() {
         <AlertsConsole
           alerts={alerts}
           sessions={alertSessions}
+          sessionsFailed={alertSessionsFailed}
           loading={alertsLoading}
           loaded={alertsLoaded}
           filters={alertFilters}
@@ -2271,6 +2302,7 @@ function AdminApp() {
           selected={selected}
           onToggleSelected={toggleSelected}
           onSelectAll={(ids) => setSelected((current) => addAllToSelection(current, ids))}
+          onDeselectAll={(ids) => setSelected((current) => removeFromSelection(current, ids))}
           onClearSelection={() => setSelected(new Set())}
           onFiltersChange={(next) => {
             setAlertFilters(next);
@@ -3182,17 +3214,20 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
                   <td className="px-4 py-3 text-xs text-muted">{s.created_at ? new Date(s.created_at).toLocaleString() : "—"}</td>
                   {statusFilter === "pending_approval" ? (
                     <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onApprove(s);
-                        }}
-                        disabled={s.status !== "pending_approval"}
-                        className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
-                      >
-                        <CheckCircle2 size={14} /> Approve
-                      </button>
+                      {/* F6 review: same explanatory tooltip as every other Approve. */}
+                      <ActionTooltip tip={SESSION_ACTION_INFO.approve.tooltip}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onApprove(s);
+                          }}
+                          disabled={s.status !== "pending_approval"}
+                          className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                        >
+                          <CheckCircle2 size={14} /> Approve
+                        </button>
+                      </ActionTooltip>
                     </td>
                   ) : null}
                 </tr>
@@ -3289,17 +3324,63 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
     })();
   };
 
+  // F6 review: Recordings-tab deep links. "View events" stays usable for
+  // zero-chunk sessions (the activity log needs no chunks); both disable in
+  // demo mode for candidates outside the seeded recording dataset.
+  const dataAvailable = recordingDataAvailable(session.hackerrank_username);
+  const recordingLink = viewRecordingAffordance(chunkCount, dataAvailable);
+  const eventsLink = viewEventsAffordance(dataAvailable);
+
+  // F6 review — modal a11y, mirroring the M10 FullscreenGate fix: focus moves
+  // into the dialog on open (the close button), Escape closes, and Tab /
+  // Shift+Tab cycle within the card so the page behind stays unreachable.
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+  const onDialogKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    const items = focusables ? Array.from(focusables) : [];
+    if (items.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !dialogRef.current?.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !dialogRef.current?.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
-    // Modal overlay: click-outside or the X closes; clicks inside don't bubble out.
+    // Modal overlay: click-outside, Escape, or the X closes; clicks inside
+    // don't bubble out.
     <div
       role="dialog"
       aria-modal="true"
       aria-label={`Session detail for ${session.hackerrank_username}`}
       className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-ink/40 p-4 sm:p-10"
       onClick={onClose}
+      onKeyDown={onDialogKeyDown}
     >
       <section
-        className="w-full max-w-3xl rounded-lg border border-line bg-panel p-5 shadow-subtle"
+        ref={dialogRef}
+        tabIndex={-1}
+        className="focus:outline-none w-full max-w-3xl rounded-lg border border-line bg-panel p-5 shadow-subtle"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -3313,6 +3394,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
             <p className="mt-1 font-mono text-xs text-muted">{session.session_id}</p>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
             onClick={onClose}
             aria-label="Close session detail"
@@ -3414,14 +3496,28 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
             </span>
           )}
           <div className="ml-auto flex flex-wrap gap-2">
-            <ActionTooltip tip={chunkCount > 0 ? "Open the Recordings tab with this candidate's recording loaded and this session selected." : "No recorded chunks yet — there is nothing to play for this session."}>
+            <ActionTooltip tip={recordingLink.tip}>
               <button
                 type="button"
                 onClick={() => onViewRecording(session)}
-                disabled={chunkCount === 0}
+                disabled={recordingLink.disabled}
+                title={recordingLink.disabled ? recordingLink.tip : undefined}
                 className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
               >
                 <Film size={14} /> View recording
+              </button>
+            </ActionTooltip>
+            {/* F6 review: the chunk-free events path — same deep link, the
+                Recordings tab's activity log renders without any chunks. */}
+            <ActionTooltip tip={eventsLink.tip}>
+              <button
+                type="button"
+                onClick={() => onViewRecording(session)}
+                disabled={eventsLink.disabled}
+                title={eventsLink.disabled ? eventsLink.tip : undefined}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+              >
+                <Activity size={14} /> View events
               </button>
             </ActionTooltip>
             <ActionTooltip tip="Open the Live alerts tab filtered to this candidate's alerts.">
@@ -3826,9 +3922,9 @@ function SessionActionButton({ action, targetLabel, onRun }: { action: SessionAc
 }
 
 // Compact per-candidate remote-action buttons. Destructive actions confirm first.
-// `actions` defaults to the FULL set (Review tab shows every action; the alerts
-// console passes the status-filtered valid set instead).
-function ActionButtons({ onAction, sessionId, username, actions = SESSION_ACTION_ORDER }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions?: SessionAction[] }) {
+// Callers pass the status-valid `actions` set (validSessionActionsFor) — there
+// is no full-set default left; every surface knows its session's status.
+function ActionButtons({ onAction, sessionId, username, actions }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions: SessionAction[] }) {
   const targetLabel = sessionId ? `session ${sessionId.slice(0, 8)}…` : `${username}`;
   return (
     <div className="flex flex-wrap gap-2">
@@ -3846,6 +3942,10 @@ function ActionButtons({ onAction, sessionId, username, actions = SESSION_ACTION
 
 function ReviewSessionCard({ session, onAction }: { session: Record<string, unknown>; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void }) {
   const sessionId = session.session_id ? String(session.session_id) : undefined;
+  // F6 review: the status is in hand — render only the status-valid actions
+  // (same table as the alerts console / session detail card), not all five.
+  const status = session.status ? String(session.status) : "";
+  const actions = validSessionActionsFor(status);
   return (
     <div className="rounded-lg border border-line bg-panel p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -3854,10 +3954,16 @@ function ReviewSessionCard({ session, onAction }: { session: Record<string, unkn
           <h2 className="mt-1 text-lg font-semibold">{String(session.hackerrank_username ?? "")}</h2>
           {session.room ? <p className="text-xs text-muted">Room {String(session.room)}</p> : null}
         </div>
-        <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{String(session.status ?? "unknown")}</span>
+        <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{status || "unknown"}</span>
       </div>
       <div className="mt-4">
-        <ActionButtons onAction={onAction} sessionId={sessionId} />
+        {actions.length ? (
+          <ActionButtons onAction={onAction} sessionId={sessionId} actions={actions} />
+        ) : (
+          <span className="text-xs text-muted">
+            {status === "ended" ? "This session has ended — view-only." : "No session actions apply to this status."}
+          </span>
+        )}
       </div>
       <pre className="mt-4 max-h-96 overflow-auto rounded-md bg-ink p-4 text-xs text-white">{JSON.stringify(session, null, 2)}</pre>
     </div>
@@ -3889,10 +3995,13 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
+function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
   alerts: Alert[];
-  /** F6.4 status-join data; null = sessions-list unavailable → full action set. */
+  /** F6.4 status-join data; null = not loaded / 404 / truncated (see alertJoinState). */
   sessions: RecordingSession[] | null;
+  /** F6 review: the join fetch failed (non-404) — with no kept data, rows
+   * degrade to archive-only with a "session status unavailable" note. */
+  sessionsFailed: boolean;
   loading: boolean;
   loaded: boolean;
   filters: AlertFilters;
@@ -3904,6 +4013,9 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
   selected: Set<string>;
   onToggleSelected: (key: string) => void;
   onSelectAll: (ids: string[]) => void;
+  /** F6 review: un-checking "Select all" removes ONLY the currently-filtered
+   * ids — off-screen ids selected under another filter survive. */
+  onDeselectAll: (ids: string[]) => void;
   onClearSelection: () => void;
   onFiltersChange: (filters: AlertFilters) => void;
   onRefresh: () => void;
@@ -3927,11 +4039,20 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
   // filter changes); bulk archive acts on ALL selected ids, not just visible ones.
   const visibleIds = useMemo(() => visibleAlerts.map((alert) => alert.id), [visibleAlerts]);
   const allSelected = isAllSelected(selected, visibleIds);
+  // F6 review: how rows/bulk treat the join data — contextual ("joined"), full
+  // fallback ("fallback": not loaded / 404 / truncated), or archive-only with a
+  // note ("unavailable": the join fetch failed and nothing was kept).
+  const joinState = alertJoinState(sessions, sessionsFailed);
   // F6.4: bulk buttons show only the UNION of actions valid for the selected
-  // candidates' live sessions (no join data → full set, same fallback as rows).
+  // candidates' live sessions (fallback → full set, same degrade as rows).
   const bulkActions = useMemo(
-    () => (sessions === null ? SESSION_ACTION_ORDER : bulkSessionActionsFor(selectedUsernames, sessions)),
-    [sessions, selectedUsernames]
+    () =>
+      joinState === "joined" && sessions !== null
+        ? bulkSessionActionsFor(selectedUsernames, sessions)
+        : joinState === "fallback"
+          ? SESSION_ACTION_ORDER
+          : [],
+    [joinState, sessions, selectedUsernames]
   );
 
   return (
@@ -3992,6 +4113,15 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
           <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(visibleAlerts.filter((alert) => alert.severity === "warning").length)} />
         </div>
 
+        {/* F6 review: the status join failed (non-404) with nothing kept —
+            alerts stay fully readable, session actions hide until a refresh
+            succeeds (auto-retry every poll tick). */}
+        {joinState === "unavailable" ? (
+          <p className="mt-4 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle size={14} /> Session status unavailable — the sessions list could not be loaded, so session actions are hidden (archiving still works). Retrying on the next refresh.
+          </p>
+        ) : null}
+
         {/* F6.1-2 selection bar: select-all over the CURRENTLY FILTERED list,
             selected count, clear, and bulk archive/unarchive on ALL selected ids. */}
         {visibleAlerts.length || selected.size ? (
@@ -4001,7 +4131,10 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
                 className="h-4 w-4 accent-accent"
                 type="checkbox"
                 checked={allSelected}
-                onChange={() => (allSelected ? onClearSelection() : onSelectAll(visibleIds))}
+                // F6 review: un-checking removes only the CURRENTLY FILTERED ids;
+                // off-screen ids picked under another filter stay selected
+                // ("Clear selection" is the explicit clear-everything action).
+                onChange={() => (allSelected ? onDeselectAll(visibleIds) : onSelectAll(visibleIds))}
               />
               Select all ({visibleAlerts.length})
             </label>
@@ -4038,7 +4171,14 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
             <span className="text-sm font-medium">{selectedUsernames.length} candidate(s) selected:</span>
             <span className="font-mono text-xs text-muted">{selectedUsernames.join(", ")}</span>
-            <BulkActionButtons usernames={selectedUsernames} actions={bulkActions} onAction={onAction} />
+            <BulkActionButtons
+              usernames={selectedUsernames}
+              actions={bulkActions}
+              noActionsNote={joinState === "unavailable"
+                ? "Session status unavailable — bulk session actions are hidden; bulk archive above still works."
+                : undefined}
+              onAction={onAction}
+            />
           </div>
         ) : null}
       </section>
@@ -4058,6 +4198,7 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
               key={alert.id}
               alert={alert}
               sessions={sessions}
+              joinState={joinState}
               selected={selected.has(alert.id)}
               onToggleSelected={() => onToggleSelected(alert.id)}
               onAction={onAction}
@@ -4074,9 +4215,11 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, cand
 // Bulk actions operate on the live session of each selected candidate username.
 // F6.4: only the actions valid for at least one selected candidate render
 // (union — the backend applies each action per-candidate and skips the rest).
-function BulkActionButtons({ usernames, actions, onAction }: { usernames: string[]; actions: SessionAction[]; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
+// `noActionsNote` overrides the empty-state copy when the actions are hidden
+// for a DIFFERENT reason than "no live sessions" (join data unavailable).
+function BulkActionButtons({ usernames, actions, noActionsNote, onAction }: { usernames: string[]; actions: SessionAction[]; noActionsNote?: string; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
   if (!actions.length) {
-    return <span className="text-xs text-muted">No session actions apply — the selected candidates have no live sessions.</span>;
+    return <span className="text-xs text-muted">{noActionsNote ?? "No session actions apply — the selected candidates have no live sessions."}</span>;
   }
   const run = (action: SessionAction) => {
     const info = SESSION_ACTION_INFO[action];
@@ -4116,18 +4259,20 @@ function FilterSelect({ label, value, options, onChange }: { label: string; valu
   );
 }
 
-function AlertRow({ alert, sessions, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; sessions: RecordingSession[] | null; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void }) {
+function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
   // F6.4: join the alert to the session its actions would target (the alert's
-  // own session_id, else the candidate's latest live session) and render ONLY
-  // the actions valid for that session's status. sessions === null means the
-  // sessions-list endpoint is unavailable → fall back to the full action set so
-  // a stale backend never costs admin capability. Contest-eval alerts whose
-  // candidate has no session resolve to joined === null → alert actions only.
-  const joined = sessions === null ? null : sessionForAlert(alert, sessions);
-  const sessionActions = sessions === null ? SESSION_ACTION_ORDER : validSessionActionsFor(joined?.status);
-  const sessionGroupLabel = sessions === null ? "Session" : `Session — ${joined?.status ?? "none"}`;
+  // own LIVE session_id, else the candidate's latest live session) and render
+  // ONLY the actions valid for that session's status. F6 review (joinState):
+  // "fallback" (no list yet / 404 / truncated) → full action set so a stale
+  // backend never costs admin capability; "unavailable" (join fetch failed) →
+  // archive-only with a note. Contest-eval alerts whose candidate has no
+  // session resolve to joined === null → alert actions only.
+  const joined = joinState === "joined" && sessions !== null ? sessionForAlert(alert, sessions) : null;
+  const sessionActions =
+    joinState === "joined" ? validSessionActionsFor(joined?.status) : joinState === "fallback" ? SESSION_ACTION_ORDER : [];
+  const sessionGroupLabel = joinState === "joined" ? `Session — ${joined?.status ?? "none"}` : "Session";
   // Actions target the JOINED session (never a stale alert.session_id whose doc
   // fell back to a newer live one); without join data, legacy targeting applies.
   const actionTarget = joined
@@ -4160,8 +4305,10 @@ function AlertRow({ alert, sessions, selected, onToggleSelected, onAction, onArc
         {alert.room ? <AlertField label="Room" value={alert.room} /> : null}
         {alert.contest_slug ? <AlertField label="Contest" value={alert.contest_slug} mono /> : null}
         {alert.session_id ? <AlertField label="Session" value={alert.session_id} mono /> : null}
-        {/* F6.4: the joined status explains WHY the row offers these actions. */}
-        {sessions !== null ? <AlertField label="Session status" value={joined?.status ?? "no live session"} /> : null}
+        {/* F6.4: the joined status explains WHY the row offers these actions;
+            "unavailable" = the join fetch failed (F6 review). */}
+        {joinState === "joined" ? <AlertField label="Session status" value={joined?.status ?? "no live session"} /> : null}
+        {joinState === "unavailable" ? <AlertField label="Session status" value="unavailable" /> : null}
         {alert.verdict ? <AlertField label="Verdict" value={alert.verdict.status} /> : null}
       </div>
 
@@ -4209,6 +4356,9 @@ function AlertRow({ alert, sessions, selected, onToggleSelected, onAction, onArc
                 )
               )}
             </ActionGroup>
+          ) : joinState === "unavailable" ? (
+            // F6 review: the join fetch failed — say so instead of guessing.
+            <span className="text-xs text-muted">Session status unavailable — archive only.</span>
           ) : null}
           <ActionGroup label="Alert">
             <ActionTooltip tip={archiveInfo.tooltip}>
@@ -4423,7 +4573,9 @@ function CameraSelfView({ videoRef, mediaCapture, pipMessage, onPopOut, pipAvail
           <Camera size={18} />
           <h2 className="font-semibold">Camera self-view</h2>
         </div>
-        <span className={`rounded-full border px-2 py-1 text-xs font-medium ${mediaCapture.camera === "recording" ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>{mediaCapture.camera}</span>
+        {/* The camera is a live monitor only — never part of the recorded
+            video — so its "recording" state reads "monitored, not recorded". */}
+        <span className={`rounded-full border px-2 py-1 text-xs font-medium ${mediaCapture.camera === "recording" ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>{studentCopy.cameraStateLabel(mediaCapture.camera)}</span>
       </div>
       <div className="overflow-hidden rounded-md border border-line bg-ink">
         <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
@@ -4467,7 +4619,8 @@ function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, man
         <Metric icon={<UploadCloud size={16} />} label="Uploaded chunks" value={`${uploadedCount}${queueDepth ? ` (${queueDepth} pending)` : ""}`} />
         <Metric icon={<MonitorUp size={16} />} label="Chunk interval" value={config ? `${config.upload_config.chunk_seconds}s` : "Not started"} />
         <Metric icon={<MonitorUp size={16} />} label="Screen" value={mediaCapture.screen} />
-        <Metric icon={<Camera size={16} />} label="Camera" value={mediaCapture.camera} />
+        {/* Camera = live monitor only; its stream is never recorded. */}
+        <Metric icon={<Camera size={16} />} label="Camera" value={studentCopy.cameraStateLabel(mediaCapture.camera)} />
         <Metric icon={<Mic size={16} />} label="Microphone" value={mediaCapture.microphone} />
         <Metric icon={<ClipboardList size={16} />} label="Manifest items" value={String(manifest.length)} />
         <Metric icon={<Activity size={16} />} label="Start IP" value={startIp || "pending"} />

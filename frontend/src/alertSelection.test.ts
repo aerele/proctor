@@ -44,6 +44,14 @@ describe("removeFromSelection", () => {
     expect([...next].sort()).toEqual(["a", "c"]);
   });
 
+  // F6 review: un-checking "Select all" passes the CURRENTLY FILTERED ids here —
+  // only those leave the selection; off-screen ids picked under another filter
+  // survive (mirror image of addAllToSelection's select-all semantics).
+  it("unchecking select-all removes only the visible ids — off-screen ids survive", () => {
+    const next = removeFromSelection(new Set(["vis-1", "vis-2", "offscreen"]), ["vis-1", "vis-2"]);
+    expect([...next]).toEqual(["offscreen"]);
+  });
+
   it("does not mutate the input set", () => {
     const input = new Set(["a"]);
     removeFromSelection(input, ["a"]);

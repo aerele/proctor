@@ -924,13 +924,19 @@ export async function fetchSubmissionEvents(
 // event stream (visibility/blur/clipboard/IP/recording-state...) for the
 // recordings timeline overlay + activity log. Returns `null` on a 404 (endpoint
 // not deployed yet) so the timeline renders WITHOUT event markers instead of
-// erroring. In demo mode it returns canned per-session events so the overlay
-// and log are fully demoable offline.
-export async function fetchSessionEvents(password: string, sessionId: string): Promise<SessionEventItem[] | null> {
+// erroring. The result carries the backend's `truncated` flag (F6 review):
+// true when the stream was capped server-side, so the activity log can say
+// "showing the first N events" instead of silently presenting a partial log
+// as complete (older backends without the flag read as false). In demo mode
+// it returns canned per-session events so the overlay and log are fully
+// demoable offline (small canned sets — never truncated).
+export type SessionEventsResult = { events: SessionEventItem[]; truncated: boolean };
+
+export async function fetchSessionEvents(password: string, sessionId: string): Promise<SessionEventsResult | null> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    return DEMO_SESSION_EVENTS[sessionId] ?? [];
+    return { events: DEMO_SESSION_EVENTS[sessionId] ?? [], truncated: false };
   }
 
   const query = new URLSearchParams();
@@ -940,7 +946,7 @@ export async function fetchSessionEvents(password: string, sessionId: string): P
       `/api/admin/session-events?${query.toString()}`,
       { method: "GET", headers: { "x-admin-password": password } }
     );
-    return response.events;
+    return { events: response.events, truncated: response.truncated === true };
   } catch (cause) {
     // Endpoint not deployed yet → no event markers (graceful), not a hard error.
     if ((cause as ApiError)?.status === 404) return null;
@@ -1187,6 +1193,17 @@ function demoEvidenceFor(seed: DemoRecordingSeed): SessionEvidence[] {
   // Add a couple of non-screen files so filtering is exercised too.
   evidence.push({ key: `${prefix}manifest.json`, size: 412, last_modified: seed.created_at, download_url: DEMO_SAMPLE_CLIP });
   return evidence;
+}
+
+// F6 review — guard for the session-card Recordings-tab deep links ("View
+// recording" / "View events"): in DEMO mode only the recording dataset above
+// is loadable in the Recordings tab, so a deep link for any other candidate
+// dead-ends in "No sessions found". Always true against a real backend
+// (/api/admin/sessions serves every candidate, zero-chunk sessions included).
+export function recordingDataAvailable(username: string): boolean {
+  if (!demoMode) return true;
+  const usernameNorm = normalizeUsername(username);
+  return DEMO_RECORDING_SESSIONS.some((seed) => seed.username_norm === usernameNorm);
 }
 
 function demoRecordingSessionsFor(usernameNorm: string): AdminSessionsResponse["sessions"] {

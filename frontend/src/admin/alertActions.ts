@@ -124,19 +124,24 @@ function latestLiveSessionFor(username: string, sessions: JoinableSession[]): Jo
 
 /**
  * Join an alert to the session its actions would target: the alert's own
- * session_id when that session is in the list (even if ended — a single-id
- * action targets exactly that doc), otherwise the candidate's latest LIVE
- * session by username (what the backend usernames[] path would act on).
+ * session_id when that session is in the list AND still live, otherwise the
+ * candidate's latest LIVE session by username (what the backend usernames[]
+ * path would act on) — an alert pinned to an old ENDED attempt must not lose
+ * Lock/End while the candidate is live on a newer session (F6 review). When
+ * the direct join is ended and no live session exists, the ended doc is kept
+ * so the row shows the truthful "SESSION — ENDED" context (archive-only).
  * Null = no session to act on (e.g. contest-eval signal for a candidate who
- * never started, or whose sessions all ended).
+ * never started).
  */
 export function sessionForAlert(alert: JoinableAlert, sessions: JoinableSession[]): JoinableSession | null {
+  const username = alert.username_norm || alert.hackerrank_username;
+  const live = username ? latestLiveSessionFor(username, sessions) : null;
   if (alert.session_id) {
     const direct = sessions.find((session) => session.session_id === alert.session_id);
-    if (direct) return direct;
+    if (direct && direct.status !== "ended") return direct;
+    if (direct) return live ?? direct;
   }
-  const username = alert.username_norm || alert.hackerrank_username;
-  return username ? latestLiveSessionFor(username, sessions) : null;
+  return live;
 }
 
 /**
@@ -153,6 +158,27 @@ export function joinableSessions<T extends JoinableSession>(
 ): T[] | null {
   if (result === null || result.truncated) return null;
   return result.sessions;
+}
+
+/**
+ * F6 review: how the alerts console should treat its status-join data.
+ * - "joined": a usable sessions list is in hand (fresh, or stale data kept
+ *   across a failed refresh — stale statuses beat dropping the buttons) →
+ *   rows render the status-contextual action set.
+ * - "fallback": no list YET and nothing has failed — first load in flight,
+ *   endpoint 404 (not deployed), or a truncated page mapped to null by
+ *   joinableSessions → rows render the FULL action set (incomplete data must
+ *   not cost admin capability; the backend resolves real targets per action).
+ * - "unavailable": the sessions-list fetch FAILED (non-404) and there is no
+ *   previous data to keep — the statuses are unknowable, so rows degrade to
+ *   archive-only with a "session status unavailable" note instead of
+ *   offering session actions against a console we know is erroring.
+ */
+export type AlertJoinState = "joined" | "fallback" | "unavailable";
+
+export function alertJoinState(sessions: JoinableSession[] | null, fetchFailed: boolean): AlertJoinState {
+  if (sessions !== null) return "joined";
+  return fetchFailed ? "unavailable" : "fallback";
 }
 
 /**

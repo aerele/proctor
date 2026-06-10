@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { alertsForSession, approxRecordingSeconds, captureSourceLabel, describeRecordingContents, formatApproxDuration } from "./sessionDetail";
+import {
+  alertsForSession,
+  approxRecordingSeconds,
+  captureSourceLabel,
+  describeRecordingContents,
+  formatApproxDuration,
+  viewEventsAffordance,
+  viewRecordingAffordance
+} from "./sessionDetail";
 
 describe("approxRecordingSeconds", () => {
   it("is chunk_count × 30s (the fixed recorder chunk length)", () => {
@@ -130,5 +138,43 @@ describe("describeRecordingContents", () => {
   it("degrades to a no-detail line when the state was never reported (legacy sessions)", () => {
     expect(describeRecordingContents(null)).toBe("screen video — capture detail not reported for this session");
     expect(describeRecordingContents(undefined)).toBe("screen video — capture detail not reported for this session");
+  });
+});
+
+// F6 review — the session card's deep-link affordances. "View recording" needs
+// playable chunks AND loadable recording data (demo mode only seeds a few
+// candidates); "View events" needs only loadable data — the Recordings tab's
+// activity log works without a single recorded chunk.
+describe("viewRecordingAffordance", () => {
+  it("is enabled with a playback tooltip when chunks exist and data is loadable", () => {
+    const a = viewRecordingAffordance(12, true);
+    expect(a.disabled).toBe(false);
+    expect(a.tip).toContain("Recordings tab");
+  });
+
+  it("is disabled with a nothing-to-play tooltip for zero-chunk sessions", () => {
+    const a = viewRecordingAffordance(0, true);
+    expect(a.disabled).toBe(true);
+    expect(a.tip).toContain("No recorded chunks");
+  });
+
+  it("is disabled with a demo-data tooltip when the candidate has no loadable recording data", () => {
+    const a = viewRecordingAffordance(12, false);
+    expect(a.disabled).toBe(true);
+    expect(a.tip).toContain("Demo mode");
+  });
+});
+
+describe("viewEventsAffordance", () => {
+  it("is enabled even for zero-chunk sessions when data is loadable (events need no chunks)", () => {
+    const a = viewEventsAffordance(true);
+    expect(a.disabled).toBe(false);
+    expect(a.tip).toContain("activity log");
+  });
+
+  it("is disabled with the demo-data tooltip when the candidate is not loadable", () => {
+    const a = viewEventsAffordance(false);
+    expect(a.disabled).toBe(true);
+    expect(a.tip).toContain("Demo mode");
   });
 });

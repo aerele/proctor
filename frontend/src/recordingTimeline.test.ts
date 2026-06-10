@@ -7,8 +7,10 @@ import { describe, expect, it } from "vitest";
 import type { Alert, SessionEventItem, SubmissionEvent } from "./types";
 import {
   DEFAULT_LOG_FILTERS,
+  EVENT_TYPE_MAX,
   alertsForCandidate,
   buildTimelineLog,
+  clampEventType,
   clusterMarkers,
   eventLabel,
   filterTimelineLog,
@@ -92,6 +94,23 @@ describe("eventLabel", () => {
   });
   it("falls back to humanizing unknown types", () => {
     expect(eventLabel("weird_new_thing")).toBe("weird new thing");
+  });
+  // F6 review: the backend caps detail strings but NOT the type itself; a
+  // hostile/buggy emitter must not smear a 100KB type across the log rows.
+  it("defensively truncates an oversized unknown type", () => {
+    const label = eventLabel("x".repeat(500));
+    expect(label.length).toBeLessThanOrEqual(EVENT_TYPE_MAX + 1); // +1 for the ellipsis
+    expect(label.endsWith("…")).toBe(true);
+  });
+});
+
+describe("clampEventType", () => {
+  it("passes ordinary types through unchanged", () => {
+    expect(clampEventType("window_blur")).toBe("window_blur");
+  });
+  it("truncates past EVENT_TYPE_MAX with an ellipsis", () => {
+    const clamped = clampEventType("a".repeat(EVENT_TYPE_MAX + 50));
+    expect(clamped).toBe(`${"a".repeat(EVENT_TYPE_MAX)}…`);
   });
 });
 
@@ -194,6 +213,20 @@ describe("buildTimelineLog", () => {
     });
     const ids = entries.map((e) => e.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  // F6 review: the per-entry `type` is rendered/tooled downstream — clamp an
+  // oversized event type defensively (the backend does not cap this field).
+  it("clamps an oversized event type on the merged entry", () => {
+    const entries = buildTimelineLog({
+      alerts: [],
+      events: [event({ type: "z".repeat(EVENT_TYPE_MAX + 200) })],
+      submissions: [],
+      testStartMs: T0,
+      gaps: []
+    });
+    expect(entries[0].type).toBe(`${"z".repeat(EVENT_TYPE_MAX)}…`);
+    expect(entries[0].label.length).toBeLessThanOrEqual(EVENT_TYPE_MAX + 1);
   });
 });
 
