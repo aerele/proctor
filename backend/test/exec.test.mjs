@@ -192,8 +192,13 @@ function makeFakeStorage() {
   };
 }
 
-test("getProblem returns the slice-1 problem with samples, hidden tests, language ids", () => {
-  const p = getProblem("sum-two");
+test("getProblem returns the slice-1 problem with samples, hidden tests, language ids", async () => {
+  // S4: getProblem is async + Firestore-backed; an EMPTY fake store falls back
+  // to the built-in seed. Fakes must be injected or the real client is hit.
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const p = await getProblem("sum-two");
   assert.equal(p.id, "sum-two");
   assert.ok(p.statement.length > 0);
   assert.ok(Array.isArray(p.sampleTests) && p.sampleTests.length >= 1);
@@ -203,17 +208,23 @@ test("getProblem returns the slice-1 problem with samples, hidden tests, languag
   for (const lang of ["python", "cpp", "java", "javascript"]) assert.ok(LANGUAGE_IDS[lang]);
 });
 
-test("getProblem returns null for unknown id", () => {
-  assert.equal(getProblem("nope"), null);
+test("getProblem returns null for unknown id", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  assert.equal(await getProblem("nope"), null);
 });
 
-test("getProblem rejects prototype keys: 'constructor' is null, not a function", () => {
-  // "constructor"/"hasOwnProperty" are not own keys of PROBLEMS but index
+test("getProblem rejects prototype keys: 'constructor' is null, not a function", async () => {
+  // "constructor"/"hasOwnProperty" are not own keys of the seed bank but index
   // Object.prototype — a truthiness check would return a function and 500 in
   // the handlers. Object.hasOwn must gate the lookup.
-  assert.equal(getProblem("constructor"), null);
-  assert.equal(getProblem("hasOwnProperty"), null);
-  assert.equal(getProblem("__proto__"), null);
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  assert.equal(await getProblem("constructor"), null);
+  assert.equal(await getProblem("hasOwnProperty"), null);
+  assert.equal(await getProblem("__proto__"), null);
 });
 
 test("POST /api/exec/run executes source against SAMPLE tests via the injected adapter", async () => {

@@ -718,7 +718,7 @@ async function execRun(req) {
   await requireExamStarted(session); // S3 room gate
   // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
   const limiter = checkExecRunLimit(sessionId);
-  const problem = getProblem(String(body.problem_id || ""));
+  const problem = await getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -772,7 +772,7 @@ async function execSubmit(req) {
   // The cap is keyed on the raw problem_id string; only stored submissions
   // increment it, so invalid ids can never grow the per-session count map.
   const limiter = checkExecSubmitLimit(sessionId, String(body.problem_id || ""));
-  const problem = getProblem(String(body.problem_id || ""));
+  const problem = await getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
