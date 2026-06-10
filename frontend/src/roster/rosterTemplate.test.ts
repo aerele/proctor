@@ -7,8 +7,11 @@ import { parseRoster, suggestMapping } from "./parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./rosterTemplate";
 
 describe("ROSTER_TEMPLATE_COLUMNS", () => {
-  it("lists the compulsory columns (unique_id, name) FIRST, then the optional ones", () => {
+  // S-C (vision §2.8, F8.3 amended): college,unique_id,name required +
+  // roll_number,email,room optional — college COMPULSORY and first.
+  it("lists the compulsory columns (college, unique_id, name) FIRST, then the optional ones", () => {
     expect(ROSTER_TEMPLATE_COLUMNS.map((column) => column.header)).toEqual([
+      "college",
       "unique_id",
       "name",
       "roll_number",
@@ -16,6 +19,7 @@ describe("ROSTER_TEMPLATE_COLUMNS", () => {
       "room"
     ]);
     expect(ROSTER_TEMPLATE_COLUMNS.filter((column) => column.required).map((column) => column.header)).toEqual([
+      "college",
       "unique_id",
       "name"
     ]);
@@ -26,7 +30,7 @@ describe("buildRosterTemplateCsv", () => {
   it("emits the headers plus two example rows", () => {
     const lines = buildRosterTemplateCsv().split(/\r\n|\r|\n/).filter((line) => line.trim() !== "");
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toBe("unique_id,name,roll_number,email,room");
+    expect(lines[0]).toBe("college,unique_id,name,roll_number,email,room");
   });
 
   it("round-trips through parseRoster with no errors and full cells", () => {
@@ -39,10 +43,11 @@ describe("buildRosterTemplateCsv", () => {
     }
   });
 
-  it("re-uploads cleanly: suggestMapping picks unique_id as the ID column and maps every optional field", () => {
+  it("re-uploads cleanly: suggestMapping picks unique_id as the ID column and maps every field incl. college", () => {
     const parsed = parseRoster(buildRosterTemplateCsv());
     const { mapping, uniqueIdColumn } = suggestMapping(parsed.columns);
     expect(uniqueIdColumn).toBe("unique_id");
+    expect(mapping.college).toBe("college");
     expect(mapping.name).toBe("name");
     expect(mapping.roll_number).toBe("roll_number");
     expect(mapping.email).toBe("email");

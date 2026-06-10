@@ -21,9 +21,10 @@ import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMe
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
+import { buildCollegeResolutions } from "./roster/personRoster";
 import type { ApiError } from "./api";
 import { candidateIdOf } from "./identity";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
@@ -2829,7 +2830,11 @@ function AdminApp() {
         {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
       </section>
 
-      <CandidateRosterSection password={password} />
+      {/* S-C: the global contest filter (A1) doubles as the roster target until
+          the S-D selector lands — set it to a person contest's slug to upload
+          THAT contest's roster (college column compulsory); clear it for the
+          legacy global roster. */}
+      <CandidateRosterSection password={password} contestSlug={alertFilters.contest_slug ?? ""} />
 
       <ReviewRosterSection
         text={rosterText}
@@ -2901,7 +2906,12 @@ function AdminApp() {
 // the unique-ID column (+ optional identity-field mappings, pre-suggested from
 // the headers), and POST structured rows to /api/admin/roster. While a roster
 // is configured, student login REQUIRES a roster match (enforced server-side).
-function CandidateRosterSection({ password }: { password: string }) {
+//
+// S-C: when `contestSlug` names a person contest the upload goes down the
+// person-layer pipeline — the college column is COMPULSORY, unknown colleges
+// block on a map-or-confirm panel (vision §2.2), and duplicate (college,
+// unique_id) rows hard-reject the whole file with row numbers (vision §2.8).
+function CandidateRosterSection({ password, contestSlug }: { password: string; contestSlug: string }) {
   const [status, setStatus] = useState<RosterStatus | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [parsed, setParsed] = useState<ParsedRoster | null>(null);
@@ -2911,12 +2921,26 @@ function CandidateRosterSection({ password }: { password: string }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  // S-C panels: the college map-or-confirm gate + per-college decisions
+  // ("" = create new, otherwise the existing college_norm to map onto), and
+  // the duplicate hard-reject rows.
+  const [collegeGate, setCollegeGate] = useState<{ new_colleges: NewCollegePreview[]; known_colleges: KnownCollege[] } | null>(null);
+  const [collegeDecisions, setCollegeDecisions] = useState<Record<string, string>>({});
+  const [duplicates, setDuplicates] = useState<RosterDuplicate[] | null>(null);
+
+  const contest = contestSlug.trim();
+
+  const resetPanels = () => {
+    setCollegeGate(null);
+    setCollegeDecisions({});
+    setDuplicates(null);
+  };
 
   const refresh = async () => {
     setBusy(true);
     setError("");
     try {
-      const next = await fetchRosterStatus(password);
+      const next = await fetchRosterStatus(password, contest || undefined);
       if (next === null) setUnavailable(true);
       else {
         setUnavailable(false);
@@ -2930,13 +2954,15 @@ function CandidateRosterSection({ password }: { password: string }) {
   };
 
   useEffect(() => {
+    resetPanels();
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [contest]);
 
   const onFile = async (file: File | null) => {
     setMessage("");
     setError("");
+    resetPanels();
     if (!file) return;
     const text = await file.text();
     const result = parseRoster(text);
@@ -2952,35 +2978,72 @@ function CandidateRosterSection({ password }: { password: string }) {
     setMapping(suggestion.mapping);
   };
 
-  const upload = async () => {
+  const upload = async (resolutions?: Record<string, CollegeResolution>) => {
     if (!parsed || !uniqueIdColumn) return;
     setBusy(true);
     setMessage("");
     setError("");
+    setDuplicates(null);
     try {
       const response = await uploadRoster(password, {
+        ...(contest ? { contest } : {}),
         unique_id_column: uniqueIdColumn,
         columns: parsed.columns,
         column_mapping: mapping,
-        rows: parsed.rows
+        rows: parsed.rows,
+        ...(resolutions ? { college_resolutions: resolutions } : {})
       });
       if (response === null) {
         setUnavailable(true);
         return;
       }
+      // S-C college gate: the upload BLOCKED on unknown colleges — render the
+      // map-or-confirm panel and keep the parsed file for the re-post.
+      if (response.needs_college_confirmation) {
+        setCollegeGate({ new_colleges: response.new_colleges ?? [], known_colleges: response.known_colleges ?? [] });
+        setCollegeDecisions(Object.fromEntries((response.new_colleges ?? []).map((c) => [c.college_norm, ""])));
+        return;
+      }
+      resetPanels();
+      const skipped = response.skipped ?? [];
+      const personSummary = contest && response.enrollments
+        ? ` Colleges created: ${(response.colleges_created ?? []).length}; enrollments +${response.enrollments.created}/${response.enrollments.reactivated} reactivated/${response.enrollments.removed} removed.`
+        : "";
+      const ambiguous = (response.ambiguous_ids ?? []).length;
       setMessage(
-        `Roster saved: ${response.count} students` +
-        (response.skipped.length ? `; ${response.skipped.length} row(s) skipped (${summarizeSkipped(response.skipped)})` : "") +
-        ". Student login now requires a roster match."
+        `Roster saved: ${response.count ?? 0} students` +
+        (skipped.length ? `; ${skipped.length} row(s) skipped (${summarizeSkipped(skipped)})` : "") +
+        (ambiguous ? `; ${ambiguous} id(s) exist under multiple colleges — those candidates pick their college at login` : "") +
+        ". Student login now requires a roster match." + personSummary
       );
       setParsed(null);
       setFileName("");
       await refresh();
     } catch (cause) {
+      const apiError = cause as ApiError;
+      // S-C duplicate hard-reject: the whole file bounced — show the rows.
+      if (apiError?.code === "duplicate_unique_ids" && Array.isArray(apiError.body?.duplicates)) {
+        setDuplicates(apiError.body.duplicates as RosterDuplicate[]);
+        setError("Duplicate candidates in the file — fix the rows below and re-upload. Nothing was saved.");
+        return;
+      }
+      if (apiError?.code === "college_required" && Array.isArray(apiError.body?.rows)) {
+        setError(`The college cell is blank on row(s) ${(apiError.body.rows as number[]).join(", ")} — every row needs a college. Nothing was saved.`);
+        return;
+      }
+      if (apiError?.code === "college_column_required") {
+        setError("This contest requires a college column — map one under \"College column\" (or add a 'college' header to the file).");
+        return;
+      }
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
+  };
+
+  const confirmColleges = () => {
+    if (!collegeGate) return;
+    void upload(buildCollegeResolutions(collegeDecisions));
   };
 
   const clear = async () => {
@@ -2988,12 +3051,14 @@ function CandidateRosterSection({ password }: { password: string }) {
     setMessage("");
     setError("");
     try {
-      const response = await clearRoster(password);
+      const response = await clearRoster(password, contest || undefined);
       if (response === null) {
         setUnavailable(true);
         return;
       }
-      setMessage("Roster cleared — student login no longer requires a roster match.");
+      setMessage(contest
+        ? `Roster for contest "${contest}" cleared. Enrollments are kept — a re-upload reconciles them.`
+        : "Roster cleared — student login no longer requires a roster match.");
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -3059,13 +3124,22 @@ function CandidateRosterSection({ password }: { password: string }) {
       ) : (
         <>
           <div className="rounded-md border border-line bg-white/60 p-3 text-sm">
+            {contest ? (
+              <div className="mb-1">
+                <span className="font-semibold">Contest roster:</span> <span className="font-mono">{contest}</span>
+                <span className="text-muted"> (from the contest filter above; the college column is compulsory)</span>
+              </div>
+            ) : null}
             {status?.configured ? (
               <span>
                 <span className="font-semibold text-accent">Roster active:</span> {status.count} students · ID column <span className="font-mono">{status.unique_id_column}</span>
+                {status.college_column ? <span> · college column <span className="font-mono">{status.college_column}</span></span> : null}
                 {status.updated_at ? <span className="text-muted"> · updated {new Date(status.updated_at).toLocaleString()}</span> : null}
               </span>
             ) : (
-              <span className="text-muted">No roster uploaded — student login is open (legacy form).</span>
+              <span className="text-muted">
+                {contest ? "No roster uploaded for this contest yet." : "No roster uploaded — student login is open (legacy form)."}
+              </span>
             )}
           </div>
 
@@ -3133,6 +3207,7 @@ function CandidateRosterSection({ password }: { password: string }) {
                     {parsed.columns.map((column) => <option key={column} value={column}>{column}</option>)}
                   </select>
                 </label>
+                {mappingSelect("college", contest ? "College column (required)" : "College column")}
                 {mappingSelect("name", "Name column")}
                 {mappingSelect("email", "Email column")}
                 {mappingSelect("roll_number", "Roll-number column")}
@@ -3140,13 +3215,73 @@ function CandidateRosterSection({ password }: { password: string }) {
                 {mappingSelect("room", "Room column")}
               </div>
 
-              <button
-                className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => void upload()}
-                disabled={busy || !uniqueIdColumn}
-              >
-                <UploadCloud size={16} /> {busy ? "Uploading…" : `Upload roster (${parsed.rows.length} students)`}
-              </button>
+              {/* S-C: duplicate hard-reject panel — the exact rows the admin
+                  has to fix in the file (1-based data rows; nothing saved). */}
+              {duplicates?.length ? (
+                <div className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm">
+                  <div className="mb-2 font-semibold text-danger">Duplicate candidates — whole file rejected</div>
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-xs uppercase tracking-wide text-muted">
+                      <tr><th className="py-1 pr-3">Row</th><th className="py-1 pr-3">College</th><th className="py-1 pr-3">Candidate ID</th><th className="py-1">Conflicts with row</th></tr>
+                    </thead>
+                    <tbody>
+                      {duplicates.slice(0, 20).map((dup) => (
+                        <tr key={`${dup.row}-${dup.unique_id}`} className="border-t border-danger/20">
+                          <td className="py-1 pr-3 font-mono">{dup.row}</td>
+                          <td className="py-1 pr-3">{dup.college}</td>
+                          <td className="py-1 pr-3 font-mono">{dup.unique_id}</td>
+                          <td className="py-1 font-mono">{dup.conflicts_with_row}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {duplicates.length > 20 ? <div className="mt-1 text-xs text-muted">…and {duplicates.length - 20} more.</div> : null}
+                </div>
+              ) : null}
+
+              {/* S-C: college canonicalization gate (vision §2.2) — map each NEW
+                  college name onto an existing college or confirm creating it.
+                  This is the only enforceable moment to stop spelling drift. */}
+              {collegeGate ? (
+                <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
+                  <div className="mb-2 font-semibold">
+                    This upload creates {collegeGate.new_colleges.length} new college{collegeGate.new_colleges.length === 1 ? "" : "s"} — map or confirm each one
+                  </div>
+                  <div className="space-y-2">
+                    {collegeGate.new_colleges.map((college) => (
+                      <div key={college.college_norm} className="flex flex-wrap items-center gap-3">
+                        <span className="font-mono font-semibold">{college.names.join(" / ")}</span>
+                        <span className="text-xs text-muted">({college.rows} row{college.rows === 1 ? "" : "s"})</span>
+                        <select
+                          className="focus-ring h-9 rounded-md border border-line bg-white px-2 text-sm"
+                          value={collegeDecisions[college.college_norm] ?? ""}
+                          onChange={(event) => setCollegeDecisions({ ...collegeDecisions, [college.college_norm]: event.target.value })}
+                        >
+                          <option value="">Create new college “{college.name}”</option>
+                          {collegeGate.known_colleges.map((known) => (
+                            <option key={known.college_norm} value={known.college_norm}>Use existing “{known.name}”</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    className="focus-ring mt-3 inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    onClick={confirmColleges}
+                    disabled={busy}
+                  >
+                    <UploadCloud size={16} /> {busy ? "Uploading…" : "Confirm colleges and upload"}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => void upload()}
+                  disabled={busy || !uniqueIdColumn}
+                >
+                  <UploadCloud size={16} /> {busy ? "Uploading…" : `Upload roster (${parsed.rows.length} students)`}
+                </button>
+              )}
             </div>
           ) : null}
 

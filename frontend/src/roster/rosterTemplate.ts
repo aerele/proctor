@@ -9,7 +9,11 @@ export type RosterTemplateColumn = {
   required: boolean;
 };
 
+// S-C (vision §2.8, F8.3 amended): college,unique_id,name required +
+// roll_number,email,room optional — the college column is COMPULSORY on
+// per-contest uploads (whole file rejected without it).
 export const ROSTER_TEMPLATE_COLUMNS: RosterTemplateColumn[] = [
+  { header: "college", required: true },
   { header: "unique_id", required: true },
   { header: "name", required: true },
   { header: "roll_number", required: false },
@@ -21,8 +25,8 @@ export const ROSTER_TEMPLATE_COLUMNS: RosterTemplateColumn[] = [
 // number doubling as the unique id is the common case). Values stay free of
 // commas/quotes — the template needs no RFC-4180 escaping.
 const EXAMPLE_ROWS: string[][] = [
-  ["23BCS101", "Arav Menon", "23BCS101", "arav.menon@example.edu", "Lab A-1"],
-  ["23BEC042", "Divya Pillai", "23BEC042", "divya.p@example.edu", "Lab B-2"]
+  ["KEC", "23BCS101", "Arav Menon", "23BCS101", "arav.menon@example.edu", "Lab A-1"],
+  ["KEC", "23BEC042", "Divya Pillai", "23BEC042", "divya.p@example.edu", "Lab B-2"]
 ];
 
 /** The downloadable template: header line + 2 example rows (CRLF for Excel). */

@@ -56,6 +56,13 @@ describe("suggestMapping", () => {
     expect(suggestMapping(["Email", "Name"]).uniqueIdColumn).toBe("Email");
     expect(suggestMapping(["Foo", "Bar"]).uniqueIdColumn).toBe("Foo");
   });
+  // S-C: the COMPULSORY college column (vision §2.8) auto-maps from common headers.
+  it("maps college/institution headers onto the college field", () => {
+    expect(suggestMapping(["College", "Roll No", "Name"]).mapping.college).toBe("College");
+    expect(suggestMapping(["Institution Name", "Roll No", "Name"]).mapping.college).toBe("Institution Name");
+    // The college pattern claims its column BEFORE the broad /name/ pattern.
+    expect(suggestMapping(["College Name", "Roll No", "Student Name"]).mapping.name).toBe("Student Name");
+  });
   // F8.3: an explicit unique-ID header (the roster template ships one) beats
   // the roll-number/email fallbacks — but a mere "id" SUBSTRING must not
   // (e.g. "Candidate" contains "id").

@@ -9,6 +9,8 @@ export type RosterFieldMapping = {
   roll_number?: string;
   hackerrank_username?: string;
   room?: string;
+  /** S-C: the COMPULSORY college column for per-contest (person) uploads. */
+  college?: string;
 };
 
 export type ParsedRoster = {
@@ -112,6 +114,9 @@ const FIELD_PATTERNS: Array<{ field: keyof RosterFieldMapping; pattern: RegExp }
   { field: "email", pattern: /mail/i },
   { field: "roll_number", pattern: /roll|regist|reg\.?\s*no|admission/i },
   { field: "room", pattern: /room|lab|hall|venue/i },
+  // S-C: the compulsory college column (vision §2.8) — claimed BEFORE the
+  // broad /name/ pattern so "College Name" maps to college, not name.
+  { field: "college", pattern: /college|institut|campus|school/i },
   { field: "name", pattern: /name/i }
 ];
 
