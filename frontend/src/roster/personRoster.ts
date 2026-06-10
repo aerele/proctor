@@ -20,7 +20,7 @@ import type {
 export type PersonRosterState = {
   /** college_norm → display name (mirrors proctor_colleges) */
   colleges: Record<string, string>;
-  /** person key ("{college_norm}--{unique_id_norm}") → enrollment status */
+  /** person key ("{college_norm}~{unique_id_norm}", backend PERSON_ID_SEPARATOR) → enrollment status */
   enrollments: Record<string, "active" | "removed">;
   /** person keys ever seen (drives created/updated person counts) */
   persons: Record<string, true>;
@@ -132,7 +132,9 @@ export function evaluatePersonRosterUpload(
     }
     const collegeNorm = resolvedNorms.get(identityNorm(r.college))!;
     const idNorm = identityNorm(r.uniqueId);
-    candidates.push({ row: r.row, college: r.college, uniqueId: r.uniqueId, collegeNorm, idNorm, personKey: `${collegeNorm}--${idNorm}` });
+    // "~" mirrors the backend PERSON_ID_SEPARATOR (wave-4): a single char
+    // OUTSIDE the sanitized charset, so components can never forge the join.
+    candidates.push({ row: r.row, college: r.college, uniqueId: r.uniqueId, collegeNorm, idNorm, personKey: `${collegeNorm}~${idNorm}` });
   }
   if (!candidates.length) {
     return { kind: "error", status: 400, code: "no valid roster rows (every row was skipped)" };

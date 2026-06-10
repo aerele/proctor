@@ -53,7 +53,8 @@ First-class (locked). An identity namespace and grouping axis — no per-college
 ### 2.3 Person — `proctor_persons` (doc id = `person_id`)
 
 ```js
-{ person_id: "kec--21cs001",      // "{college_norm}--{unique_id_norm}", deterministic
+{ person_id: "kec~21cs001",       // "{college_norm}~{unique_id_norm}", deterministic (wave-4: "~" separator —
+                                  //  outside the sanitized charset, so derivation is injective; was "--")
   college_norm: "kec",            // components stored, never parsed back out
   unique_id: "21 CS 001",         // display form, latest upload wins
   unique_id_norm: "21cs001",      // identityNorm(unique_id) — existing function
@@ -78,14 +79,14 @@ candidate types unique_id (label-driven prompt, e.g. "Roll Number")
   → server resolves college from the contest roster        // candidate never types a college;
     (college picker rendered ONLY if the same unique_id    //  picker only on genuine ambiguity
      exists under 2+ colleges in this contest)
-  → person_id = "{college_norm}--{identityNorm(unique_id)}"
+  → person_id = "{college_norm}~{identityNorm(unique_id)}"   // PERSON_ID_SEPARATOR "~" (wave-4 fix)
   → session.username_norm = person_id                      // identity_mode:"person"
   → (username_norm, contest_slug) = (person × contest)     // Karthi's locked composite key,
                                                            //  riding the EXISTING universal join key
 ```
 
 - `username_norm` field name stays **frozen** (F9 D1); only the derivation changes, gated by per-contest `identity_mode` exactly as F9 D3 designed. Enum: `"person"` (all new contests) | `"legacy_username"` (synthesized legacy contest). `candidateOf()` dual-read, dual-norm resume, CI "username" grep — carried verbatim from F9.
-- Everything keyed on the composite — live locks (`live:{norm}:{slug}`), alert ids, submission-event ids, GCS paths `contests/{slug}/sessions/{username_norm}/{session_id}/`, review ids — works unchanged; the norm string gains a college prefix. `--` separator is safe inside `:`-delimited ids.
+- Everything keyed on the composite — live locks (`live:{norm}:{slug}`), alert ids, submission-event ids, GCS paths `contests/{slug}/sessions/{username_norm}/{session_id}/`, review ids — works unchanged; the norm string gains a college prefix. **Wave-4 amendment:** the separator is `~` — a single char OUTSIDE the sanitized component charset `[a-zA-Z0-9._-]`, making `person_id` derivation injective (the original `--` sat inside the charset, so `("anna--chennai","123")` and `("anna","chennai--123")` silently aliased one person). `~` is Firestore-doc-id/GCS/URL safe and stays visually distinct inside `:`-delimited composite ids; composite ids are still NEVER parsed back apart.
 - Within-contest uniqueness is per (college, unique_id): two colleges sharing roll "21CS001" in one contest = two persons, two norms, no collision (extends F9 §1.6 by one row).
 - **No-roster contests:** sessions carry `person_id: null` — they don't participate in multi-round linking. Documented limitation. Publish gate requires roster OR an explicit "no-roster contest" acknowledgement.
 - **Verification task named in-stage (gap fix):** the longer prefixed norm must pass `sanitizeSegment`, the >120-char `identityNorm` golden tests, Firestore doc-id length limits, and GCS path limits before S-C ships.

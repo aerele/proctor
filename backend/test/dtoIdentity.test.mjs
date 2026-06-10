@@ -412,8 +412,10 @@ test("attendance for a person contest joins ITS roster by person_id and reports 
   } }));
   assert.equal(upload.body.ok, true, JSON.stringify(upload.body));
 
+  // person_id matches what THIS contest's roster derives (PERSON_ID_SEPARATOR
+  // "~" — the wave-4 injectivity fix); the attendance join is by person_id.
   await firestore.collection("di_sessions").doc("a1").set({
-    session_id: "a1", username_norm: "kec--21cs001", person_id: "kec--21cs001",
+    session_id: "a1", username_norm: "kec~21cs001", person_id: "kec~21cs001",
     candidate_id: "21CS001", contest_slug: contest.slug, status: "active",
     roster_unique_id: "21CS001", created_at: "2026-06-10T02:00:00.000Z"
   });

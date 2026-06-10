@@ -52,8 +52,8 @@ export const ALL_CONTESTS = Symbol("ALL_CONTESTS");
 // instance) so the __setClientsForTest fakes propagate here too — the exact
 // configureProblemStore pattern.
 let store = null;
-export function configureContestStore({ getFirestore, collection, settingsCollection, settingsId }) {
-  store = { getFirestore, collection, settingsCollection, settingsId };
+export function configureContestStore({ getFirestore, collection, settingsCollection, settingsId, dataCollections }) {
+  store = { getFirestore, collection, settingsCollection, settingsId, dataCollections: dataCollections || [] };
 }
 
 // Injectable RNG seam for deterministic access-code collision tests (mirrors
@@ -131,10 +131,15 @@ export async function createContest(body) {
   // Atomic .create() decides slug ownership — two concurrent creates of the
   // same name can never overwrite each other; the loser walks to the next
   // suffix. The synthesized legacy slug is skipped outright so a new contest
-  // can never shadow today's legacy exam data.
+  // can never shadow today's legacy exam data — and so is any HISTORIC legacy
+  // slug (wave-4 fix): sessions/submissions/alerts from earlier exam runs
+  // carry contest_slug values derived from old contest_url settings, which
+  // look exactly like slugify output. Adopting one would resolve that whole
+  // old population onto the new contest doc (contestForSession, scopedQuery).
   for (let n = 1; n <= SLUG_COLLISION_LIMIT; n++) {
     const slug = n === 1 ? baseSlug : `${baseSlug}-${n}`;
     if (legacy && legacy.slug === slug) continue;
+    if (await slugCarriesOrphanedData(slug)) continue;
     const item = {
       slug,
       name,
@@ -174,6 +179,20 @@ export async function createContest(body) {
     }
   }
   throw httpError(409, "slug_collision_limit");
+}
+
+// Does any data collection (sessions / submissions / alerts — wired by
+// handler.mjs) already carry this candidate slug? At create time no real
+// contest doc owns it (that would be an ALREADY_EXISTS), so any hit is an
+// ORPHANED legacy population the new contest must never absorb. The probe
+// goes through scopedQuery so the scoping lint keeps its single chokepoint;
+// the synthetic `{ slug }` scope is exactly "this candidate slug".
+async function slugCarriesOrphanedData(slug) {
+  for (const name of store.dataCollections) {
+    const snapshot = await scopedQuery(db().collection(name), { slug }).limit(1).get();
+    if (snapshot.docs.length) return true;
+  }
+  return false;
 }
 
 // ---- update / status ----------------------------------------------------------

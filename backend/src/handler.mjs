@@ -6,7 +6,7 @@ import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, configureContestStore, createContest, listContests, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { configureIdentityStore, findContestRosterEntries, getContestRosterMeta, getContestRosterSummary, identityNorm, listColleges, saveContestRoster } from "./identity.mjs";
-import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
+import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { computeSessionSummary } from "./scoreboard.mjs";
 import { buildIpReport } from "./ipReport.mjs";
@@ -188,7 +188,11 @@ configureContestStore({
   getFirestore: () => firestore,
   collection: CONTESTS_COLLECTION,
   settingsCollection: SETTINGS_COLLECTION,
-  settingsId: SETTINGS_ID
+  settingsId: SETTINGS_ID,
+  // Wave-4 fix: createContest probes these for ORPHANED data carrying a
+  // candidate slug (historic legacy contest_slug values from earlier exam
+  // runs) and walks to the next suffix instead of adopting the slug.
+  dataCollections: [SESSION_COLLECTION, SUBMISSIONS_COLLECTION, ALERTS_COLLECTION]
 });
 
 // S-C: the identity core (proctor_colleges / proctor_persons /
@@ -512,10 +516,10 @@ function candidateOf(doc) {
 // The identity chain for identity_mode:"person" contests:
 //   candidate types unique_id → server resolves college from the CONTEST
 //   roster (picker ONLY on genuine ambiguity) → person_id =
-//   "{college_norm}--{identityNorm(unique_id)}" → session.username_norm =
-//   person_id. Everything keyed on (username_norm, contest_slug) — live locks,
-//   alert ids, GCS paths — works unchanged; the norm simply gains its college
-//   prefix.
+//   "{college_norm}~{identityNorm(unique_id)}" (PERSON_ID_SEPARATOR) →
+//   session.username_norm = person_id. Everything keyed on (username_norm,
+//   contest_slug) — live locks, alert ids, GCS paths — works unchanged; the
+//   norm simply gains its college prefix.
 
 // The person-mode contest for a start body, or null → legacy path. A present-
 // but-bogus contest is a HARD error (F9 §2.3.1: mandatory resolution kills the
@@ -772,7 +776,8 @@ async function startResponse(session, settings, contest = null) {
     room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
     // F5.3/F5.5: enforcement knobs + this session's exemptions + why a locked
     // session is locked (the candidate unlock-code UI keys off the reason).
-    enforcement: enforcementConfig(settings),
+    // Wave-4 fix: person contests serve their OWN snapshot enforcement.
+    enforcement: enforcementConfigFor(contest, settings),
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     locked_reason: session.locked_reason || null,
     // S-I: person/real contests serve their OWN problems[] (the legacy
@@ -784,7 +789,8 @@ async function startResponse(session, settings, contest = null) {
     submit_budget: EXEC_MAX_SUBMISSIONS_PER_SESSION,
     // F10.1: the camera-recording knobs ride the same upload_config object the
     // screen constraints use, so the recorder reads ONE authoritative config.
-    upload_config: { ...uploadConfig, camera: cameraRecordingConfig(settings) },
+    // Wave-4 fix: person contests serve their OWN snapshot camera config.
+    upload_config: { ...uploadConfig, camera: cameraRecordingConfigFor(contest, settings) },
     heartbeat_interval_seconds: 15,
     // S5: authoritative exam end time + the server clock at response time, so
     // the client shows a skew-corrected countdown from the very first response.
@@ -1552,13 +1558,18 @@ async function recordHeartbeat(req) {
   // the student's only live channel (15 s interval), so an admin's end-time
   // change reaches every student within one interval — no reload. Costs one
   // extra settings read per heartbeat (the same doc the start gate reads).
+  // Wave-4 fix: person-contest sessions source end_at AND enforcement from
+  // THEIR contest doc (S-I snapshot fields), matching startResponse — the
+  // global settings doc stays authoritative for legacy sessions only.
   const settings = await getSettings();
+  const contest = await personContestForSession(session);
+  const enforcement = enforcementConfigFor(contest, settings);
 
   // F5.3 wave-2 fix: the heartbeat closes the server-side fullscreen countdown
   // (events set fullscreen_out_since; the heartbeat's `fullscreen` field is
   // corrective truth). A lock applied HERE is reported on this very response so
   // the recorder self-stops within the same interval.
-  const reconciledStatus = await reconcileEnforcementCountdown(session, body, settings, alertSettings);
+  const reconciledStatus = await reconcileEnforcementCountdown(session, body, enforcement, alertSettings);
   return {
     ok: true,
     status: reconciledStatus || session.status || "active",
@@ -1566,11 +1577,11 @@ async function recordHeartbeat(req) {
     current_ip: currentIp,
     ip_changed: ipChanged,
     newly_changed: newlyChanged,
-    end_at: settings?.end_at || "",
+    end_at: contest ? (contest.end_at || "") : (settings?.end_at || ""),
     // F5.3/F5.5: the heartbeat is the live channel for enforcement config AND
     // per-session exemptions, so an admin/invigilator exemption (or a settings
     // change) reaches the candidate within one interval — no reload.
-    enforcement: enforcementConfig(settings),
+    enforcement,
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     server_now: now
   };
@@ -2432,6 +2443,12 @@ async function adminGetRoster(req) {
 // is safe because /api/session/start re-enforces the roster gate regardless.
 async function publicExamConfig() {
   const [settings, meta] = await Promise.all([getSettings(), getRosterMeta()]);
+  // DEFERRED to S-D (wave-4): this pre-session endpoint stays GLOBAL-settings
+  // driven — no candidate is routed to a person contest before S-D defines the
+  // contest-aware exam-config contract (?contest= param + identity_label +
+  // college picker bootstrap). Every SESSION-BOUND surface (start/resume,
+  // heartbeat, violation, events reconcile, exec gate, room-gate poll) is
+  // already contest-sourced via enforcementConfigFor/cameraRecordingConfigFor.
   return {
     roster_required: Boolean(meta),
     unique_id_label: meta?.unique_id_column || "",
@@ -4782,8 +4799,14 @@ async function sessionRoomGate(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id"]);
   const session = requireWritableSession(await getSession(String(body.session_id)));
-  const settings = await getSettings();
-  if (!settings?.room_gate_enabled) {
+  // Wave-4 fix: the gate FLAG follows the session's contest (person contests
+  // own room_gate_enabled as an S-I snapshot field); the gate DOC below was
+  // already per-(contest_slug, room). Legacy sessions keep the settings flag.
+  const contest = await personContestForSession(session);
+  const gateEnabled = contest
+    ? Boolean(contest.room_gate_enabled)
+    : Boolean((await getSettings())?.room_gate_enabled);
+  if (!gateEnabled) {
     return { gate_enabled: false, exam_started: true, exam_started_at: session.exam_started_at || null };
   }
   if (session.exam_started_at) {
@@ -4846,8 +4869,11 @@ async function sessionEnforcementViolation(req) {
     return { ok: true, locked: false, exempt: true };
   }
 
-  const settings = await getSettings();
-  const enforcement = enforcementConfig(settings);
+  // Wave-4 fix: the consequence follows the SESSION's config source — its
+  // person contest's snapshot enforcement when it has one, else the global
+  // settings doc (legacy parity).
+  const contest = await personContestForSession(session);
+  const enforcement = enforcementConfigFor(contest, contest ? null : await getSettings());
   const exitCount = Math.max(0, intOrZero(body.exit_count));
   const alertSettings = await getAlertSettings();
   const { locked } = await applyEnforcementViolation(session, { phase, exitCount, enforcement, alertSettings });
@@ -4940,8 +4966,10 @@ async function reconcileFullscreenEnforcement(session, events, alertSettings) {
   });
   if (!unexpectedExits) return;
 
-  const settings = await getSettings();
-  const enforcement = enforcementConfig(settings);
+  // Wave-4 fix: same config-source rule as the self-report path — the
+  // session's person contest wins over the global settings doc.
+  const contest = await personContestForSession(session);
+  const enforcement = enforcementConfigFor(contest, contest ? null : await getSettings());
   if (newCount > enforcement.fullscreen_exit_limit) {
     await applyEnforcementViolation(session, {
       phase: "exit_limit", exitCount: newCount, enforcement, alertSettings, derived: true
@@ -4951,8 +4979,10 @@ async function reconcileFullscreenEnforcement(session, events, alertSettings) {
 
 // Heartbeat-side countdown reconciliation. Returns "locked" when this call
 // locked the session (so the heartbeat response reports the new status and the
-// recorder self-stops on THIS interval), null otherwise.
-async function reconcileEnforcementCountdown(session, body, settings, alertSettings) {
+// recorder self-stops on THIS interval), null otherwise. Takes the RESOLVED
+// enforcement config (wave-4: contest-sourced for person sessions; the caller
+// already resolved the session's config source).
+async function reconcileEnforcementCountdown(session, body, enforcement, alertSettings) {
   if (sanitizeExemptions(session.enforcement_exemptions).fullscreen === true) return null;
   if (session.status && session.status !== "active") return null;
   const now = new Date().toISOString();
@@ -4970,7 +5000,6 @@ async function reconcileEnforcementCountdown(session, body, settings, alertSetti
   }
   if (!outSince) return null;
 
-  const enforcement = enforcementConfig(settings);
   const deadlineMs = Date.parse(outSince)
     + (enforcement.fullscreen_reentry_seconds + ENFORCEMENT_COUNTDOWN_GRACE_SECONDS) * 1000;
   if (!Number.isFinite(deadlineMs) || Date.now() <= deadlineMs) return null;
@@ -5044,9 +5073,15 @@ async function requireExamStarted(session, settings) {
   // settings read only happens for a not-yet-started session (the rare waiting
   // case). A caller that already holds settings may pass them through to skip the
   // read entirely. Behavior is identical: reject iff gate enabled AND not started.
+  // Wave-4 fix: a person-contest session is gated by ITS contest's
+  // room_gate_enabled (S-I snapshot field), never the global settings doc —
+  // legacy sessions (no person contest) keep today's settings-driven gate.
   if (session.exam_started_at) return;
-  const effectiveSettings = settings !== undefined ? settings : await getSettings();
-  if (effectiveSettings?.room_gate_enabled && !session.exam_started_at) {
+  const contest = await personContestForSession(session);
+  const gateEnabled = contest
+    ? Boolean(contest.room_gate_enabled)
+    : Boolean((settings !== undefined ? settings : await getSettings())?.room_gate_enabled);
+  if (gateEnabled) {
     throw httpError(403, "exam_not_started");
   }
 }
@@ -5457,6 +5492,21 @@ function normalizeCameraRecording(raw) {
 
 function cameraRecordingConfig(settings) {
   return normalizeCameraRecording(settings?.camera_recording);
+}
+
+// ---- wave-4 fix: contest-owned enforcement/camera (S-I §1.4 snapshot) -------
+// A session bound to a person contest serves the CONTEST's snapshot-copied
+// enforcement/camera_recording fields; legacy sessions keep the global
+// settings doc bit-for-bit. `contest` is the resolved person contest (or
+// null). The template normalizers produce the exact same shape (and NaN
+// guards) as the settings normalizers above, so a corrupt contest doc can
+// never strand candidates either.
+function enforcementConfigFor(contest, settings) {
+  return contest ? normalizeTemplateEnforcement(contest.enforcement) : enforcementConfig(settings);
+}
+
+function cameraRecordingConfigFor(contest, settings) {
+  return contest ? normalizeTemplateCameraRecording(contest.camera_recording) : cameraRecordingConfig(settings);
 }
 
 // Per-session enforcement exemptions (F5.5): ONLY the known keys, ONLY real

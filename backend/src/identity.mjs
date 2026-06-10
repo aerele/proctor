@@ -26,7 +26,13 @@
 import { randomUUID } from "node:crypto";
 import { scopedQuery } from "./contests.mjs";
 
-export const PERSON_ID_SEPARATOR = "--";
+// Wave-4 review fix: a single char OUTSIDE the sanitized component charset
+// [a-zA-Z0-9._-], so personIdOf is injective BY CONSTRUCTION — no
+// (college_norm, unique_id_norm) pair can ever forge the separator and alias
+// another person ("anna--chennai"+"123" vs "anna"+"chennai--123" collided
+// under the old "--"). "~" is legal in Firestore doc ids and GCS object names,
+// and RFC 3986 unreserved in URLs. Composite ids are still NEVER parsed apart.
+export const PERSON_ID_SEPARATOR = "~";
 
 // Same bounds as the legacy roster path (handler.mjs) — kept as local copies so
 // this module has no circular dependency on handler.mjs.
@@ -64,7 +70,9 @@ function col(name) {
 // identityNorm = sanitizeSegment ∘ normalizeUniqueId — both mirror the frozen
 // handler.mjs implementations exactly (pinned by the golden tests). The person
 // id is doc-id/GCS-path safe BY CONSTRUCTION: each component is sanitized and
-// the "--" separator is inside the safe charset.
+// the "~" separator is doc-id/path/URL safe while sitting OUTSIDE the
+// component charset (see PERSON_ID_SEPARATOR — that is what keeps personIdOf
+// injective).
 
 export function normalizeUniqueId(value) {
   return String(value).trim().toLowerCase().replace(/\s+/g, "");
