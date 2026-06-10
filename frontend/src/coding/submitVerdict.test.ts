@@ -10,7 +10,7 @@ import type { SubmitResult } from "../types";
 
 describe("presentSubmitResult", () => {
   it("renders accepted as a success banner with the hidden-test counts", () => {
-    const result: SubmitResult = { verdict: "accepted", passed_count: 4, total: 4, submission_id: "s1" };
+    const result: SubmitResult = { verdict: "accepted", passed_count: 4, total: 4, score: 100, max_points: 100, submission_id: "s1" };
     const p = presentSubmitResult(result);
     expect(p.tone).toBe("success");
     expect(p.message).toContain("accepted");
@@ -18,7 +18,7 @@ describe("presentSubmitResult", () => {
   });
 
   it("renders wrong_answer as a failure banner with the hidden-test counts", () => {
-    const result: SubmitResult = { verdict: "wrong_answer", passed_count: 1, total: 4, submission_id: "s2" };
+    const result: SubmitResult = { verdict: "wrong_answer", passed_count: 1, total: 4, score: 25, max_points: 100, submission_id: "s2" };
     const p = presentSubmitResult(result);
     expect(p.tone).toBe("failure");
     expect(p.message).toContain("wrong_answer");
@@ -26,7 +26,7 @@ describe("presentSubmitResult", () => {
   });
 
   it("renders error (judging infra failed) as a NEUTRAL retry message, never as a wrong answer", () => {
-    const result: SubmitResult = { verdict: "error", passed_count: 0, total: 4, submission_id: "s3" };
+    const result: SubmitResult = { verdict: "error", passed_count: 0, total: 4, score: 0, max_points: 100, submission_id: "s3" };
     const p = presentSubmitResult(result);
     expect(p.tone).toBe("neutral");
     expect(p.message).toBe("Judging failed — please submit again.");

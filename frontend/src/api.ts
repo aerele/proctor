@@ -1991,8 +1991,9 @@ export async function execRun(req: ExecRequest): Promise<RunResult> {
 export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
   if (demoMode) {
     await wait(500);
-    // §9 lock: mirror the real /api/exec/submit shape — verdict + counts only.
-    return { verdict: "accepted", passed_count: 4, total: 4, submission_id: "demo" };
+    // §9 lock: mirror the real /api/exec/submit shape — verdict + counts +
+    // score, never per-test hidden detail.
+    return { verdict: "accepted", passed_count: 4, total: 4, score: 100, max_points: 100, submission_id: "demo" };
   }
   return request<SubmitResult>("/api/exec/submit", { method: "POST", body: JSON.stringify(req) });
 }
