@@ -402,8 +402,9 @@ async function resumeSession(req) {
 }
 
 // Shared start/resume payload so the browser always gets the same shape whether
-// it just started, replayed a token, or resumed after reload.
-function startResponse(session, settings) {
+// it just started, replayed a token, or resumed after reload. S4: async because
+// it resolves the assigned problem's candidate-facing view from the bank.
+async function startResponse(session, settings) {
   return {
     session_id: session.session_id,
     status: session.status,
@@ -417,8 +418,30 @@ function startResponse(session, settings) {
     contest_url: settings?.contest_url || "",
     // S3: tells the candidate client whether to hold at the room-code screen.
     room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    problem: await activeProblemPublic(settings),
     upload_config: uploadConfig,
     heartbeat_interval_seconds: 15
+  };
+}
+
+// The candidate-facing view of the assigned contest problem: statement, samples
+// (non-secret — /api/exec/run echoes them anyway), limits, points. NEVER
+// hiddenTests, never the lifecycle status. null when nothing is assigned or the
+// assignment is no longer published (degrade to the link-flow fallback).
+async function activeProblemPublic(settings) {
+  const problemId = String(settings?.problem_id || "");
+  if (!problemId) return null;
+  const problem = await getProblem(problemId);
+  if (!problem) return null;
+  return {
+    id: problem.id,
+    title: problem.title,
+    statement: problem.statement,
+    languages: problem.languages || [],
+    points: problem.points ?? 100,
+    cpuTimeLimit: problem.cpuTimeLimit,
+    memoryLimit: problem.memoryLimit,
+    sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected }))
   };
 }
 
@@ -1138,6 +1161,14 @@ async function adminSaveSettings(req) {
   const contestUrl = String(body.contest_url || "").trim();
   if (contestUrl && !isHttpUrl(contestUrl)) return badRequest("Contest URL must start with http:// or https://.");
 
+  // S4: optional active-problem assignment ("" clears it). A non-empty id must
+  // be servable to candidates RIGHT NOW (published bank doc or built-in seed),
+  // so start/resume never advertise a dead problem id.
+  const problemId = String(body.problem_id || "").trim();
+  if (problemId && !(await getProblem(problemId))) {
+    return badRequest("problem_id must reference a published problem");
+  }
+
   // Phase 2 (0.1): passcodes are removed. They are no longer REQUIRED to save
   // settings, and start/end are gated only by the time window. We still persist
   // any passcode/end_code an older admin UI happens to send so the stored doc is
@@ -1153,6 +1184,7 @@ async function adminSaveSettings(req) {
     end_at: endAt.toISOString(),
     contest_url: contestUrl,
     contest_slug: contestSlugFromUrl(contestUrl),
+    problem_id: problemId,
     // S3: opt-in room start gate (invigilator OTP / start-now). Default false.
     room_gate_enabled: body.room_gate_enabled === true,
     passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
@@ -3220,6 +3252,7 @@ function publicSettings(settings) {
     // recompute on read so an older settings doc (no stored slug) still reports
     // the right value. This is the slug all sure-shot alerts/sessions join on.
     contest_slug: settings?.contest_slug || contestSlugFromUrl(settings?.contest_url),
+    problem_id: settings?.problem_id || "",
     room_gate_enabled: Boolean(settings?.room_gate_enabled),
     // S2: admin-configured room labels (student dropdown; later the invigilator
     // portal). Sanitized + deduped on read as well as on save.

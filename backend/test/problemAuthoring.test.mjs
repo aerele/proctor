@@ -268,3 +268,69 @@ test("delete removes the doc and clears a matching active problem_id from settin
   assert.equal(firestore._collections.get("problems_bank").has("rev-str"), false);
   assert.equal(firestore._collections.get("problems_settings").get("active").problem_id, "");
 });
+
+// ---- Task 3: settings problem_id + public problem in start/resume -----------
+
+const GATE = { start_at: "2026-01-01T00:00:00.000Z", end_at: "2027-01-01T00:00:00.000Z" };
+
+test("settings save validates problem_id: unknown/draft -> 400; published bank doc or built-in seed -> saved + echoed", async () => {
+  freshClients();
+  const unknown = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
+    body: { ...GATE, problem_id: "ghost" } }));
+  assert.equal(unknown.statusCode, 400);
+
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem({ id: "draft-one", status: "draft" }) }));
+  const draft = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
+    body: { ...GATE, problem_id: "draft-one" } }));
+  assert.equal(draft.statusCode, 400);
+
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  const published = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
+    body: { ...GATE, problem_id: "rev-str" } }));
+  assert.equal(published.statusCode, 200);
+  assert.equal(published.body.problem_id, "rev-str");
+
+  // built-in seed counts as assignable even with no Firestore doc
+  const seed = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
+    body: { ...GATE, problem_id: "sum-two" } }));
+  assert.equal(seed.statusCode, 200);
+
+  const echoed = await call(makeReq({ method: "GET", path: "/api/admin/settings", headers: ADMIN }));
+  assert.equal(echoed.body.problem_id, "sum-two");
+});
+
+test("resume payload carries the PUBLIC problem view — never hiddenTests; null when unassigned", async () => {
+  const { firestore } = freshClients();
+  firestore.collection("problems_sessions").doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
+  });
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.problem.id, "rev-str");
+  assert.equal(res.body.problem.title, "Reverse");
+  assert.equal(res.body.problem.points, 80);
+  assert.equal(res.body.problem.cpuTimeLimit, 2);
+  assert.deepEqual(res.body.problem.sampleTests, [{ input: "ab\n", expected: "ba" }]);
+  assert.equal(res.body.problem.hiddenTests, undefined); // the §9 lock extends to the bank
+  assert.equal(res.body.problem.status, undefined);      // lifecycle is admin-only
+
+  // unassigned -> problem: null (legacy link-flow fallback)
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+  const bare = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
+  assert.equal(bare.body.problem, null);
+});
+
+test("a problem UNPUBLISHED after assignment degrades to problem: null (no dead payloads)", async () => {
+  const { firestore } = freshClients();
+  firestore.collection("problems_sessions").doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
+  });
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem({ status: "draft" }) }));
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
+  assert.equal(res.body.problem, null);
+});
