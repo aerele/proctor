@@ -205,6 +205,9 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
     blocked_by_session_id: session.blocked_by_session_id,
     start_ip: session.start_ip,
     contest_url: contestUrl,
+    // S3: mirror the backend startResponse — the candidate client needs the
+    // gate flag to know whether to hold at the room-code screen (demo parity).
+    room_gate_enabled: getDemoSettings()?.room_gate_enabled === true,
     upload_config: {
       chunk_seconds: 20,
       video_bits_per_second: 750_000,
