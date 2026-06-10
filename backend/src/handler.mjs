@@ -426,7 +426,11 @@ async function startResponse(session, settings) {
     room_gate_enabled: Boolean(settings?.room_gate_enabled),
     problem: await activeProblemPublic(settings),
     upload_config: uploadConfig,
-    heartbeat_interval_seconds: 15
+    heartbeat_interval_seconds: 15,
+    // S5: authoritative exam end time + the server clock at response time, so
+    // the client shows a skew-corrected countdown from the very first response.
+    end_at: settings?.end_at || "",
+    server_now: new Date().toISOString()
   };
 }
 
@@ -1039,7 +1043,12 @@ async function recordHeartbeat(req) {
   // B1: surface the session lifecycle status so the recorder can self-stop if a
   // proctor locked/ended the session (requireWritableSession already 403/409s a
   // non-active session, but an active heartbeat returns the live status too).
-  return { ok: true, status: session.status || "active", start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged };
+  // S5: ALSO surface the current exam end time + server clock. The heartbeat is
+  // the student's only live channel (15 s interval), so an admin's end-time
+  // change reaches every student within one interval — no reload. Costs one
+  // extra settings read per heartbeat (the same doc the start gate reads).
+  const settings = await getSettings();
+  return { ok: true, status: session.status || "active", start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged, end_at: settings?.end_at || "", server_now: now };
 }
 
 // Liveness beacon (Phase 2). Designed for navigator.sendBeacon(), which fires on
