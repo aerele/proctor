@@ -259,6 +259,9 @@ export type IpReportCandidate = {
   session_id: string;
   hackerrank_username: string;
   name: string;
+  /** F8.1: roster identity for the drill-down ("" = legacy pre-roster session;
+   * absent on older deployed backends). */
+  roster_unique_id?: string;
   room: string;
   status: string;
   created_at: string;

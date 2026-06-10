@@ -280,8 +280,21 @@ test("buildIpReport: candidate rows capped with truncation flag; newest first", 
   assert.equal(entry.candidates[0].session_id, `s${IP_REPORT_CANDIDATES_LIMIT + 4}`);
   // Candidate rows carry exactly the documented projection.
   assert.deepEqual(Object.keys(entry.candidates[0]).sort(), [
-    "created_at", "hackerrank_username", "ip_change_count", "name", "room", "session_id", "start_ip", "status"
+    "created_at", "hackerrank_username", "ip_change_count", "name", "room", "roster_unique_id", "session_id", "start_ip", "status"
   ]);
+});
+
+// F8.1: the drill-down rows must identify the candidate by ROSTER id (the
+// admin-facing identity) — carried from the session doc, "" for legacy
+// pre-roster sessions.
+test("buildIpReport: candidate rows carry roster_unique_id ('' when absent)", () => {
+  const report = buildIpReport([
+    sessionDoc({ session_id: "r1", username_norm: "rita", current_ip: "10.0.0.1", roster_unique_id: "23BCS101" }),
+    sessionDoc({ session_id: "r2", username_norm: "leg", current_ip: "10.0.0.1", created_at: "2026-06-09T09:00:00.000Z" })
+  ]);
+  const candidates = report.ips[0].candidates;
+  assert.equal(candidates[0].roster_unique_id, "23BCS101");
+  assert.equal(candidates[1].roster_unique_id, "");
 });
 
 test("buildIpReport: caps IP groups at IP_REPORT_IPS_LIMIT, biggest kept, flag set", () => {

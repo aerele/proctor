@@ -70,6 +70,17 @@ describe("groupIpEntries", () => {
     expect(entry.candidates_truncated).toBe(true);
     expect(entry.candidates[0].session_id).toBe(`s${IP_REPORT_CANDIDATES_LIMIT + 2}`);
   });
+
+  // F8.1: the drill-down rows identify candidates by ROSTER id — propagated
+  // from the session row, "" when absent (legacy pre-roster sessions).
+  it("propagates roster_unique_id onto candidate rows, defaulting to ''", () => {
+    const [entry] = groupIpEntries([
+      row({ session_id: "r1", hackerrank_username: "Rita", ip: "10.0.0.1", roster_unique_id: "23BCS101" }),
+      row({ session_id: "r2", hackerrank_username: "Leg", ip: "10.0.0.1", created_at: "2026-06-09T09:00:00.000Z" })
+    ]);
+    expect(entry.candidates[0].roster_unique_id).toBe("23BCS101");
+    expect(entry.candidates[1].roster_unique_id).toBe("");
+  });
 });
 
 describe("summarizeIpEntries", () => {

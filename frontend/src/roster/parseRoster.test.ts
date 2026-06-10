@@ -56,4 +56,13 @@ describe("suggestMapping", () => {
     expect(suggestMapping(["Email", "Name"]).uniqueIdColumn).toBe("Email");
     expect(suggestMapping(["Foo", "Bar"]).uniqueIdColumn).toBe("Foo");
   });
+  // F8.3: an explicit unique-ID header (the roster template ships one) beats
+  // the roll-number/email fallbacks — but a mere "id" SUBSTRING must not
+  // (e.g. "Candidate" contains "id").
+  it("prefers an explicit unique-id column over roll number / email", () => {
+    expect(suggestMapping(["unique_id", "name", "roll_number", "email", "room"]).uniqueIdColumn).toBe("unique_id");
+    expect(suggestMapping(["Roll No", "Unique ID", "Name"]).uniqueIdColumn).toBe("Unique ID");
+    expect(suggestMapping(["ID", "Email"]).uniqueIdColumn).toBe("ID");
+    expect(suggestMapping(["Candidate", "Register Number"]).uniqueIdColumn).toBe("Register Number");
+  });
 });
