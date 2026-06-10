@@ -3,14 +3,14 @@
 // gate (client-side verify, then the typed password rides x-invigilator-password
 // on every call; the backend also accepts the admin credential). NO signed-QR
 // ID verification here — that is DEFERRED by design; ID checks stay manual.
-import { AlertTriangle, Bell, ChevronDown, ChevronUp, DoorOpen, KeyRound, RefreshCw, ShieldCheck, Users } from "lucide-react";
+import { AlertTriangle, Bell, ChevronDown, ChevronUp, DoorOpen, KeyRound, RefreshCw, ShieldCheck, Unlock, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   adminPassword, adminPasswordHash,
-  fetchInvigilatorOverview, fetchInvigilatorRoom, invigilatorExempt,
+  fetchInvigilatorOverview, fetchInvigilatorRoom, invigilatorExempt, invigilatorUnlock,
   invigilatorPassword, invigilatorPasswordHash,
-  openRoom, releaseRoomCode, sha256Hex
+  openRoom, releaseRoomCode, releaseUnlockCode, sha256Hex
 } from "./api";
 import { gateStatusLabel } from "./invigilator/gateLogic";
 import { alertExplanation, matchesStatusFilter } from "./invigilator/roomView";
@@ -163,6 +163,44 @@ export function InvigilatorApp() {
     }
   };
 
+  // F5.6 wave-2 fix: mint / re-display / regenerate the room's ENFORCEMENT
+  // unlock code — its own namespace, available even when the start gate is off.
+  const releaseUnlock = async (regenerate: boolean) => {
+    if (regenerate && !window.confirm("Generate a NEW unlock code? The previous unlock code stops working.")) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await releaseUnlockCode(password, room, name.trim(), regenerate);
+      setData((current) => (current ? { ...current, gate: response.gate } : current));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // F5.6 wave-2 fix: per-student release of an enforcement lock (the locked
+  // screen tells the candidate the room proctor can "unlock you from their
+  // console" — this is that console action). Admin locks never show the button.
+  const unlockStudent = async (row: InvigilatorSessionRow) => {
+    if (!window.confirm(`Unlock ${row.name || row.hackerrank_username}? Their exam resumes immediately.`)) return;
+    setError("");
+    try {
+      await invigilatorUnlock(password, room, row.hackerrank_username);
+      setData((current) => current
+        ? {
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.hackerrank_username === row.hackerrank_username
+                ? { ...session, status: "active", locked_reason: null }
+                : session)
+          }
+        : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   // F5.5: toggle one enforcement exemption for ONE student (legit environment
   // problems — e.g. a flaky projector hook stealing focus). Applies to the
   // student's LIVE session within a heartbeat; the row updates optimistically
@@ -303,6 +341,17 @@ export function InvigilatorApp() {
         </div>
       ) : null}
 
+      {/* F5.6 wave-2 fix: the enforcement unlock card renders ALWAYS — locks
+          happen whether or not the start gate is in use. */}
+      <div className="mt-5">
+        <UnlockCodeCard
+          gate={data?.gate ?? null}
+          busy={busy}
+          onRelease={() => void releaseUnlock(false)}
+          onRegenerate={() => void releaseUnlock(true)}
+        />
+      </div>
+
       {/* F9.2: each counter is a toggleable filter for the student list below. */}
       <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-7">
         <StatTile label="Recording" value={stats?.live ?? 0} tone="accent"
@@ -344,7 +393,7 @@ export function InvigilatorApp() {
                   <th className="py-2 pr-3">Roll no.</th>
                   <th className="py-2 pr-3">Status</th>
                   <th className="py-2 pr-3">Exam</th>
-                  <th className="py-2">Exemptions</th>
+                  <th className="py-2">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -361,8 +410,19 @@ export function InvigilatorApp() {
                       <td className="py-2 pr-3 text-muted">{row.exam_started_at ? "Started" : "Waiting"}</td>
                       <td className="py-2">
                         {/* F5.5: per-student enforcement exemptions for legit
-                            environment problems. Disabled for ended sessions. */}
-                        <div className="flex flex-wrap gap-1.5">
+                            environment problems. Disabled for ended sessions.
+                            F5.6 wave-2: Unlock appears ONLY on enforcement
+                            locks (admin locks stay admin-released). */}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {row.status === "locked" && row.locked_reason === "fullscreen_enforcement" ? (
+                            <button
+                              className="focus-ring inline-flex items-center gap-1 rounded-full border border-danger/50 bg-danger/10 px-2.5 py-0.5 text-xs font-semibold text-danger"
+                              title="Release this student's fullscreen-enforcement lock — their exam resumes immediately."
+                              onClick={() => void unlockStudent(row)}
+                            >
+                              <Unlock size={12} /> Unlock
+                            </button>
+                          ) : null}
                           <ExemptionToggle
                             label="Fullscreen"
                             active={row.enforcement_exemptions?.fullscreen === true}
@@ -481,6 +541,59 @@ function GateCard(props: {
       {gate?.opened_by ? (
         <p className="mt-1 text-xs text-muted">
           Room opened by {gate.opened_by}{gate.opened_at ? ` at ${new Date(gate.opened_at).toLocaleTimeString()}` : ""}.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+// F5.6 wave-2 fix: the ENFORCEMENT unlock code card. Renders ALWAYS (locks
+// happen whether or not the start gate is in use). This code lives in its own
+// namespace (gate.unlock_otp) — never the start OTP, which every candidate in
+// an OTP-gated room personally typed — and is read to ONE locked student, not
+// written on the board.
+function UnlockCodeCard(props: {
+  gate: RoomGate | null;
+  busy: boolean;
+  onRelease: () => void;
+  onRegenerate: () => void;
+}) {
+  const { gate, busy, onRelease, onRegenerate } = props;
+  const code = gate?.unlock_otp || "";
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Unlock size={18} />
+          <h2 className="text-base font-semibold">Enforcement unlock code</h2>
+        </div>
+        <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+          code ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-white/60 text-muted"
+        }`}>
+          {code ? "Unlock code active" : "No unlock code yet"}
+        </span>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-muted">
+        When a student's exam locks itself (fullscreen rule), read them this code to release the lock — or use Unlock on their row below.
+        This is NOT the start code: read it to the one locked student, don't write it on the board.
+      </p>
+      {code ? (
+        <p className="mt-4 text-center font-mono text-5xl font-bold tracking-[0.35em] text-ink">{code}</p>
+      ) : null}
+      <div className="mt-4 flex flex-wrap gap-3">
+        {!code ? (
+          <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={onRelease}>
+            <KeyRound size={16} /> Release unlock code
+          </button>
+        ) : (
+          <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={onRegenerate}>
+            <RefreshCw size={16} /> Regenerate unlock code
+          </button>
+        )}
+      </div>
+      {gate?.unlock_released_by ? (
+        <p className="mt-3 text-xs text-muted">
+          Unlock code released by {gate.unlock_released_by}{gate.unlock_released_at ? ` at ${new Date(gate.unlock_released_at).toLocaleTimeString()}` : ""}.
         </p>
       ) : null}
     </section>

@@ -44,7 +44,7 @@ const ALERT_EXPLANATIONS: Record<string, string> = {
   recording_stopped: "The screen recording on this student's machine stopped. Recording is mandatory — go to the student and check their exam screen.",
   screen_share_stopped: "The student stopped sharing their screen (or the share was interrupted). The exam cannot be proctored without it — check their machine.",
   recording_error: "The recorder on the student's machine hit an error and may not be capturing. Check their exam screen and ask them to follow the on-screen instructions.",
-  fullscreen_enforcement: "The student left fullscreen more than the allowed limit, so the exam locked itself. They need the room code (or an admin) to continue.",
+  fullscreen_enforcement: "The student left fullscreen more than the allowed limit, so the exam locked itself. Use Unlock on their row, or read them the room's unlock code (NOT the start code).",
   ip_changed: "The student's network address changed mid-exam — usually a Wi-Fi/hotspot switch, occasionally a device swap. Verify they are on the same machine.",
   tab_hidden: "The exam tab was hidden — the student switched to another tab or window. Check what is on their screen.",
   tab_away: "The exam was not visible on the student's screen for longer than the allowed time. Check what they were doing instead.",
