@@ -28,3 +28,4 @@ monitoring/**/contest_*_meta.json
 spike/proctor-extension.crx
 spike/iframe-test/proctor-extension.crx
 spike/iframe-test/proctor-extension.zip
+.claude/
