@@ -3,8 +3,9 @@ import { Firestore, FieldValue, FieldPath } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
-import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { configureContestStore, createContest, listContests, setContestStatus, updateContest } from "./contests.mjs";
+import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
+import { configureContestStore, createContest, listContests, setContestStatus, slugify, updateContest } from "./contests.mjs";
+import { configureTemplateStore, getTemplate, listTemplates, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -187,6 +188,11 @@ configureContestStore({
   settingsId: SETTINGS_ID
 });
 
+// S-I §1.1: the proctor_templates collection (same getter pattern). The
+// system-check seed preset lives in code; a doc with the same slug shadows it.
+const TEMPLATES_COLLECTION = process.env.TEMPLATES_COLLECTION || "proctor_templates";
+configureTemplateStore({ getFirestore: () => firestore, collection: TEMPLATES_COLLECTION });
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -245,6 +251,12 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/contests") return send(res, 200, await adminCreateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-update") return send(res, 200, await adminUpdateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-status") return send(res, 200, await adminContestStatus(req));
+    if (req.method === "GET" && path === "/api/admin/templates") return send(res, 200, await adminListTemplates(req));
+    if (req.method === "GET" && path === "/api/admin/template") return send(res, 200, await adminGetTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/templates") return send(res, 200, await adminCreateTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-update") return send(res, 200, await adminUpdateTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-archive") return send(res, 200, await adminArchiveTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-clone") return send(res, 200, await adminCloneTemplate(req));
     if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
     if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
     if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
@@ -297,6 +309,10 @@ export const api = async (req, res) => {
       // Rate-limit rejections (429, exec limiter) carry a machine-readable
       // retry hint inside the same JSON error shape as every other error.
       if (error.retry_after_seconds !== undefined) body.retry_after_seconds = error.retry_after_seconds;
+      // S-I guard errors carry structured context (referencing contest/template
+      // slugs, unavailable problem ids) — merged into the same JSON error shape.
+      // Server-controlled fields only (httpErrorWith call sites), never client echo.
+      if (error.extra && typeof error.extra === "object") Object.assign(body, error.extra);
       return send(res, statusCode, body);
     }
     return send(res, 500, { error: "Internal server error" });
@@ -1434,6 +1450,173 @@ async function adminDeleteProblem(req) {
     await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
   }
   return { ok: true };
+}
+
+// ---- S-I §1.1/§2: proctor templates (admin CRUD) -----------------------------
+// Thin glue over src/templates.mjs (validation + seed shadowing live there).
+// Slug rules are the contest rules verbatim (slugify + -2 suffix, atomic
+// .create() decides ownership); SEED slugs are skipped at create so a new
+// template can never silently shadow the system-check preset.
+
+function templateRef(slug) {
+  return firestore.collection(TEMPLATES_COLLECTION).doc(slug);
+}
+
+const TEMPLATE_SLUG_COLLISION_LIMIT = 50;
+
+// Every template problem entry must reference an EXISTING bank problem at save
+// time. Drafts are fine in a template (spec §1.1) — instantiation re-validates
+// published — so this reads through getBankProblem, never getProblem.
+async function requireKnownProblems(entries) {
+  const unknown = [];
+  for (const entry of entries) {
+    if (!(await getBankProblem(entry.problem_id))) unknown.push(entry.problem_id);
+  }
+  if (unknown.length) throw httpErrorWith(400, "unknown_problems", { problems: unknown });
+}
+
+async function createTemplateDoc(template) {
+  const baseSlug = slugify(template.name);
+  if (!baseSlug) throw httpError(400, "name must contain letters or digits");
+  const now = new Date().toISOString();
+  for (let n = 1; n <= TEMPLATE_SLUG_COLLISION_LIMIT; n++) {
+    const slug = n === 1 ? baseSlug : `${baseSlug}-${n}`;
+    if (Object.hasOwn(SEED_TEMPLATES, slug)) continue; // presets keep their slug
+    const item = { slug, ...template, archived: false, created_at: now, updated_at: now };
+    try {
+      await templateRef(slug).create(item);
+      return item;
+    } catch (error) {
+      if (isAlreadyExists(error)) continue;
+      throw error;
+    }
+  }
+  throw httpError(409, "slug_collision_limit");
+}
+
+// points per bank problem id for the list totals: one bounded collection read;
+// per-id getBankProblem fallback catches seed problems (e.g. sum-two).
+async function bankProblemPoints() {
+  const points = new Map();
+  const snapshot = await firestore.collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
+  for (const doc of snapshot.docs) {
+    const p = doc.data();
+    points.set(p.id, p.points ?? 100);
+  }
+  return {
+    async effectiveFor(entry) {
+      if (entry.points !== null && entry.points !== undefined) return entry.points;
+      if (points.has(entry.problem_id)) return points.get(entry.problem_id);
+      const fallback = await getBankProblem(entry.problem_id);
+      const value = fallback ? (fallback.points ?? 100) : 0; // dangling ref counts 0
+      points.set(entry.problem_id, value);
+      return value;
+    }
+  };
+}
+
+async function adminListTemplates(req) {
+  requireAdmin(req);
+  const [templates, bank] = await Promise.all([listTemplates(), bankProblemPoints()]);
+  const rows = [];
+  for (const template of templates) {
+    const entries = template.problems || [];
+    let totalPoints = 0;
+    for (const entry of entries) totalPoints += await bank.effectiveFor(entry);
+    rows.push({
+      slug: template.slug,
+      name: template.name,
+      archived: Boolean(template.archived),
+      preset: Boolean(template.preset),
+      problem_count: entries.length,
+      total_points: totalPoints,
+      updated_at: template.updated_at || ""
+    });
+  }
+  return { templates: rows };
+}
+
+async function adminGetTemplate(req) {
+  requireAdmin(req);
+  const template = await getTemplate(req.query?.slug);
+  if (!template) throw httpError(404, "template_not_found");
+  return { template };
+}
+
+async function adminCreateTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const checked = validateTemplateInput(body);
+  if (!checked.ok) return badRequest(checked.error);
+  await requireKnownProblems(checked.template.problems);
+  return { ok: true, template: await createTemplateDoc(checked.template) };
+}
+
+// Partial update. THE rule (same as contests): a rename NEVER re-slugs — the
+// slug is referenced from contest provenance the moment one instantiates.
+// Updating a seed slug MATERIALIZES a shadow doc (customize-the-preset flow).
+async function adminUpdateTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  const merged = {
+    name: body.name !== undefined ? body.name : existing.name,
+    description: body.description !== undefined ? body.description : existing.description,
+    problems: body.problems !== undefined ? body.problems : existing.problems,
+    defaults: {
+      ...existing.defaults,
+      ...(body.defaults && typeof body.defaults === "object" && !Array.isArray(body.defaults) ? body.defaults : {})
+    }
+  };
+  const checked = validateTemplateInput(merged);
+  if (!checked.ok) return badRequest(checked.error);
+  if (body.problems !== undefined) await requireKnownProblems(checked.template.problems);
+  const now = new Date().toISOString();
+  const item = {
+    slug: existing.slug,
+    ...checked.template,
+    archived: Boolean(existing.archived),
+    created_at: existing.created_at || now,
+    updated_at: now
+  };
+  await templateRef(item.slug).set(item);
+  return { ok: true, template: item };
+}
+
+// Archived templates disappear from the instantiate picker but stay listed
+// behind the UI toggle. Archiving a seed materializes its shadow doc too.
+async function adminArchiveTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  if (typeof body.archived !== "boolean") return badRequest("archived must be a boolean");
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  const now = new Date().toISOString();
+  const { preset: _preset, ...rest } = existing;
+  const item = { ...rest, archived: body.archived, created_at: existing.created_at || now, updated_at: now };
+  await templateRef(item.slug).set(item);
+  return { ok: true, template: item };
+}
+
+// Clone verb = the §1.4 snapshot copy onto a NEW template doc: deep copy of
+// problems + defaults, fresh slug from the (default "Copy of …") name, fresh
+// timestamps, archived reset.
+async function adminCloneTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  const name = (String(body.name ?? "").trim() || `Copy of ${existing.name}`).slice(0, TEMPLATE_BOUNDS.NAME_MAX);
+  const copy = structuredCloneTemplate(existing);
+  const checked = validateTemplateInput({
+    name, description: copy.description, problems: copy.problems, defaults: copy.defaults
+  });
+  if (!checked.ok) return badRequest(checked.error);
+  return { ok: true, template: await createTemplateDoc(checked.template) };
 }
 
 // ---- S-B: contests (F9 §2 / F10 §2.7) — SHIPS DARK ---------------------------
@@ -4635,6 +4818,15 @@ function badRequest(message) {
 function httpError(statusCode, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
+  return error;
+}
+
+// httpError carrying structured machine-readable context (S-I guard payloads).
+// `extra` is merged into the JSON error body by the api() catch — only ever
+// server-built objects (slug lists, problem-id lists), never raw client input.
+function httpErrorWith(statusCode, message, extra) {
+  const error = httpError(statusCode, message);
+  error.extra = extra;
   return error;
 }
 
