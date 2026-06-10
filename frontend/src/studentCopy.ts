@@ -1,10 +1,10 @@
 // frontend/src/studentCopy.ts
 //
 // Candidate-facing copy that differs between the two test surfaces:
-//   ownEditor=true  — a Slice-1 problem is configured (SLICE1_PROBLEM truthy);
-//                     candidates solve in the built-in coding workspace, so no
-//                     string may direct them to HackerRank or an external
-//                     contest.
+//   ownEditor=true  — a server problem is assigned (S4: sessionConfig.problem
+//                     from the start/resume response); candidates solve in the
+//                     built-in coding workspace, so no string may direct them
+//                     to HackerRank or an external contest.
 //   ownEditor=false — legacy flow; candidates open the external HackerRank
 //                     contest via the Start test link, original copy verbatim.
 //

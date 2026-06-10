@@ -3,7 +3,7 @@ import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
-import { getProblem, LANGUAGE_IDS } from "./problems.mjs";
+import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 
 let firestore = new Firestore();
 let storage = new Storage();
@@ -84,6 +84,8 @@ const JUDGE0_MODE = process.env.JUDGE0_MODE || "rapidapi";
 const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY;
 const JUDGE0_AUTH_TOKEN = process.env.JUDGE0_AUTH_TOKEN;
 const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_submissions";
+const PROBLEMS_COLLECTION = process.env.PROBLEMS_COLLECTION || "proctor_problems";
+const PROBLEMS_QUERY_LIMIT = 500;
 const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
 const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
 // S2 roster (compulsory roster login). One ACTIVE roster, global (like the
@@ -163,6 +165,10 @@ const DISCONNECTED_STALENESS_MS = Number(process.env.DISCONNECTED_STALENESS_MS |
 // number of room labels can never bloat a stats/alerts response.
 const ROOMS_LIST_LIMIT = 200;
 
+// S4: wire the problem bank to THIS module's Firestore handle. A getter (not
+// the instance) so __setClientsForTest fakes propagate to problem reads too.
+configureProblemStore({ getFirestore: () => firestore, collection: PROBLEMS_COLLECTION });
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -208,6 +214,10 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/room-gate") return send(res, 200, await sessionRoomGate(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
+    if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
+    if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
+    if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
+    if (req.method === "POST" && path === "/api/admin/problem-delete") return send(res, 200, await adminDeleteProblem(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
     if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
@@ -396,8 +406,9 @@ async function resumeSession(req) {
 }
 
 // Shared start/resume payload so the browser always gets the same shape whether
-// it just started, replayed a token, or resumed after reload.
-function startResponse(session, settings) {
+// it just started, replayed a token, or resumed after reload. S4: async because
+// it resolves the assigned problem's candidate-facing view from the bank.
+async function startResponse(session, settings) {
   return {
     session_id: session.session_id,
     status: session.status,
@@ -411,8 +422,30 @@ function startResponse(session, settings) {
     contest_url: settings?.contest_url || "",
     // S3: tells the candidate client whether to hold at the room-code screen.
     room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    problem: await activeProblemPublic(settings),
     upload_config: uploadConfig,
     heartbeat_interval_seconds: 15
+  };
+}
+
+// The candidate-facing view of the assigned contest problem: statement, samples
+// (non-secret — /api/exec/run echoes them anyway), limits, points. NEVER
+// hiddenTests, never the lifecycle status. null when nothing is assigned or the
+// assignment is no longer published (degrade to the link-flow fallback).
+async function activeProblemPublic(settings) {
+  const problemId = String(settings?.problem_id || "");
+  if (!problemId) return null;
+  const problem = await getProblem(problemId);
+  if (!problem) return null;
+  return {
+    id: problem.id,
+    title: problem.title,
+    statement: problem.statement,
+    languages: problem.languages || [],
+    points: problem.points ?? 100,
+    cpuTimeLimit: problem.cpuTimeLimit,
+    memoryLimit: problem.memoryLimit,
+    sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected }))
   };
 }
 
@@ -722,7 +755,7 @@ async function execRun(req) {
   await requireExamStarted(session); // S3 room gate
   // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
   const limiter = checkExecRunLimit(sessionId);
-  const problem = getProblem(String(body.problem_id || ""));
+  const problem = await getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -776,7 +809,7 @@ async function execSubmit(req) {
   // The cap is keyed on the raw problem_id string; only stored submissions
   // increment it, so invalid ids can never grow the per-session count map.
   const limiter = checkExecSubmitLimit(sessionId, String(body.problem_id || ""));
-  const problem = getProblem(String(body.problem_id || ""));
+  const problem = await getProblem(String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -827,6 +860,11 @@ async function execSubmit(req) {
     ? "accepted"
     : (results.some((r) => r.status === "judging_timeout") ? "error" : "wrong_answer");
 
+  // S4: submit-time scoring from the problem's points + scoring mode. Derived
+  // from counts only, so returning it leaks nothing about hidden tests.
+  const score = scoreSubmission(problem, passedCount, results.length);
+  const maxPoints = problem.points ?? 100;
+
   // Per-test results WITHOUT hidden inputs/expected (don't leak the test cases).
   // STORED only — never returned to the candidate (§9 lock below).
   const tests = results.map((r, i) => ({ index: i, passed: r.passed, status: r.status, timeSec: r.timeSec }));
@@ -841,7 +879,8 @@ async function execSubmit(req) {
     await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
       session_id: sessionId, problem_id: problem.id, language: body.language,
       source_code: source, verdict, passed_count: passedCount, total: results.length,
-      tests, created_at: createdAt
+      tests, score, max_points: maxPoints, scoring: problem.scoring || "per_test",
+      created_at: createdAt
     });
   } catch (error) {
     // The engine run already happened (and was BILLED) — a store failure must
@@ -858,7 +897,7 @@ async function execSubmit(req) {
 
   // §9 lock: candidates see ONLY pass/fail counts on hidden tests. The stored
   // doc keeps the per-test detail for admin-side analysis; the response doesn't.
-  return { verdict, passed_count: passedCount, total: results.length, submission_id: submissionId };
+  return { verdict, passed_count: passedCount, total: results.length, score, max_points: maxPoints, submission_id: submissionId };
 }
 
 async function ingestEditorEvents(req) {
@@ -1132,6 +1171,14 @@ async function adminSaveSettings(req) {
   const contestUrl = String(body.contest_url || "").trim();
   if (contestUrl && !isHttpUrl(contestUrl)) return badRequest("Contest URL must start with http:// or https://.");
 
+  // S4: optional active-problem assignment ("" clears it). A non-empty id must
+  // be servable to candidates RIGHT NOW (published bank doc or built-in seed),
+  // so start/resume never advertise a dead problem id.
+  const problemId = String(body.problem_id || "").trim();
+  if (problemId && !(await getProblem(problemId))) {
+    return badRequest("problem_id must reference a published problem");
+  }
+
   // Phase 2 (0.1): passcodes are removed. They are no longer REQUIRED to save
   // settings, and start/end are gated only by the time window. We still persist
   // any passcode/end_code an older admin UI happens to send so the stored doc is
@@ -1147,6 +1194,7 @@ async function adminSaveSettings(req) {
     end_at: endAt.toISOString(),
     contest_url: contestUrl,
     contest_slug: contestSlugFromUrl(contestUrl),
+    problem_id: problemId,
     // S3: opt-in room start gate (invigilator OTP / start-now). Default false.
     room_gate_enabled: body.room_gate_enabled === true,
     passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
@@ -1161,6 +1209,73 @@ async function adminSaveSettings(req) {
 
   await settingsRef().set(item);
   return publicSettings(item);
+}
+
+// ---- S4: problem bank (admin authoring) ------------------------------------
+
+function problemRef(id) {
+  return firestore.collection(PROBLEMS_COLLECTION).doc(id);
+}
+
+async function adminListProblems(req) {
+  requireAdmin(req);
+  const snapshot = await firestore.collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
+  const problems = snapshot.docs
+    .map((doc) => doc.data())
+    .map((p) => ({
+      id: p.id,
+      title: p.title || "",
+      status: p.status || "draft",
+      points: p.points ?? 100,
+      scoring: p.scoring || "per_test",
+      languages: p.languages || [],
+      sample_count: (p.sampleTests || []).length,
+      hidden_count: (p.hiddenTests || []).length,
+      updated_at: p.updated_at || ""
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return { problems };
+}
+
+async function adminGetProblem(req) {
+  requireAdmin(req);
+  const id = String(req.query?.id || "");
+  if (!isValidProblemId(id)) return badRequest("invalid id");
+  const doc = await problemRef(id).get();
+  if (!doc.exists) throw httpError(404, "Problem not found");
+  // Full doc INCLUDING hiddenTests — admin-only surface.
+  return { problem: doc.data() };
+}
+
+async function adminSaveProblem(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const checked = validateProblemInput(body);
+  if (!checked.ok) return badRequest(checked.error);
+  const existing = await problemRef(checked.problem.id).get();
+  const now = new Date().toISOString();
+  const item = {
+    ...checked.problem,
+    created_at: existing.exists ? (existing.data().created_at || now) : now,
+    updated_at: now
+  };
+  await problemRef(item.id).set(item);
+  return { ok: true, problem: item };
+}
+
+async function adminDeleteProblem(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const id = String(body.id || "");
+  if (!isValidProblemId(id)) return badRequest("invalid id");
+  await problemRef(id).delete();
+  // If the deleted problem was the assigned contest problem, clear the
+  // assignment so start/resume stop advertising a dead id (link-flow fallback).
+  const settings = await getSettings();
+  if (settings?.problem_id === id) {
+    await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
+  }
+  return { ok: true };
 }
 
 // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
@@ -3234,6 +3349,7 @@ function publicSettings(settings) {
     // recompute on read so an older settings doc (no stored slug) still reports
     // the right value. This is the slug all sure-shot alerts/sessions join on.
     contest_slug: settings?.contest_slug || contestSlugFromUrl(settings?.contest_url),
+    problem_id: settings?.problem_id || "",
     room_gate_enabled: Boolean(settings?.room_gate_enabled),
     // S2: admin-configured room labels (student dropdown; later the invigilator
     // portal). Sanitized + deduped on read as well as on save.
