@@ -856,6 +856,11 @@ async function execSubmit(req) {
     ? "accepted"
     : (results.some((r) => r.status === "judging_timeout") ? "error" : "wrong_answer");
 
+  // S4: submit-time scoring from the problem's points + scoring mode. Derived
+  // from counts only, so returning it leaks nothing about hidden tests.
+  const score = scoreSubmission(problem, passedCount, results.length);
+  const maxPoints = problem.points ?? 100;
+
   // Per-test results WITHOUT hidden inputs/expected (don't leak the test cases).
   // STORED only — never returned to the candidate (§9 lock below).
   const tests = results.map((r, i) => ({ index: i, passed: r.passed, status: r.status, timeSec: r.timeSec }));
@@ -870,7 +875,8 @@ async function execSubmit(req) {
     await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
       session_id: sessionId, problem_id: problem.id, language: body.language,
       source_code: source, verdict, passed_count: passedCount, total: results.length,
-      tests, created_at: createdAt
+      tests, score, max_points: maxPoints, scoring: problem.scoring || "per_test",
+      created_at: createdAt
     });
   } catch (error) {
     // The engine run already happened (and was BILLED) — a store failure must
@@ -887,7 +893,7 @@ async function execSubmit(req) {
 
   // §9 lock: candidates see ONLY pass/fail counts on hidden tests. The stored
   // doc keeps the per-test detail for admin-side analysis; the response doesn't.
-  return { verdict, passed_count: passedCount, total: results.length, submission_id: submissionId };
+  return { verdict, passed_count: passedCount, total: results.length, score, max_points: maxPoints, submission_id: submissionId };
 }
 
 async function ingestEditorEvents(req) {

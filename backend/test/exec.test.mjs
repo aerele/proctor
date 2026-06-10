@@ -293,11 +293,12 @@ test("POST /api/exec/submit runs HIDDEN tests, returns ONLY verdict + counts (§
   assert.equal(res.body.total, 4);            // four hidden tests
   assert.equal(res.body.passed_count, 4);
   // §9 lock: the candidate-facing response carries NO per-test array at all —
-  // only the verdict + pass/fail counts (+ submission_id).
+  // only the verdict + pass/fail counts (+ submission_id). S4 adds score/
+  // max_points, derived from counts only, so they leak nothing about hidden tests.
   assert.equal(res.body.tests, undefined);
   assert.deepEqual(
     Object.keys(res.body).sort(),
-    ["passed_count", "submission_id", "total", "verdict"]
+    ["max_points", "passed_count", "score", "submission_id", "total", "verdict"]
   );
   assert.equal(seen.length, 4);               // judged against the 4 hidden tests
   // The submission was stored in the injected fake Firestore (observable).
