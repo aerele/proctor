@@ -15,16 +15,22 @@ const SUBMIT_TONE_CLASSES: Record<SubmitTone, string> = {
   neutral: "border-line bg-panel text-muted"
 };
 
+// Generic read-stdin/print-stdout scaffolds. Problem-specific starter code is
+// deliberately NOT a thing yet (see the S4 spec, OUT of scope).
 const STARTERS: Record<string, string> = {
-  python: "a, b = map(int, input().split())\nprint(a + b)\n",
-  cpp: "#include <bits/stdc++.h>\nint main(){long long a,b;std::cin>>a>>b;std::cout<<a+b;}\n",
-  java: "import java.util.*;\npublic class Main{public static void main(String[] a){Scanner s=new Scanner(System.in);System.out.print(s.nextLong()+s.nextLong());}}\n",
-  javascript: "const [a,b]=require('fs').readFileSync(0,'utf8').trim().split(' ').map(Number);console.log(a+b);\n"
+  python: "# Read from standard input, print the answer to standard output.\n",
+  cpp: "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    // Read from stdin, print the answer to stdout.\n    return 0;\n}\n",
+  java: "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        // Read from System.in, print the answer to System.out.\n    }\n}\n",
+  javascript: "// Read from stdin, print the answer to stdout.\nconst input = require(\"fs\").readFileSync(0, \"utf8\");\n"
 };
 
 export function CodingWorkspace({ sessionId, problem }: {
   sessionId: string;
-  problem: { id: string; title: string; statement: string; languages: readonly ("python"|"cpp"|"java"|"javascript")[] };
+  problem: {
+    id: string; title: string; statement: string;
+    languages: readonly ("python"|"cpp"|"java"|"javascript")[];
+    sampleTests?: readonly { input: string; expected: string }[];
+  };
 }) {
   const [language, setLanguage] = useState(problem.languages[0]);
   const [code, setCode] = useState(STARTERS[language]);
@@ -56,6 +62,19 @@ export function CodingWorkspace({ sessionId, problem }: {
       <section className="rounded-lg border border-line bg-panel p-5">
         <h2 className="text-lg font-semibold">{problem.title}</h2>
         <p className="mt-2 whitespace-pre-wrap text-sm text-muted">{problem.statement}</p>
+        {problem.sampleTests?.length ? (
+          <div className="mt-4 space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted">Sample tests</div>
+            {problem.sampleTests.map((t, i) => (
+              <div key={i} className="rounded-md border border-line bg-white p-2 text-xs">
+                <div className="font-medium text-muted">Input</div>
+                <pre className="whitespace-pre-wrap font-mono">{t.input}</pre>
+                <div className="mt-1 font-medium text-muted">Expected output</div>
+                <pre className="whitespace-pre-wrap font-mono">{t.expected}</pre>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
       <section className="space-y-3">
         <div className="flex items-center gap-3">
