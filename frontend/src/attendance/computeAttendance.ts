@@ -74,10 +74,14 @@ export function computeAttendance(
 }
 
 // RFC-4180-ish escaping, same rules as App.tsx's csvField (kept local so this
-// module stays pure + importable by both api.ts and App.tsx).
+// module stays pure + importable by both api.ts and App.tsx). Cells starting
+// with a formula trigger are prefixed with ' so spreadsheets treat them as
+// text — roster fields are candidate-supplied (M8, same guard as App.tsx).
 function csvField(value: string): string {
-  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
+  let v = value;
+  if (v && /^[=+\-@\t\r]/.test(v)) v = "'" + v;
+  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
 }
 
 // Absentees CSV for the exam-day report: fixed header + one row per absentee.

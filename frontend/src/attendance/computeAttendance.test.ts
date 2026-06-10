@@ -77,4 +77,11 @@ describe("buildAbsenteesCsv", () => {
   it("returns only the header for an empty list", () => {
     expect(buildAbsenteesCsv([])).toBe("unique_id,name,roll_number,room");
   });
+
+  it("neutralizes formula-injection triggers in candidate-supplied fields", () => {
+    const csv = buildAbsenteesCsv([
+      { unique_id: "=cmd()", name: "+SUM(1)", roll_number: "-2+3", room: "@import" }
+    ]);
+    expect(csv.split("\n")[1]).toBe("'=cmd(),'+SUM(1),'-2+3,'@import");
+  });
 });
