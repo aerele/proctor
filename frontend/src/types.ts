@@ -1010,3 +1010,82 @@ export type ProblemSubmissionSummary = {
   last_verdict: string;
   last_submitted_at: string;
 };
+
+// ---- S-D: contest administration (Contests tab + selector + routing) --------
+// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5 A1-A3
+
+export type ContestStatus = "draft" | "open" | "archived";
+
+/** One contest doc from GET /api/admin/contests. The synthesized legacy
+ * contest rides the same list with legacy:true (read-only — no doc exists). */
+export type ContestSummary = {
+  slug: string;
+  name: string;
+  status: ContestStatus;
+  legacy: boolean;
+  /** Set only on the synthesized legacy contest of an empty-slug deployment. */
+  legacy_empty_slug?: boolean;
+  listed: boolean;
+  identity_label: string;
+  /** Typed 6-char candidate access code (vision §10.3); null on legacy. */
+  access_code: string | null;
+  /** Per-contest invigilator portal token (vision §2.7); null on legacy. */
+  invigilator_key: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  end_at_updated_at?: string | null;
+  /** Ordered problems snapshot (S-I). Absent on the legacy synth row. */
+  problems?: ContestProblemEntry[];
+  /** Legacy synth carries the single-problem assignment instead. */
+  problem_id?: string;
+  rooms: string[];
+  room_gate_enabled: boolean;
+  template_slug: string | null;
+  camera_recording?: CameraRecordingConfigPayload;
+  enforcement?: EnforcementConfigPayload;
+  languages?: ProblemLanguage[];
+  evidence_retention_days?: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/** POST /api/admin/contests body (create — blank or from a template). */
+export type ContestCreateRequest = {
+  name: string;
+  template_slug?: string;
+  problems?: Array<{ problem_id: string; points?: number | null }>;
+  identity_label?: string;
+  start_at?: string;
+  end_at?: string;
+  room_gate_enabled?: boolean;
+  rooms?: string[];
+};
+
+/** POST /api/admin/contest-update body (slug addresses the contest). */
+export type ContestUpdateRequest = {
+  slug: string;
+  name?: string;
+  identity_label?: string;
+  listed?: boolean;
+  start_at?: string | null;
+  end_at?: string | null;
+  rooms?: string[];
+  room_gate_enabled?: boolean;
+  problems?: Array<{ problem_id: string; points?: number | null }>;
+  /** S-I open-contest guard: confirm problem ADDs on an open contest. */
+  confirm?: boolean;
+  /** S-I open-contest guard: typed contest slug confirming a points edit. */
+  confirm_points_edit?: string;
+  evidence_retention_days?: number;
+};
+
+/** Per-contest pre-session config (GET /api/exam-config?contest=). */
+export type ContestExamConfig = ExamConfig & {
+  contest_slug: string;
+  contest_name: string;
+  identity_label: string;
+  room_gate_enabled: boolean;
+  start_at: string | null;
+  end_at: string | null;
+  server_now: string;
+};

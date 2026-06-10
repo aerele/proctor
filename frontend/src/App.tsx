@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchContests, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
@@ -9,6 +9,8 @@ import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApp
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
+import { ContestsPanel } from "./admin/ContestsPanel";
+import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
@@ -21,7 +23,7 @@ import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMe
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ContestSummary, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
 import { buildCollegeResolutions } from "./roster/personRoster";
@@ -1674,7 +1676,7 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
   );
 }
 
-type AdminView = "stats" | "alerts" | "sessions" | "attendance" | "review" | "recordings" | "problems" | "settings" | "ips";
+type AdminView = "stats" | "contests" | "alerts" | "sessions" | "attendance" | "review" | "recordings" | "problems" | "settings" | "ips";
 
 // A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
 // AdminStats card labels. "" = no status filter (the Total card). "disconnected"
@@ -1742,7 +1744,17 @@ function AdminApp() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsLoaded, setAlertsLoaded] = useState(false);
-  const [alertFilters, setAlertFilters] = useState<AlertFilters>({});
+  // S-D (A1): the global contest scope seeds from THIS TAB's URL ?contest=
+  // param, so two browser tabs run two parallel drives independently.
+  const [alertFilters, setAlertFilters] = useState<AlertFilters>(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("contest")?.trim() ?? "";
+    return fromUrl ? { contest_slug: fromUrl } : {};
+  });
+  // S-D: the contests list feeding the selector dropdown (and the Contests
+  // tab keeps it fresh via onContestsChanged).
+  const [adminContests, setAdminContests] = useState<ContestSummary[] | null>(null);
+  // One-shot guard: the single-open-contest auto-default applies once per tab.
+  const contestDefaultApplied = useRef(false);
   const [rooms, setRooms] = useState<string[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
@@ -2013,6 +2025,32 @@ function AdminApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, alertsLoaded, password]);
+
+  // S-D (A1): load the contests list for the selector once unlocked; apply the
+  // single-open-contest auto-default ONCE per tab (an explicit URL ?contest=
+  // always wins inside defaultContestSelection).
+  useEffect(() => {
+    if (!unlocked) return;
+    let cancelled = false;
+    void fetchContests(password, true)
+      .then((list) => {
+        if (cancelled) return;
+        setAdminContests(list);
+        if (!contestDefaultApplied.current) {
+          contestDefaultApplied.current = true;
+          const fromUrl = new URLSearchParams(window.location.search).get("contest")?.trim() ?? "";
+          const selection = defaultContestSelection(list, fromUrl);
+          if (selection && selection !== fromUrl) selectContest(selection);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAdminContests([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, password]);
 
   // Auto-load stats the first time the unlocked admin opens the stats tab.
   useEffect(() => {
@@ -2557,6 +2595,19 @@ function AdminApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, alertSettings, password]);
 
+  // S-D (A1): apply a contest selection everywhere — state, the loaded tabs,
+  // and THIS TAB's URL (?contest=) so a reload or duplicated tab keeps its
+  // scope (two tabs = two parallel drives).
+  const selectContest = (slug: string) => {
+    const next = { ...alertFilters, contest_slug: slug || undefined };
+    setAlertFilters(next);
+    window.history.replaceState(null, "", `${window.location.pathname}${searchWithContestParam(window.location.search, slug)}`);
+    void loadStats(next);
+    if (alertsLoaded) void loadAlerts(next);
+    if (sessionsList !== null) void loadSessions(next);
+    if (ipReport !== null) void loadIpReport(undefined, next);
+  };
+
   if (!unlocked) {
     return (
       <Shell>
@@ -2584,6 +2635,7 @@ function AdminApp() {
     <Shell>
       <nav className="mb-5 flex flex-wrap gap-2" aria-label="Admin views">
         <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
+        <AdminTab active={view === "contests"} onClick={() => setView("contests")} icon={<ListChecks size={16} />} label="Contests" />
         <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
         <AdminTab active={view === "sessions"} onClick={() => { setView("sessions"); void loadSessions(); }} icon={<Users size={16} />} label="Sessions" />
         <AdminTab active={view === "ips"} onClick={() => { setView("ips"); void loadIpReport(); }} icon={<Network size={16} />} label="IP report" />
@@ -2594,25 +2646,13 @@ function AdminApp() {
         <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
       </nav>
 
-      {/* A1: GLOBAL CONTEST FILTER — below the nav so it scopes EVERY tab. */}
-      <ContestFilterBanner
+      {/* A1 (S-D): GLOBAL CONTEST SELECTOR — below the nav so it scopes EVERY
+          tab; the selection persists in this tab's URL ?contest= param. */}
+      <ContestSelectorBar
+        contests={adminContests}
         contestSlug={alertFilters.contest_slug ?? ""}
-        onApply={(slug) => {
-          const next = { ...alertFilters, contest_slug: slug };
-          setAlertFilters(next);
-          void loadStats(next);
-          if (alertsLoaded) void loadAlerts(next);
-          if (sessionsList !== null) void loadSessions(next);
-          if (ipReport !== null) void loadIpReport(undefined, next);
-        }}
-        onClear={() => {
-          const next = { ...alertFilters, contest_slug: undefined };
-          setAlertFilters(next);
-          void loadStats(next);
-          if (alertsLoaded) void loadAlerts(next);
-          if (sessionsList !== null) void loadSessions(next);
-          if (ipReport !== null) void loadIpReport(undefined, next);
-        }}
+        onSelect={selectContest}
+        onManage={() => setView("contests")}
       />
 
       {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
@@ -2728,6 +2768,14 @@ function AdminApp() {
           onAction={runAction}
           onArchive={(ids, action) => void archiveAlerts(ids, action)}
           onApproveArchive={(alert, targetSessionId) => void approveAndArchive(alert, targetSessionId)}
+        />
+      ) : null}
+
+      {view === "contests" ? (
+        <ContestsPanel
+          password={password}
+          renderRoster={(slug) => <CandidateRosterSection password={password} contestSlug={slug} />}
+          onContestsChanged={setAdminContests}
         />
       ) : null}
 
@@ -3596,57 +3644,54 @@ function ReviewRosterSection({
 // for Stats/Alerts only). Sessions is NOT auto-polled — the poll effect guards on
 // view==='stats'||'alerts' — so the parent re-loads the Sessions list explicitly
 // (on tab-open, stat-card drill, status change, Refresh, and post-approve).
-function ContestFilterBanner({ contestSlug, onApply, onClear }: { contestSlug: string; onApply: (slug: string) => void; onClear: () => void }) {
-  const [draft, setDraft] = useState("");
-  if (contestSlug) {
-    return (
-      <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-accent/30 bg-accent/5 p-3 text-sm">
-        <span className="inline-flex items-center gap-2 text-accent">
-          <ListFilter size={16} />
-          <span className="font-medium text-ink">Contest filter active:</span>
-          <span className="font-mono font-semibold text-ink">{contestSlug}</span>
+// S-D (A1): the real contest SELECTOR — a dropdown of every contest (legacy
+// included) replacing the old type-a-slug banner. The selection scopes
+// Sessions/Alerts/Recordings/IP/Attendance/Stats via the existing contest_slug
+// filters and persists in this tab's URL. A selected slug that is not in the
+// dropdown (deep link to an old/purged slug) renders as a literal option so
+// the URL state is never silently dropped.
+function ContestSelectorBar({ contests, contestSlug, onSelect, onManage }: {
+  contests: ContestSummary[] | null;
+  contestSlug: string;
+  onSelect: (slug: string) => void;
+  onManage: () => void;
+}) {
+  const known = contests ?? [];
+  const unknownSelection = contestSlug && !known.some((contest) => contest.slug === contestSlug);
+  return (
+    <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel p-3 text-sm shadow-subtle">
+      <label className="flex items-center gap-2">
+        <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
+          <ListFilter size={13} /> Contest
         </span>
+        <select
+          className="focus-ring h-9 min-w-[16rem] rounded-md border border-line bg-white px-3 text-sm"
+          value={contestSlug}
+          onChange={(event) => onSelect(event.target.value)}
+        >
+          <option value="">All contests</option>
+          {known.map((contest) => (
+            <option key={contest.slug} value={contest.slug}>
+              {contest.name} ({contest.slug}) — {contest.status}{contest.legacy ? " · legacy" : ""}
+            </option>
+          ))}
+          {unknownSelection ? <option value={contestSlug}>{contestSlug} (unknown slug)</option> : null}
+        </select>
+      </label>
+      {contestSlug ? (
         <button
           type="button"
-          onClick={onClear}
-          className="focus-ring ml-auto inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-white px-3 text-xs font-medium text-ink hover:border-ink/40"
+          onClick={() => onSelect("")}
+          className="focus-ring inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-white px-3 text-xs font-medium text-ink hover:border-ink/40"
         >
           <X size={14} /> Clear
         </button>
-      </div>
-    );
-  }
-  return (
-    <form
-      className="mb-5 flex flex-wrap items-end gap-3 rounded-lg border border-line bg-panel p-3 shadow-subtle"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const next = draft.trim();
-        if (next) {
-          onApply(next);
-          setDraft("");
-        }
-      }}
-    >
-      <label className="block">
-        <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
-          <ListFilter size={13} /> Filter by contest slug
-        </span>
-        <input
-          className="focus-ring mt-1 h-9 w-56 rounded-md border border-line bg-white px-3 text-sm"
-          value={draft}
-          placeholder="all contests"
-          onChange={(event) => setDraft(event.target.value)}
-        />
-      </label>
-      <button
-        type="submit"
-        disabled={!draft.trim()}
-        className="focus-ring inline-flex h-9 items-center gap-1.5 rounded-md bg-ink px-4 text-xs font-medium text-white disabled:opacity-50"
-      >
-        Apply
-      </button>
-    </form>
+      ) : null}
+      <span className="ml-auto text-xs text-muted">
+        Scopes every tab · kept in this tab's URL (open another browser tab for a second contest) ·{" "}
+        <button type="button" className="focus-ring underline" onClick={onManage}>manage contests</button>
+      </span>
+    </div>
   );
 }
 
