@@ -17,16 +17,23 @@ export type ShellGate = "form" | "pending_approval" | "locked" | "ended" | "runn
 
 export type Stage = 1 | 2 | 3 | 4 | 5;
 
-// Spec §4: the five onboarding stages — at-a-distance label + stage-block color.
+// F5.1: the five onboarding stages — at-a-distance label + stage-block color.
+// Permissions come FIRST (all browser prompts before fullscreen, so a prompt
+// can never kick the candidate out of fullscreen), then fullscreen, then the
+// details form INSIDE fullscreen; recording starts immediately on submit.
 export const STAGE_META: Record<Stage, { label: string; blockClass: string }> = {
-  1: { label: "FULLSCREEN", blockClass: "bg-red-600" },
-  2: { label: "DETAILS", blockClass: "bg-amber-500" },
-  3: { label: "GET READY", blockClass: "bg-sky-500" },
+  1: { label: "PERMISSIONS", blockClass: "bg-red-600" },
+  2: { label: "FULLSCREEN", blockClass: "bg-amber-500" },
+  3: { label: "DETAILS", blockClass: "bg-sky-500" },
   4: { label: "IN EXAM", blockClass: "bg-emerald-600" },
   5: { label: "DONE", blockClass: "bg-indigo-600" }
 };
 
 export type StageInput = {
+  // F5.1: the screen share (the one REQUIRED permission) is acquired and live,
+  // or recording is already running. Streams never survive a reload, so a
+  // resumed session reruns stage 1+2 before its form-less resume.
+  permissionsReady: boolean;
   fullscreen: boolean;
   gate: ShellGate;
   status: SessionStatus;
@@ -36,14 +43,16 @@ export type StageInput = {
   examReleased: boolean;
 };
 
-// Spec §4 derivation contract. Priority: ended wins; then the fullscreen gate;
-// then session progress. `locked` reports 3 — the spec's "keeps the last
-// pre-lock stage" is unimplementable in a pure function, and the bar never
-// renders while locked (see topBarVisible), so the value is unobservable.
-export function deriveStage({ fullscreen, gate, status, examReleased }: StageInput): Stage {
+// Spec §4 derivation contract (F5.1 order). Priority: ended wins; then the
+// permissions gate; then the fullscreen gate; then session progress. `locked`
+// reports 3 — the spec's "keeps the last pre-lock stage" is unimplementable in
+// a pure function, and the bar never renders while locked (see topBarVisible),
+// so the value is unobservable.
+export function deriveStage({ permissionsReady, fullscreen, gate, status, examReleased }: StageInput): Stage {
   if (gate === "ended" || status === "ended") return 5;
-  if (!fullscreen) return 1;
-  if (gate === "form") return 2;
+  if (!permissionsReady) return 1;
+  if (!fullscreen) return 2;
+  if (gate === "form") return 3;
   // A session exists (running / pending_approval / locked).
   if (status === "recording" || status === "ending") return examReleased ? 4 : 3;
   return 3;
@@ -56,18 +65,30 @@ export function topBarVisible(barHidden: boolean, gate: ShellGate): boolean {
   return !barHidden && gate !== "locked";
 }
 
-// FullscreenGate overlay visibility. The overlay renders only when out of
-// fullscreen, before DONE, and while no anomaly episode owns fullscreen
-// re-entry (the AnomalyPanel has its own button, §5.2). The locked screen also
-// suppresses it: a locked candidate can do nothing about fullscreen, so the
-// locked message takes precedence over the gate.
+// FullscreenGate overlay visibility. The overlay renders only at stage 2
+// (permissions done, fullscreen pending — stage 1 belongs to PermissionsGate)
+// and while no anomaly episode owns fullscreen re-entry (the AnomalyPanel has
+// its own button, §5.2). The locked screen also suppresses it: a locked
+// candidate can do nothing about fullscreen, so the locked message takes
+// precedence over the gate.
 export function fullscreenGateVisible(input: {
   fullscreen: boolean;
   stage: Stage;
   barHidden: boolean;
   gate: ShellGate;
 }): boolean {
-  return !input.fullscreen && input.stage < 5 && !input.barHidden && input.gate !== "locked";
+  return !input.fullscreen && input.stage === 2 && !input.barHidden && input.gate !== "locked";
+}
+
+// F5.1: PermissionsGate overlay visibility — owns stage 1 the way the
+// fullscreen gate owns stage 2. Hidden during an anomaly episode (the panel
+// owns the screen) and on the locked screen (nothing the candidate can do).
+export function permissionsGateVisible(input: {
+  stage: Stage;
+  barHidden: boolean;
+  gate: ShellGate;
+}): boolean {
+  return input.stage === 1 && !input.barHidden && input.gate !== "locked";
 }
 
 // Spec §7.4: the one-line close-up hint under the bar — survives from the
@@ -78,20 +99,21 @@ export function stageHint(input: StageInput & { ownEditor: boolean }): string {
   const stage = deriveStage(input);
   const { gate, status, ownEditor } = input;
   if (stage === 5) return "Your test is complete. You may close this tab.";
-  if (stage === 1) return "The exam runs in fullscreen from start to finish. Enter fullscreen to continue.";
-  if (stage === 2) return "Read the rules, fill in your details and consent, then start proctoring.";
+  if (stage === 1) return "Set up your exam permissions first — share your entire screen and allow camera, microphone and clipboard access.";
+  if (stage === 2) return "Permissions are set. The exam runs in fullscreen from start to finish — enter fullscreen to continue.";
   if (stage === 4) {
     return ownEditor
       ? "Recording is active. Solve the problem in the coding workspace below and keep this tab running. End the test here when you submit."
       : "Recording is active. Open HackerRank with the Start test button and keep this tab running. End the test here when you submit.";
   }
-  // Stage 3 — GET READY variants.
+  // Stage 3 — DETAILS + waiting variants (form, approval, resume, room gate).
   if (gate === "pending_approval") return "Waiting for a proctor to approve this device. Stay on this page.";
   if (gate === "locked") return "Your session is locked. Call a proctor to unlock you.";
-  if (status === "starting") return "Follow the browser prompt and share your Entire Screen.";
+  if (gate === "form") return "Read the rules, fill in your details and consent, then start proctoring.";
+  if (status === "starting") return "Starting recording — if your browser asks again, share your Entire Screen.";
   if (status === "error") return "Recording has stopped. Use the Retry button on this page to finish ending your test.";
   if (status === "recording" || status === "ending") return "Recording is active. Waiting for your room's exam code to be released.";
-  return "Your session was restored. Press Resume recording to share your screen again and continue.";
+  return "Your session was restored. Press Resume recording to continue — your screen share is already set up.";
 }
 
 // Right side of the bar: a ticking local wall clock — every stage gets a
@@ -110,6 +132,15 @@ export function formatExamElapsed(totalSeconds: number): string {
   const seconds = safe % 60;
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+// F5.7: the elapsed count-up ticks ONLY while actively recording AND the
+// session has not ended. The moment status or gate reports ended the interval
+// must stop and the last value freezes (the bar reflects the ended state —
+// never a count-up after test end). "ending"/"error" also freeze: the exam is
+// over, only the submit is in flight.
+export function elapsedTimerActive(input: { status: SessionStatus; gate: ShellGate }): boolean {
+  return input.status === "recording" && input.gate !== "ended";
 }
 
 // ---- Spec §6: anomaly classification ---------------------------------------

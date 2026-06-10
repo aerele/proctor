@@ -1,7 +1,8 @@
 // frontend/src/shell/examShell.test.ts
 import { describe, it, expect } from "vitest";
 import {
-  deriveStage, stageHint, topBarVisible, fullscreenGateVisible, STAGE_META,
+  deriveStage, stageHint, topBarVisible, fullscreenGateVisible, permissionsGateVisible,
+  elapsedTimerActive, STAGE_META,
   formatWallClock, formatExamElapsed,
   anomalyFromEvent, topBarReducer, initialTopBarState,
   serializeShellState, deserializeShellState, shellStateStorageKey,
@@ -10,32 +11,39 @@ import {
 } from "./examShell";
 import type { ProctorEvent } from "../types";
 
-const base: StageInput = { fullscreen: true, gate: "form", status: "idle", examReleased: true };
+const base: StageInput = { permissionsReady: true, fullscreen: true, gate: "form", status: "idle", examReleased: true };
 
 describe("deriveStage", () => {
-  it("1 FULLSCREEN: not in fullscreen, in any pre-end state", () => {
-    expect(deriveStage({ ...base, fullscreen: false })).toBe(1);
-    expect(deriveStage({ ...base, fullscreen: false, gate: "running", status: "recording" })).toBe(1);
-    expect(deriveStage({ ...base, fullscreen: false, gate: "pending_approval" })).toBe(1);
+  it("1 PERMISSIONS: streams not acquired, in any pre-end state (F5.1 — prompts before fullscreen)", () => {
+    expect(deriveStage({ ...base, permissionsReady: false })).toBe(1);
+    expect(deriveStage({ ...base, permissionsReady: false, fullscreen: false })).toBe(1);
+    // Resume after reload: streams never survive — stage A reruns before the form-less resume.
+    expect(deriveStage({ ...base, permissionsReady: false, gate: "running", status: "idle" })).toBe(1);
+    expect(deriveStage({ ...base, permissionsReady: false, gate: "pending_approval" })).toBe(1);
   });
-  it("2 DETAILS: fullscreen OK, no session yet (gate form), incl. registration in flight", () => {
-    expect(deriveStage(base)).toBe(2);
-    expect(deriveStage({ ...base, status: "starting" })).toBe(2);
+  it("2 FULLSCREEN: permissions ready but not in fullscreen", () => {
+    expect(deriveStage({ ...base, fullscreen: false })).toBe(2);
+    expect(deriveStage({ ...base, fullscreen: false, gate: "running", status: "recording" })).toBe(2);
+    expect(deriveStage({ ...base, fullscreen: false, gate: "pending_approval" })).toBe(2);
   });
-  it("3 GET READY: session exists but surface not live (resume needed / share starting / pending approval)", () => {
+  it("3 DETAILS: permissions + fullscreen OK, no session yet (gate form), incl. registration in flight", () => {
+    expect(deriveStage(base)).toBe(3);
+    expect(deriveStage({ ...base, status: "starting" })).toBe(3);
+  });
+  it("3 DETAILS: session exists but surface not live (resume ready / start in flight / pending approval)", () => {
     expect(deriveStage({ ...base, gate: "running", status: "idle" })).toBe(3);
     expect(deriveStage({ ...base, gate: "running", status: "starting" })).toBe(3);
     expect(deriveStage({ ...base, gate: "pending_approval", status: "idle" })).toBe(3);
   });
-  it("3 GET READY: recording but the room gate has not released the exam (S3 seam)", () => {
+  it("3 DETAILS: recording but the room gate has not released the exam (S3 seam)", () => {
     expect(deriveStage({ ...base, gate: "running", status: "recording", examReleased: false })).toBe(3);
   });
   it("4 IN EXAM: recording (and ending) with the exam released", () => {
     expect(deriveStage({ ...base, gate: "running", status: "recording" })).toBe(4);
     expect(deriveStage({ ...base, gate: "running", status: "ending" })).toBe(4);
   });
-  it("5 DONE: ended wins over everything, even out of fullscreen", () => {
-    expect(deriveStage({ ...base, gate: "ended", status: "ended", fullscreen: false })).toBe(5);
+  it("5 DONE: ended wins over everything, even with permissions/fullscreen lost", () => {
+    expect(deriveStage({ ...base, gate: "ended", status: "ended", fullscreen: false, permissionsReady: false })).toBe(5);
     expect(deriveStage({ ...base, gate: "running", status: "ended" })).toBe(5);
   });
   it("locked reports 3 (the bar is hidden on the locked screen anyway)", () => {
@@ -44,10 +52,10 @@ describe("deriveStage", () => {
 });
 
 describe("STAGE_META", () => {
-  it("carries the spec §4 label + color block per stage", () => {
-    expect(STAGE_META[1]).toEqual({ label: "FULLSCREEN", blockClass: "bg-red-600" });
-    expect(STAGE_META[2]).toEqual({ label: "DETAILS", blockClass: "bg-amber-500" });
-    expect(STAGE_META[3]).toEqual({ label: "GET READY", blockClass: "bg-sky-500" });
+  it("carries the F5.1 label + color block per stage (1 permissions, 2 fullscreen, 3 details, 4 exam, 5 done)", () => {
+    expect(STAGE_META[1]).toEqual({ label: "PERMISSIONS", blockClass: "bg-red-600" });
+    expect(STAGE_META[2]).toEqual({ label: "FULLSCREEN", blockClass: "bg-amber-500" });
+    expect(STAGE_META[3]).toEqual({ label: "DETAILS", blockClass: "bg-sky-500" });
     expect(STAGE_META[4]).toEqual({ label: "IN EXAM", blockClass: "bg-emerald-600" });
     expect(STAGE_META[5]).toEqual({ label: "DONE", blockClass: "bg-indigo-600" });
   });
@@ -64,32 +72,74 @@ describe("topBarVisible", () => {
 });
 
 describe("fullscreenGateVisible", () => {
-  it("shows the gate when out of fullscreen pre-DONE with no anomaly episode", () => {
-    expect(fullscreenGateVisible({ fullscreen: false, stage: 1, barHidden: false, gate: "form" })).toBe(true);
-    expect(fullscreenGateVisible({ fullscreen: false, stage: 3, barHidden: false, gate: "running" })).toBe(true);
+  it("shows the gate ONLY at stage 2 (permissions done, fullscreen pending) with no anomaly episode", () => {
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 2, barHidden: false, gate: "form" })).toBe(true);
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 2, barHidden: false, gate: "running" })).toBe(true);
+  });
+  it("stage 1 belongs to the PermissionsGate — fullscreen gate stays hidden", () => {
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 1, barHidden: false, gate: "form" })).toBe(false);
   });
   it("hides the gate while in fullscreen", () => {
-    expect(fullscreenGateVisible({ fullscreen: true, stage: 2, barHidden: false, gate: "form" })).toBe(false);
+    expect(fullscreenGateVisible({ fullscreen: true, stage: 3, barHidden: false, gate: "form" })).toBe(false);
   });
   it("hides the gate at stage 5 DONE", () => {
     expect(fullscreenGateVisible({ fullscreen: false, stage: 5, barHidden: false, gate: "ended" })).toBe(false);
   });
   it("hides the gate while an anomaly episode owns fullscreen re-entry", () => {
-    expect(fullscreenGateVisible({ fullscreen: false, stage: 4, barHidden: true, gate: "running" })).toBe(false);
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 2, barHidden: true, gate: "running" })).toBe(false);
   });
   it("locked + not fullscreen: gate hidden — the locked message takes precedence", () => {
-    expect(fullscreenGateVisible({ fullscreen: false, stage: 3, barHidden: false, gate: "locked" })).toBe(false);
+    expect(fullscreenGateVisible({ fullscreen: false, stage: 2, barHidden: false, gate: "locked" })).toBe(false);
+  });
+});
+
+describe("permissionsGateVisible", () => {
+  it("shows at stage 1 (permissions pending) with no anomaly episode", () => {
+    expect(permissionsGateVisible({ stage: 1, barHidden: false, gate: "form" })).toBe(true);
+    // Resume after reload: gate running, streams gone — stage A reruns over the restored app.
+    expect(permissionsGateVisible({ stage: 1, barHidden: false, gate: "running" })).toBe(true);
+  });
+  it("hidden once permissions are ready (stage 2+)", () => {
+    expect(permissionsGateVisible({ stage: 2, barHidden: false, gate: "form" })).toBe(false);
+    expect(permissionsGateVisible({ stage: 3, barHidden: false, gate: "form" })).toBe(false);
+    expect(permissionsGateVisible({ stage: 5, barHidden: false, gate: "ended" })).toBe(false);
+  });
+  it("hidden during an anomaly episode and on the locked screen", () => {
+    expect(permissionsGateVisible({ stage: 1, barHidden: true, gate: "running" })).toBe(false);
+    expect(permissionsGateVisible({ stage: 1, barHidden: false, gate: "locked" })).toBe(false);
+  });
+});
+
+describe("elapsedTimerActive", () => {
+  it("ticks only while actively recording", () => {
+    expect(elapsedTimerActive({ status: "recording", gate: "running" })).toBe(true);
+  });
+  it("F5.7: stops the moment the session/gate ends — never a count-up after test end", () => {
+    expect(elapsedTimerActive({ status: "ended", gate: "ended" })).toBe(false);
+    expect(elapsedTimerActive({ status: "recording", gate: "ended" })).toBe(false);
+    expect(elapsedTimerActive({ status: "ended", gate: "running" })).toBe(false);
+  });
+  it("frozen while ending / idle / starting / error", () => {
+    expect(elapsedTimerActive({ status: "ending", gate: "running" })).toBe(false);
+    expect(elapsedTimerActive({ status: "idle", gate: "running" })).toBe(false);
+    expect(elapsedTimerActive({ status: "starting", gate: "running" })).toBe(false);
+    expect(elapsedTimerActive({ status: "error", gate: "running" })).toBe(false);
   });
 });
 
 describe("stageHint", () => {
-  it("stage 1: fullscreen instruction", () => {
+  it("stage 1: permissions + screen-share instruction (prompts happen BEFORE fullscreen)", () => {
+    const hint = stageHint({ ...base, permissionsReady: false, ownEditor: true });
+    expect(hint).toMatch(/permission/i);
+    expect(hint).toMatch(/screen/i);
+  });
+  it("stage 2: fullscreen instruction", () => {
     expect(stageHint({ ...base, fullscreen: false, ownEditor: true })).toMatch(/fullscreen/i);
   });
-  it("stage 2: details + start proctoring", () => {
+  it("stage 3: details + start proctoring", () => {
     expect(stageHint({ ...base, ownEditor: true })).toMatch(/details/i);
   });
-  it("stage 3 variants: pending approval / locked / resume / share prompt / end-retry / waiting for release", () => {
+  it("stage 3 variants: pending approval / locked / resume / start in flight / end-retry / waiting for release", () => {
     expect(stageHint({ ...base, gate: "pending_approval", ownEditor: true })).toMatch(/approve/i);
     expect(stageHint({ ...base, gate: "locked", ownEditor: true })).toMatch(/locked/i);
     expect(stageHint({ ...base, gate: "running", status: "idle", ownEditor: true })).toMatch(/resume recording/i);

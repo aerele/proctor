@@ -6,6 +6,11 @@ type RecorderOptions = {
   sessionId: string;
   config: SessionStartResponse["upload_config"];
   heartbeatSeconds: number;
+  // F5.1 permissions-first onboarding: streams already acquired by the stage-1
+  // PermissionsGate. start() claims and reuses them instead of re-prompting;
+  // a stream the candidate killed between setup and start falls back to the
+  // prompting path (the submit click's activation usually still covers it).
+  acquired?: AcquiredMedia;
   onEvent: (event: ProctorEvent) => void;
   onUploadChange: (depth: number, uploaded: number) => void;
   onFatalError: (message: string) => void;
@@ -66,6 +71,137 @@ export function classifyStartError(error: unknown): RecorderStartErrorKind {
     }
   }
   return "unknown";
+}
+
+// ---- F5.1 permissions-first stream acquisition ------------------------------
+//
+// The stage-1 PermissionsGate acquires every stream BEFORE the session exists
+// (and before fullscreen), then hands them to the recorder at start(). These
+// standalone helpers are shared by the gate (via App.tsx) and by start()'s
+// own prompting/re-prompt path so the surface guard and the camera fallback
+// ladder live in exactly one place.
+
+export type AcquiredMedia = {
+  screen: MediaStream | null;
+  cameraMic: MediaStream | null;
+  // The fallback-ladder label of the cameraMic acquisition (for the
+  // camera_microphone_started audit event).
+  cameraMicMode: string | null;
+};
+
+// Pre-session screen constraints — mirror of the backend uploadConfig defaults
+// (handler.mjs). start() re-applies the session's authoritative values via
+// applyConstraints, so a server-side change still wins.
+export const SETUP_SCREEN_CONSTRAINTS = { maxWidth: 960, maxFrameRate: 4 };
+
+type EmitFn = (type: string, detail?: Record<string, unknown>) => void;
+
+// Prompt for the screen share and enforce the ENTIRE-SCREEN surface. Throws
+// (classifiable via classifyStartError) on cancel/denial/invalid surface; an
+// invalid tab/window share is stopped and rejected BEFORE anything observes it.
+export async function acquireScreenShareStream(
+  constraints: { maxWidth: number; maxFrameRate: number },
+  emit: EmitFn
+): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error("Screen recording is not supported. Use latest Chrome or Edge.");
+  }
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      width: { ideal: constraints.maxWidth },
+      frameRate: { ideal: constraints.maxFrameRate, max: constraints.maxFrameRate }
+    },
+    audio: false
+  });
+  const [track] = stream.getVideoTracks();
+  const settings = track?.getSettings() as (MediaTrackSettings & { displaySurface?: string }) | undefined;
+  if (settings?.displaySurface && settings.displaySurface !== "monitor") {
+    emit("invalid_share_surface", {
+      display_surface: settings.displaySurface,
+      required_surface: "monitor"
+    });
+    stream.getTracks().forEach((t) => t.stop());
+    throw new InvalidShareSurfaceError(settings.displaySurface);
+  }
+  return stream;
+}
+
+export type CameraMicAcquireResult = {
+  stream: MediaStream | null;
+  captureMode: string | null;
+  camera: "granted" | "denied" | "unavailable";
+  microphone: "granted" | "denied" | "unavailable";
+};
+
+// The optional camera+microphone fallback ladder (camera+mic -> camera-only ->
+// mic-only). NEVER throws: camera/mic stay optional — failures are returned as
+// statuses (and audited via emit) so the candidate is never blocked by them.
+export async function acquireCameraMicrophone(emit: EmitFn): Promise<CameraMicAcquireResult> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    emit("camera_microphone_unavailable", { reason: "getUserMedia not supported" });
+    return { stream: null, captureMode: null, camera: "unavailable", microphone: "unavailable" };
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices?.().catch(() => []);
+  const hasCamera = !devices?.length || devices.some((device) => device.kind === "videoinput");
+  const hasMicrophone = !devices?.length || devices.some((device) => device.kind === "audioinput");
+
+  if (!hasCamera && !hasMicrophone) {
+    emit("camera_microphone_unavailable", { reason: "No camera or microphone devices detected" });
+    return { stream: null, captureMode: null, camera: "unavailable", microphone: "unavailable" };
+  }
+
+  const preferredVideo: MediaTrackConstraints = {
+    width: { ideal: 320, max: 640 },
+    height: { ideal: 240, max: 480 },
+    frameRate: { ideal: 6, max: 10 }
+  };
+  const preferredAudio: MediaTrackConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true
+  };
+  const attempts: Array<{ label: string; constraints: MediaStreamConstraints }> = [];
+
+  if (hasCamera && hasMicrophone) {
+    attempts.push({ label: "camera_and_microphone", constraints: { video: preferredVideo, audio: preferredAudio } });
+  }
+  if (hasCamera) attempts.push({ label: "camera_only", constraints: { video: preferredVideo, audio: false } });
+  if (hasMicrophone) attempts.push({ label: "microphone_only", constraints: { video: false, audio: preferredAudio } });
+
+  let lastError: unknown = null;
+  for (const attempt of attempts) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
+      return {
+        stream,
+        captureMode: attempt.label,
+        camera: stream.getVideoTracks().length ? "granted" : hasCamera ? "denied" : "unavailable",
+        microphone: stream.getAudioTracks().length ? "granted" : hasMicrophone ? "denied" : "unavailable"
+      };
+    } catch (error) {
+      lastError = error;
+      emit("optional_media_capture_attempt_failed", { attempt: attempt.label, message: String(error) });
+    }
+  }
+
+  emit("camera_microphone_optional_capture_failed", {
+    message: String(lastError),
+    camera_available: hasCamera,
+    microphone_available: hasMicrophone
+  });
+  return {
+    stream: null,
+    captureMode: null,
+    camera: hasCamera ? "denied" : "unavailable",
+    microphone: hasMicrophone ? "denied" : "unavailable"
+  };
+}
+
+function streamFullyLive(stream: MediaStream | null): boolean {
+  if (!stream) return false;
+  const tracks = stream.getTracks();
+  return tracks.length > 0 && tracks.every((track) => track.readyState === "live");
 }
 
 function createEvent(type: string, detail?: Record<string, unknown>): ProctorEvent {
@@ -277,36 +413,35 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
 
   const controls: RecorderControls = {
     async start() {
-      if (!navigator.mediaDevices?.getDisplayMedia) {
-        throw new Error("Screen recording is not supported. Use latest Chrome or Edge.");
-      }
+      // F5.1: claim the handed-over streams up front so stop() owns their
+      // cleanup even when start() throws part-way (no orphaned camera/screen
+      // capture indicators after a failed start).
+      const acquired = options.acquired;
+      if (acquired?.cameraMic) cameraStream = acquired.cameraMic;
 
-      screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
+      const preScreen = acquired?.screen ?? null;
+      if (preScreen && preScreen.getVideoTracks()[0]?.readyState === "live") {
+        // Reuse the stage-1 share — NO second prompt. The acquisition path
+        // already enforced the entire-screen surface; the server's upload
+        // config is authoritative, so re-align the track with it.
+        screenStream = preScreen;
+        await screenStream.getVideoTracks()[0].applyConstraints({
           width: { ideal: options.config.max_width },
           frameRate: { ideal: options.config.max_frame_rate, max: options.config.max_frame_rate }
-        },
-        audio: false
-      });
+        }).catch(() => undefined);
+      } else {
+        // No pre-acquired share, or the candidate killed it between setup and
+        // start — re-prompt (the surface guard runs inside, and throws a typed
+        // error BEFORE any recording starts so the host shows an inline retry).
+        preScreen?.getTracks().forEach((track) => track.stop());
+        screenStream = await acquireScreenShareStream(
+          { maxWidth: options.config.max_width, maxFrameRate: options.config.max_frame_rate },
+          emit
+        );
+      }
 
       const [screenTrack] = screenStream.getVideoTracks();
       const screenSettings = screenTrack?.getSettings() as MediaTrackSettings & { displaySurface?: string };
-
-      // INVALID-SURFACE GUARD — runs BEFORE we attach the ended-listener, start
-      // the camera/mic, build the combined stream, or create the MediaRecorder.
-      // If the student shared a tab/window/browser instead of the whole monitor,
-      // we stop the obtained stream and throw a typed error so the host keeps the
-      // UI in a clear NOT-RECORDING state and offers an inline retry. No recording
-      // is ever started for an invalid surface.
-      if (screenSettings?.displaySurface && screenSettings.displaySurface !== "monitor") {
-        emit("invalid_share_surface", {
-          display_surface: screenSettings.displaySurface,
-          required_surface: "monitor"
-        });
-        screenStream.getTracks().forEach((track) => track.stop());
-        screenStream = null;
-        throw new InvalidShareSurfaceError(screenSettings.displaySurface);
-      }
 
       // Valid full-screen share confirmed — now it is safe to wire up the
       // stop-detection and begin capture.
@@ -317,7 +452,16 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         options.onFatalError("Screen sharing stopped. Return to the proctor app immediately.");
       });
 
-      await startCameraAndMicrophone();
+      if (streamFullyLive(cameraStream)) {
+        // Reuse the stage-1 camera/mic acquisition as-is.
+        bindOptionalMediaTracks(acquired?.cameraMicMode ?? "preacquired");
+      } else {
+        // Nothing pre-acquired, or a track died in between: re-run the ladder
+        // (permissions already granted in stage 1 mean no visible prompt).
+        cameraStream?.getTracks().forEach((track) => track.stop());
+        cameraStream = null;
+        await startCameraAndMicrophone();
+      }
       startDirectScreenRecordingStream();
       bindPageEvents();
       emit("combined_recording_started", {
@@ -325,6 +469,7 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         display_surface: screenSettings?.displaySurface || "unknown",
         chunk_seconds: options.config.chunk_seconds,
         recording_mode: "direct_screen_stream",
+        screen_source: screenStream === preScreen ? "preacquired" : "prompted",
         camera_overlay: "disabled_for_reliable_background_recording",
         audio: mediaState.microphone === "recording" ? "microphone" : "none"
       });
@@ -364,61 +509,17 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   return controls;
 
   async function startCameraAndMicrophone() {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      updateMediaState("camera", "unavailable");
-      updateMediaState("microphone", "unavailable");
-      emit("camera_microphone_unavailable", { reason: "getUserMedia not supported" });
+    // Shared F5.1 ladder — the same code path the PermissionsGate uses, so the
+    // audit events (camera_microphone_unavailable / attempt_failed / optional_
+    // capture_failed) stay identical wherever the acquisition happens.
+    const result = await acquireCameraMicrophone(emit);
+    cameraStream = result.stream;
+    if (result.stream) {
+      bindOptionalMediaTracks(result.captureMode ?? "unknown");
       return;
     }
-
-    const devices = await navigator.mediaDevices.enumerateDevices?.().catch(() => []);
-    const hasCamera = !devices?.length || devices.some((device) => device.kind === "videoinput");
-    const hasMicrophone = !devices?.length || devices.some((device) => device.kind === "audioinput");
-
-    if (!hasCamera && !hasMicrophone) {
-      updateMediaState("camera", "unavailable");
-      updateMediaState("microphone", "unavailable");
-      emit("camera_microphone_unavailable", { reason: "No camera or microphone devices detected" });
-      return;
-    }
-
-    const preferredVideo: MediaTrackConstraints = {
-      width: { ideal: 320, max: 640 },
-      height: { ideal: 240, max: 480 },
-      frameRate: { ideal: 6, max: 10 }
-    };
-    const preferredAudio: MediaTrackConstraints = {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
-    };
-    const attempts: Array<{ label: string; constraints: MediaStreamConstraints }> = [];
-
-    if (hasCamera && hasMicrophone) {
-      attempts.push({ label: "camera_and_microphone", constraints: { video: preferredVideo, audio: preferredAudio } });
-    }
-    if (hasCamera) attempts.push({ label: "camera_only", constraints: { video: preferredVideo, audio: false } });
-    if (hasMicrophone) attempts.push({ label: "microphone_only", constraints: { video: false, audio: preferredAudio } });
-
-    let lastError: unknown = null;
-    for (const attempt of attempts) {
-      try {
-        cameraStream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
-        bindOptionalMediaTracks(attempt.label);
-        return;
-      } catch (error) {
-        lastError = error;
-        emit("optional_media_capture_attempt_failed", { attempt: attempt.label, message: String(error) });
-      }
-    }
-
-    updateMediaState("camera", hasCamera ? "permission_denied" : "unavailable");
-    updateMediaState("microphone", hasMicrophone ? "permission_denied" : "unavailable");
-    emit("camera_microphone_optional_capture_failed", {
-      message: String(lastError),
-      camera_available: hasCamera,
-      microphone_available: hasMicrophone
-    });
+    updateMediaState("camera", result.camera === "denied" ? "permission_denied" : "unavailable");
+    updateMediaState("microphone", result.microphone === "denied" ? "permission_denied" : "unavailable");
     options.onCameraStream?.(null);
   }
 
