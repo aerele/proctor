@@ -334,3 +334,106 @@ test("a problem UNPUBLISHED after assignment degrades to problem: null (no dead 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
   assert.equal(res.body.problem, null);
 });
+
+// ---- Task 4: exec-from-bank + scoring ----------------------------------------
+
+// Deterministic clock for the per-session exec rate limiter (the exec.test.mjs
+// precedent): every exec test reuses session "s1", so step past the cooldowns
+// between calls rather than weakening the limiter.
+const { __setExecClockForTest } = handler;
+let execNowMs = 0;
+__setExecClockForTest(() => execNowMs);
+const advanceExecClock = (ms) => { execNowMs += ms; };
+
+function seedExecFixture() {
+  advanceExecClock(3600_000); // past any cooldown an earlier test started for "s1"
+  const clients = freshClients();
+  clients.firestore.collection("problems_sessions").doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  return clients;
+}
+
+test("exec/run resolves the problem from the BANK: adapter sees the doc's sample tests + limits", async () => {
+  seedExecFixture();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  const seen = [];
+  __setJudge0AdapterForTest({
+    runBatch: async (items) => {
+      seen.push(...items);
+      return items.map(() => ({ status: "accepted", passed: true, stdout: "ba", stderr: "", compileOutput: "", timeSec: 0.01, memoryKb: 100 }));
+    }
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "rev-str", language: "python", source_code: "print(input()[::-1])" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.results.length, 1);          // rev-str has ONE sample
+  assert.equal(res.body.results[0].input, "ab\n");   // the BANK's sample, not the seed's
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].stdin, "ab\n");
+  assert.equal(seen[0].cpuTimeLimit, 2);             // the BANK's limit
+  assert.equal(seen[0].memoryLimit, 64000);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec/run on a DRAFT problem -> 400 unknown problem_id (drafts are not executable)", async () => {
+  seedExecFixture();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem({ status: "draft" }) }));
+  __setJudge0AdapterForTest({ runBatch: async () => { throw new Error("must not run a draft"); } });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "rev-str", language: "python", source_code: "x" } }));
+  assert.equal(res.statusCode, 400);
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec/run seed fallback: sum-two still works with an empty bank", async () => {
+  seedExecFixture();
+  __setJudge0AdapterForTest({
+    runBatch: async (items) => items.map(() => ({ status: "accepted", passed: true, stdout: "5", stderr: "", compileOutput: "", timeSec: 0.01, memoryKb: 100 }))
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "print(sum(map(int,input().split())))" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.results.length, 2); // the seed's two samples
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec/submit scores per_test: 3/4 hidden passed on an 80-point problem -> score 60, stored + returned", async () => {
+  const { firestore } = seedExecFixture();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() })); // 80 pts, per_test, 4 hidden
+  __setJudge0AdapterForTest({
+    runBatch: async (items) => items.map((_, i) => ({ status: i === 2 ? "wrong_answer" : "accepted", passed: i !== 2, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }))
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "rev-str", language: "python", source_code: "x" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.verdict, "wrong_answer");
+  assert.equal(res.body.passed_count, 3);
+  assert.equal(res.body.score, 60);
+  assert.equal(res.body.max_points, 80);
+  const stored = [...firestore._collections.get("problems_submissions").values()][0];
+  assert.equal(stored.score, 60);
+  assert.equal(stored.max_points, 80);
+  assert.equal(stored.scoring, "per_test");
+  __setJudge0AdapterForTest(null);
+});
+
+test("exec/submit scores all_or_nothing: full sweep pays, partial pays zero", async () => {
+  seedExecFixture();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem({ scoring: "all_or_nothing" }) }));
+  __setJudge0AdapterForTest({
+    runBatch: async (items) => items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }))
+  });
+  const sweep = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "rev-str", language: "python", source_code: "x" } }));
+  assert.equal(sweep.body.score, 80);
+
+  advanceExecClock(21_000); // past the 20 s submit cooldown for "s1"
+  __setJudge0AdapterForTest({
+    runBatch: async (items) => items.map((_, i) => ({ status: i === 0 ? "wrong_answer" : "accepted", passed: i !== 0, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }))
+  });
+  const partial = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "rev-str", language: "python", source_code: "x" } }));
+  assert.equal(partial.body.score, 0);
+  __setJudge0AdapterForTest(null);
+});
