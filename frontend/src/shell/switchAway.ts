@@ -4,10 +4,14 @@
 // visibility_change(hidden) signals within a rolling window collapse into ONE
 // episode; when the window passes with no further away signal the episode
 // closes and the caller emits a single `switch_away_episode` event carrying
-// {count, duration_ms}. The backend's tab_away alerting (threshold-based,
-// admin-configurable) decides whether the episode is alert-worthy — the client
-// NEVER blocks on switch-away (explicit F5.4 decision: proctor reviews video,
-// then acts).
+// {count, duration_ms}. `count` is the number of DISTINCT excursions
+// (not-away → away transitions), not raw signals — one tab switch fires both
+// window_blur and visibility_change(hidden), and double-counting the pair
+// made 2 real switches trip the backend's frequent-switch trigger of 3
+// (wave-3 fix; the raw events still flow to evidence individually). The
+// backend's tab_away alerting (threshold-based, admin-configurable) decides
+// whether the episode is alert-worthy — the client NEVER blocks on
+// switch-away (explicit F5.4 decision: proctor reviews video, then acts).
 
 import type { ProctorEvent } from "../types";
 
@@ -74,9 +78,13 @@ export function switchAwayReducer(state: SwitchAwayState, action: SwitchAwayActi
 
   if (action.kind === "away") {
     if (open && !windowPassed) {
-      // Same episode: extend the rolling window.
+      // Same episode: extend the rolling window. Wave-3 fix: an away signal
+      // while STILL AWAY is the same excursion — one tab switch fires BOTH
+      // window_blur and visibility_change(hidden), and double-counting the
+      // pair made 2 real switches look like the backend's frequent-switch
+      // trigger (3). Count only not-away → away transitions.
       return {
-        state: { ...state, lastAwayMs: action.nowMs, lastSeenMs: action.nowMs, count: state.count + 1, away: true },
+        state: { ...state, lastAwayMs: action.nowMs, lastSeenMs: action.nowMs, count: state.away ? state.count : state.count + 1, away: true },
         episode: null
       };
     }

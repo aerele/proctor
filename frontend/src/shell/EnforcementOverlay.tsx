@@ -13,10 +13,12 @@
 
 import { AlertTriangle, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { FULLSCREEN_ACK_PHRASE, type EnforcementPhase } from "./enforcement";
+import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, type EnforcementPhase, type ViolationPhase } from "./enforcement";
 
-export function EnforcementOverlay({ phase, remainingSeconds, exitCount, ackOk, fullscreen, onAckChange, onEnterFullscreen }: {
+export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, onAckChange, onEnterFullscreen }: {
   phase: EnforcementPhase;
+  /** The violation that tripped the hold — words the alert_hold banner (wave-3). */
+  violation: ViolationPhase | null;
   remainingSeconds: number | null;
   exitCount: number;
   ackOk: boolean;
@@ -71,7 +73,7 @@ export function EnforcementOverlay({ phase, remainingSeconds, exitCount, ackOk, 
             ) : null}
             {phase === "alert_hold" ? (
               <p className="mt-6 rounded-lg border-2 border-red-400 bg-red-800 p-4 text-base font-semibold text-red-100" aria-live="assertive">
-                Time expired — your proctor has been alerted. Complete both steps below to continue, or wait for the invigilator.
+                {alertHoldMessage(violation)}
               </p>
             ) : null}
 

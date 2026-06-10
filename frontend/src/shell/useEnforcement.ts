@@ -18,7 +18,8 @@ import {
   deserializeEnforcementState, enforcementOverlayVisible, enforcementReducer,
   enforcementRemainingSeconds, enforcementStorageKey, initialEnforcementState,
   serializeEnforcementState, FULLSCREEN_ACK_PHRASE,
-  type EnforcementAction, type EnforcementConfig, type EnforcementPhase, type EnforcementState
+  type EnforcementAction, type EnforcementConfig, type EnforcementPhase, type EnforcementState,
+  type ViolationPhase
 } from "./enforcement";
 import { makeShellEvent, type ShellGate } from "./examShell";
 import { initialSwitchAwayState, isSwitchAwaySignal, switchAwayReducer, type SwitchAwayState } from "./switchAway";
@@ -52,6 +53,8 @@ function clearStoredEnforcement(sessionId: string): void {
 
 export type EnforcementApi = {
   phase: EnforcementPhase;
+  /** The violation that tripped locking/alert_hold — words the overlay banner. */
+  violation: ViolationPhase | null;
   exitCount: number;
   /** Countdown seconds while blocking; null otherwise. */
   remainingSeconds: number | null;
@@ -254,6 +257,18 @@ export function useEnforcement(opts: {
     clearStoredEnforcement(sessionIdRef.current);
   }, [gate, status, dispatch, emitEvent]);
 
+  // Wave-3 fix: recording stopped ABNORMALLY (status → "error") — flush the
+  // open switch-away episode immediately. Signals stop being processed and the
+  // 1 s tick stops once recording is false, so without this the episode (and
+  // its tab_away alert) silently evaporated. Session/persisted state stay
+  // untouched: the session may still resume.
+  useEffect(() => {
+    if (status !== "error") return;
+    const { state: nextSw, episode } = switchAwayReducer(switchAwayRef.current, { kind: "flush", nowMs: Date.now() });
+    switchAwayRef.current = nextSw;
+    if (episode) emitEvent("switch_away_episode", { count: episode.count, duration_ms: episode.duration_ms });
+  }, [status, emitEvent]);
+
   const submitAck = useMemo(() => {
     return (text: string) => {
       dispatch({
@@ -267,6 +282,7 @@ export function useEnforcement(opts: {
 
   return {
     phase: state.phase,
+    violation: state.violation,
     exitCount: state.exitCount,
     remainingSeconds: enforcementRemainingSeconds(state, nowMs),
     ackOk: state.ackOk,

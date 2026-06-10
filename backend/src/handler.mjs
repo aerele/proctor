@@ -3171,7 +3171,9 @@ function parseCaptureState(recordingState) {
 
 // F5.4: a debounced switch-away episode is alert-worthy when it is LONG
 // (>= the admin-configurable tab_away threshold) or FREQUENT (this many
-// blur/hide signals inside one rolling episode window).
+// distinct switch-away excursions inside one rolling episode window — the
+// client reducer counts not-away → away transitions, so one tab switch's
+// blur+hidden signal pair is ONE, wave-3 fix).
 const SWITCH_AWAY_FREQUENT_COUNT = 3;
 
 async function raiseSureShotAlertsFromEvents(session, events, settings) {
@@ -3220,16 +3222,18 @@ async function raiseSwitchAwayAlerts(session, events, settings) {
     const durationMs = Math.max(0, intOrZero(detail.duration_ms));
     const count = Math.max(0, intOrZero(detail.count));
     if (durationMs < thresholdMs && count < SWITCH_AWAY_FREQUENT_COUNT) continue;
-    const timestamp = isoOrNow(event.timestamp);
     await upsertProctorAlert(session, {
       type: "tab_away",
       severity: config.severity,
-      timestamp,
+      timestamp: isoOrNow(event.timestamp),
       title: "Switched away from the exam",
       detail: `Away ~${Math.round(durationMs / 1000)}s across ${count} switch(es)`,
       // Per-minute dedupe (not per-day): distinct long episodes should each be
-      // visible; retries of one batch still collapse.
-      dedupe: timestamp.slice(0, 16),
+      // visible; same-minute retries still collapse. Wave-3 fix: keyed on
+      // SERVER time — the event timestamp is client-supplied, so a pinned
+      // stamp could silence every future episode (or spoofed ones could fan
+      // a single batch into many alerts).
+      dedupe: new Date().toISOString().slice(0, 16),
       data: { count, duration_ms: durationMs }
     });
   }
@@ -3998,6 +4002,10 @@ async function sessionUnlockGate(req) {
       // post-release reset — a later accident is L1 again, not an instant relock).
       fullscreen_exit_count: 0,
       fullscreen_out_since: null,
+      // Wave-3: a successful unlock also clears the brute-force counter — wrong
+      // tries from THIS lock must not creep a later re-lock toward the
+      // permanent 429 cap (the proctor was in the loop; the slate is clean).
+      unlock_attempt_count: 0,
       updated_at: now
     });
     return { ok: true, status: "active" };
