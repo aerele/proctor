@@ -75,8 +75,18 @@ export type SessionStartResponse = {
   enforcement?: EnforcementConfigPayload;
   enforcement_exemptions?: EnforcementExemptions;
   locked_reason?: string | null;
-  /** S4: candidate-facing problem assigned to this session (null when unassigned). */
+  /** S4: candidate-facing problem assigned to this session (null when
+   * unassigned). S-I: one-release compatibility alias = problems[0] without
+   * `order`; prefer `problems` when present. */
   problem?: PublicProblem | null;
+  /** S-I §3.4: the contest's ORDERED candidate-facing problems. Absent on
+   * older backends (fall back to `problem`). */
+  problems?: PublicProblem[];
+  /** S-I §3.4: per-problem submit history for this session — restores chips/
+   * attempts/total after a reload. Keyed by problem id. */
+  submissions_summary?: Record<string, ProblemSubmissionSummary>;
+  /** S-I §3.4: max stored submissions per (session, problem). */
+  submit_budget?: number;
   upload_config: {
     chunk_seconds: number;
     video_bits_per_second: number;
@@ -871,13 +881,16 @@ export type ProblemSummary = {
   points: number;
   scoring: ProblemScoring;
   languages: string[];
+  /** S-I §1.2: bank tags (picker/filter chips). Absent on older backends. */
+  tags?: string[];
   sample_count: number;
   hidden_count: number;
   updated_at: string;
 };
 
 // Candidate-facing view delivered inside the start/resume response. NEVER
-// carries hidden tests.
+// carries hidden tests. S-I: `points` is the EFFECTIVE points (contest entry
+// override applied) when the session belongs to a contest.
 export type PublicProblem = {
   id: string;
   title: string;
@@ -887,4 +900,72 @@ export type PublicProblem = {
   cpuTimeLimit: number;
   memoryLimit: number;
   sampleTests: ProblemTest[];
+  /** S-I §3.4: position in the contest's ordered problems[] (absent on the
+   * one-release legacy `problem` alias and on older backends). */
+  order?: number;
+};
+
+// ---- S-I §1: templates + contest problems[] (backend shipped; UI = next wave)
+// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md
+
+/** One ordered problem reference on a contest or template. points null = use
+ * the bank problem's points at serve time; else an int override 0..1000. */
+export type ContestProblemEntry = {
+  problem_id: string;
+  points: number | null;
+  order: number;
+};
+
+/** Template defaults snapshot-copied onto a contest at instantiation (§1.4). */
+export type TemplateDefaults = {
+  duration_minutes: number;
+  identity_label: string;
+  room_gate_enabled: boolean;
+  camera_recording: CameraRecordingConfigPayload;
+  enforcement: EnforcementConfigPayload;
+  evidence_retention_days: number;
+  languages: ProblemLanguage[];
+};
+
+/** Full template doc (GET /api/admin/template?slug=). */
+export type ProctorTemplate = {
+  slug: string;
+  name: string;
+  description: string;
+  archived: boolean;
+  /** true when the row is the code-level seed preset (e.g. system-check). */
+  preset?: boolean;
+  problems: ContestProblemEntry[];
+  defaults: TemplateDefaults;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/** One row from GET /api/admin/templates (summaries only). */
+export type TemplateSummary = {
+  slug: string;
+  name: string;
+  archived: boolean;
+  preset: boolean;
+  problem_count: number;
+  total_points: number;
+  updated_at: string;
+};
+
+/** S-I §1.4.3: what references a problem — rides adminGetProblem and the
+ * 409 problem_referenced / live_edit_confirmation_required guard bodies. */
+export type ProblemReferences = {
+  contests: string[];
+  templates: string[];
+};
+
+/** S-I §3.4: one problem's submit history inside submissions_summary —
+ * restores chips / attempt meters / the workspace total on resume. */
+export type ProblemSubmissionSummary = {
+  best_score: number;
+  max_points: number;
+  attempts: number;
+  best_verdict: string;
+  last_verdict: string;
+  last_submitted_at: string;
 };
