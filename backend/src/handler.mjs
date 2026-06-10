@@ -217,6 +217,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/validate-end") return send(res, 200, await validateEndSession(req));
     if (req.method === "POST" && path === "/api/session/end") return send(res, 200, await endSession(req));
     if (req.method === "POST" && path === "/api/session/room-gate") return send(res, 200, await sessionRoomGate(req));
+    if (req.method === "POST" && path === "/api/session/enforcement-violation") return send(res, 200, await sessionEnforcementViolation(req));
+    if (req.method === "POST" && path === "/api/session/unlock-gate") return send(res, 200, await sessionUnlockGate(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
@@ -251,6 +253,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/invigilator/room") return send(res, 200, await invigilatorRoom(req));
     if (req.method === "POST" && path === "/api/invigilator/release-code") return send(res, 200, await invigilatorReleaseCode(req));
     if (req.method === "POST" && path === "/api/invigilator/open-room") return send(res, 200, await invigilatorOpenRoom(req));
+    if (req.method === "POST" && path === "/api/invigilator/exempt") return send(res, 200, await invigilatorExempt(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
@@ -386,7 +389,10 @@ async function startSession(req) {
     focus_event_count: 0,
     upload_error_count: 0,
     heartbeat_count: 0,
-    chunk_count: 0
+    chunk_count: 0,
+    // F5.5: per-session enforcement exemptions — empty by default; set via the
+    // admin session-action "exempt" or the invigilator exempt endpoint.
+    enforcement_exemptions: {}
   };
 
   await sessionRef(sessionId).create(item);
@@ -432,6 +438,11 @@ async function startResponse(session, settings) {
     contest_url: settings?.contest_url || "",
     // S3: tells the candidate client whether to hold at the room-code screen.
     room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    // F5.3/F5.5: enforcement knobs + this session's exemptions + why a locked
+    // session is locked (the candidate unlock-code UI keys off the reason).
+    enforcement: enforcementConfig(settings),
+    enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
+    locked_reason: session.locked_reason || null,
     problem: await activeProblemPublic(settings),
     upload_config: uploadConfig,
     heartbeat_interval_seconds: 15,
@@ -1079,7 +1090,21 @@ async function recordHeartbeat(req) {
   // change reaches every student within one interval — no reload. Costs one
   // extra settings read per heartbeat (the same doc the start gate reads).
   const settings = await getSettings();
-  return { ok: true, status: session.status || "active", start_ip: startIp, current_ip: currentIp, ip_changed: ipChanged, newly_changed: newlyChanged, end_at: settings?.end_at || "", server_now: now };
+  return {
+    ok: true,
+    status: session.status || "active",
+    start_ip: startIp,
+    current_ip: currentIp,
+    ip_changed: ipChanged,
+    newly_changed: newlyChanged,
+    end_at: settings?.end_at || "",
+    // F5.3/F5.5: the heartbeat is the live channel for enforcement config AND
+    // per-session exemptions, so an admin/invigilator exemption (or a settings
+    // change) reaches the candidate within one interval — no reload.
+    enforcement: enforcementConfig(settings),
+    enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
+    server_now: now
+  };
 }
 
 // Liveness beacon (Phase 2). Designed for navigator.sendBeacon(), which fires on
@@ -1260,6 +1285,18 @@ async function adminSaveSettings(req) {
     problem_id: problemId,
     // S3: opt-in room start gate (invigilator OTP / start-now). Default false.
     room_gate_enabled: body.room_gate_enabled === true,
+    // F5.3: fullscreen enforcement knobs — NaN-guarded to their defaults so a
+    // bad payload can never persist a value that strands candidates. Same rule
+    // as rooms: an older admin UI that doesn't SEND a field preserves the
+    // stored value rather than resetting it.
+    fullscreen_reentry_seconds: intSettingOr(
+      body.fullscreen_reentry_seconds !== undefined ? body.fullscreen_reentry_seconds : existing?.fullscreen_reentry_seconds,
+      FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
+    fullscreen_exit_limit: intSettingOr(
+      body.fullscreen_exit_limit !== undefined ? body.fullscreen_exit_limit : existing?.fullscreen_exit_limit,
+      FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
+    enforcement_mode: resolveEnforcementMode(
+      body.enforcement_mode !== undefined ? body.enforcement_mode : existing?.enforcement_mode),
     passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
     passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
     end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
@@ -1513,7 +1550,10 @@ async function publicExamConfig() {
   return {
     roster_required: Boolean(meta),
     unique_id_label: meta?.unique_id_column || "",
-    rooms: normalizeRooms(settings?.rooms)
+    rooms: normalizeRooms(settings?.rooms),
+    // F5.3: the candidate runtime needs the enforcement knobs before a session
+    // exists (the heartbeat keeps them fresh afterwards).
+    enforcement: enforcementConfig(settings)
   };
 }
 
@@ -1782,7 +1822,11 @@ async function adminSessionDetail(req) {
       heartbeat_count: Number(session.heartbeat_count || 0),
       // F6.6: last-reported per-source capture state (null until a composite
       // heartbeat arrives) — the card's screen/camera/mic rows.
-      capture_state: parseCaptureState(session.recording_state)
+      capture_state: parseCaptureState(session.recording_state),
+      // F5.3/F5.5: why a locked session is locked (enforcement vs admin) +
+      // the per-session exemption toggles the card renders.
+      locked_reason: session.locked_reason || null,
+      enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions)
     }
   };
 }
@@ -2332,7 +2376,7 @@ async function adminSessionAction(req) {
   requireAdmin(req);
   const body = parseBody(req);
   const action = String(body.action || "");
-  const VALID_ACTIONS = ["approve", "lock", "unlock", "bypass", "end"];
+  const VALID_ACTIONS = ["approve", "lock", "unlock", "bypass", "end", "exempt"];
   if (!VALID_ACTIONS.includes(action)) {
     return badRequest(`action must be one of ${VALID_ACTIONS.join(", ")}`);
   }
@@ -2342,7 +2386,7 @@ async function adminSessionAction(req) {
 
   const updated = [];
   for (const session of targets) {
-    const result = await applySessionAction(action, session);
+    const result = await applySessionAction(action, session, { exemptions: body.exemptions });
     if (Array.isArray(result)) updated.push(...result);
     else if (result) updated.push(result);
   }
@@ -2380,7 +2424,7 @@ async function resolveActionTargets(body) {
   return [];
 }
 
-async function applySessionAction(action, session) {
+async function applySessionAction(action, session, options = {}) {
   const now = new Date().toISOString();
 
   if (action === "approve") {
@@ -2409,8 +2453,19 @@ async function applySessionAction(action, session) {
   }
 
   if (action === "unlock") {
-    await sessionRef(session.session_id).update({ status: "active", unlocked_at: now, updated_at: now });
-    return { ...session, status: "active", unlocked_at: now, updated_at: now };
+    // F5.3: clearing locked_reason matters — an enforcement lock released by an
+    // admin must not leave the session looking code-releasable forever.
+    await sessionRef(session.session_id).update({ status: "active", unlocked_at: now, locked_reason: null, updated_at: now });
+    return { ...session, status: "active", unlocked_at: now, locked_reason: null, updated_at: now };
+  }
+
+  if (action === "exempt") {
+    // F5.5: per-session enforcement exemptions. MERGE semantics so toggling one
+    // anomaly never silently clears the other; sanitize drops unknown keys and
+    // non-boolean values.
+    const merged = { ...sanitizeExemptions(session.enforcement_exemptions), ...sanitizeExemptions(options.exemptions) };
+    await sessionRef(session.session_id).update({ enforcement_exemptions: merged, updated_at: now });
+    return { ...session, enforcement_exemptions: merged, updated_at: now };
   }
 
   if (action === "bypass") {
@@ -2937,6 +2992,10 @@ const DEFAULT_PROCTOR_ALERT_SETTINGS = {
   recording_stopped: { enabled: true, severity: "critical" },
   screen_share_stopped: { enabled: true, severity: "critical" },
   recording_error: { enabled: true, severity: "critical" },
+  // F5.3: the fullscreen enforcement ladder tripped (countdown expired / exit
+  // limit exceeded). Disabling this hides the ALERT only — the block-mode lock
+  // itself is policy, not alerting, and is governed by enforcement_mode.
+  fullscreen_enforcement: { enabled: true, severity: "critical" },
   ip_changed: { enabled: true, severity: "warning" },
   tab_hidden: { enabled: true, severity: "warning" },
   tab_away: { enabled: true, severity: "warning", threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
@@ -3041,6 +3100,11 @@ function parseCaptureState(recordingState) {
   return state;
 }
 
+// F5.4: a debounced switch-away episode is alert-worthy when it is LONG
+// (>= the admin-configurable tab_away threshold) or FREQUENT (this many
+// blur/hide signals inside one rolling episode window).
+const SWITCH_AWAY_FREQUENT_COUNT = 3;
+
 async function raiseSureShotAlertsFromEvents(session, events, settings) {
   // Collapse repeats within this single batch: one alert per sure-shot type per
   // batch (the per-day dedupe in upsertProctorAlert keeps it stable across
@@ -3065,6 +3129,39 @@ async function raiseSureShotAlertsFromEvents(session, events, settings) {
       detail: detailFromEvent(event),
       dedupe: timestamp.slice(0, 10),
       data: event.detail && typeof event.detail === "object" ? event.detail : undefined
+    });
+  }
+
+  await raiseSwitchAwayAlerts(session, events, settings);
+}
+
+// F5.4: switch_away_episode events (the client's debounced window_blur /
+// visibility runs) surface through the EXISTING threshold-based tab_away alert
+// so proctors review the video and decide — switch-away NEVER auto-blocks.
+// The per-session switch_away exemption suppresses the alert only; the raw
+// episode event still lands in evidence storage (recordEvents already wrote it).
+async function raiseSwitchAwayAlerts(session, events, settings) {
+  if (sanitizeExemptions(session.enforcement_exemptions).switch_away === true) return;
+  const config = alertTypeConfig(settings, "tab_away", "warning");
+  if (!config.enabled) return;
+  const thresholdMs = (config.threshold_seconds || TAB_AWAY_DEFAULT_THRESHOLD_SECONDS) * 1000;
+  for (const event of events) {
+    if (event.type !== "switch_away_episode") continue;
+    const detail = event.detail && typeof event.detail === "object" ? event.detail : {};
+    const durationMs = Math.max(0, intOrZero(detail.duration_ms));
+    const count = Math.max(0, intOrZero(detail.count));
+    if (durationMs < thresholdMs && count < SWITCH_AWAY_FREQUENT_COUNT) continue;
+    const timestamp = isoOrNow(event.timestamp);
+    await upsertProctorAlert(session, {
+      type: "tab_away",
+      severity: config.severity,
+      timestamp,
+      title: "Switched away from the exam",
+      detail: `Away ~${Math.round(durationMs / 1000)}s across ${count} switch(es)`,
+      // Per-minute dedupe (not per-day): distinct long episodes should each be
+      // visible; retries of one batch still collapse.
+      dedupe: timestamp.slice(0, 16),
+      data: { count, duration_ms: durationMs }
     });
   }
 }
@@ -3446,6 +3543,40 @@ async function invigilatorOpenRoom(req) {
   return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
 }
 
+// POST /api/invigilator/exempt — F5.5: per-student enforcement exemption from
+// the room dashboard. Least privilege preserved: the invigilator addresses the
+// candidate by room + username (rows never expose session_id — it is the
+// candidate's write-endpoint bearer token), the backend resolves the LIVE
+// session in that room, and the response never echoes the token either.
+// Deliberately NOT behind requireGateEnabledSettings — exemptions are an
+// enforcement tool, independent of the room start gate.
+async function invigilatorExempt(req) {
+  requireInvigilator(req);
+  const body = parseBody(req);
+  requireFields(body, ["room", "username", "exemptions"]);
+  const settings = await getSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const roomKey = gateRoomKey(body.room);
+  const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
+  const usernameNorm = normalizeUsername(body.username);
+
+  let query = firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm);
+  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
+  const snapshot = await query.limit(50).get();
+  const live = snapshot.docs
+    .map((doc) => doc.data())
+    .filter((doc) => doc.status && doc.status !== "ended")
+    .filter((doc) => String(doc.room || "") === roomLabel)
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  if (!live.length) throw httpError(404, "no_live_session_in_room");
+
+  const session = live[0];
+  const merged = { ...sanitizeExemptions(session.enforcement_exemptions), ...sanitizeExemptions(body.exemptions) };
+  const now = new Date().toISOString();
+  await sessionRef(session.session_id).update({ enforcement_exemptions: merged, updated_at: now });
+  return { ok: true, username: session.hackerrank_username || "", enforcement_exemptions: merged };
+}
+
 // POST /api/session/room-gate — candidate-side gate poll/unlock. Auth = the
 // unguessable session token (like /api/events), never admin auth. With no
 // `code` it is a cheap status poll (the client re-polls ~5 s, so an invigilator
@@ -3487,6 +3618,109 @@ async function sessionRoomGate(req) {
     return { gate_enabled: true, exam_started: true, exam_started_at: now };
   }
   await sessionRef(session.session_id).update({ gate_attempt_count: FieldValue.increment(1), updated_at: now });
+  throw httpError(403, "invalid_code");
+}
+
+// ---- F5.3/F5.6: fullscreen enforcement violation + candidate unlock --------
+
+const ENFORCEMENT_VIOLATION_PHASES = ["countdown_expired", "exit_limit"];
+const ENFORCEMENT_LOCK_REASON = "fullscreen_enforcement";
+
+// POST /api/session/enforcement-violation — the candidate client reports that
+// the L1 ladder tripped (ack countdown expired, or the exit limit was
+// exceeded). Auth = the unguessable session token, like /api/events. The
+// SERVER decides the consequence from its own settings (never the client):
+//   - exempt session            → no-op (the client raced a fresh exemption)
+//   - always                    → critical fullscreen_enforcement alert
+//   - enforcement_mode "block"  → lock the session (locked_reason
+//     "fullscreen_enforcement"; release = room code via /api/session/unlock-gate
+//     or an admin/invigilator unlock)
+//   - "alert_first"             → alert only; the client holds the ack overlay.
+async function sessionEnforcementViolation(req) {
+  const body = parseBody(req);
+  requireFields(body, ["session_id"]);
+  const phase = String(body.phase || "");
+  if (!ENFORCEMENT_VIOLATION_PHASES.includes(phase)) {
+    return badRequest(`phase must be one of ${ENFORCEMENT_VIOLATION_PHASES.join(", ")}`);
+  }
+  const session = requireWritableSession(await getSession(String(body.session_id)));
+
+  // Server-side exemption check is authoritative — a stale client that missed
+  // the heartbeat exemption update can never lock an exempted candidate.
+  const exemptions = sanitizeExemptions(session.enforcement_exemptions);
+  if (exemptions.fullscreen === true) {
+    return { ok: true, locked: false, exempt: true };
+  }
+
+  const settings = await getSettings();
+  const enforcement = enforcementConfig(settings);
+  const now = new Date().toISOString();
+  const exitCount = Math.max(0, intOrZero(body.exit_count));
+
+  // The alert is admin-configurable DISPLAY; disabling it never disables the
+  // block-mode lock (policy lives in enforcement_mode). Deduped per minute so
+  // a violate→unlock→violate sequence stays visible as distinct alerts.
+  const alertSettings = await getAlertSettings();
+  const alertConfig = alertTypeConfig(alertSettings, "fullscreen_enforcement", "critical");
+  if (alertConfig.enabled) {
+    await upsertProctorAlert(session, {
+      type: "fullscreen_enforcement",
+      severity: alertConfig.severity,
+      timestamp: now,
+      title: "Fullscreen enforcement triggered",
+      detail: phase === "exit_limit"
+        ? `Exceeded the fullscreen exit limit (${exitCount} exits; limit ${enforcement.fullscreen_exit_limit})`
+        : `Did not re-enter fullscreen within ${enforcement.fullscreen_reentry_seconds}s`,
+      dedupe: now.slice(0, 16),
+      data: { phase, exit_count: exitCount, mode: enforcement.mode }
+    });
+  }
+
+  if (enforcement.mode === "alert_first") {
+    return { ok: true, locked: false, mode: "alert_first" };
+  }
+
+  await sessionRef(session.session_id).update({
+    status: "locked",
+    locked_at: now,
+    locked_reason: ENFORCEMENT_LOCK_REASON,
+    updated_at: now
+  });
+  return { ok: true, locked: true, locked_reason: ENFORCEMENT_LOCK_REASON, mode: "block" };
+}
+
+// POST /api/session/unlock-gate — candidate-side release of an ENFORCEMENT
+// lock using the room's release-code OTP (the same code the invigilator portal
+// already displays — "call your room proctor"). Admin locks (no/different
+// locked_reason) are NOT code-releasable: they need an admin/invigilator
+// unlock. Mirrors the room-gate attempt-cap pattern: NaN-guarded counter,
+// checked BEFORE the compare so a capped session stays capped even with the
+// right code. Deliberately consults the gate DOC regardless of
+// room_gate_enabled — the OTP here releases a lock, it does not gate a start.
+async function sessionUnlockGate(req) {
+  const body = parseBody(req);
+  requireFields(body, ["session_id", "code"]);
+  const session = await getSession(String(body.session_id));
+  if (session.status !== "locked" || session.locked_reason !== ENFORCEMENT_LOCK_REASON) {
+    throw httpError(403, "not_enforcement_locked");
+  }
+  if (intOrZero(session.unlock_attempt_count) >= GATE_ATTEMPT_LIMIT) {
+    throw httpError(429, "too_many_attempts");
+  }
+  const code = String(body.code).trim();
+  const now = new Date().toISOString();
+  const gate = await getRoomGate(session.contest_slug || "", gateRoomKey(session.room));
+  if (code && gate && gate.otp && safeEqual(code, gate.otp)) {
+    await sessionRef(session.session_id).update({
+      status: "active",
+      unlocked_at: now,
+      locked_reason: null,
+      unlock_method: "room_code",
+      updated_at: now
+    });
+    return { ok: true, status: "active" };
+  }
+  await sessionRef(session.session_id).update({ unlock_attempt_count: FieldValue.increment(1), updated_at: now });
   throw httpError(403, "invalid_code");
 }
 
@@ -3558,6 +3792,8 @@ async function invigilatorRoom(req) {
       status: doc.status || "",
       stale: doc.status === "active" ? isStaleSession(doc, nowMs) : false,
       exam_started_at: doc.exam_started_at || null,
+      // F5.5: drives the per-student exemption toggles on the room dashboard.
+      enforcement_exemptions: sanitizeExemptions(doc.enforcement_exemptions),
       created_at: doc.created_at || ""
     }));
 
@@ -3825,8 +4061,67 @@ function safeEqual(a, b) {
   return timingSafeEqual(hashA, hashB);
 }
 
-function publicSettings(settings) {
+// ---- F5.3/F5.5: fullscreen enforcement config + per-session exemptions -----
+//
+// Three admin-tunable settings drive the candidate-side enforcement ladder:
+//   fullscreen_reentry_seconds — L1 countdown to re-enter fullscreen (default 20)
+//   fullscreen_exit_limit      — exits beyond this count escalate to L2 (default 2;
+//                                0 = the first exit escalates immediately)
+//   enforcement_mode           — "block" locks the session on violation;
+//                                "alert_first" only raises the critical alert.
+// All three are NaN-guarded to their defaults so a corrupt settings doc can
+// never strand candidates, and they ride exam-config / start / heartbeat so
+// the client applies changes live.
+const FULLSCREEN_REENTRY_DEFAULT_SECONDS = 20;
+const FULLSCREEN_EXIT_LIMIT_DEFAULT = 2;
+const ENFORCEMENT_MODES = ["block", "alert_first"];
+
+function intSettingOr(raw, fallback, minimum) {
+  const num = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(num) || !Number.isInteger(num) || num < minimum) return fallback;
+  return num;
+}
+
+function resolveEnforcementMode(candidate) {
+  return ENFORCEMENT_MODES.includes(candidate) ? candidate : "block";
+}
+
+function enforcementConfig(settings) {
   return {
+    fullscreen_reentry_seconds: intSettingOr(settings?.fullscreen_reentry_seconds, FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
+    fullscreen_exit_limit: intSettingOr(settings?.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
+    mode: resolveEnforcementMode(settings?.enforcement_mode)
+  };
+}
+
+// Per-session enforcement exemptions (F5.5): ONLY the known keys, ONLY real
+// booleans — everything else is dropped so client/admin payloads can never
+// stash arbitrary data on the session doc.
+const ENFORCEMENT_EXEMPTION_KEYS = ["fullscreen", "switch_away"];
+
+function sanitizeExemptions(input) {
+  const out = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return out;
+  for (const key of ENFORCEMENT_EXEMPTION_KEYS) {
+    if (typeof input[key] === "boolean") out[key] = input[key];
+  }
+  return out;
+}
+
+// NaN-guarded attempt counter read (room-gate + unlock-gate cap pattern): a
+// corrupt stored value reads as 0 — the cap can then re-accumulate, but a
+// legitimate candidate is never spuriously locked out by bad data.
+function intOrZero(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function publicSettings(settings) {
+  const enforcement = enforcementConfig(settings);
+  return {
+    fullscreen_reentry_seconds: enforcement.fullscreen_reentry_seconds,
+    fullscreen_exit_limit: enforcement.fullscreen_exit_limit,
+    enforcement_mode: enforcement.mode,
     start_at: settings?.start_at || "",
     end_at: settings?.end_at || "",
     contest_url: settings?.contest_url || "",

@@ -8,12 +8,12 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   adminPassword, adminPasswordHash,
-  fetchInvigilatorOverview, fetchInvigilatorRoom,
+  fetchInvigilatorOverview, fetchInvigilatorRoom, invigilatorExempt,
   invigilatorPassword, invigilatorPasswordHash,
   openRoom, releaseRoomCode, sha256Hex
 } from "./api";
 import { gateStatusLabel } from "./invigilator/gateLogic";
-import type { InvigilatorAlert, InvigilatorRoomResponse, InvigilatorSessionRow, RoomGate } from "./types";
+import type { EnforcementExemptions, InvigilatorAlert, InvigilatorRoomResponse, InvigilatorSessionRow, RoomGate } from "./types";
 
 const POLL_INTERVAL_MS = 5000;
 const savedKey = "aerele-proctor-invigilator";
@@ -155,6 +155,29 @@ export function InvigilatorApp() {
     }
   };
 
+  // F5.5: toggle one enforcement exemption for ONE student (legit environment
+  // problems — e.g. a flaky projector hook stealing focus). Applies to the
+  // student's LIVE session within a heartbeat; the row updates optimistically
+  // from the server's echoed exemptions.
+  const toggleExemption = async (row: InvigilatorSessionRow, key: keyof EnforcementExemptions) => {
+    setError("");
+    try {
+      const next = { [key]: !(row.enforcement_exemptions?.[key] === true) } as EnforcementExemptions;
+      const response = await invigilatorExempt(password, room, row.hackerrank_username, next);
+      setData((current) => current
+        ? {
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.hackerrank_username === row.hackerrank_username
+                ? { ...session, enforcement_exemptions: response.enforcement_exemptions }
+                : session)
+          }
+        : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   if (!unlocked) {
     return (
       <PortalShell>
@@ -286,21 +309,40 @@ export function InvigilatorApp() {
                   <th className="py-2 pr-3">Username</th>
                   <th className="py-2 pr-3">Roll no.</th>
                   <th className="py-2 pr-3">Status</th>
-                  <th className="py-2">Exam</th>
+                  <th className="py-2 pr-3">Exam</th>
+                  <th className="py-2">Exemptions</th>
                 </tr>
               </thead>
               <tbody>
                 {data.sessions.map((row) => {
                   const badge = statusBadge(row);
                   return (
-                    <tr key={row.session_id} className="border-b border-line/60">
+                    <tr key={row.session_id || row.hackerrank_username} className="border-b border-line/60">
                       <td className="py-2 pr-3 font-medium text-ink">{row.name || "—"}</td>
                       <td className="py-2 pr-3 text-muted">{row.hackerrank_username || "—"}</td>
                       <td className="py-2 pr-3 text-muted">{row.roll_number || "—"}</td>
                       <td className="py-2 pr-3">
                         <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.className}`}>{badge.label}</span>
                       </td>
-                      <td className="py-2 text-muted">{row.exam_started_at ? "Started" : "Waiting"}</td>
+                      <td className="py-2 pr-3 text-muted">{row.exam_started_at ? "Started" : "Waiting"}</td>
+                      <td className="py-2">
+                        {/* F5.5: per-student enforcement exemptions for legit
+                            environment problems. Disabled for ended sessions. */}
+                        <div className="flex flex-wrap gap-1.5">
+                          <ExemptionToggle
+                            label="Fullscreen"
+                            active={row.enforcement_exemptions?.fullscreen === true}
+                            disabled={row.status === "ended"}
+                            onToggle={() => void toggleExemption(row, "fullscreen")}
+                          />
+                          <ExemptionToggle
+                            label="Switch-away"
+                            active={row.enforcement_exemptions?.switch_away === true}
+                            disabled={row.status === "ended"}
+                            onToggle={() => void toggleExemption(row, "switch_away")}
+                          />
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -400,6 +442,25 @@ function GateCard(props: {
         </>
       )}
     </section>
+  );
+}
+
+// F5.5: one exemption pill — amber when ACTIVE (enforcement off = worth a
+// glance), plain bordered when normal enforcement applies.
+function ExemptionToggle(props: { label: string; active: boolean; disabled: boolean; onToggle: () => void }) {
+  return (
+    <button
+      className={`focus-ring rounded-full border px-2.5 py-0.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
+        props.active ? "border-warning/50 bg-warning/15 text-warning" : "border-line bg-white/60 text-muted"
+      }`}
+      title={props.active
+        ? `${props.label} enforcement is EXEMPTED for this student — click to re-enable.`
+        : `Exempt this student from ${props.label.toLowerCase()} enforcement (legit environment problem).`}
+      disabled={props.disabled}
+      onClick={props.onToggle}
+    >
+      {props.label}{props.active ? ": exempt" : ""}
+    </button>
   );
 }
 

@@ -15,6 +15,32 @@ export type StudentForm = {
 // state, the UI status is the recorder/screen state.
 export type ServerSessionStatus = "active" | "pending_approval" | "locked" | "ended";
 
+// ---- F5.3/F5.5: fullscreen enforcement + per-session exemptions ------------
+
+export type EnforcementMode = "block" | "alert_first";
+
+// Server-validated enforcement knobs, served via exam-config / start / heartbeat.
+export type EnforcementConfigPayload = {
+  fullscreen_reentry_seconds: number;
+  fullscreen_exit_limit: number;
+  mode: EnforcementMode;
+};
+
+// Per-session exemptions (admin session-action "exempt" / invigilator toggle).
+export type EnforcementExemptions = {
+  fullscreen?: boolean;
+  switch_away?: boolean;
+};
+
+// POST /api/session/enforcement-violation — the server decides lock vs alert.
+export type EnforcementViolationResponse = {
+  ok: boolean;
+  locked: boolean;
+  exempt?: boolean;
+  locked_reason?: string;
+  mode?: EnforcementMode;
+};
+
 export type SessionStartResponse = {
   session_id: string;
   status?: ServerSessionStatus;
@@ -28,6 +54,10 @@ export type SessionStartResponse = {
   contest_url?: string;
   /** S3: when true the client holds at the room-code screen until released. */
   room_gate_enabled?: boolean;
+  /** F5.3: enforcement knobs + this session's exemptions + lock reason. */
+  enforcement?: EnforcementConfigPayload;
+  enforcement_exemptions?: EnforcementExemptions;
+  locked_reason?: string | null;
   /** S4: candidate-facing problem assigned to this session (null when unassigned). */
   problem?: PublicProblem | null;
   upload_config: {
@@ -68,6 +98,10 @@ export type HeartbeatResponse = {
   // S5: current exam end time + server clock — the live update channel.
   end_at?: string;
   server_now?: string;
+  // F5.3/F5.5: live enforcement config + this session's exemptions, so an
+  // admin/invigilator change applies within one heartbeat interval.
+  enforcement?: EnforcementConfigPayload;
+  enforcement_exemptions?: EnforcementExemptions;
 };
 
 export type UploadUrlResponse = {
@@ -99,6 +133,10 @@ export type ProctorSettings = {
   problem_id?: string;
   // S2: admin-configured room labels for the student room dropdown.
   rooms?: string[];
+  // F5.3: fullscreen enforcement knobs (defaults 20 / 2 / "block").
+  fullscreen_reentry_seconds?: number;
+  fullscreen_exit_limit?: number;
+  enforcement_mode?: EnforcementMode;
   // S5/D1: stamped when the exam-time endpoint adjusts the end — while set (and
   // the start is unchanged) exam-time owns end_at, so a stale Settings save
   // cannot revert a live change. Used by the demo store for backend parity.
@@ -204,6 +242,10 @@ export type SessionCardDetail = {
   focus_event_count: number;
   heartbeat_count: number;
   capture_state: CaptureState | null;
+  /** F5.3: "fullscreen_enforcement" when the enforcement ladder locked it. */
+  locked_reason?: string | null;
+  /** F5.5: per-session exemption toggles. */
+  enforcement_exemptions?: EnforcementExemptions;
 };
 
 export type SessionCardDetailResponse = {
@@ -329,13 +371,15 @@ export type AdminSessionsResponse = {
   sessions: AdminSessionDetail[];
 };
 
-export type SessionAction = "approve" | "lock" | "unlock" | "bypass" | "end";
+export type SessionAction = "approve" | "lock" | "unlock" | "bypass" | "end" | "exempt";
 
 export type SessionActionRequest = {
   action: SessionAction;
   session_id?: string;
   usernames?: string[];
   contest_slug?: string;
+  /** F5.5: payload for action "exempt" — merged over the session's exemptions. */
+  exemptions?: EnforcementExemptions;
 };
 
 export type SessionActionResponse = {
@@ -590,6 +634,8 @@ export type ExamConfig = {
   roster_required: boolean;
   unique_id_label: string;
   rooms: string[];
+  /** F5.3: fullscreen enforcement knobs (absent on an older backend). */
+  enforcement?: EnforcementConfigPayload;
 };
 
 // Identity fields a roster column can be mapped onto (matches the backend's
@@ -676,6 +722,8 @@ export type InvigilatorSessionRow = {
   status: ServerSessionStatus | "";
   stale: boolean;
   exam_started_at: string | null;
+  /** F5.5: drives the per-student exemption toggles on the room dashboard. */
+  enforcement_exemptions?: EnforcementExemptions;
   created_at: string;
 };
 

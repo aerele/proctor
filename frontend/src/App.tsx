@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "./admin/alertActions";
@@ -12,11 +12,13 @@ import { CodingWorkspace } from "./coding/CodingWorkspace";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
 import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
+import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
+import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
@@ -130,6 +132,12 @@ function StudentApp() {
   const [gateCode, setGateCode] = useState("");
   const [gateError, setGateError] = useState("");
   const [gateBusy, setGateBusy] = useState(false);
+  // F5.3/F5.5: enforcement knobs (exam-config → start/resume → heartbeat keep
+  // them fresh), this session's exemptions, and the server's lock reason (an
+  // enforcement lock offers the room-code unlock; an admin lock does not).
+  const [enforcementPayload, setEnforcementPayload] = useState<EnforcementConfigPayload | null>(null);
+  const [enforcementExemptions, setEnforcementExemptions] = useState<EnforcementExemptions>({});
+  const [lockedReason, setLockedReason] = useState<string | null>(null);
   // S2 roster login state. examConfig is the public pre-session config; the
   // unique-ID -> confirm flow fills form.roster_unique_id, which the server
   // re-verifies at /api/session/start (this client gate is UX only).
@@ -181,8 +189,12 @@ function StudentApp() {
   // for anomaly classification (spec §6). The ref breaks the definition cycle —
   // the shell hook itself emits events through addEvent.
   const shellTapRef = useRef<(event: ProctorEvent) => void>(() => undefined);
+  // F5.3/F5.4: the enforcement hook taps the SAME funnel (fullscreen exits →
+  // hard-block ladder; blur/hide runs → switch-away debounce).
+  const enforcementTapRef = useRef<(event: ProctorEvent) => void>(() => undefined);
   const addEvent = (event: ProctorEvent) => {
     shellTapRef.current(event);
+    enforcementTapRef.current(event);
     setEvents((current) => [event, ...current].slice(0, 16));
   };
 
@@ -311,6 +323,36 @@ function StudentApp() {
   const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, permissionsReady, addEvent });
   shellTapRef.current = shell.onShellEvent;
 
+  // F5.3-6: fullscreen HARD-BLOCK ladder + switch-away debounce. The server's
+  // violation verdict locks the session in block mode; the candidate-side
+  // release is the room code (UnlockCodePanel on the locked screen).
+  const enforcement = useEnforcement({
+    gate,
+    status,
+    sessionId,
+    config: {
+      reentrySeconds: enforcementPayload?.fullscreen_reentry_seconds ?? 20,
+      exitLimit: enforcementPayload?.fullscreen_exit_limit ?? 2,
+      mode: enforcementPayload?.mode ?? "block",
+      exemptFullscreen: enforcementExemptions.fullscreen === true
+    },
+    addEvent,
+    onLocked: (reason) => {
+      setLockedReason(reason);
+      // Stop the recorder NOW (the heartbeat's 403 would catch it within one
+      // interval anyway, but the lock should be immediate and audible).
+      if (recorderRef.current) void recorderRef.current.stop().catch(() => undefined);
+      setStatus("idle");
+      setGate("locked");
+      speakWarning("Your test has been locked for leaving fullscreen. Raise your hand and call your room proctor.");
+    },
+    // L1 resolved (typed phrase + back in fullscreen): the typed ack is a
+    // stronger acknowledgement than the AnomalyPanel button, so restore the
+    // top bar in the same gesture (the reducer still re-checks preconditions).
+    onResolved: () => shell.restoreBar()
+  });
+  enforcementTapRef.current = enforcement.onShellEvent;
+
   // S5: remaining time on the SERVER clock. Recomputed every render — the 1 s
   // elapsed ticker already re-renders while recording, so this stays live
   // without another interval. null (no end_at yet / old backend) → no countdown.
@@ -342,6 +384,20 @@ function StudentApp() {
       timeUp={examTimeUp}
     />
   );
+
+  // F5.3: the hard-block takeover renders ABOVE everything on every branch
+  // (its own visibility rule already yields to the locked/ended screens).
+  const enforcementOverlay = enforcement.overlayVisible ? (
+    <EnforcementOverlay
+      phase={enforcement.phase}
+      remainingSeconds={enforcement.remainingSeconds}
+      exitCount={enforcement.exitCount}
+      ackOk={enforcement.ackOk}
+      fullscreen={shell.fullscreen}
+      onAckChange={enforcement.submitAck}
+      onEnterFullscreen={shell.enterFullscreen}
+    />
+  ) : null;
   // The fixed bar needs page top padding only while it is actually rendered.
   const shellPadTop = topBarVisible(shell.barHidden, gate);
 
@@ -369,6 +425,11 @@ function StudentApp() {
     setContestUrl(session.contest_url || "");
     // S3: gate disabled (or absent on an older backend) → released immediately.
     setExamStarted(!session.room_gate_enabled);
+    // F5.3/F5.5: enforcement knobs + exemptions + lock reason ride start/resume
+    // (the heartbeat keeps them fresh afterwards).
+    if (session.enforcement) setEnforcementPayload(session.enforcement);
+    if (session.enforcement_exemptions) setEnforcementExemptions(session.enforcement_exemptions);
+    setLockedReason(session.locked_reason ?? null);
     setIdentity({
       name: session.name || form.name.trim(),
       username: session.hackerrank_username || form.hackerrank_username.trim(),
@@ -466,10 +527,14 @@ function StudentApp() {
   // S2: fetch the public exam config (roster gate + room list) once for the
   // pre-session form. Fail-open on error: the server still enforces the roster
   // at /api/session/start; a fetch failure only degrades the form UI.
+  // F5.3: the same payload seeds the enforcement knobs pre-session (start/
+  // resume + heartbeat overwrite them later).
   useEffect(() => {
     let cancelled = false;
     void fetchExamConfig().then((config) => {
-      if (!cancelled) setExamConfig(config);
+      if (cancelled) return;
+      setExamConfig(config);
+      if (config.enforcement) setEnforcementPayload((current) => current ?? config.enforcement ?? null);
     });
     return () => {
       cancelled = true;
@@ -767,6 +832,12 @@ function StudentApp() {
       },
       // S5: heartbeat-delivered exam end time → live countdown update.
       onExamTimeChange: ({ endAt, serverNow }) => applyExamTime(endAt, serverNow),
+      // F5.3/F5.5: heartbeat-delivered enforcement config + exemptions — an
+      // admin/invigilator exemption applies live within one interval.
+      onEnforcementChange: ({ enforcement: config, exemptions }) => {
+        if (config) setEnforcementPayload(config);
+        if (exemptions) setEnforcementExemptions(exemptions);
+      },
       onCameraStream: (stream) => {
         setCameraStream(stream);
         const video = cameraVideoRef.current;
@@ -954,6 +1025,15 @@ function StudentApp() {
     }
   };
 
+  // F5.3: a lock arriving via the heartbeat channel (403 session_locked)
+  // carries no reason — fetch it once so the locked screen knows whether to
+  // offer the room-code unlock (enforcement lock) or not (admin lock).
+  useEffect(() => {
+    if (gate !== "locked" || lockedReason !== null || !sessionConfig) return;
+    void refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gate, lockedReason]);
+
   const collectEntryReviewEvidence = async (activeSessionId: string, ownEditor: boolean) => {
     const now = new Date().toISOString();
     const tabRecord = {
@@ -1110,6 +1190,7 @@ function StudentApp() {
     return (
       <Shell padTop={shellPadTop}>
         {shellChrome}
+        {enforcementOverlay}
         <section className="mx-auto max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
           <RefreshCw size={22} className="mx-auto animate-spin text-accent" />
           <p className="mt-3 text-sm text-muted">Restoring your proctoring session…</p>
@@ -1140,6 +1221,7 @@ function StudentApp() {
   }
 
   if (gate === "locked") {
+    const enforcementLock = lockedReason === "fullscreen_enforcement";
     return (
       <Shell padTop={shellPadTop}>
         {shellChrome}
@@ -1147,14 +1229,28 @@ function StudentApp() {
         <BlockedScreen
           tone="danger"
           icon={<Lock size={22} />}
-          title="Your test is locked"
-          lines={[
-            "A proctor has locked this session. You cannot record until it is unlocked.",
-            "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
-          ]}
+          title={enforcementLock ? "Your test is locked — fullscreen rule" : "Your test is locked"}
+          lines={enforcementLock
+            ? [
+                "You did not return to fullscreen in time (or exited fullscreen too many times), so this session locked itself.",
+                "Raise your hand and call your room proctor. They can read you the room code to unlock you here, or unlock you from their console."
+              ]
+            : [
+                "A proctor has locked this session. You cannot record until it is unlocked.",
+                "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
+              ]}
           onRefresh={refreshStatus}
           error={error}
         />
+        {enforcementLock && sessionId ? (
+          <UnlockCodePanel
+            sessionId={sessionId}
+            onUnlocked={() => {
+              setLockedReason(null);
+              void refreshStatus();
+            }}
+          />
+        ) : null}
       </Shell>
     );
   }
@@ -1182,6 +1278,7 @@ function StudentApp() {
   return (
     <Shell padTop={shellPadTop}>
       {shellChrome}
+      {enforcementOverlay}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 
       {/* S5: end-time change notice + time-up banner. The countdown itself lives
@@ -1451,6 +1548,64 @@ function BlockedScreen({ tone, icon, title, lines, onRefresh, error }: { tone: "
         <RefreshCw size={16} /> Check again
       </button>
       {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
+    </section>
+  );
+}
+
+// F5.6 L2 candidate-side release: an ENFORCEMENT-locked session unlocks with
+// the room's release code (the same 6-digit OTP the invigilator portal shows).
+// Admin locks never render this panel (locked_reason gate in the caller).
+function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; onUnlocked: () => void }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const submit = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      await unlockEnforcementGate(sessionId, code.trim());
+      setCode("");
+      onUnlocked();
+    } catch (cause) {
+      const apiCode = (cause as ApiError)?.code;
+      setMessage(
+        apiCode === "invalid_code" ? "That code is not valid. Ask your room proctor to read it again."
+          : apiCode === "too_many_attempts" ? "Too many attempts — this session can now only be unlocked by a proctor."
+            : apiCode === "not_enforcement_locked" ? "This lock can only be released by a proctor."
+              : cause instanceof Error ? cause.message : String(cause)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="mx-auto mt-5 max-w-xl rounded-lg border border-line bg-panel p-5 text-center shadow-subtle">
+      <p className="text-sm font-semibold text-ink">Have the room code?</p>
+      <p className="mt-1 text-sm leading-6 text-muted">Your room proctor can read you the 6-digit room code to unlock this session.</p>
+      <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
+        <input
+          className="focus-ring h-11 w-44 rounded-md border border-line bg-white px-3 text-center font-mono text-lg tracking-[0.3em]"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={6}
+          placeholder="000000"
+          value={code}
+          onChange={(event) => setCode(normalizeOtpInput(event.target.value))}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && isCompleteOtp(code) && !busy) void submit();
+          }}
+        />
+        <button
+          className="focus-ring inline-flex h-11 items-center gap-2 rounded-md bg-ink px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!isCompleteOtp(code) || busy}
+          onClick={() => void submit()}
+        >
+          <KeyRound size={16} /> Unlock
+        </button>
+      </div>
+      {message ? <p className="mt-3 text-sm font-medium text-danger">{message}</p> : null}
     </section>
   );
 }
@@ -1926,6 +2081,9 @@ function AdminApp() {
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
         room_gate_enabled: Boolean(response.room_gate_enabled),
+        fullscreen_reentry_seconds: response.fullscreen_reentry_seconds ?? 20,
+        fullscreen_exit_limit: response.fullscreen_exit_limit ?? 2,
+        enforcement_mode: response.enforcement_mode ?? "block",
         problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
@@ -1948,6 +2106,9 @@ function AdminApp() {
         end_at: localInputToIso(settings.end_at),
         contest_url: settings.contest_url,
         room_gate_enabled: settings.room_gate_enabled === true,
+        fullscreen_reentry_seconds: settings.fullscreen_reentry_seconds,
+        fullscreen_exit_limit: settings.fullscreen_exit_limit,
+        enforcement_mode: settings.enforcement_mode,
         problem_id: settings.problem_id,
         // parseRosterInput = the existing comma/newline split + trim + dedupe.
         rooms: parseRosterInput(roomsText)
@@ -1957,6 +2118,9 @@ function AdminApp() {
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
         room_gate_enabled: Boolean(response.room_gate_enabled),
+        fullscreen_reentry_seconds: response.fullscreen_reentry_seconds ?? 20,
+        fullscreen_exit_limit: response.fullscreen_exit_limit ?? 2,
+        enforcement_mode: response.enforcement_mode ?? "block",
         problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
@@ -1984,14 +2148,16 @@ function AdminApp() {
 
   // Per-candidate or bulk remote action against the backend session-action API.
   // After it runs we refresh whatever data the current view is showing.
-  const runAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+  // F5.5: "exempt" carries an exemptions payload (merged server-side).
+  const runAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[]; exemptions?: EnforcementExemptions }) => {
     setError("");
     setActionMessage("");
     try {
       const response = await sessionAction(password, {
         action,
         ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
-        ...(opts.usernames ? { usernames: opts.usernames } : {})
+        ...(opts.usernames ? { usernames: opts.usernames } : {}),
+        ...(opts.exemptions ? { exemptions: opts.exemptions } : {})
       });
       setActionMessage(`${action} applied to ${response.updated.length} session(s).`);
       await loadStats();
@@ -2487,6 +2653,31 @@ function AdminApp() {
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
           <Field label="Active problem ID" value={settings.problem_id ?? ""} onChange={(value) => setSettings({ ...settings, problem_id: value })} />
           <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
+          {/* F5.3: fullscreen enforcement knobs. Invalid values fall back to the
+              defaults SERVER-SIDE (20 / 2 / block) — the form mirrors that. */}
+          <Field
+            label="Fullscreen re-entry countdown (seconds)"
+            type="number"
+            value={String(settings.fullscreen_reentry_seconds ?? 20)}
+            onChange={(value) => setSettings({ ...settings, fullscreen_reentry_seconds: Number(value) })}
+          />
+          <Field
+            label="Fullscreen exit limit (exits beyond this lock)"
+            type="number"
+            value={String(settings.fullscreen_exit_limit ?? 2)}
+            onChange={(value) => setSettings({ ...settings, fullscreen_exit_limit: Number(value) })}
+          />
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">Enforcement mode</span>
+            <select
+              className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+              value={settings.enforcement_mode ?? "block"}
+              onChange={(event) => setSettings({ ...settings, enforcement_mode: event.target.value === "alert_first" ? "alert_first" : "block" })}
+            >
+              <option value="block">Block — countdown expiry / exit limit locks the test</option>
+              <option value="alert_first">Alert first — raise a critical alert, never auto-lock</option>
+            </select>
+          </label>
           <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
             <input
               className="mt-1 h-4 w-4 accent-accent"
@@ -3411,7 +3602,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
   alerts: Alert[];
   alertsLoaded: boolean;
   onClose: () => void;
-  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => Promise<void>;
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[]; exemptions?: EnforcementExemptions }) => Promise<void>;
   onViewRecording: (session: RecordingSession) => void;
   onViewAlerts: (session: RecordingSession) => void;
 }) {
@@ -3474,6 +3665,18 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
   const runCardAction = (action: SessionAction) => {
     void (async () => {
       await onAction(action, { sessionId: session.session_id });
+      setRefreshNonce((n) => n + 1);
+    })();
+  };
+
+  // F5.5: per-session enforcement exemption toggle (action "exempt" with a
+  // one-key payload; the server merges, so the other toggle is untouched).
+  const toggleExemption = (key: keyof EnforcementExemptions) => {
+    void (async () => {
+      await onAction("exempt", {
+        sessionId: session.session_id,
+        exemptions: { [key]: !(detail?.enforcement_exemptions?.[key] === true) }
+      });
       setRefreshNonce((n) => n + 1);
     })();
   };
@@ -3571,6 +3774,43 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
           <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
             <AlertTriangle size={14} /> IP changed {detail.ip_change_count} time{detail.ip_change_count === 1 ? "" : "s"} mid-exam.
           </p>
+        ) : null}
+
+        {/* F5.3: locked-by-enforcement context — the candidate self-locked via
+            the fullscreen ladder; the room code (or Unlock here) releases it. */}
+        {status === "locked" && detail?.locked_reason === "fullscreen_enforcement" ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <Lock size={14} /> Locked by FULLSCREEN ENFORCEMENT (countdown expired or exit limit) — the candidate can self-unlock with their room code, or use Unlock here.
+          </p>
+        ) : null}
+
+        {/* F5.5: per-session enforcement exemptions (legit environment problems). */}
+        {detail && status !== "ended" ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-white/60 px-3 py-2 text-xs">
+            <span className="font-semibold uppercase tracking-wide text-muted">Enforcement exemptions</span>
+            <ActionTooltip tip="Exempt this session from the fullscreen hard-block (exits then log as plain events).">
+              <button
+                type="button"
+                onClick={() => toggleExemption("fullscreen")}
+                className={`focus-ring rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                  detail.enforcement_exemptions?.fullscreen === true ? "border-warning/50 bg-warning/15 text-warning" : "border-line bg-white/60 text-muted"
+                }`}
+              >
+                Fullscreen{detail.enforcement_exemptions?.fullscreen === true ? ": exempt" : ""}
+              </button>
+            </ActionTooltip>
+            <ActionTooltip tip="Exempt this session from switch-away (tab_away) alerting — episodes still log as events.">
+              <button
+                type="button"
+                onClick={() => toggleExemption("switch_away")}
+                className={`focus-ring rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                  detail.enforcement_exemptions?.switch_away === true ? "border-warning/50 bg-warning/15 text-warning" : "border-line bg-white/60 text-muted"
+                }`}
+              >
+                Switch-away{detail.enforcement_exemptions?.switch_away === true ? ": exempt" : ""}
+              </button>
+            </ActionTooltip>
+          </div>
         ) : null}
 
         {/* STATS — recording, alerts join, submissions, doc activity counters. */}
