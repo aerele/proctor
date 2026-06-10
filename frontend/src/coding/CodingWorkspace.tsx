@@ -2,6 +2,7 @@
 import { lazy, Suspense, useMemo, useRef, useState } from "react";
 import { execRun, execSubmit, sendEditorEvents } from "../api";
 import { EventBatcher } from "./editorEvents";
+import { runJudgeAttempt } from "./judgeAttempt";
 import { presentSubmitResult, type SubmitTone } from "./submitVerdict";
 import type { EditorEvent, RunResult, SubmitResult } from "../types";
 
@@ -37,6 +38,8 @@ export function CodingWorkspace({ sessionId, problem }: {
   const [run, setRun] = useState<RunResult | null>(null);
   const [submit, setSubmit] = useState<SubmitResult | null>(null);
   const [busy, setBusy] = useState<"" | "run" | "submit">("");
+  // M9: a failed Run/Submit must surface an inline error, cleared on next attempt.
+  const [judgeError, setJudgeError] = useState("");
 
   const batcher = useMemo(() => new EventBatcher({
     maxSize: 40, maxMs: 4000,
@@ -47,14 +50,20 @@ export function CodingWorkspace({ sessionId, problem }: {
   const onEvent = (e: EditorEvent) => batcher.add(e);
 
   const doRun = async () => {
-    setBusy("run"); onEvent({ type: "code_run", timestamp: new Date().toISOString(), detail: { language } }); batcher.flush();
-    try { setRun(await execRun({ session_id: sessionId, problem_id: problem.id, language, source_code: code })); }
-    finally { setBusy(""); }
+    setBusy("run"); setJudgeError(""); onEvent({ type: "code_run", timestamp: new Date().toISOString(), detail: { language } }); batcher.flush();
+    try {
+      const outcome = await runJudgeAttempt(() => execRun({ session_id: sessionId, problem_id: problem.id, language, source_code: code }));
+      if (outcome.ok) setRun(outcome.value);
+      else setJudgeError(outcome.error);
+    } finally { setBusy(""); }
   };
   const doSubmit = async () => {
-    setBusy("submit"); onEvent({ type: "code_submit", timestamp: new Date().toISOString(), detail: { language } }); batcher.flush();
-    try { setSubmit(await execSubmit({ session_id: sessionId, problem_id: problem.id, language, source_code: code })); }
-    finally { setBusy(""); }
+    setBusy("submit"); setJudgeError(""); onEvent({ type: "code_submit", timestamp: new Date().toISOString(), detail: { language } }); batcher.flush();
+    try {
+      const outcome = await runJudgeAttempt(() => execSubmit({ session_id: sessionId, problem_id: problem.id, language, source_code: code }));
+      if (outcome.ok) setSubmit(outcome.value);
+      else setJudgeError(outcome.error);
+    } finally { setBusy(""); }
   };
 
   return (
@@ -85,6 +94,11 @@ export function CodingWorkspace({ sessionId, problem }: {
           <button onClick={doRun} disabled={!!busy} className="rounded-md border border-line px-3 py-1.5 text-sm">{busy==="run"?"Running…":"Run"}</button>
           <button onClick={doSubmit} disabled={!!busy} className="rounded-md bg-ink px-3 py-1.5 text-sm text-white">{busy==="submit"?"Submitting…":"Submit"}</button>
         </div>
+        {judgeError && (
+          <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            {judgeError}
+          </div>
+        )}
         <Suspense fallback={<div className="text-sm text-muted">Loading editor…</div>}>
           <MonacoEditor language={language} value={code} onChange={(v) => { setCode(v); lastCode.current = v; }} onEvent={onEvent} />
         </Suspense>
