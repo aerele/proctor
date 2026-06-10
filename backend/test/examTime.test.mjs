@@ -59,25 +59,39 @@ function makeFakeFirestore() {
     return collections.get(name);
   }
 
-  function makeQuery(name, filters) {
+  // Unlike the other test files' pasted fakes, this one HONORS limit(n) and
+  // supports orderBy/startAfter so the D3 end-now pagination is actually
+  // exercisable (a limit-ignoring fake would pass even without pagination).
+  // orderBy treats ANY field argument as doc-id order — the handler only pages
+  // by FieldPath.documentId(), and session_id === doc id anyway.
+  function makeQuery(name, { filters = [], ordered = false, startAfterId = null, limitN = Infinity } = {}) {
     return {
       where(field, op, value) {
-        return makeQuery(name, [...filters, { field, op, value }]);
+        return makeQuery(name, { filters: [...filters, { field, op, value }], ordered, startAfterId, limitN });
       },
-      limit() {
-        return this;
+      orderBy() {
+        return makeQuery(name, { filters, ordered: true, startAfterId, limitN });
+      },
+      startAfter(id) {
+        return makeQuery(name, { filters, ordered, startAfterId: String(id), limitN });
+      },
+      limit(n) {
+        return makeQuery(name, { filters, ordered, startAfterId, limitN: n });
       },
       async get() {
         const store = getCollection(name);
-        let docs = [...store.values()];
+        let entries = [...store.entries()];
         for (const { field, op, value } of filters) {
           if (op === "in") {
-            docs = docs.filter((doc) => Array.isArray(value) && value.includes(doc[field]));
+            entries = entries.filter(([, doc]) => Array.isArray(value) && value.includes(doc[field]));
           } else {
-            docs = docs.filter((doc) => doc[field] === value);
+            entries = entries.filter(([, doc]) => doc[field] === value);
           }
         }
-        return { docs: docs.map((data) => ({ data: () => data })) };
+        if (ordered) entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+        if (startAfterId !== null) entries = entries.filter(([id]) => id > startAfterId);
+        entries = entries.slice(0, limitN);
+        return { docs: entries.map(([id, data]) => ({ id, data: () => data })) };
       }
     };
   }
@@ -86,9 +100,10 @@ function makeFakeFirestore() {
     _collections: collections,
     collection(name) {
       const store = getCollection(name);
-      const query = makeQuery(name, []);
+      const query = makeQuery(name);
       return {
         where: query.where,
+        orderBy: query.orderBy,
         limit: query.limit,
         get: query.get,
         doc(id) {
@@ -352,4 +367,175 @@ test("GET /api/admin/stats carries end_at + server_now for the console exam-time
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.end_at, seeded.end_at);
   assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
+});
+
+// ---- D1: a stale Settings-form save must never clobber S5 exam-time state ---
+
+test("D1: stale settings save (same start_at) cannot revert a live exam-time change", async () => {
+  const { firestore } = freshFakes();
+  const seeded = await seedSettings(firestore);
+
+  // Live adjustment via the S5 endpoint: +30 minutes.
+  const extended = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 30 } }));
+  assert.equal(extended.statusCode, 200);
+  const liveEndAt = extended.body.end_at;
+
+  // A Settings form loaded BEFORE the extend posts the original end_at back
+  // (same start_at = same exam window) alongside a legitimate rooms edit.
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {
+    start_at: seeded.start_at, end_at: seeded.end_at,
+    contest_url: seeded.contest_url, rooms: ["Lab A-1", "Lab B-2"]
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.end_at, liveEndAt, "response reports the preserved live end_at");
+  assert.deepEqual(res.body.rooms, ["Lab A-1", "Lab B-2"], "non-exam-time fields still save");
+
+  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
+  assert.equal(stored.end_at, liveEndAt, "live-adjusted end_at survives the stale save");
+  assert.ok(stored.end_at_updated_at, "exam-time ownership stamp survives the full set()");
+});
+
+test("D1: a settings save with a NEW start_at is a new schedule — submitted end_at applies, stamp clears", async () => {
+  const { firestore } = freshFakes();
+  await seedSettings(firestore);
+  // Take exam-time ownership first (end-now stamps end_at_updated_at).
+  const extended = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 30 } }));
+  assert.equal(extended.statusCode, 200);
+
+  const newStart = isoMinutesFromNow(-10);
+  const newEnd = isoMinutesFromNow(200);
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {
+    start_at: newStart, end_at: newEnd, contest_url: "https://www.hackerrank.com/contests/kec-2026"
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.end_at, newEnd, "new schedule takes the submitted end_at");
+
+  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
+  assert.equal(stored.end_at, newEnd);
+  assert.equal(stored.end_at_updated_at, undefined, "old exam's live-adjust stamp does not shackle the new schedule");
+});
+
+test("D1: with no prior exam-time adjustment the settings save sets end_at normally", async () => {
+  const { firestore } = freshFakes();
+  const seeded = await seedSettings(firestore);
+  const newEnd = isoMinutesFromNow(90);
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {
+    start_at: seeded.start_at, end_at: newEnd, contest_url: seeded.contest_url
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.end_at, newEnd);
+  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
+  assert.equal(stored.end_at, newEnd, "form remains the end_at owner until exam-time is used");
+});
+
+// ---- D2: bounded grace for the final chunk + manifest after an admin end ----
+
+async function seedEndedSession(firestore, id, { endedAgoMs, endedReason }) {
+  const item = {
+    session_id: id, status: "ended", username_norm: "alice", contest_slug: "kec-2026",
+    storage_prefix: `contests/kec-2026/sessions/alice/${id}/`,
+    ended_at: new Date(Date.now() - endedAgoMs).toISOString(),
+    chunk_count: 3
+  };
+  if (endedReason !== undefined) item.ended_reason = endedReason;
+  await firestore.collection(process.env.SESSION_COLLECTION).doc(id).set(item);
+  return item;
+}
+
+test("D2: within the grace window an admin-ended session can still get a final-chunk upload URL", async () => {
+  const { firestore } = freshFakes();
+  await seedEndedSession(firestore, "s-grace", { endedAgoMs: 60_000, endedReason: "exam_ended_by_admin" });
+  const res = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
+    session_id: "s-grace", kind: "screen", chunk_index: 3, content_type: "video/webm"
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.upload_url, "signed URL issued for the in-flight final chunk");
+  const stored = firestore._collections.get(process.env.SESSION_COLLECTION).get("s-grace");
+  assert.equal(stored.status, "ended", "grace never reopens the session");
+  assert.equal(stored.chunk_count, 4, "the final chunk still counts");
+});
+
+test("D2: within the grace window the session/end manifest is accepted WITHOUT reopening or re-ending", async () => {
+  const { firestore, storage } = freshFakes();
+  const seeded = await seedEndedSession(firestore, "s-grace", { endedAgoMs: 60_000, endedReason: "exam_ended_by_admin" });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/end", body: {
+    session_id: "s-grace", assurance_accepted: true,
+    manifest: [{ kind: "screen", chunk_index: 3, storage_key: "k" }]
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.manifest_key);
+  assert.ok(storage._saved.has(res.body.manifest_key), "manifest written to storage");
+  const stored = firestore._collections.get(process.env.SESSION_COLLECTION).get("s-grace");
+  assert.equal(stored.status, "ended");
+  assert.equal(stored.ended_at, seeded.ended_at, "admin's ended_at stays authoritative");
+  assert.equal(stored.ended_reason, "exam_ended_by_admin", "admin's ended_reason survives");
+  assert.equal(stored.manifest_key, res.body.manifest_key);
+  assert.equal(stored.uploaded_manifest_count, 1);
+});
+
+test("D2: the per-session admin 'end' action (ended_reason admin_action) gets the same grace", async () => {
+  const { firestore } = freshFakes();
+  await seedEndedSession(firestore, "s-admin-act", { endedAgoMs: 60_000, endedReason: "admin_action" });
+  const res = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
+    session_id: "s-admin-act", kind: "screen", chunk_index: 3, content_type: "video/webm"
+  } }));
+  assert.equal(res.statusCode, 200);
+});
+
+test("D2: heartbeats still 409 during grace (B1 self-stop must keep firing)", async () => {
+  const { firestore } = freshFakes();
+  await seedEndedSession(firestore, "s-grace", { endedAgoMs: 60_000, endedReason: "exam_ended_by_admin" });
+  const res = await call(makeReq({ method: "POST", path: "/api/heartbeat", body: {
+    session_id: "s-grace", recording_state: "screen:recording", visibility_state: "visible"
+  } }));
+  assert.equal(res.statusCode, 409);
+});
+
+test("D2: grace is bounded — an admin-ended session older than the window is rejected", async () => {
+  const { firestore } = freshFakes();
+  await seedEndedSession(firestore, "s-stale", { endedAgoMs: 6 * 60_000, endedReason: "exam_ended_by_admin" });
+  const upload = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
+    session_id: "s-stale", kind: "screen", chunk_index: 3, content_type: "video/webm"
+  } }));
+  assert.equal(upload.statusCode, 409);
+  const end = await call(makeReq({ method: "POST", path: "/api/session/end", body: {
+    session_id: "s-stale", assurance_accepted: true, manifest: []
+  } }));
+  assert.equal(end.statusCode, 409);
+});
+
+// ---- D3: end-now must reach EVERY live session, past the per-query cap ------
+
+test("D3: end_now paginates past the 2000-doc query cap and ends every live session", async () => {
+  const { firestore } = freshFakes();
+  await seedSettings(firestore);
+  // 2005 live sessions > SESSIONS_QUERY_LIMIT (2000): a single capped query
+  // strands the lexicographic tail. Direct store writes keep the seed fast.
+  // (collection() materializes the backing Map in _collections.)
+  firestore.collection(process.env.SESSION_COLLECTION);
+  const TOTAL = 2005;
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  for (let i = 0; i < TOTAL; i += 1) {
+    const id = `sess-${String(i).padStart(4, "0")}`;
+    store.set(id, { session_id: id, status: "active", username_norm: `u${i}`, contest_slug: "kec-2026" });
+  }
+
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ended_count, TOTAL, "every live session ended, not just the first page");
+  assert.equal(store.get("sess-2004").status, "ended", "doc beyond the first 2000 reached");
+  assert.equal(store.get("sess-0000").status, "ended");
+});
+
+test("D2: no grace for a self-ended session — repeated session/end stays a 409", async () => {
+  const { firestore } = freshFakes();
+  await seedEndedSession(firestore, "s-self", { endedAgoMs: 60_000, endedReason: undefined });
+  const upload = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
+    session_id: "s-self", kind: "screen", chunk_index: 3, content_type: "video/webm"
+  } }));
+  assert.equal(upload.statusCode, 409);
+  const end = await call(makeReq({ method: "POST", path: "/api/session/end", body: {
+    session_id: "s-self", assurance_accepted: true, manifest: []
+  } }));
+  assert.equal(end.statusCode, 409);
 });

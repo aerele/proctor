@@ -1,6 +1,6 @@
 // frontend/src/examTime.test.ts — pure exam-time math (S5).
 import { describe, expect, it } from "vitest";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, resolveSavedEndAt } from "./examTime";
 
 describe("computeClockSkewMs", () => {
   it("is server minus client", () => {
@@ -43,6 +43,44 @@ describe("formatRemaining", () => {
   });
   it("floors sub-second remainders", () => {
     expect(formatRemaining(1_999)).toBe("0:00:01");
+  });
+});
+
+// D1: mirrors the backend adminSaveSettings rule so the demo settings save
+// behaves exactly like production.
+describe("resolveSavedEndAt", () => {
+  const start = "2026-06-09T09:00:00.000Z";
+  const formEnd = "2026-06-09T11:00:00.000Z";
+  const liveEnd = "2026-06-09T11:30:00.000Z";
+  const stamp = "2026-06-09T10:15:00.000Z";
+
+  it("keeps a live-adjusted end_at (stamp present, same start) — stale form value ignored", () => {
+    expect(resolveSavedEndAt(
+      { start_at: start, end_at: liveEnd, end_at_updated_at: stamp },
+      { start_at: start, end_at: formEnd }
+    )).toEqual({ end_at: liveEnd, end_at_updated_at: stamp });
+  });
+
+  it("same start compares instants, not strings", () => {
+    expect(resolveSavedEndAt(
+      { start_at: start, end_at: liveEnd, end_at_updated_at: stamp },
+      { start_at: "2026-06-09T14:30:00.000+05:30", end_at: formEnd }
+    )).toEqual({ end_at: liveEnd, end_at_updated_at: stamp });
+  });
+
+  it("a NEW start_at is a new schedule: submitted end_at wins, stamp clears", () => {
+    expect(resolveSavedEndAt(
+      { start_at: start, end_at: liveEnd, end_at_updated_at: stamp },
+      { start_at: "2026-06-10T09:00:00.000Z", end_at: formEnd }
+    )).toEqual({ end_at: formEnd });
+  });
+
+  it("no stamp → the form still owns end_at", () => {
+    expect(resolveSavedEndAt(
+      { start_at: start, end_at: liveEnd },
+      { start_at: start, end_at: formEnd }
+    )).toEqual({ end_at: formEnd });
+    expect(resolveSavedEndAt(null, { start_at: start, end_at: formEnd })).toEqual({ end_at: formEnd });
   });
 });
 

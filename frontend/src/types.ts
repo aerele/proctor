@@ -99,6 +99,10 @@ export type ProctorSettings = {
   problem_id?: string;
   // S2: admin-configured room labels for the student room dropdown.
   rooms?: string[];
+  // S5/D1: stamped when the exam-time endpoint adjusts the end — while set (and
+  // the start is unchanged) exam-time owns end_at, so a stale Settings save
+  // cannot revert a live change. Used by the demo store for backend parity.
+  end_at_updated_at?: string;
   // Passcodes are removed (Phase 2). These remain optional/backward-compatible so
   // an older settings doc still parses; the start/end flow no longer reads them.
   passcode?: string;
