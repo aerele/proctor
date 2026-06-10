@@ -28,6 +28,8 @@ export type SessionStartResponse = {
   contest_url?: string;
   /** S3: when true the client holds at the room-code screen until released. */
   room_gate_enabled?: boolean;
+  /** S4: candidate-facing problem assigned to this session (null when unassigned). */
+  problem?: PublicProblem | null;
   upload_config: {
     chunk_seconds: number;
     video_bits_per_second: number;
@@ -85,6 +87,8 @@ export type ProctorSettings = {
   contest_url?: string;
   /** S3: opt-in room start gate (invigilator OTP / start-now). */
   room_gate_enabled?: boolean;
+  /** S4: id of the problem-bank problem assigned to this contest. */
+  problem_id?: string;
   // S2: admin-configured room labels for the student room dropdown.
   rooms?: string[];
   // Passcodes are removed (Phase 2). These remain optional/backward-compatible so
@@ -439,7 +443,7 @@ export type RunResult = { results: RunCaseResult[] };
 // hidden tests — no per-test array (the backend stores that detail admin-side only).
 // "error" = the judging infrastructure failed (e.g. Judge0 timeout) — NOT a wrong
 // answer; the UI renders it neutrally and asks the candidate to submit again.
-export type SubmitResult = { verdict: "accepted" | "wrong_answer" | "error"; passed_count: number; total: number; submission_id: string };
+export type SubmitResult = { verdict: "accepted" | "wrong_answer" | "error"; passed_count: number; total: number; score: number; max_points: number; submission_id: string };
 
 // ---- S2 roster login --------------------------------------------------------
 
@@ -576,4 +580,53 @@ export type RoomGatePollResponse = {
   exam_started: boolean;
   exam_started_at?: string | null;
   room?: string;
+};
+
+// ---- S4: problem bank (admin authoring) -------------------------------------
+export type ProblemLanguage = "python" | "cpp" | "java" | "javascript";
+export type ProblemTest = { input: string; expected: string };
+export type ProblemScoring = "per_test" | "all_or_nothing";
+export type ProblemStatus = "draft" | "published";
+
+// Full authored problem (admin-only surfaces; includes hidden tests).
+export type ProblemDoc = {
+  id: string;
+  title: string;
+  statement: string;
+  languages: ProblemLanguage[];
+  cpuTimeLimit: number;
+  memoryLimit: number;
+  points: number;
+  scoring: ProblemScoring;
+  status: ProblemStatus;
+  sampleTests: ProblemTest[];
+  hiddenTests: ProblemTest[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+// One row from GET /api/admin/problems (summaries only — no test contents).
+export type ProblemSummary = {
+  id: string;
+  title: string;
+  status: ProblemStatus;
+  points: number;
+  scoring: ProblemScoring;
+  languages: string[];
+  sample_count: number;
+  hidden_count: number;
+  updated_at: string;
+};
+
+// Candidate-facing view delivered inside the start/resume response. NEVER
+// carries hidden tests.
+export type PublicProblem = {
+  id: string;
+  title: string;
+  statement: string;
+  languages: ProblemLanguage[];
+  points: number;
+  cpuTimeLimit: number;
+  memoryLimit: number;
+  sampleTests: ProblemTest[];
 };

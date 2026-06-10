@@ -21,6 +21,8 @@ export function presentSubmitResult(result: SubmitResult): SubmitPresentation {
   }
   return {
     tone: result.verdict === "accepted" ? "success" : "failure",
-    message: `Verdict: ${result.verdict} — ${result.passed_count}/${result.total} hidden tests passed.`
+    // S4: authored problems carry points + a scoring mode (per_test /
+    // all_or_nothing) — show the earned score next to the raw test counts.
+    message: `Verdict: ${result.verdict} — ${result.passed_count}/${result.total} hidden tests passed. Score: ${result.score}/${result.max_points}.`
   };
 }
