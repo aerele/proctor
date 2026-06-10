@@ -68,6 +68,7 @@ Fix AFTER the night-run tasks close. From live testing the deployed proctor:
 4. **Switch-away**: long/frequent switch-aways → backend notification to proctor (review video, then decide) instead of auto-blocking with no reason; avoid repeated spurious blocks when something environmental retriggers it.
 5. **Per-session enforcement override**: admin/invigilator can disable a specific anomaly enforcement for ONE user session (legit environment problems).
 6. **Escalation ladder**: L1 = typed-warning acknowledgement (self-serve); L2 = locked, requires a code from the room proctor (ties into S3 invigilator portal). Optionally "get approval before block" mode.
+7. **Top-bar timer ignores test end** (TG voice ~11:32): after the test has ended, the top bar keeps a count-up timer running. The timer must follow the current test status — stop/replace it when the session is ended (and generally reflect status, not wall-clock-since-start).
 
 ## 2026-06-10 morning live-test feedback round 2 (Karthi voice, TG ~11:25 + ~11:28) — admin panel [F6]
 Karthi reviewed the DEPLOYED admin panel (stale image, predates S2-S7). Do BEFORE resuming the night-run close-out walkthrough; redeploy addresses item 5.
