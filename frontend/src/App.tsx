@@ -1,6 +1,6 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
@@ -12,6 +12,7 @@ import { classifyStartError, createProctorRecorder, type MediaCaptureState, type
 import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
+import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
 
 // Slice 1: the single config-driven problem solved in our own Monaco editor.
 // When a problem is configured, the CodingWorkspace IS the coding surface
@@ -119,6 +120,13 @@ function StudentApp() {
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
   const [pipAvailable, setPipAvailable] = useState(false);
   const [pipMessage, setPipMessage] = useState("");
+  // S3 room gate: whether THIS session has been released into the exam (room
+  // OTP / invigilator start-now / gate disabled). Starts false when the gate is
+  // enabled; the poll effect corrects it (also after reload/resume).
+  const [examStarted, setExamStarted] = useState(false);
+  const [gateCode, setGateCode] = useState("");
+  const [gateError, setGateError] = useState("");
+  const [gateBusy, setGateBusy] = useState(false);
   // S2 roster login state. examConfig is the public pre-session config; the
   // unique-ID -> confirm flow fills form.roster_unique_id, which the server
   // re-verifies at /api/session/start (this client gate is UX only).
@@ -158,11 +166,15 @@ function StudentApp() {
     setEvents((current) => [event, ...current].slice(0, 16));
   };
 
+  // S3 room gate: enabled for this contest AND this session not yet released.
+  // While active, the candidate holds at the RoomCodePanel waiting room — the
+  // coding workspace / contest link stay hidden and the shell stage stays 3.
+  const examGateActive = Boolean(sessionConfig?.room_gate_enabled) && !examStarted;
+
   // S1 exam shell: fullscreen truth, 1-5 stage, top-bar vanish/restore.
-  // examReleased is the S3 room-gate seam — S3 has NOT landed at HEAD, so the
-  // exam is always "released" (recording => stage 4 IN EXAM). When S3 lands,
-  // its waiting-room release state replaces this constant.
-  const shell = useExamShell({ gate, status, sessionId, examReleased: true, addEvent });
+  // examReleased is the S3 room-gate seam: released once the room code (or an
+  // invigilator start-now) admits this session, or when the gate is disabled.
+  const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, addEvent });
   shellTapRef.current = shell.onShellEvent;
 
   // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
@@ -173,7 +185,7 @@ function StudentApp() {
       status={status}
       identity={identity}
       elapsedSeconds={elapsedSeconds}
-      examReleased={true}
+      examReleased={!examGateActive}
       ownEditor={OWN_EDITOR}
     />
   );
@@ -202,6 +214,8 @@ function StudentApp() {
     setSessionConfig(session);
     setSessionId(session.session_id);
     setContestUrl(session.contest_url || "");
+    // S3: gate disabled (or absent on an older backend) → released immediately.
+    setExamStarted(!session.room_gate_enabled);
     setIdentity({
       name: session.name || form.name.trim(),
       username: session.hackerrank_username || form.hackerrank_username.trim(),
@@ -213,6 +227,53 @@ function StudentApp() {
     else if (serverStatus === "ended") setGate("ended");
     else setGate("running");
     return serverStatus;
+  };
+
+  // S3 room gate: while recording with the gate enabled and not yet released,
+  // poll every 5 s so an invigilator "Start now" admits the candidate with zero
+  // typing. The first tick runs immediately (covers resume-after-reload where
+  // the server may already have released this session).
+  useEffect(() => {
+    if (status !== "recording" || !sessionConfig?.room_gate_enabled || examStarted) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const response = await pollRoomGate(sessionConfig.session_id);
+        if (!cancelled && response.exam_started) setExamStarted(true);
+      } catch {
+        // transient poll errors are silent; the explicit submit surfaces errors
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [status, sessionConfig, examStarted]);
+
+  const submitGateCode = async () => {
+    if (!sessionConfig) return;
+    setGateBusy(true);
+    setGateError("");
+    try {
+      const response = await pollRoomGate(sessionConfig.session_id, gateCode.trim());
+      if (response.exam_started) {
+        setExamStarted(true);
+        setGateCode("");
+      }
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      if (apiError.code === "invalid_code") {
+        setGateError("That code is not correct for your room. Check the board or ask your invigilator.");
+      } else if (apiError.code === "too_many_attempts") {
+        setGateError("Too many wrong attempts. Wait — your invigilator can admit the whole room.");
+      } else {
+        setGateError(apiError.message || String(cause));
+      }
+    } finally {
+      setGateBusy(false);
+    }
   };
 
   // On load: if a stored session_id exists, resume it WITHOUT re-collecting
@@ -1025,7 +1086,7 @@ function StudentApp() {
             {/* Legacy external-contest fallback: shown ONLY when no Slice-1
                 problem is configured. With a problem configured the own-editor
                 CodingWorkspace below replaces this link entirely. */}
-            {!SLICE1_PROBLEM && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error ? (
+            {!SLICE1_PROBLEM && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error && !examGateActive ? (
               <a
                 className="focus-ring inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white"
                 href={contestUrl}
@@ -1070,12 +1131,28 @@ function StudentApp() {
         </aside>
       </div>
 
+      {/* S3 room gate: recording runs while the candidate waits; the workspace
+          and the contest link stay hidden until the room code (or an
+          invigilator start-now) releases this session. */}
+      {status === "recording" && examGateActive ? (
+        <div className="mt-5">
+          <RoomCodePanel
+            room={identity?.room || ""}
+            code={gateCode}
+            error={gateError}
+            busy={gateBusy}
+            onCodeChange={(value) => setGateCode(normalizeOtpInput(value))}
+            onSubmit={() => void submitGateCode()}
+          />
+        </div>
+      ) : null}
+
       {/* Slice 1: own coding workspace (Monaco + Run/Submit), live only while
           recording so every editor event is tied to an actively recorded
           session. When a problem is configured this REPLACES the contest_url
           Start-test surface (own editor replaces HackerRank); the link renders
           only when SLICE1_PROBLEM is null. */}
-      {SLICE1_PROBLEM && sessionId && status === "recording" && (
+      {SLICE1_PROBLEM && sessionId && status === "recording" && !examGateActive && (
         <div className="mt-5">
           <CodingWorkspace sessionId={sessionId} problem={SLICE1_PROBLEM} />
         </div>
@@ -1171,6 +1248,51 @@ type AdminView = "stats" | "alerts" | "sessions" | "review" | "recordings" | "se
 // has no literal session-doc status (it is a derived liveness state), so the
 // Sessions list treats it as the active sessions and shows an explanatory note.
 type SessionsStatusFilter = "" | "active" | "locked" | "pending_approval" | "ended" | "disconnected";
+
+// S3: the waiting room between "recording started" and "exam released". Shows a
+// big 6-digit entry (the invigilator writes the room code on the board) and
+// auto-advances when the invigilator opens the whole room.
+function RoomCodePanel(props: {
+  room: string;
+  code: string;
+  error: string;
+  busy: boolean;
+  onCodeChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const { room, code, error, busy, onCodeChange, onSubmit } = props;
+  return (
+    <section className="rounded-lg border border-accent/40 bg-accent/5 p-6 text-center shadow-subtle">
+      <KeyRound size={26} className="mx-auto text-accent" />
+      <h2 className="mt-3 text-xl font-semibold text-ink">Waiting for your room code</h2>
+      <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted">
+        Recording has started. Your invigilator will announce a 6-digit start code for room {room ? <strong>{room}</strong> : "(not set)"} just before the test begins. Enter it below — or simply wait: if your invigilator starts the whole room, this screen advances automatically.
+      </p>
+      <div className="mx-auto mt-4 flex max-w-xs items-center gap-3">
+        <input
+          className="focus-ring h-12 w-full rounded-md border border-line bg-white px-4 text-center text-2xl font-semibold tracking-[0.4em] text-ink"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          placeholder="000000"
+          value={code}
+          onChange={(event) => onCodeChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && isCompleteOtp(code) && !busy) onSubmit();
+          }}
+        />
+        <button
+          className="focus-ring inline-flex h-12 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!isCompleteOtp(code) || busy}
+          onClick={onSubmit}
+        >
+          {busy ? "Checking…" : "Start"}
+        </button>
+      </div>
+      {error ? <p className="mt-3 text-sm font-medium text-danger">{error}</p> : null}
+      <p className="mt-3 text-xs text-muted">Stay in this tab. Your screen is being recorded while you wait.</p>
+    </section>
+  );
+}
 
 function AdminApp() {
   const [view, setView] = useState<AdminView>("stats");
