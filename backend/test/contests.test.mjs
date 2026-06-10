@@ -13,6 +13,9 @@ process.env.EVIDENCE_BUCKET = "ct-bucket";
 process.env.SESSION_COLLECTION = "ct_sessions";
 process.env.SETTINGS_COLLECTION = "ct_settings";
 process.env.CONTESTS_COLLECTION = "ct_contests";
+process.env.TEMPLATES_COLLECTION = "ct_templates";
+process.env.PROBLEMS_COLLECTION = "ct_problems";
+process.env.SUBMISSIONS_COLLECTION = "ct_submissions";
 process.env.ADMIN_PASSWORD = "ct-admin-pass";
 
 const handler = await import("../src/handler.mjs?contests");
@@ -404,7 +407,8 @@ test("update/status: the synthesized legacy contest is read-only (404, nothing w
 
 test("status: draft → open → archived; invalid status rejected", async () => {
   __setClientsForTest({ firestore: makeFakeFirestore() });
-  await call(createReq({ name: "S" }));
+  // S-I publish gate: opening needs ≥1 problem, so seed one at create.
+  await call(createReq({ name: "S", problems: [{ problem_id: "sum-two" }] }));
   assert.equal((await call(statusReq({ slug: "s", status: "open" }))).body.contest.status, "open");
   assert.equal((await call(statusReq({ slug: "s", status: "archived" }))).body.contest.status, "archived");
   assert.equal((await call(statusReq({ slug: "s", status: "deleted" }))).statusCode, 400);
@@ -415,7 +419,7 @@ test("status: draft → open → archived; invalid status rejected", async () =>
 
 test("resolveContest: open contest resolves by slug; draft is contest_not_open unless requireOpen:false", async () => {
   __setClientsForTest({ firestore: makeFakeFirestore() });
-  await call(createReq({ name: "Live One" }));
+  await call(createReq({ name: "Live One", problems: [{ problem_id: "sum-two" }] }));
   await assert.rejects(resolveContest("live-one"), /contest_not_open/);
   const draft = await resolveContest("live-one", { requireOpen: false });
   assert.equal(draft.slug, "live-one");
@@ -433,7 +437,7 @@ test("resolveContest: unknown/empty slug → unknown_contest (400)", async () =>
 
 test("resolveContest: accepts a req-like object — query.contest first, then JSON body.contest", async () => {
   __setClientsForTest({ firestore: makeFakeFirestore() });
-  await call(createReq({ name: "Req Based" }));
+  await call(createReq({ name: "Req Based", problems: [{ problem_id: "sum-two" }] }));
   await call(statusReq({ slug: "req-based", status: "open" }));
   const viaQuery = await resolveContest({ query: { contest: "req-based" } });
   assert.equal(viaQuery.slug, "req-based");
@@ -457,7 +461,7 @@ test("resolveContest: the synthesized legacy contest resolves read-only with leg
 test("scopedQuery: filters to the contest's slug; ALL_CONTESTS passes through unfiltered", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore });
-  await call(createReq({ name: "A" }));
+  await call(createReq({ name: "A", problems: [{ problem_id: "sum-two" }] }));
   await call(statusReq({ slug: "a", status: "open" }));
   await firestore.collection("ct_sessions").doc("s1").set({ session_id: "s1", contest_slug: "a" });
   await firestore.collection("ct_sessions").doc("s2").set({ session_id: "s2", contest_slug: "b" });
@@ -488,4 +492,234 @@ test("scopedQuery: refuses an unresolved contest (no accidental cross-contest re
   assert.throws(() => scopedQuery(firestore.collection("ct_sessions"), null));
   assert.throws(() => scopedQuery(firestore.collection("ct_sessions"), { name: "no slug" }));
   assert.throws(() => scopedQuery(firestore.collection("ct_sessions"), "a-bare-slug"));
+});
+
+// ---- S-I §1.3/§1.4: contest problems[] + template instantiation ----------------
+
+const tplReq = (body, headers = ADMIN_HEADERS) =>
+  makeReq({ method: "POST", path: "/api/admin/templates", headers, body });
+const tplUpdateReq = (body, headers = ADMIN_HEADERS) =>
+  makeReq({ method: "POST", path: "/api/admin/template-update", headers, body });
+
+const DRAFT_BANK_PROBLEM = {
+  id: "draft-one", title: "Drafty", statement: "x", languages: ["python"],
+  cpuTimeLimit: 2, memoryLimit: 64000, points: 60, scoring: "per_test", status: "draft",
+  sampleTests: [{ input: "a\n", expected: "a" }], hiddenTests: [{ input: "b\n", expected: "b" }]
+};
+
+test("create: problems[] stored normalized; new snapshot fields default (template_slug null, languages, camera, enforcement)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  const res = await call(createReq({
+    name: "Multi",
+    problems: [{ problem_id: "sum-two", points: 40, order: 5 }]
+  }));
+  assert.equal(res.statusCode, 200);
+  const contest = res.body.contest;
+  assert.deepEqual(contest.problems, [{ problem_id: "sum-two", points: 40, order: 0 }]); // renumbered
+  assert.equal(contest.template_slug, null);
+  assert.deepEqual(contest.languages, ["python", "cpp", "java", "javascript"]);
+  assert.deepEqual(contest.camera_recording, { enabled: true, fps: 10, width: 640 });
+  assert.deepEqual(contest.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 });
+});
+
+test("create: a problems[] entry referencing a draft/missing problem -> 400 problems_unavailable, nothing created", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await firestore.collection("ct_problems").doc("draft-one").set(DRAFT_BANK_PROBLEM);
+  const res = await call(createReq({
+    name: "Broken",
+    problems: [{ problem_id: "draft-one" }, { problem_id: "ghost" }]
+  }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "problems_unavailable");
+  assert.deepEqual(res.body.problems, [
+    { problem_id: "draft-one", reason: "draft" },
+    { problem_id: "ghost", reason: "missing" }
+  ]);
+  assert.equal((firestore._collections.get("ct_contests") || new Map()).size, 0);
+});
+
+test("publish gate: opening a contest with zero problems -> 400 contest_has_no_problems (vision §2.7)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  await call(createReq({ name: "Empty" }));
+  const res = await call(statusReq({ slug: "empty", status: "open" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "contest_has_no_problems");
+  // Add a problem, then it opens.
+  await call(updateReq({ slug: "empty", problems: [{ problem_id: "sum-two" }] }));
+  assert.equal((await call(statusReq({ slug: "empty", status: "open" }))).statusCode, 200);
+});
+
+test("instantiate: template_slug snapshot-copies problems + defaults; end_at prefilled from duration (S-I §1.4.1)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await call(tplReq({
+    name: "Apt R1",
+    problems: [{ problem_id: "sum-two", points: 40 }],
+    defaults: {
+      duration_minutes: 60, identity_label: "Hall Ticket", room_gate_enabled: false,
+      camera_recording: { enabled: false, fps: 5, width: 320 },
+      enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 1 },
+      evidence_retention_days: 7, languages: ["python", "cpp"]
+    }
+  }));
+
+  const res = await call(createReq({
+    name: "KEC June", template_slug: "apt-r1", start_at: "2026-07-01T04:00:00.000Z"
+  }));
+  assert.equal(res.statusCode, 200);
+  const contest = res.body.contest;
+  assert.equal(contest.template_slug, "apt-r1");
+  assert.deepEqual(contest.problems, [{ problem_id: "sum-two", points: 40, order: 0 }]);
+  assert.equal(contest.identity_label, "Hall Ticket");
+  assert.equal(contest.room_gate_enabled, false);
+  assert.deepEqual(contest.camera_recording, { enabled: false, fps: 5, width: 320 });
+  assert.deepEqual(contest.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 1 });
+  assert.equal(contest.evidence_retention_days, 7);
+  assert.deepEqual(contest.languages, ["python", "cpp"]);
+  // end_at = start_at + 60 min (editable prefill — an explicit end_at would win).
+  assert.equal(contest.end_at, "2026-07-01T05:00:00.000Z");
+
+  // SNAPSHOT CANARY: editing + archiving the template afterwards changes NOTHING.
+  await call(tplUpdateReq({ slug: "apt-r1", problems: [{ problem_id: "sum-two", points: 999 }], defaults: { duration_minutes: 5 } }));
+  await call(makeReq({ method: "POST", path: "/api/admin/template-archive", headers: ADMIN_HEADERS,
+    body: { slug: "apt-r1", archived: true } }));
+  const after = firestore._collections.get("ct_contests").get("kec-june");
+  assert.equal(after.problems[0].points, 40);
+  assert.equal(after.end_at, "2026-07-01T05:00:00.000Z");
+  assert.equal(after.template_slug, "apt-r1");
+});
+
+test("instantiate: explicit end_at beats the duration prefill; body overrides beat template defaults", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  await call(tplReq({ name: "Apt R2", problems: [{ problem_id: "sum-two" }], defaults: { duration_minutes: 60, identity_label: "Hall Ticket" } }));
+  const res = await call(createReq({
+    name: "Custom", template_slug: "apt-r2",
+    start_at: "2026-07-01T04:00:00.000Z", end_at: "2026-07-01T09:00:00.000Z",
+    identity_label: "Register Number"
+  }));
+  assert.equal(res.body.contest.end_at, "2026-07-01T09:00:00.000Z");
+  assert.equal(res.body.contest.identity_label, "Register Number");
+});
+
+test("instantiate: every template entry must be PUBLISHED right now -> 400 template_problems_unavailable", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await firestore.collection("ct_problems").doc("draft-one").set(DRAFT_BANK_PROBLEM);
+  await call(tplReq({ name: "Has Draft", problems: [{ problem_id: "draft-one" }, { problem_id: "sum-two" }] }));
+  const res = await call(createReq({ name: "Nope", template_slug: "has-draft" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "template_problems_unavailable");
+  assert.deepEqual(res.body.problems, [{ problem_id: "draft-one", reason: "draft" }]);
+  assert.equal((firestore._collections.get("ct_contests") || new Map()).size, 0);
+});
+
+test("instantiate: unknown template -> 404; archived template -> 400", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  assert.equal((await call(createReq({ name: "X", template_slug: "ghost" }))).statusCode, 404);
+  await call(tplReq({ name: "Oldie", problems: [{ problem_id: "sum-two" }] }));
+  await call(makeReq({ method: "POST", path: "/api/admin/template-archive", headers: ADMIN_HEADERS,
+    body: { slug: "oldie", archived: true } }));
+  const res = await call(createReq({ name: "X", template_slug: "oldie" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "template_archived");
+});
+
+test("instantiate: the system-check preset mints a working contest with no setup (vision S6/J1.5)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  const res = await call(createReq({ name: "Lab Check", template_slug: "system-check" }));
+  assert.equal(res.statusCode, 200);
+  const contest = res.body.contest;
+  assert.deepEqual(contest.problems, [{ problem_id: "sum-two", points: null, order: 0 }]);
+  assert.equal(contest.room_gate_enabled, false);
+  assert.equal(contest.evidence_retention_days, 1);
+});
+
+// ---- S-I §1.4.5: contest problems[] edit rules --------------------------------
+
+test("problems edit: free while draft; entries re-validated (draft problem -> 400)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await firestore.collection("ct_problems").doc("draft-one").set(DRAFT_BANK_PROBLEM);
+  await call(createReq({ name: "Editable", problems: [{ problem_id: "sum-two" }] }));
+  const ok = await call(updateReq({ slug: "editable", problems: [{ problem_id: "sum-two", points: 25 }] }));
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.body.contest.problems, [{ problem_id: "sum-two", points: 25, order: 0 }]);
+  const bad = await call(updateReq({ slug: "editable", problems: [{ problem_id: "draft-one" }] }));
+  assert.equal(bad.statusCode, 400);
+  assert.equal(bad.body.error, "problems_unavailable");
+});
+
+test("problems edit on an OPEN contest: adding needs confirm:true", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await firestore.collection("ct_problems").doc("extra-one").set({ ...DRAFT_BANK_PROBLEM, id: "extra-one", status: "published" });
+  await call(createReq({ name: "Live Edit", problems: [{ problem_id: "sum-two" }] }));
+  await call(statusReq({ slug: "live-edit", status: "open" }));
+
+  const blocked = await call(updateReq({ slug: "live-edit",
+    problems: [{ problem_id: "sum-two" }, { problem_id: "extra-one", order: 1 }] }));
+  assert.equal(blocked.statusCode, 409);
+  assert.equal(blocked.body.error, "problem_add_requires_confirm");
+  assert.deepEqual(blocked.body.problems, ["extra-one"]);
+
+  const confirmed = await call(updateReq({ slug: "live-edit", confirm: true,
+    problems: [{ problem_id: "sum-two" }, { problem_id: "extra-one", order: 1 }] }));
+  assert.equal(confirmed.statusCode, 200);
+  assert.equal(confirmed.body.contest.problems.length, 2);
+});
+
+test("problems edit on an OPEN contest: removing an entry with stored submissions -> 409 problem_has_submissions", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await firestore.collection("ct_problems").doc("extra-one").set({ ...DRAFT_BANK_PROBLEM, id: "extra-one", status: "published" });
+  await call(createReq({ name: "Rm Test", problems: [{ problem_id: "sum-two" }, { problem_id: "extra-one", order: 1 }] }));
+  await call(statusReq({ slug: "rm-test", status: "open" }));
+  // A stored submission for sum-two in THIS contest.
+  await firestore.collection("ct_submissions").doc("sub1").set({
+    contest_slug: "rm-test", problem_id: "sum-two", session_id: "s1", score: 100
+  });
+
+  const blocked = await call(updateReq({ slug: "rm-test", problems: [{ problem_id: "extra-one" }] }));
+  assert.equal(blocked.statusCode, 409);
+  assert.equal(blocked.body.error, "problem_has_submissions");
+  assert.equal(blocked.body.problem_id, "sum-two");
+
+  // Removing the UNSUBMITTED problem is fine (extra-one has no submissions).
+  const ok = await call(updateReq({ slug: "rm-test", problems: [{ problem_id: "sum-two" }] }));
+  assert.equal(ok.statusCode, 200);
+
+  // A same-id submission in a DIFFERENT contest never blocks this one.
+  firestore.collection("ct_submissions").doc("sub2").set({
+    contest_slug: "other", problem_id: "extra-one", session_id: "s2", score: 0
+  });
+  const okAgain = await call(updateReq({ slug: "rm-test", confirm: true,
+    problems: [{ problem_id: "sum-two" }, { problem_id: "extra-one", order: 1 }] }));
+  assert.equal(okAgain.statusCode, 200);
+  const rmExtra = await call(updateReq({ slug: "rm-test", problems: [{ problem_id: "sum-two" }] }));
+  assert.equal(rmExtra.statusCode, 200);
+});
+
+test("problems edit on an OPEN contest: points edit needs the typed contest-slug confirm", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await call(createReq({ name: "Pts Test", problems: [{ problem_id: "sum-two", points: 100 }] }));
+  await call(statusReq({ slug: "pts-test", status: "open" }));
+
+  const blocked = await call(updateReq({ slug: "pts-test", problems: [{ problem_id: "sum-two", points: 50 }] }));
+  assert.equal(blocked.statusCode, 409);
+  assert.equal(blocked.body.error, "points_edit_confirmation_required");
+
+  const wrong = await call(updateReq({ slug: "pts-test", confirm_points_edit: "wrong-slug",
+    problems: [{ problem_id: "sum-two", points: 50 }] }));
+  assert.equal(wrong.statusCode, 409);
+
+  const confirmed = await call(updateReq({ slug: "pts-test", confirm_points_edit: "pts-test",
+    problems: [{ problem_id: "sum-two", points: 50 }] }));
+  assert.equal(confirmed.statusCode, 200);
+  assert.equal(confirmed.body.contest.problems[0].points, 50);
+
+  // Unchanged points (same entries posted back) never demand the confirm.
+  const noop = await call(updateReq({ slug: "pts-test", problems: [{ problem_id: "sum-two", points: 50 }] }));
+  assert.equal(noop.statusCode, 200);
 });
