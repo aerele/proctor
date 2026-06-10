@@ -81,10 +81,35 @@ describe("switchAwayReducer — episode debounce", () => {
     expect(flushed.state).toEqual(initialSwitchAwayState);
   });
 
-  it("duration never goes below the away-instant itself (no return marker)", () => {
+  // Wave-2 review fix: an away-only episode (the candidate NEVER returned) used
+  // to close with duration ≈ 0 because the duration anchored at the blur
+  // instant — the single prolonged switch-away, F5.4's primary target, produced
+  // no tab_away alert at all. Still-away episodes now report up to close time.
+  it("an away-only episode closed by the window tick reports the FULL away duration", () => {
     const open = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
-    const flushed = switchAwayReducer(open, { kind: "flush", nowMs: T0 + 100 });
-    expect(flushed.episode).toEqual({ count: 1, duration_ms: 0 });
+    const closed = switchAwayReducer(open, { kind: "tick", nowMs: T0 + SWITCH_AWAY_WINDOW_MS + 1_000 });
+    expect(closed.episode).toEqual({ count: 1, duration_ms: SWITCH_AWAY_WINDOW_MS + 1_000 });
+    expect(closed.state).toEqual(initialSwitchAwayState);
+  });
+
+  it("an away-only episode flushed early reports up to the flush instant", () => {
+    const open = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
+    const flushed = switchAwayReducer(open, { kind: "flush", nowMs: T0 + 7_500 });
+    expect(flushed.episode).toEqual({ count: 1, duration_ms: 7_500 });
+  });
+
+  it("an away→back episode still anchors duration at the RETURN time, not the close time", () => {
+    let state = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
+    state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 4_000 }).state;
+    const closed = switchAwayReducer(state, { kind: "tick", nowMs: T0 + SWITCH_AWAY_WINDOW_MS + 5_000 });
+    expect(closed.episode).toEqual({ count: 1, duration_ms: 4_000 });
+  });
+
+  it("a new away past the window closes a STILL-AWAY previous episode at the new away instant", () => {
+    const open = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
+    const next = switchAwayReducer(open, { kind: "away", nowMs: T0 + SWITCH_AWAY_WINDOW_MS + 9_000 });
+    expect(next.episode).toEqual({ count: 1, duration_ms: SWITCH_AWAY_WINDOW_MS + 9_000 });
+    expect(next.state.episodeStartMs).toBe(T0 + SWITCH_AWAY_WINDOW_MS + 9_000);
   });
 
   it("back signals without an open episode are ignored", () => {

@@ -25,5 +25,8 @@ export type GateBadge = { label: string; tone: "idle" | "armed" | "open" };
 export function gateStatusLabel(gate: RoomGate | null): GateBadge {
   if (!gate) return { label: "No code released yet", tone: "idle" };
   if (gate.mode === "open") return { label: "Room OPEN — everyone admitted", tone: "open" };
-  return { label: "Code active", tone: "armed" };
+  // Wave-2: a gate doc can exist purely to hold the unlock code (mode "none",
+  // no start otp) — the START gate is still idle in that case.
+  if (gate.mode === "otp" && gate.otp) return { label: "Code active", tone: "armed" };
+  return { label: "No code released yet", tone: "idle" };
 }

@@ -545,6 +545,10 @@ export async function heartbeat(params: {
   upload_queue_depth: number;
   client_time: string;
   network_online: boolean;
+  /** F5.3 wave-2 fix: corrective fullscreen truth for the server-side
+   *  enforcement countdown (true clears a stale open exit; false starts the
+   *  clock when the exit event itself was lost). */
+  fullscreen: boolean;
 }): Promise<HeartbeatResponse> {
   if (demoMode) {
     // B8: mirror the backend H3 write-guard so the lock-stop UX is testable in
@@ -2754,6 +2758,9 @@ export async function fetchInvigilatorRoom(password: string, room: string): Prom
         exam_started_at: gate?.mode === "open" ? gate.opened_at : null,
         // F5.5: drives the room dashboard's per-student exemption toggles.
         enforcement_exemptions: { ...s.enforcement_exemptions },
+        // F5.6 wave-2 parity: demo convention treats a locked row as an
+        // enforcement lock (mirrors the demo sessions-list derivation).
+        locked_reason: s.status === "locked" ? "fullscreen_enforcement" : null,
         created_at: s.created_at
       }));
     // F9.3 parity: honour show_to_invigilator per type (catalog-unknown types
@@ -2810,6 +2817,10 @@ export async function releaseRoomCode(
       released_by: invigilatorName,
       opened_at: existing?.opened_at ?? null,
       opened_by: existing?.opened_by ?? "",
+      // Backend parity: a full gate rewrite preserves a minted unlock code.
+      unlock_otp: existing?.unlock_otp ?? "",
+      unlock_released_at: existing?.unlock_released_at ?? null,
+      unlock_released_by: existing?.unlock_released_by ?? "",
       updated_at: now
     };
     store[roomKey] = gate;
@@ -2841,6 +2852,10 @@ export async function openRoom(password: string, room: string, invigilatorName: 
       released_by: existing?.released_by ?? "",
       opened_at: now,
       opened_by: invigilatorName,
+      // Backend parity: a full gate rewrite preserves a minted unlock code.
+      unlock_otp: existing?.unlock_otp ?? "",
+      unlock_released_at: existing?.unlock_released_at ?? null,
+      unlock_released_by: existing?.unlock_released_by ?? "",
       updated_at: now
     };
     store[roomKey] = gate;
@@ -2851,6 +2866,80 @@ export async function openRoom(password: string, room: string, invigilatorName: 
     method: "POST",
     headers: invigilatorHeaders(password),
     body: JSON.stringify({ room, invigilator_name: invigilatorName })
+  });
+}
+
+// F5.6 wave-2 fix: mint (or re-display) the room's ENFORCEMENT-UNLOCK code —
+// a SEPARATE namespace from the start OTP (which every candidate in an
+// OTP-gated room personally typed). Deliberately NOT gated on
+// room_gate_enabled: in the default deployment (block mode, start gate off)
+// this is the room proctor's only code path. Demo mode mirrors the backend
+// against the shared room-gate store.
+export async function releaseUnlockCode(
+  password: string, room: string, invigilatorName: string, regenerate = false
+): Promise<RoomGateActionResponse> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoInvigilator(password);
+    const store = readDemoRoomGates();
+    const roomKey = roomKeyForLabel(room);
+    const existing = store[roomKey];
+    if (existing?.unlock_otp && !regenerate) {
+      return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate: existing };
+    }
+    const now = new Date().toISOString();
+    const gate: RoomGate = {
+      room: roomKey === "_" ? "" : room,
+      room_key: roomKey,
+      // The start-gate state stays untouched ("none" can never release a start).
+      mode: existing?.mode ?? "none",
+      otp: existing?.otp ?? "",
+      released_at: existing?.released_at ?? null,
+      released_by: existing?.released_by ?? "",
+      opened_at: existing?.opened_at ?? null,
+      opened_by: existing?.opened_by ?? "",
+      unlock_otp: String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0"),
+      unlock_released_at: now,
+      unlock_released_by: invigilatorName,
+      updated_at: now
+    };
+    store[roomKey] = gate;
+    writeDemoRoomGates(store);
+    return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate };
+  }
+  return request<RoomGateActionResponse>("/api/invigilator/unlock-code", {
+    method: "POST",
+    headers: invigilatorHeaders(password),
+    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...(regenerate ? { regenerate: true } : {}) })
+  });
+}
+
+// F5.6 wave-2 fix: release one student's ENFORCEMENT lock from the room
+// dashboard. Least privilege mirrors invigilatorExempt: addressed by room +
+// username, never session_id. Admin locks are refused server-side
+// (not_enforcement_locked). Demo mode mutates the shared admin population row
+// (demo convention: a locked demo row is an enforcement lock).
+export async function invigilatorUnlock(
+  password: string, room: string, username: string
+): Promise<{ ok: boolean; username: string; status: string }> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoInvigilator(password);
+    const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
+    const usernameNorm = normalizeUsername(username);
+    const locked = DEMO_ALL_SESSIONS
+      .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status === "locked")
+      .filter((row) => String(row.room || "") === roomLabel)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    if (!locked.length) throw demoApiError(404, "no_locked_session_in_room");
+    const row = locked[0];
+    row.status = "active";
+    return { ok: true, username: row.hackerrank_username, status: "active" };
+  }
+  return request<{ ok: boolean; username: string; status: string }>("/api/invigilator/unlock", {
+    method: "POST",
+    headers: invigilatorHeaders(password),
+    body: JSON.stringify({ room, username })
   });
 }
 
@@ -2949,8 +3038,9 @@ export async function reportEnforcementViolation(
 }
 
 // F5.6 L2 release: candidate-side unlock of an ENFORCEMENT lock with the
-// room's release-code OTP (the code on the invigilator's board). Throws
-// ApiError invalid_code / not_enforcement_locked / too_many_attempts.
+// room's dedicated UNLOCK code (gate.unlock_otp — wave-2 fix: never the start
+// OTP, which the candidate typed themselves). Throws ApiError invalid_code /
+// no_unlock_code / not_enforcement_locked / too_many_attempts.
 export async function unlockEnforcementGate(sessionId: string, code: string): Promise<{ ok: boolean; status: string }> {
   if (demoMode) {
     await wait(150);
@@ -2960,7 +3050,8 @@ export async function unlockEnforcementGate(sessionId: string, code: string): Pr
       throw demoApiError(403, "not_enforcement_locked");
     }
     const gate = readDemoRoomGates()[roomKeyForLabel(session.room)];
-    if (gate?.otp && gate.otp === String(code).trim()) {
+    if (!gate?.unlock_otp) throw demoApiError(403, "no_unlock_code");
+    if (gate.unlock_otp === String(code).trim()) {
       upsertDemoSession({ ...session, status: "active", locked_reason: null });
       return { ok: true, status: "active" };
     }

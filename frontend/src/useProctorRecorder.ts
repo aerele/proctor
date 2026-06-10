@@ -376,7 +376,11 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         visibility_state: document.visibilityState,
         upload_queue_depth: queueDepth,
         client_time: new Date().toISOString(),
-        network_online: navigator.onLine
+        network_online: navigator.onLine,
+        // F5.3 wave-2 fix: corrective fullscreen truth for the server-side
+        // enforcement countdown (clears a stale open exit / starts the clock
+        // when the exit event itself was lost).
+        fullscreen: Boolean(document.fullscreenElement)
       }).then((response) => {
         if (response.start_ip && response.current_ip) {
           options.onIpStatusChange?.({

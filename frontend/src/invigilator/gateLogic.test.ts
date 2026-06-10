@@ -42,4 +42,11 @@ describe("gateStatusLabel", () => {
     expect(gateStatusLabel(baseGate).tone).toBe("armed");
     expect(gateStatusLabel({ ...baseGate, mode: "open" }).tone).toBe("open");
   });
+
+  it("a gate doc holding ONLY an unlock code (mode none / no start otp) reads as idle", () => {
+    // Wave-2: minting an unlock code can create the gate doc before any start
+    // code exists — the start-gate card must not claim "Code active".
+    expect(gateStatusLabel({ ...baseGate, mode: "none", otp: "", unlock_otp: "654321" }).tone).toBe("idle");
+    expect(gateStatusLabel({ ...baseGate, otp: "" }).tone).toBe("idle");
+  });
 });

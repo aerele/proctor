@@ -327,7 +327,7 @@ function StudentApp() {
 
   // F5.3-6: fullscreen HARD-BLOCK ladder + switch-away debounce. The server's
   // violation verdict locks the session in block mode; the candidate-side
-  // release is the room code (UnlockCodePanel on the locked screen).
+  // release is the room's UNLOCK code (UnlockCodePanel on the locked screen).
   const enforcement = useEnforcement({
     gate,
     status,
@@ -1235,7 +1235,7 @@ function StudentApp() {
           lines={enforcementLock
             ? [
                 "You did not return to fullscreen in time (or exited fullscreen too many times), so this session locked itself.",
-                "Raise your hand and call your room proctor. They can read you the room code to unlock you here, or unlock you from their console."
+                "Raise your hand and call your room proctor. They can read you a 6-digit unlock code to enter here, or unlock you from their console."
               ]
             : [
                 "A proctor has locked this session. You cannot record until it is unlocked.",
@@ -1555,7 +1555,8 @@ function BlockedScreen({ tone, icon, title, lines, onRefresh, error }: { tone: "
 }
 
 // F5.6 L2 candidate-side release: an ENFORCEMENT-locked session unlocks with
-// the room's release code (the same 6-digit OTP the invigilator portal shows).
+// the room's dedicated UNLOCK code (minted on the invigilator portal — wave-2
+// fix: never the start code, which the candidate typed themselves to begin).
 // Admin locks never render this panel (locked_reason gate in the caller).
 function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; onUnlocked: () => void }) {
   const [code, setCode] = useState("");
@@ -1572,10 +1573,11 @@ function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; onUnloc
     } catch (cause) {
       const apiCode = (cause as ApiError)?.code;
       setMessage(
-        apiCode === "invalid_code" ? "That code is not valid. Ask your room proctor to read it again."
+        apiCode === "invalid_code" ? "That code is not valid. Ask your room proctor to read it again — the unlock code is NOT the code you started with."
           : apiCode === "too_many_attempts" ? "Too many attempts — this session can now only be unlocked by a proctor."
-            : apiCode === "not_enforcement_locked" ? "This lock can only be released by a proctor."
-              : cause instanceof Error ? cause.message : String(cause)
+            : apiCode === "no_unlock_code" ? "Your room proctor hasn't issued an unlock code yet. Ask them to generate one on their console, or to unlock you from there."
+              : apiCode === "not_enforcement_locked" ? "This lock can only be released by a proctor."
+                : cause instanceof Error ? cause.message : String(cause)
       );
     } finally {
       setBusy(false);
@@ -1584,8 +1586,8 @@ function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; onUnloc
 
   return (
     <section className="mx-auto mt-5 max-w-xl rounded-lg border border-line bg-panel p-5 text-center shadow-subtle">
-      <p className="text-sm font-semibold text-ink">Have the room code?</p>
-      <p className="mt-1 text-sm leading-6 text-muted">Your room proctor can read you the 6-digit room code to unlock this session.</p>
+      <p className="text-sm font-semibold text-ink">Have the unlock code?</p>
+      <p className="mt-1 text-sm leading-6 text-muted">Your room proctor can read you a 6-digit unlock code (from their proctor console) to unlock this session.</p>
       <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
         <input
           className="focus-ring h-11 w-44 rounded-md border border-line bg-white px-3 text-center font-mono text-lg tracking-[0.3em]"
@@ -3853,10 +3855,11 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
         ) : null}
 
         {/* F5.3: locked-by-enforcement context — the candidate self-locked via
-            the fullscreen ladder; the room code (or Unlock here) releases it. */}
+            the fullscreen ladder; the room's UNLOCK code (invigilator portal)
+            or Unlock here releases it. */}
         {status === "locked" && detail?.locked_reason === "fullscreen_enforcement" ? (
           <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-            <Lock size={14} /> Locked by FULLSCREEN ENFORCEMENT (countdown expired or exit limit) — the candidate can self-unlock with their room code, or use Unlock here.
+            <Lock size={14} /> Locked by FULLSCREEN ENFORCEMENT (countdown expired or exit limit) — the room proctor's unlock code (or Unlock here / on the invigilator portal) releases it.
           </p>
         ) : null}
 

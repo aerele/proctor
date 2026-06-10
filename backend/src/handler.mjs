@@ -254,6 +254,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/invigilator/release-code") return send(res, 200, await invigilatorReleaseCode(req));
     if (req.method === "POST" && path === "/api/invigilator/open-room") return send(res, 200, await invigilatorOpenRoom(req));
     if (req.method === "POST" && path === "/api/invigilator/exempt") return send(res, 200, await invigilatorExempt(req));
+    if (req.method === "POST" && path === "/api/invigilator/unlock-code") return send(res, 200, await invigilatorUnlockCode(req));
+    if (req.method === "POST" && path === "/api/invigilator/unlock") return send(res, 200, await invigilatorUnlock(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
@@ -706,6 +708,11 @@ async function recordEvents(req) {
   const alertSettings = await getAlertSettings();
   await raiseSureShotAlertsFromEvents(session, cleanedEvents, alertSettings);
 
+  // F5.3 wave-2 fix: server-side fullscreen enforcement — derive the exit
+  // counter (and the exit-limit escalation) from the event stream itself, so a
+  // client that blocks the enforcement-violation URL still gets locked/alerted.
+  await reconcileFullscreenEnforcement(session, cleanedEvents, alertSettings);
+
   return { ok: true, storage_key: eventKey };
 }
 
@@ -1090,9 +1097,15 @@ async function recordHeartbeat(req) {
   // change reaches every student within one interval — no reload. Costs one
   // extra settings read per heartbeat (the same doc the start gate reads).
   const settings = await getSettings();
+
+  // F5.3 wave-2 fix: the heartbeat closes the server-side fullscreen countdown
+  // (events set fullscreen_out_since; the heartbeat's `fullscreen` field is
+  // corrective truth). A lock applied HERE is reported on this very response so
+  // the recorder self-stops within the same interval.
+  const reconciledStatus = await reconcileEnforcementCountdown(session, body, settings, alertSettings);
   return {
     ok: true,
-    status: session.status || "active",
+    status: reconciledStatus || session.status || "active",
     start_ip: startIp,
     current_ip: currentIp,
     ip_changed: ipChanged,
@@ -2455,8 +2468,12 @@ async function applySessionAction(action, session, options = {}) {
   if (action === "unlock") {
     // F5.3: clearing locked_reason matters — an enforcement lock released by an
     // admin must not leave the session looking code-releasable forever.
-    await sessionRef(session.session_id).update({ status: "active", unlocked_at: now, locked_reason: null, updated_at: now });
-    return { ...session, status: "active", unlocked_at: now, locked_reason: null, updated_at: now };
+    // Wave-2: the SERVER-SIDE exit ladder resets too (mirrors the client's
+    // post-release reset) — one later accident is an L1 episode again, not an
+    // instant server-side relock.
+    const patch = { status: "active", unlocked_at: now, locked_reason: null, fullscreen_exit_count: 0, fullscreen_out_since: null, updated_at: now };
+    await sessionRef(session.session_id).update(patch);
+    return { ...session, ...patch };
   }
 
   if (action === "exempt") {
@@ -3487,6 +3504,11 @@ function publicRoomGate(gate) {
     released_by: gate.released_by || "",
     opened_at: gate.opened_at || null,
     opened_by: gate.opened_by || "",
+    // F5.6 wave-2 fix: the ENFORCEMENT-UNLOCK code lives in its own namespace —
+    // never the start OTP, which every candidate in an OTP-gated room typed.
+    unlock_otp: gate.unlock_otp || "",
+    unlock_released_at: gate.unlock_released_at || null,
+    unlock_released_by: gate.unlock_released_by || "",
     updated_at: gate.updated_at || ""
   };
 }
@@ -3527,6 +3549,10 @@ async function invigilatorReleaseCode(req) {
     released_by: String(body.invigilator_name || "").slice(0, 120),
     opened_at: existing?.opened_at || null,
     opened_by: existing?.opened_by || "",
+    // Full-doc rewrite must never clobber the separately-minted unlock code.
+    unlock_otp: existing?.unlock_otp || "",
+    unlock_released_at: existing?.unlock_released_at || null,
+    unlock_released_by: existing?.unlock_released_by || "",
     updated_at: now
   };
   await roomGateRef(contestSlug, roomKey).set(item);
@@ -3555,10 +3581,103 @@ async function invigilatorOpenRoom(req) {
     released_by: existing?.released_by || "",
     opened_at: now,
     opened_by: String(body.invigilator_name || "").slice(0, 120),
+    // Full-doc rewrite must never clobber the separately-minted unlock code.
+    unlock_otp: existing?.unlock_otp || "",
+    unlock_released_at: existing?.unlock_released_at || null,
+    unlock_released_by: existing?.unlock_released_by || "",
     updated_at: now
   };
   await roomGateRef(contestSlug, roomKey).set(item);
   return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
+}
+
+// POST /api/invigilator/unlock-code — mint (or re-display) the room's 6-digit
+// ENFORCEMENT-UNLOCK code (F5.6, wave-2 review fix). This is a SEPARATE
+// namespace from the start OTP: in an OTP-gated room every candidate personally
+// typed the start code, so accepting it for unlocks made the L2 lock
+// self-serve. Idempotent like release-code (reload re-displays the same code;
+// regenerate:true mints fresh). Deliberately NOT behind
+// requireGateEnabledSettings — with the default config (enforcement "block",
+// start gate off) this is the room proctor's ONLY code path, and an unlock
+// code must always be mintable.
+async function invigilatorUnlockCode(req) {
+  requireInvigilator(req);
+  const body = parseBody(req);
+  requireFields(body, ["room"]);
+  const settings = await getSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const roomKey = gateRoomKey(body.room);
+  const existing = await getRoomGate(contestSlug, roomKey);
+  if (existing && existing.unlock_otp && body.regenerate !== true) {
+    return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(existing) };
+  }
+  const now = new Date().toISOString();
+  const item = {
+    contest_slug: contestSlug,
+    room: roomKey === "_" ? "" : sanitizeRoom(body.room),
+    room_key: roomKey,
+    // Preserve the start-gate state untouched; a doc created purely for an
+    // unlock code carries mode "none" (sessionRoomGate admits on "open"/"otp"
+    // only, so this can never release a start gate).
+    mode: existing?.mode || "none",
+    otp: existing?.otp || "",
+    released_at: existing?.released_at || null,
+    released_by: existing?.released_by || "",
+    opened_at: existing?.opened_at || null,
+    opened_by: existing?.opened_by || "",
+    unlock_otp: generateRoomOtp(),
+    unlock_released_at: now,
+    unlock_released_by: String(body.invigilator_name || "").slice(0, 120),
+    updated_at: now
+  };
+  await roomGateRef(contestSlug, roomKey).set(item);
+  return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
+}
+
+// POST /api/invigilator/unlock — release one student's ENFORCEMENT lock from
+// the room dashboard (F5.6, wave-2 review fix: the locked screen promises
+// "unlock you from their console", which previously required ADMIN
+// credentials). Same least-privilege addressing as /api/invigilator/exempt
+// (room + username, never session_id). Admin locks (no/different
+// locked_reason) stay admin-only — an invigilator must not undo a deliberate
+// admin lock. Independent of the room start gate.
+async function invigilatorUnlock(req) {
+  requireInvigilator(req);
+  const body = parseBody(req);
+  requireFields(body, ["room", "username"]);
+  const settings = await getSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const roomKey = gateRoomKey(body.room);
+  const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
+  const usernameNorm = normalizeUsername(body.username);
+
+  let query = firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm);
+  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
+  const snapshot = await query.limit(50).get();
+  const locked = snapshot.docs
+    .map((doc) => doc.data())
+    .filter((doc) => doc.status === "locked")
+    .filter((doc) => String(doc.room || "") === roomLabel)
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  if (!locked.length) throw httpError(404, "no_locked_session_in_room");
+
+  const session = locked[0];
+  if (session.locked_reason !== ENFORCEMENT_LOCK_REASON) {
+    throw httpError(403, "not_enforcement_locked");
+  }
+  const now = new Date().toISOString();
+  await sessionRef(session.session_id).update({
+    status: "active",
+    unlocked_at: now,
+    locked_reason: null,
+    unlock_method: "invigilator",
+    // Wave-2: reset the server-side exit ladder (mirrors the client's
+    // post-release reset — a later accident is L1 again, not an instant relock).
+    fullscreen_exit_count: 0,
+    fullscreen_out_since: null,
+    updated_at: now
+  });
+  return { ok: true, username: session.hackerrank_username || "", status: "active" };
 }
 
 // POST /api/invigilator/exempt — F5.5: per-student enforcement exemption from
@@ -3672,13 +3791,24 @@ async function sessionEnforcementViolation(req) {
 
   const settings = await getSettings();
   const enforcement = enforcementConfig(settings);
-  const now = new Date().toISOString();
   const exitCount = Math.max(0, intOrZero(body.exit_count));
-
-  // The alert is admin-configurable DISPLAY; disabling it never disables the
-  // block-mode lock (policy lives in enforcement_mode). Deduped per minute so
-  // a violate→unlock→violate sequence stays visible as distinct alerts.
   const alertSettings = await getAlertSettings();
+  const { locked } = await applyEnforcementViolation(session, { phase, exitCount, enforcement, alertSettings });
+  if (!locked) {
+    return { ok: true, locked: false, mode: "alert_first" };
+  }
+  return { ok: true, locked: true, locked_reason: ENFORCEMENT_LOCK_REASON, mode: "block" };
+}
+
+// The single consequence of a tripped enforcement ladder — shared by the
+// candidate's self-report (sessionEnforcementViolation) and the SERVER-SIDE
+// reconciliation paths (recordEvents exit counting + heartbeat countdown).
+// The alert is admin-configurable DISPLAY; disabling it never disables the
+// block-mode lock (policy lives in enforcement_mode). Deduped per minute so a
+// violate→unlock→violate sequence stays visible as distinct alerts — and so
+// the honest client's report and the server's own derivation collapse into one.
+async function applyEnforcementViolation(session, { phase, exitCount, enforcement, alertSettings, derived = false }) {
+  const now = new Date().toISOString();
   const alertConfig = alertTypeConfig(alertSettings, "fullscreen_enforcement", "critical");
   if (alertConfig.enabled) {
     await upsertProctorAlert(session, {
@@ -3690,12 +3820,12 @@ async function sessionEnforcementViolation(req) {
         ? `Exceeded the fullscreen exit limit (${exitCount} exits; limit ${enforcement.fullscreen_exit_limit})`
         : `Did not re-enter fullscreen within ${enforcement.fullscreen_reentry_seconds}s`,
       dedupe: now.slice(0, 16),
-      data: { phase, exit_count: exitCount, mode: enforcement.mode }
+      data: { phase, exit_count: exitCount, mode: enforcement.mode, ...(derived ? { derived: "server" } : {}) }
     });
   }
 
   if (enforcement.mode === "alert_first") {
-    return { ok: true, locked: false, mode: "alert_first" };
+    return { locked: false };
   }
 
   await sessionRef(session.session_id).update({
@@ -3704,17 +3834,110 @@ async function sessionEnforcementViolation(req) {
     locked_reason: ENFORCEMENT_LOCK_REASON,
     updated_at: now
   });
-  return { ok: true, locked: true, locked_reason: ENFORCEMENT_LOCK_REASON, mode: "block" };
+  return { locked: true };
+}
+
+// ---- F5.3 wave-2 review fix: SERVER-SIDE enforcement reconciliation ---------
+//
+// The candidate's enforcement-violation POST is only the FAST PATH: a client
+// that blocks that single URL (or clears the localStorage ladder state) used to
+// neutralize the hard block with zero server-side signal. The server now
+// derives the same violations from evidence it already receives:
+//   - recordEvents counts unexpected fullscreen_exit events per session
+//     (fullscreen_exit_count) and tracks the open exit (fullscreen_out_since,
+//     cleared by fullscreen_enter) → exceeding the exit limit escalates here;
+//   - recordHeartbeat closes the countdown: an out-of-fullscreen span older
+//     than reentry + grace escalates even when no further events arrive. The
+//     heartbeat's `fullscreen` field is corrective truth — `true` clears a
+//     stale out_since (lost enter event), `false` starts the clock when the
+//     exit event itself was lost.
+// Exempt sessions are skipped entirely; alert_first mode alerts without
+// locking (policy parity with the self-report path).
+const ENFORCEMENT_COUNTDOWN_GRACE_SECONDS = 15;
+
+async function reconcileFullscreenEnforcement(session, events, alertSettings) {
+  if (sanitizeExemptions(session.enforcement_exemptions).fullscreen === true) return;
+  if (session.status !== "active") return;
+
+  let unexpectedExits = 0;
+  let outSince = session.fullscreen_out_since || null;
+  let sawFullscreenEvent = false;
+  for (const event of events) {
+    if (event.type === "fullscreen_exit") {
+      if (event.detail?.expected === true) continue;
+      unexpectedExits += 1;
+      if (!outSince) outSince = isoOrNow(event.timestamp);
+      sawFullscreenEvent = true;
+    } else if (event.type === "fullscreen_enter") {
+      outSince = null;
+      sawFullscreenEvent = true;
+    }
+  }
+  if (!sawFullscreenEvent) return;
+
+  const newCount = intOrZero(session.fullscreen_exit_count) + unexpectedExits;
+  await sessionRef(session.session_id).update({
+    fullscreen_exit_count: newCount,
+    fullscreen_out_since: outSince,
+    updated_at: new Date().toISOString()
+  });
+  if (!unexpectedExits) return;
+
+  const settings = await getSettings();
+  const enforcement = enforcementConfig(settings);
+  if (newCount > enforcement.fullscreen_exit_limit) {
+    await applyEnforcementViolation(session, {
+      phase: "exit_limit", exitCount: newCount, enforcement, alertSettings, derived: true
+    });
+  }
+}
+
+// Heartbeat-side countdown reconciliation. Returns "locked" when this call
+// locked the session (so the heartbeat response reports the new status and the
+// recorder self-stops on THIS interval), null otherwise.
+async function reconcileEnforcementCountdown(session, body, settings, alertSettings) {
+  if (sanitizeExemptions(session.enforcement_exemptions).fullscreen === true) return null;
+  if (session.status && session.status !== "active") return null;
+  const now = new Date().toISOString();
+  const outSince = session.fullscreen_out_since || null;
+
+  if (body.fullscreen === true) {
+    // Corrective truth: back in fullscreen — clear a stale open exit.
+    if (outSince) await sessionRef(session.session_id).update({ fullscreen_out_since: null, updated_at: now });
+    return null;
+  }
+  if (body.fullscreen === false && !outSince) {
+    // The exit event itself was lost — start the clock from heartbeat truth.
+    await sessionRef(session.session_id).update({ fullscreen_out_since: now, updated_at: now });
+    return null;
+  }
+  if (!outSince) return null;
+
+  const enforcement = enforcementConfig(settings);
+  const deadlineMs = Date.parse(outSince)
+    + (enforcement.fullscreen_reentry_seconds + ENFORCEMENT_COUNTDOWN_GRACE_SECONDS) * 1000;
+  if (!Number.isFinite(deadlineMs) || Date.now() <= deadlineMs) return null;
+  const { locked } = await applyEnforcementViolation(session, {
+    phase: "countdown_expired",
+    exitCount: intOrZero(session.fullscreen_exit_count),
+    enforcement, alertSettings, derived: true
+  });
+  return locked ? "locked" : null;
 }
 
 // POST /api/session/unlock-gate — candidate-side release of an ENFORCEMENT
-// lock using the room's release-code OTP (the same code the invigilator portal
-// already displays — "call your room proctor"). Admin locks (no/different
-// locked_reason) are NOT code-releasable: they need an admin/invigilator
-// unlock. Mirrors the room-gate attempt-cap pattern: NaN-guarded counter,
-// checked BEFORE the compare so a capped session stays capped even with the
-// right code. Deliberately consults the gate DOC regardless of
-// room_gate_enabled — the OTP here releases a lock, it does not gate a start.
+// lock using the room's dedicated UNLOCK code (gate.unlock_otp, minted via
+// /api/invigilator/unlock-code — "call your room proctor"). Wave-2 review fix:
+// NEVER the start OTP — every candidate in an OTP-gated room typed that code
+// to begin, so accepting it here made the L2 lock self-serve. Admin locks
+// (no/different locked_reason) are NOT code-releasable: they need an
+// admin/invigilator unlock. Mirrors the room-gate attempt-cap pattern:
+// NaN-guarded counter, checked BEFORE the compare so a capped session stays
+// capped even with the right code. When NO unlock code has been minted there
+// is nothing to brute-force, so the attempt does NOT burn toward the cap
+// (distinct no_unlock_code error → the candidate UI says "ask your proctor").
+// Deliberately consults the gate DOC regardless of room_gate_enabled — the
+// unlock code releases a lock, it does not gate a start.
 async function sessionUnlockGate(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "code"]);
@@ -3728,12 +3951,19 @@ async function sessionUnlockGate(req) {
   const code = String(body.code).trim();
   const now = new Date().toISOString();
   const gate = await getRoomGate(session.contest_slug || "", gateRoomKey(session.room));
-  if (code && gate && gate.otp && safeEqual(code, gate.otp)) {
+  if (!gate || !gate.unlock_otp) {
+    throw httpError(403, "no_unlock_code");
+  }
+  if (code && safeEqual(code, gate.unlock_otp)) {
     await sessionRef(session.session_id).update({
       status: "active",
       unlocked_at: now,
       locked_reason: null,
       unlock_method: "room_code",
+      // Wave-2: reset the server-side exit ladder (mirrors the client's
+      // post-release reset — a later accident is L1 again, not an instant relock).
+      fullscreen_exit_count: 0,
+      fullscreen_out_since: null,
       updated_at: now
     });
     return { ok: true, status: "active" };
@@ -3815,6 +4045,12 @@ async function invigilatorRoom(req) {
       exam_started_at: doc.exam_started_at || null,
       // F5.5: drives the per-student exemption toggles on the room dashboard.
       enforcement_exemptions: sanitizeExemptions(doc.enforcement_exemptions),
+      // F5.6 wave-2 fix: lets the portal offer per-student Unlock ONLY on
+      // enforcement locks (admin locks stay admin-released). Not PII — a fixed
+      // reason token, never free text.
+      locked_reason: doc.status === "locked" && doc.locked_reason === ENFORCEMENT_LOCK_REASON
+        ? ENFORCEMENT_LOCK_REASON
+        : null,
       created_at: doc.created_at || ""
     }));
 

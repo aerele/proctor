@@ -358,7 +358,12 @@ test("violation rejects an unknown phase and a missing session", async () => {
   assert.equal(missing.statusCode, 404);
 });
 
-// ---- 3: POST /api/session/unlock-gate ---------------------------------------
+// ---- 3: POST /api/session/unlock-gate + the unlock-code namespace -----------
+//
+// Wave-2 review fix: the unlock code is its OWN OTP (gate.unlock_otp), minted
+// via /api/invigilator/unlock-code, NEVER the room START code — every candidate
+// in an OTP-gated room personally typed the start code, so accepting it for
+// unlocks made the L2 lock self-serve.
 
 async function lockViaViolation(firestore, sessionId) {
   seedSession(firestore, sessionId);
@@ -374,19 +379,44 @@ async function mintRoomOtp() {
   return res.body.gate.otp;
 }
 
-test("unlock-gate with the room OTP releases an enforcement lock and clears locked_reason", async () => {
+async function mintUnlockCode(regenerate = false) {
+  const res = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock-code", headers: invigHeaders,
+    body: { room: "Lab A-1", invigilator_name: "Invy", ...(regenerate ? { regenerate: true } : {}) } }));
+  assert.equal(res.statusCode, 200);
+  return res.body.gate.unlock_otp;
+}
+
+test("unlock-gate with the room's UNLOCK code releases an enforcement lock and clears locked_reason", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
   await lockViaViolation(firestore, "u-1");
-  const otp = await mintRoomOtp();
+  const code = await mintUnlockCode();
+  assert.match(code, /^\d{6}$/);
   const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
-    body: { session_id: "u-1", code: otp } }));
+    body: { session_id: "u-1", code } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.status, "active");
   const doc = sessionDoc(firestore, "u-1");
   assert.equal(doc.status, "active");
   assert.equal(doc.locked_reason, null);
+  assert.equal(doc.unlock_method, "room_code");
+});
+
+test("unlock-gate REJECTS the room START otp — candidates already know that code", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  await lockViaViolation(firestore, "u-1b");
+  const startOtp = await mintRoomOtp();
+  await mintUnlockCode(); // an unlock code EXISTS — the start code must still fail
+  const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
+    body: { session_id: "u-1b", code: startOtp } }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.error, "invalid_code");
+  const doc = sessionDoc(firestore, "u-1b");
+  assert.equal(doc.status, "locked");
+  assert.equal(doc.unlock_attempt_count, 1);
 });
 
 test("unlock-gate rejects a wrong code with 403 and counts the attempt", async () => {
@@ -394,9 +424,10 @@ test("unlock-gate rejects a wrong code with 403 and counts the attempt", async (
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
   await lockViaViolation(firestore, "u-2");
-  await mintRoomOtp();
+  const code = await mintUnlockCode();
+  const wrong = code === "000000" ? "000001" : "000000";
   const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
-    body: { session_id: "u-2", code: "000000" } }));
+    body: { session_id: "u-2", code: wrong } }));
   assert.equal(res.statusCode, 403);
   assert.equal(sessionDoc(firestore, "u-2").unlock_attempt_count, 1);
 });
@@ -406,9 +437,9 @@ test("unlock-gate refuses ADMIN locks (only enforcement locks are code-releasabl
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
   seedSession(firestore, "u-3", { status: "locked" }); // admin lock: no locked_reason
-  const otp = await mintRoomOtp();
+  const code = await mintUnlockCode();
   const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
-    body: { session_id: "u-3", code: otp } }));
+    body: { session_id: "u-3", code } }));
   assert.equal(res.statusCode, 403);
   assert.equal(res.body.error, "not_enforcement_locked");
   assert.equal(sessionDoc(firestore, "u-3").status, "locked");
@@ -419,28 +450,167 @@ test("unlock-gate attempt cap: capped session stays capped even with the right c
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
   await lockViaViolation(firestore, "u-4");
-  const otp = await mintRoomOtp();
+  const code = await mintUnlockCode();
   // Garbage attempt count (NaN guard): treated as 0, so the right code works.
   sessionDoc(firestore, "u-4").unlock_attempt_count = "garbage";
   const okRes = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
-    body: { session_id: "u-4", code: otp } }));
+    body: { session_id: "u-4", code } }));
   assert.equal(okRes.statusCode, 200);
   // Capped: 429 BEFORE the compare, even with the right code.
   await lockViaViolation(firestore, "u-5");
   sessionDoc(firestore, "u-5").unlock_attempt_count = 20;
   const capped = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
-    body: { session_id: "u-5", code: otp } }));
+    body: { session_id: "u-5", code } }));
   assert.equal(capped.statusCode, 429);
 });
 
-test("unlock-gate with no gate doc minted yet rejects as invalid_code", async () => {
+test("unlock-gate with NO unlock code minted → 403 no_unlock_code WITHOUT burning an attempt", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
+  // No gate doc at all.
   await lockViaViolation(firestore, "u-6");
-  const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
+  const noDoc = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
     body: { session_id: "u-6", code: "123456" } }));
-  assert.equal(res.statusCode, 403);
+  assert.equal(noDoc.statusCode, 403);
+  assert.equal(noDoc.body.error, "no_unlock_code");
+  assert.equal(sessionDoc(firestore, "u-6").unlock_attempt_count, undefined);
+  // A gate doc with ONLY a start code is the same: nothing to brute-force, so
+  // the candidate's typing must not creep toward the 20-attempt permanent cap.
+  await mintRoomOtp();
+  const startOnly = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
+    body: { session_id: "u-6", code: "123456" } }));
+  assert.equal(startOnly.statusCode, 403);
+  assert.equal(startOnly.body.error, "no_unlock_code");
+  assert.equal(sessionDoc(firestore, "u-6").unlock_attempt_count, undefined);
+});
+
+// ---- 3b: invigilator unlock-code + per-student unlock (gate-independent) ----
+//
+// Wave-2 review fix: with the default config (enforcement block + room gate
+// DISABLED) every L2 lock used to dead-end on an admin. Both release paths the
+// locked screen promises must work independent of the start gate.
+
+test("invigilator unlock-code mints a 6-digit code even with the room gate DISABLED (default deployment)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore, { room_gate_enabled: false });
+  // Contrast: the START-gate mint is still (correctly) refused.
+  const release = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code", headers: invigHeaders,
+    body: { room: "Lab A-1", invigilator_name: "Invy" } }));
+  assert.equal(release.statusCode, 400);
+  assert.equal(release.body.error, "room_gate_disabled");
+  // The UNLOCK code mints fine — and the full candidate release loop works.
+  const code = await mintUnlockCode();
+  assert.match(code, /^\d{6}$/);
+  await lockViaViolation(firestore, "ug-1");
+  const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
+    body: { session_id: "ug-1", code } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(sessionDoc(firestore, "ug-1").status, "active");
+});
+
+test("invigilator unlock-code: 401 without auth; idempotent re-display; regenerate mints fresh; START otp untouched", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const noAuth = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock-code",
+    body: { room: "Lab A-1" } }));
+  assert.equal(noAuth.statusCode, 401);
+  const startOtp = await mintRoomOtp();
+  const first = await mintUnlockCode();
+  const second = await mintUnlockCode();
+  assert.equal(second, first); // portal reload re-displays the SAME code
+  const gates = firestore._collections.get(process.env.ROOM_GATES_COLLECTION);
+  const gateDoc = gates.get("gate:kec-2026:Lab A-1");
+  assert.equal(gateDoc.otp, startOtp);          // start code untouched
+  assert.equal(gateDoc.unlock_otp, first);
+  const regen = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock-code", headers: invigHeaders,
+    body: { room: "Lab A-1", invigilator_name: "Asha", regenerate: true } }));
+  assert.match(regen.body.gate.unlock_otp, /^\d{6}$/);
+  assert.equal(regen.body.gate.unlock_released_by, "Asha"); // rewrite proven (random code could collide)
+  assert.equal(regen.body.gate.otp, startOtp);  // regenerating the unlock code never touches the start code
+});
+
+test("release-code and open-room PRESERVE a minted unlock code (no clobber on full doc rewrite)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const code = await mintUnlockCode();
+  const release = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code", headers: invigHeaders,
+    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  assert.equal(release.statusCode, 200);
+  assert.equal(release.body.gate.unlock_otp, code);
+  const open = await call(makeReq({ method: "POST", path: "/api/invigilator/open-room", headers: invigHeaders,
+    body: { room: "Lab A-1", invigilator_name: "Asha" } }));
+  assert.equal(open.statusCode, 200);
+  assert.equal(open.body.gate.unlock_otp, code);
+});
+
+test("invigilator room response carries the unlock code fields on the gate projection", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore, { room_gate_enabled: false });
+  const code = await mintUnlockCode();
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room", headers: invigHeaders,
+    query: { room: "Lab A-1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.gate.unlock_otp, code);
+  assert.equal(res.body.gate.unlock_released_by, "Invy");
+});
+
+test("POST /api/invigilator/unlock releases an ENFORCEMENT-locked student by room+username (gate disabled)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore, { room_gate_enabled: false });
+  await lockViaViolation(firestore, "iu-1");
+  const noAuth = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
+    body: { room: "Lab A-1", username: "alice" } }));
+  assert.equal(noAuth.statusCode, 401);
+  const res = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
+    body: { room: "Lab A-1", username: "alice" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.username, "Alice");
+  assert.equal(res.body.status, "active");
+  assert.equal(res.body.session_id, undefined); // least privilege: never echo the bearer token
+  const doc = sessionDoc(firestore, "iu-1");
+  assert.equal(doc.status, "active");
+  assert.equal(doc.locked_reason, null);
+  assert.equal(doc.unlock_method, "invigilator");
+});
+
+test("invigilator unlock refuses ADMIN locks; 404 when no locked session for that student in the room", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "iu-2", { status: "locked" }); // admin lock: no locked_reason
+  const adminLock = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
+    body: { room: "Lab A-1", username: "alice" } }));
+  assert.equal(adminLock.statusCode, 403);
+  assert.equal(adminLock.body.error, "not_enforcement_locked");
+  assert.equal(sessionDoc(firestore, "iu-2").status, "locked");
+  const none = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
+    body: { room: "Lab A-1", username: "nobody" } }));
+  assert.equal(none.statusCode, 404);
+  assert.equal(none.body.error, "no_locked_session_in_room");
+});
+
+test("invigilator room rows carry locked_reason so the portal can offer Unlock only on enforcement locks", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  await lockViaViolation(firestore, "lr-1");
+  seedSession(firestore, "lr-2", {
+    session_id: "lr-2", status: "locked",
+    hackerrank_username: "Bob", username_norm: "bob"
+  }); // admin lock
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room", headers: invigHeaders,
+    query: { room: "Lab A-1" } }));
+  assert.equal(res.statusCode, 200);
+  const alice = res.body.sessions.find((row) => row.hackerrank_username === "Alice");
+  const bob = res.body.sessions.find((row) => row.hackerrank_username === "Bob");
+  assert.equal(alice.locked_reason, "fullscreen_enforcement");
+  assert.equal(bob.locked_reason, null);
 });
 
 // ---- 4: exemptions — admin session-action + invigilator endpoint -----------
@@ -602,4 +772,234 @@ test("a disabled fullscreen_enforcement alert type still locks in block mode (al
   assert.equal(res.body.locked, true);
   assert.equal(sessionDoc(firestore, "v-7").status, "locked");
   assert.equal(alertsIn(firestore).length, 0);
+});
+
+// ---- 6: SERVER-SIDE enforcement reconciliation -------------------------------
+//
+// Wave-2 review fix: the hard block used to exist only as a client self-report
+// (one blocked URL or a cleared localStorage key neutralized F5.3 silently).
+// The server now reconciles from the evidence it already receives: fullscreen
+// exit/enter events drive a server-side exit counter + open-exit timestamp, and
+// the heartbeat closes the countdown — the client POST is just the fast path.
+
+function fsEvent(type, timestamp, detail) {
+  return { type, timestamp, ...(detail ? { detail } : {}) };
+}
+
+async function postFsEvents(sessionId, events) {
+  return call(makeReq({ method: "POST", path: "/api/events",
+    body: { session_id: sessionId, events } }));
+}
+
+test("events: unexpected fullscreen exits past the limit lock the session server-side (no client report)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore); // defaults: limit 2, block mode
+  seedSession(firestore, "fs-1");
+  const res = await postFsEvents("fs-1", [
+    fsEvent("fullscreen_exit", "2026-06-10T10:00:00.000Z"),
+    fsEvent("fullscreen_enter", "2026-06-10T10:00:10.000Z"),
+    fsEvent("fullscreen_exit", "2026-06-10T10:01:00.000Z"),
+    fsEvent("fullscreen_enter", "2026-06-10T10:01:10.000Z"),
+    fsEvent("fullscreen_exit", "2026-06-10T10:02:00.000Z")
+  ]);
+  assert.equal(res.statusCode, 200);
+  const doc = sessionDoc(firestore, "fs-1");
+  assert.equal(doc.status, "locked");
+  assert.equal(doc.locked_reason, "fullscreen_enforcement");
+  assert.equal(doc.fullscreen_exit_count, 3);
+  const alerts = alertsIn(firestore).filter((a) => a.type === "fullscreen_enforcement");
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].data.phase, "exit_limit");
+  assert.equal(alerts[0].data.derived, "server");
+});
+
+test("events: expected exits don't count; the counter accumulates across batches and locks only past the limit", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "fs-2");
+  await postFsEvents("fs-2", [
+    fsEvent("fullscreen_exit", "2026-06-10T10:00:00.000Z", { expected: true }),
+    fsEvent("fullscreen_exit", "2026-06-10T10:00:30.000Z")
+  ]);
+  let doc = sessionDoc(firestore, "fs-2");
+  assert.equal(doc.fullscreen_exit_count, 1);
+  assert.equal(doc.status, "active");
+  await postFsEvents("fs-2", [fsEvent("fullscreen_exit", "2026-06-10T10:05:00.000Z")]);
+  doc = sessionDoc(firestore, "fs-2");
+  assert.equal(doc.fullscreen_exit_count, 2); // AT the limit — not past it
+  assert.equal(doc.status, "active");
+  await postFsEvents("fs-2", [fsEvent("fullscreen_exit", "2026-06-10T10:10:00.000Z")]);
+  doc = sessionDoc(firestore, "fs-2");
+  assert.equal(doc.fullscreen_exit_count, 3);
+  assert.equal(doc.status, "locked");
+});
+
+test("events: fullscreen_out_since tracks the open exit and clears on re-enter", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "fs-3");
+  await postFsEvents("fs-3", [fsEvent("fullscreen_exit", "2026-06-10T10:00:00.000Z")]);
+  assert.equal(sessionDoc(firestore, "fs-3").fullscreen_out_since, "2026-06-10T10:00:00.000Z");
+  await postFsEvents("fs-3", [fsEvent("fullscreen_enter", "2026-06-10T10:00:05.000Z")]);
+  assert.equal(sessionDoc(firestore, "fs-3").fullscreen_out_since, null);
+});
+
+test("events: exempt sessions never lock server-side; alert_first mode alerts without locking", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "fs-4", { enforcement_exemptions: { fullscreen: true } });
+  await postFsEvents("fs-4", [
+    fsEvent("fullscreen_exit", "2026-06-10T10:00:00.000Z"),
+    fsEvent("fullscreen_exit", "2026-06-10T10:01:00.000Z"),
+    fsEvent("fullscreen_exit", "2026-06-10T10:02:00.000Z")
+  ]);
+  assert.equal(sessionDoc(firestore, "fs-4").status, "active");
+  assert.equal(alertsIn(firestore).length, 0);
+
+  const firestore2 = makeFakeFirestore();
+  __setClientsForTest({ firestore: firestore2, storage: makeFakeStorage() });
+  seedSettings(firestore2, { enforcement_mode: "alert_first" });
+  seedSession(firestore2, "fs-5");
+  await postFsEvents("fs-5", [
+    fsEvent("fullscreen_exit", "2026-06-10T10:00:00.000Z"),
+    fsEvent("fullscreen_exit", "2026-06-10T10:01:00.000Z"),
+    fsEvent("fullscreen_exit", "2026-06-10T10:02:00.000Z")
+  ]);
+  assert.equal(sessionDoc(firestore2, "fs-5").status, "active");
+  const alerts = alertsIn(firestore2).filter((a) => a.type === "fullscreen_enforcement");
+  assert.equal(alerts.length, 1);
+});
+
+async function postHeartbeat(sessionId, extra = {}) {
+  return call(makeReq({ method: "POST", path: "/api/heartbeat",
+    body: { session_id: sessionId, recording_state: "combined:recording;screen:recording", visibility_state: "visible", ...extra } }));
+}
+
+test("heartbeat: a stale fullscreen_out_since locks (countdown reconciliation) and reports the locked status", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore); // reentry 20s; server grace 15s
+  seedSession(firestore, "hb-fs-1", { fullscreen_out_since: new Date(Date.now() - 60_000).toISOString() });
+  const res = await postHeartbeat("hb-fs-1", { fullscreen: false });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.status, "locked");
+  const doc = sessionDoc(firestore, "hb-fs-1");
+  assert.equal(doc.status, "locked");
+  assert.equal(doc.locked_reason, "fullscreen_enforcement");
+  const alerts = alertsIn(firestore).filter((a) => a.type === "fullscreen_enforcement");
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].data.phase, "countdown_expired");
+  assert.equal(alerts[0].data.derived, "server");
+});
+
+test("heartbeat: an out_since still inside reentry+grace does NOT lock (honest client races win)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "hb-fs-2", { fullscreen_out_since: new Date(Date.now() - 10_000).toISOString() });
+  const res = await postHeartbeat("hb-fs-2", { fullscreen: false });
+  assert.equal(res.body.status, "active");
+  assert.equal(sessionDoc(firestore, "hb-fs-2").status, "active");
+});
+
+test("heartbeat: fullscreen:true clears a stale out_since (lost enter event) — no lock", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "hb-fs-3", { fullscreen_out_since: new Date(Date.now() - 60_000).toISOString() });
+  const res = await postHeartbeat("hb-fs-3", { fullscreen: true });
+  assert.equal(res.body.status, "active");
+  const doc = sessionDoc(firestore, "hb-fs-3");
+  assert.equal(doc.status, "active");
+  assert.equal(doc.fullscreen_out_since, null);
+});
+
+test("heartbeat: fullscreen:false STARTS the clock when no out_since (lost exit event) — no lock yet", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "hb-fs-4");
+  const before = Date.now();
+  const res = await postHeartbeat("hb-fs-4", { fullscreen: false });
+  assert.equal(res.body.status, "active");
+  const doc = sessionDoc(firestore, "hb-fs-4");
+  assert.equal(doc.status, "active");
+  const stamped = Date.parse(doc.fullscreen_out_since);
+  assert.ok(stamped >= before && stamped <= Date.now());
+});
+
+test("heartbeat: countdown reconciliation respects the fullscreen exemption and alert_first mode", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "hb-fs-5", {
+    enforcement_exemptions: { fullscreen: true },
+    fullscreen_out_since: new Date(Date.now() - 600_000).toISOString()
+  });
+  const exempt = await postHeartbeat("hb-fs-5", { fullscreen: false });
+  assert.equal(exempt.body.status, "active");
+  assert.equal(sessionDoc(firestore, "hb-fs-5").status, "active");
+  assert.equal(alertsIn(firestore).length, 0);
+
+  const firestore2 = makeFakeFirestore();
+  __setClientsForTest({ firestore: firestore2, storage: makeFakeStorage() });
+  seedSettings(firestore2, { enforcement_mode: "alert_first" });
+  seedSession(firestore2, "hb-fs-6", { fullscreen_out_since: new Date(Date.now() - 60_000).toISOString() });
+  const held = await postHeartbeat("hb-fs-6", { fullscreen: false });
+  assert.equal(held.body.status, "active");
+  assert.equal(sessionDoc(firestore2, "hb-fs-6").status, "active");
+  const alerts = alertsIn(firestore2).filter((a) => a.type === "fullscreen_enforcement");
+  assert.equal(alerts.length, 1);
+});
+
+test("every unlock path RESETS the server-side exit counter — one later accident is L1 again, not an instant relock", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+
+  // (a) admin session-action unlock
+  seedSession(firestore, "rs-1", { status: "locked", locked_reason: "fullscreen_enforcement", fullscreen_exit_count: 3, fullscreen_out_since: "2026-06-10T10:00:00.000Z" });
+  await call(makeReq({ method: "POST", path: "/api/admin/session-action", headers: adminHeaders,
+    body: { action: "unlock", session_id: "rs-1" } }));
+  let doc = sessionDoc(firestore, "rs-1");
+  assert.equal(doc.fullscreen_exit_count, 0);
+  assert.equal(doc.fullscreen_out_since, null);
+  // A single accidental exit afterwards stays an L1 episode (no server lock).
+  await postFsEvents("rs-1", [fsEvent("fullscreen_exit", "2026-06-10T11:00:00.000Z")]);
+  doc = sessionDoc(firestore, "rs-1");
+  assert.equal(doc.status, "active");
+  assert.equal(doc.fullscreen_exit_count, 1);
+
+  // (b) candidate unlock-gate with the unlock code
+  seedSession(firestore, "rs-2", { status: "locked", locked_reason: "fullscreen_enforcement", fullscreen_exit_count: 3, fullscreen_out_since: "2026-06-10T10:00:00.000Z" });
+  const code = await mintUnlockCode();
+  await call(makeReq({ method: "POST", path: "/api/session/unlock-gate", body: { session_id: "rs-2", code } }));
+  doc = sessionDoc(firestore, "rs-2");
+  assert.equal(doc.status, "active");
+  assert.equal(doc.fullscreen_exit_count, 0);
+  assert.equal(doc.fullscreen_out_since, null);
+
+  // (c) invigilator per-student unlock
+  seedSession(firestore, "rs-3", { status: "locked", locked_reason: "fullscreen_enforcement", fullscreen_exit_count: 3, fullscreen_out_since: "2026-06-10T10:00:00.000Z",
+    hackerrank_username: "Cara", username_norm: "cara" });
+  await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
+    body: { room: "Lab A-1", username: "cara" } }));
+  doc = sessionDoc(firestore, "rs-3");
+  assert.equal(doc.status, "active");
+  assert.equal(doc.fullscreen_exit_count, 0);
+  assert.equal(doc.fullscreen_out_since, null);
+});
+
+test("heartbeat: a legacy client WITHOUT the fullscreen field still gets the events-derived countdown", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "hb-fs-7", { fullscreen_out_since: new Date(Date.now() - 60_000).toISOString() });
+  const res = await postHeartbeat("hb-fs-7"); // no fullscreen field at all
+  assert.equal(res.body.status, "locked");
+  assert.equal(sessionDoc(firestore, "hb-fs-7").status, "locked");
 });

@@ -22,13 +22,19 @@ export type SwitchAwayState = {
   // instant.
   lastSeenMs: number | null;
   count: number;
+  // Wave-2 review fix: still away (no return marker since the last away
+  // signal). An away-only episode must report its duration up to the CLOSE
+  // time, not the blur instant — the candidate who leaves and never returns is
+  // F5.4's primary target and used to close with duration ≈ 0 (no alert).
+  away: boolean;
 };
 
 export const initialSwitchAwayState: SwitchAwayState = {
   episodeStartMs: null,
   lastAwayMs: null,
   lastSeenMs: null,
-  count: 0
+  count: 0,
+  away: false
 };
 
 export type SwitchAwayEpisode = { count: number; duration_ms: number };
@@ -51,9 +57,14 @@ export function isSwitchAwaySignal(event: ProctorEvent): "away" | "back" | null 
   return null;
 }
 
-function closeEpisode(state: SwitchAwayState): SwitchAwayEpisode | null {
+// Close at `nowMs`: a STILL-AWAY episode (no return marker after the last away
+// signal) extends to the close instant — that is the real away span for the
+// candidate who never came back. A returned episode anchors at the return time.
+function closeEpisode(state: SwitchAwayState, nowMs: number): SwitchAwayEpisode | null {
   if (state.episodeStartMs == null) return null;
-  const end = Math.max(state.lastSeenMs ?? state.episodeStartMs, state.episodeStartMs);
+  const end = state.away
+    ? Math.max(nowMs, state.episodeStartMs)
+    : Math.max(state.lastSeenMs ?? state.episodeStartMs, state.episodeStartMs);
   return { count: state.count, duration_ms: end - state.episodeStartMs };
 }
 
@@ -64,22 +75,25 @@ export function switchAwayReducer(state: SwitchAwayState, action: SwitchAwayActi
   if (action.kind === "away") {
     if (open && !windowPassed) {
       // Same episode: extend the rolling window.
-      return { state: { ...state, lastAwayMs: action.nowMs, lastSeenMs: action.nowMs, count: state.count + 1 }, episode: null };
+      return {
+        state: { ...state, lastAwayMs: action.nowMs, lastSeenMs: action.nowMs, count: state.count + 1, away: true },
+        episode: null
+      };
     }
     // Window passed (or no episode): close any previous episode, open a new one.
     return {
-      state: { episodeStartMs: action.nowMs, lastAwayMs: action.nowMs, lastSeenMs: action.nowMs, count: 1 },
-      episode: windowPassed ? closeEpisode(state) : null
+      state: { episodeStartMs: action.nowMs, lastAwayMs: action.nowMs, lastSeenMs: action.nowMs, count: 1, away: true },
+      episode: windowPassed ? closeEpisode(state, action.nowMs) : null
     };
   }
 
   if (action.kind === "back") {
     if (!open) return { state, episode: null };
-    return { state: { ...state, lastSeenMs: action.nowMs }, episode: null };
+    return { state: { ...state, lastSeenMs: action.nowMs, away: false }, episode: null };
   }
 
   // tick / flush
   if (!open) return { state, episode: null };
   if (action.kind === "tick" && !windowPassed) return { state, episode: null };
-  return { state: initialSwitchAwayState, episode: closeEpisode(state) };
+  return { state: initialSwitchAwayState, episode: closeEpisode(state, action.nowMs) };
 }

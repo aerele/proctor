@@ -693,7 +693,9 @@ export type RosterLookupResult = {
 
 // ---- S3: invigilator portal + room start gate -------------------------------
 
-export type RoomGateMode = "otp" | "open";
+// "none" = a gate doc that exists only because an unlock code was minted —
+// it never releases a start gate (wave-2 unlock-namespace fix).
+export type RoomGateMode = "otp" | "open" | "none";
 
 export type RoomGate = {
   room: string;
@@ -704,6 +706,11 @@ export type RoomGate = {
   released_by: string;
   opened_at: string | null;
   opened_by: string;
+  /** F5.6 wave-2 fix: the ENFORCEMENT-UNLOCK code — its own namespace, never
+   *  the start OTP (which every candidate in an OTP-gated room typed). */
+  unlock_otp?: string;
+  unlock_released_at?: string | null;
+  unlock_released_by?: string;
   updated_at: string;
 };
 
@@ -733,6 +740,9 @@ export type InvigilatorSessionRow = {
   exam_started_at: string | null;
   /** F5.5: drives the per-student exemption toggles on the room dashboard. */
   enforcement_exemptions?: EnforcementExemptions;
+  /** F5.6 wave-2 fix: "fullscreen_enforcement" when the lock is invigilator-
+   *  releasable (per-row Unlock); null for admin locks. Fixed token, no PII. */
+  locked_reason?: string | null;
   created_at: string;
 };
 

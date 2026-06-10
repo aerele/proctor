@@ -219,6 +219,15 @@ export function useEnforcement(opts: {
     if (exemptFullscreen) dispatch({ kind: "config_change", nowMs: Date.now() });
   }, [exemptFullscreen, dispatch]);
 
+  // The server lock became visible through ANY channel (violation verdict or
+  // the heartbeat's status flip): settle a pending report so the tick retry
+  // loop stops POSTing against a session that is already locked.
+  useEffect(() => {
+    if (gate === "locked" && stateRef.current.reportPending) {
+      dispatch({ kind: "violation_result", locked: true, nowMs: Date.now() });
+    }
+  }, [gate, dispatch]);
+
   // The lock was SERVED (gate left "locked" via room code / admin unlock):
   // reset to a fresh ladder — exitCount restarts so a single later accident is
   // an L1 episode again, not an instant relock. The proctor was in the loop;
@@ -228,7 +237,7 @@ export function useEnforcement(opts: {
     const cameFromLocked = prevGateRef.current === "locked" && gate !== "locked" && gate !== "ended";
     prevGateRef.current = gate;
     if (!cameFromLocked || stateRef.current.phase === "idle") return;
-    const released: EnforcementState = { phase: "idle", exitCount: 0, deadlineMs: null, ackOk: false };
+    const released: EnforcementState = { ...initialEnforcementState };
     stateRef.current = released;
     setState(released);
     writeStoredEnforcement(sessionIdRef.current, released);

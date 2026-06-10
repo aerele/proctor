@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   FULLSCREEN_ACK_PHRASE,
+  REPORT_RETRY_MS,
   initialEnforcementState,
   enforcementReducer,
   enforcementOverlayVisible,
@@ -123,12 +124,84 @@ describe("enforcementReducer — countdown expiry", () => {
     expect(acked.state.phase).toBe("idle");
   });
 
-  it("the violation is reported once — further ticks in locking/alert_hold are no-ops", () => {
+  it("ticks inside the retry interval do not re-report", () => {
     const blocking = exit(initialEnforcementState).state;
     const locking = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, config).state;
-    const again = enforcementReducer(locking, { kind: "tick", nowMs: T0 + 25_000 }, config);
+    const again = enforcementReducer(locking, { kind: "tick", nowMs: T0 + 20_000 + REPORT_RETRY_MS - 1 }, config);
     expect(again.effects).toEqual([]);
     expect(again.state).toBe(locking);
+  });
+});
+
+// Wave-2 review fix: a FAILED violation POST used to strand the candidate in a
+// dead "Test disabled" overlay forever (tick was a no-op outside blocking, so
+// nothing ever retried while the server still showed a healthy session). The
+// report now retries on the tick until a violation_result verdict arrives.
+describe("enforcementReducer — violation report retry (failed POST recovery)", () => {
+  it("locking with a pending report re-emits report_violation once the retry interval passes", () => {
+    const blocking = exit(initialEnforcementState).state;
+    const locking = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, config).state;
+    expect(locking.reportPending).toBe(true);
+    const retried = enforcementReducer(locking, { kind: "tick", nowMs: T0 + 20_000 + REPORT_RETRY_MS }, config);
+    expect(retried.effects).toEqual([
+      { kind: "report_violation", phase: "countdown_expired", exitCount: 1 }
+    ]);
+    // The next retry waits a full interval again.
+    const tooSoon = enforcementReducer(retried.state, { kind: "tick", nowMs: T0 + 20_000 + REPORT_RETRY_MS + 1000 }, config);
+    expect(tooSoon.effects).toEqual([]);
+  });
+
+  it("a violation_result settles the report — no further retries", () => {
+    const blocking = exit(initialEnforcementState).state;
+    const locking = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, config).state;
+    const settled = enforcementReducer(locking, { kind: "violation_result", locked: true, nowMs: T0 + 21_000 }, config).state;
+    expect(settled.reportPending).toBe(false);
+    const later = enforcementReducer(settled, { kind: "tick", nowMs: T0 + 21_000 + REPORT_RETRY_MS * 3 }, config);
+    expect(later.effects).toEqual([]);
+  });
+
+  it("alert_hold (alert_first mode) retries a pending report too, and keeps the exit_limit phase", () => {
+    const cfg: EnforcementConfig = { ...config, mode: "alert_first", exitLimit: 0 };
+    const hold = exit(initialEnforcementState, T0, cfg).state;
+    expect(hold.phase).toBe("alert_hold");
+    expect(hold.reportPending).toBe(true);
+    const retried = enforcementReducer(hold, { kind: "tick", nowMs: T0 + REPORT_RETRY_MS }, cfg);
+    expect(retried.effects).toEqual([
+      { kind: "report_violation", phase: "exit_limit", exitCount: 1 }
+    ]);
+  });
+
+  it("a reload mid-locking re-reports on the FIRST tick (persisted pending state)", () => {
+    const blocking = exit(initialEnforcementState).state;
+    const locking = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, config).state;
+    const restored = deserializeEnforcementState(serializeEnforcementState(locking));
+    expect(restored.phase).toBe("locking");
+    expect(restored.reportPending).toBe(true);
+    const { effects } = enforcementReducer(restored, { kind: "tick", nowMs: T0 + 60_000 }, config);
+    expect(effects).toEqual([
+      { kind: "report_violation", phase: "countdown_expired", exitCount: 1 }
+    ]);
+  });
+
+  it("a LEGACY persisted locking payload (no pending flag) still retries after reload", () => {
+    const legacy = JSON.stringify({ phase: "locking", exitCount: 2, deadlineMs: null });
+    const restored = deserializeEnforcementState(legacy);
+    expect(restored.phase).toBe("locking");
+    expect(restored.reportPending).toBe(true);
+    const { effects } = enforcementReducer(restored, { kind: "tick", nowMs: T0 }, config);
+    expect(effects).toEqual([
+      { kind: "report_violation", phase: "countdown_expired", exitCount: 2 }
+    ]);
+  });
+
+  it("resolving an alert_hold episode (ack + fullscreen) stops any pending retry", () => {
+    const cfg: EnforcementConfig = { ...config, mode: "alert_first", exitLimit: 0 };
+    const hold = exit(initialEnforcementState, T0, cfg).state;
+    const resolved = enforcementReducer(hold, { kind: "ack", matched: true, fullscreen: true, nowMs: T0 + 5000 }, cfg).state;
+    expect(resolved.phase).toBe("idle");
+    expect(resolved.reportPending).toBe(false);
+    const later = enforcementReducer(resolved, { kind: "tick", nowMs: T0 + REPORT_RETRY_MS * 2 }, cfg);
+    expect(later.effects).toEqual([]);
   });
 });
 
