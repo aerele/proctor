@@ -49,6 +49,8 @@ import type {
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
+  SessionCardDetail,
+  SessionCardDetailResponse,
   SessionDetail,
   SessionDetailsResponse,
   SessionEvidence,
@@ -692,6 +694,62 @@ export async function fetchSessionsList(
     return response.sessions;
   } catch (cause) {
     // Endpoint not deployed yet → degrade gracefully (same as fetchRecordingSessions).
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// F6.3 — GET /api/admin/session-detail?session_id= for the Sessions detail
+// card: ONE session doc projected to the least-privilege card fields (identity
+// incl. roster id, status, IP block, doc activity counters). Returns `null` on
+// 404 — endpoint not deployed OR the doc vanished — so the card degrades to
+// the list-row fields it already has instead of erroring. The demo branch
+// derives the detail from the SHARED admin population (DEMO_ALL_SESSIONS) plus
+// the same per-room IP assignment the demo IP report uses, with deterministic
+// activity counters scaled off chunk_count (no wall-clock randomness).
+export async function fetchSessionCardDetail(password: string, sessionId: string): Promise<SessionCardDetail | null> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const row = DEMO_ALL_SESSIONS.find((session) => session.session_id === sessionId);
+    if (!row) return null;
+    const { ip, start_ip, ip_change_count } = demoIpFor(row);
+    return {
+      session_id: row.session_id,
+      hackerrank_username: row.hackerrank_username,
+      name: row.name,
+      roll_number: `R-${row.session_id.slice(-4).toUpperCase()}`,
+      roster_unique_id: `R-${row.session_id.slice(-4).toUpperCase()}`,
+      room: row.room,
+      contest_slug: row.contest_slug,
+      status: row.status,
+      created_at: row.created_at,
+      updated_at: row.created_at,
+      blocked_by_session_id: null,
+      start_ip,
+      current_ip: ip,
+      ip_change_count,
+      chunk_count: row.chunk_count,
+      // Deterministic activity counters: scale off the recording length so a
+      // longer demo session also "did more" (heartbeats every 15s ≈ 2/chunk).
+      event_count: row.chunk_count * 3 + 4,
+      clipboard_event_count: Math.floor(row.chunk_count / 5),
+      focus_event_count: Math.floor(row.chunk_count / 3),
+      heartbeat_count: row.chunk_count * 2
+    };
+  }
+
+  const query = new URLSearchParams();
+  query.set("session_id", sessionId);
+  try {
+    const response = await request<SessionCardDetailResponse>(
+      `/api/admin/session-detail?${query.toString()}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.session;
+  } catch (cause) {
+    // Endpoint not deployed (or the doc vanished) → the card falls back to the
+    // list-row fields it already has (graceful, same as fetchSessionsList).
     if ((cause as ApiError)?.status === 404) return null;
     throw cause;
   }
