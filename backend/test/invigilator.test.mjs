@@ -468,3 +468,68 @@ test("exec run/submit blocked with 403 exam_not_started until released; allowed 
   assert.equal(allowed.statusCode, 200);
   __setJudge0AdapterForTest(null);
 });
+
+// ---- Task 4: room dashboard --------------------------------------------------
+
+function seedAlert(firestore, id, overrides = {}) {
+  firestore.collection(process.env.ALERTS_COLLECTION).doc(id).set({
+    id, source: "proctor", type: "recording_stopped", severity: "critical",
+    timestamp: "2026-06-09T10:00:00.000Z", hackerrank_username: "Alice", username_norm: "alice",
+    title: "Recording stopped", contest_slug: "kec-2026", room: "Lab A-1", session_id: "a1",
+    video_key: "contests/kec-2026/sessions/alice/a1/screen/merged.webm",
+    ...overrides
+  });
+}
+
+test("GET /api/invigilator/room: room-scoped stats + least-privilege rows + gate + filtered alerts", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const fresh = new Date().toISOString();
+  seedSession(firestore, "a1");                                                            // live
+  seedSession(firestore, "a2", { username_norm: "bob", hackerrank_username: "Bob", name: "Bob B",
+    last_heartbeat_at: "2026-06-09T00:00:00.000Z" });                                      // live, stale -> disconnected
+  seedSession(firestore, "a3", { username_norm: "carl", name: "Carl C", status: "locked" });
+  seedSession(firestore, "a4", { username_norm: "dan", name: "Dan D", status: "ended", exam_started_at: fresh });
+  seedSession(firestore, "b1", { username_norm: "eve", room: "Lab B-2" });                 // other room — excluded
+  await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  seedAlert(firestore, "al1");
+  seedAlert(firestore, "al2", { id: "al2", archived: true });                              // archived — excluded
+  seedAlert(firestore, "al3", { id: "al3", room: "Lab B-2" });                             // other room — excluded
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.room, "Lab A-1");
+  assert.deepEqual(res.body.stats,
+    { live: 2, locked: 1, pending_approval: 0, finished: 1, disconnected: 1, started: 1, total: 4 });
+  assert.equal(res.body.sessions.length, 4);
+  const row = res.body.sessions.find((r) => r.session_id === "a1");
+  assert.equal(row.name, "Alice A");
+  assert.equal(row.roll_number, "R1");
+  // least-privilege: NO email / IP / storage fields on rows
+  assert.ok(!("email" in row) && !("start_ip" in row) && !("current_ip" in row) && !("storage_prefix" in row));
+  assert.equal(res.body.sessions.find((r) => r.session_id === "a2").stale, true);
+  assert.equal(res.body.sessions.find((r) => r.session_id === "a4").exam_started_at, fresh);
+  // gate present with the released OTP
+  assert.match(res.body.gate.otp, /^\d{6}$/);
+  // alerts: room-scoped, archived excluded, NO media fields
+  assert.deepEqual(res.body.alerts.map((a) => a.id), ["al1"]);
+  assert.ok(!("video_key" in res.body.alerts[0]) && !("download_url" in res.body.alerts[0]));
+});
+
+test("GET /api/invigilator/room: room=_ selects blank-room sessions; room param required", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "u1", { room: "" });
+  seedSession(firestore, "a1");
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "_" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.room_key, "_");
+  assert.deepEqual(res.body.sessions.map((r) => r.session_id), ["u1"]);
+  const missing = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(missing.statusCode, 400);
+});
