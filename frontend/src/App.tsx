@@ -1,6 +1,6 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
@@ -12,7 +12,7 @@ import { topBarVisible } from "./shell/examShell";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { useExamShell } from "./shell/useExamShell";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
@@ -1319,7 +1319,7 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
   );
 }
 
-type AdminView = "stats" | "alerts" | "sessions" | "attendance" | "review" | "recordings" | "problems" | "settings";
+type AdminView = "stats" | "alerts" | "sessions" | "attendance" | "review" | "recordings" | "problems" | "settings" | "ips";
 
 // A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
 // AdminStats card labels. "" = no status filter (the Total card). "disconnected"
@@ -1422,6 +1422,13 @@ function AdminApp() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsStatusFilter, setSessionsStatusFilter] = useState<SessionsStatusFilter>("");
   const [sessionsUnavailable, setSessionsUnavailable] = useState(false);
+
+  // S7: IP report state — the report payload, scope (live = non-ended only),
+  // loading flag, and the 404-degrade marker (endpoint not deployed yet).
+  const [ipReport, setIpReport] = useState<IpReportResponse | null>(null);
+  const [ipReportLoading, setIpReportLoading] = useState(false);
+  const [ipScope, setIpScope] = useState<IpReportScope>("live");
+  const [ipReportUnavailable, setIpReportUnavailable] = useState(false);
 
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
@@ -1531,6 +1538,30 @@ function AdminApp() {
     setSessionsStatusFilter(status);
     setView("sessions");
     void loadSessions(undefined, status);
+  };
+
+  // S7: load the IP-wise report. The scope is passed EXPLICITLY (same
+  // stale-state dodge as loadSessions); the contest scope follows the global
+  // filter. A null response = endpoint not deployed → "unavailable" note.
+  const loadIpReport = async (scopeOverride?: IpReportScope, filters?: AlertFilters) => {
+    setIpReportLoading(true);
+    setError("");
+    try {
+      const active = filters ?? alertFilters;
+      const scope = scopeOverride ?? ipScope;
+      const report = await fetchIpReport(password, { contestSlug: active.contest_slug, scope });
+      if (report === null) {
+        setIpReportUnavailable(true);
+        setIpReport(null);
+        return;
+      }
+      setIpReportUnavailable(false);
+      setIpReport(report);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIpReportLoading(false);
+    }
   };
 
   // Auto-load alerts the first time the unlocked admin opens the alerts tab.
@@ -2027,6 +2058,7 @@ function AdminApp() {
         <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
         <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
         <AdminTab active={view === "sessions"} onClick={() => { setView("sessions"); void loadSessions(); }} icon={<Users size={16} />} label="Sessions" />
+        <AdminTab active={view === "ips"} onClick={() => { setView("ips"); void loadIpReport(); }} icon={<Network size={16} />} label="IP report" />
         <AdminTab active={view === "attendance"} onClick={() => setView("attendance")} icon={<UserCheck size={16} />} label="Attendance" />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
         <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
@@ -2043,6 +2075,7 @@ function AdminApp() {
           void loadStats(next);
           if (alertsLoaded) void loadAlerts(next);
           if (sessionsList !== null) void loadSessions(next);
+          if (ipReport !== null) void loadIpReport(undefined, next);
         }}
         onClear={() => {
           const next = { ...alertFilters, contest_slug: undefined };
@@ -2050,6 +2083,7 @@ function AdminApp() {
           void loadStats(next);
           if (alertsLoaded) void loadAlerts(next);
           if (sessionsList !== null) void loadSessions(next);
+          if (ipReport !== null) void loadIpReport(undefined, next);
         }}
       />
 
@@ -2105,6 +2139,21 @@ function AdminApp() {
 
       {view === "attendance" ? (
         <AttendancePanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
+      ) : null}
+
+      {view === "ips" ? (
+        <IpReportView
+          report={ipReport}
+          loading={ipReportLoading}
+          unavailable={ipReportUnavailable}
+          scope={ipScope}
+          onScopeChange={(scope) => {
+            setIpScope(scope);
+            void loadIpReport(scope);
+          }}
+          contestSlug={alertFilters.contest_slug ?? ""}
+          onRefresh={() => loadIpReport()}
+        />
       ) : null}
 
       {view === "alerts" ? (
@@ -3196,6 +3245,122 @@ function AttendancePanel({ password, contestSlug }: { password: string; contestS
             )}
           </div>
         </>
+      )}
+    </section>
+  );
+}
+
+// S7: scope options for the IP report — "live" (non-ended = logged-in users)
+// vs "all" (adds ended sessions for after-the-exam forensics).
+const IP_SCOPE_OPTIONS: Array<{ value: IpReportScope; label: string }> = [
+  { value: "live", label: "Logged-in (live)" },
+  { value: "all", label: "All sessions" }
+];
+
+// S7: IP-wise report of logged-in users — the proxy-detection signal surface.
+// One row per IP, biggest clusters first: on campus, rooms collapse to a few
+// NAT IPs with many users, so an unexpected solo IP (off-campus candidate) or
+// an unexpected cluster (many candidates through one box) stands out. Rows
+// with 2+ distinct users get a warning tint; candidates whose IP changed
+// mid-exam get a warning icon. Interpretation stays with the admin — the
+// report never auto-flags.
+function IpReportView({ report, loading, unavailable, scope, onScopeChange, contestSlug, onRefresh }: {
+  report: IpReportResponse | null;
+  loading: boolean;
+  unavailable: boolean;
+  scope: IpReportScope;
+  onScopeChange: (scope: IpReportScope) => void;
+  contestSlug: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="space-y-5">
+      <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Network size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">IP report</h1>
+              <p className="mt-1 text-sm text-muted">
+                IP-wise count of logged-in users{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}. Many candidates on one unexpected IP — or a candidate on an IP nobody else uses — is a proxy/off-campus signal; a shared campus NAT is normal.
+              </p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <FilterSelect label="Scope" value={scope} options={IP_SCOPE_OPTIONS} onChange={(value) => onScopeChange(value as IpReportScope)} />
+          {report ? (
+            <p className="text-xs text-muted">
+              <span className="font-medium text-ink">{report.distinct_ips}</span> distinct IP{report.distinct_ips === 1 ? "" : "s"} across{" "}
+              <span className="font-medium text-ink">{report.total_sessions}</span> session{report.total_sessions === 1 ? "" : "s"} ·{" "}
+              <span className="font-medium text-ink">{report.multi_user_ips}</span> multi-user IP{report.multi_user_ips === 1 ? "" : "s"} ·{" "}
+              <span className="font-medium text-ink">{report.ip_changed_sessions}</span> session{report.ip_changed_sessions === 1 ? "" : "s"} with a mid-exam IP change
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          <AlertTriangle size={16} className="mr-2 inline" />
+          The ip-report endpoint is not deployed yet, so the IP report is unavailable. Deploy the backend to enable it.
+        </div>
+      ) : report === null ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading IP report…" : "No report loaded yet."}</div>
+      ) : report.ips.length === 0 ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No sessions match this scope.</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-line bg-panel shadow-subtle">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
+                <th className="px-4 py-3 font-semibold">IP address</th>
+                <th className="px-4 py-3 font-semibold">Users</th>
+                <th className="px-4 py-3 font-semibold">Sessions</th>
+                <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Rooms</th>
+                <th className="px-4 py-3 font-semibold">Candidates</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.ips.map((entry) => (
+                <tr key={entry.ip} className={`border-b border-line/60 last:border-0 ${entry.users >= 2 ? "bg-warning/5" : ""}`}>
+                  <td className="px-4 py-3 font-mono text-ink">{entry.ip}</td>
+                  <td className="px-4 py-3 font-semibold text-ink">{entry.users}</td>
+                  <td className="px-4 py-3 font-mono text-muted">{entry.sessions}</td>
+                  <td className="px-4 py-3 text-xs text-muted">
+                    {entry.active ? <span className="mr-2">{entry.active} live</span> : null}
+                    {entry.locked ? <span className="mr-2">{entry.locked} locked</span> : null}
+                    {entry.pending_approval ? <span className="mr-2">{entry.pending_approval} pending</span> : null}
+                    {entry.ended ? <span>{entry.ended} ended</span> : null}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-muted">{entry.rooms.length ? entry.rooms.join(", ") : "—"}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {entry.candidates.map((candidate) => (
+                        <span
+                          key={candidate.session_id}
+                          className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
+                          title={`${candidate.name || candidate.hackerrank_username} · ${candidate.status}${candidate.ip_change_count > 0 ? ` · IP changed ${candidate.ip_change_count}×` : ""}`}
+                        >
+                          {candidate.hackerrank_username}
+                          {candidate.ip_change_count > 0 ? <AlertTriangle size={12} className="text-warning" /> : null}
+                        </span>
+                      ))}
+                      {entry.candidates_truncated ? <span className="text-xs text-muted">+{entry.sessions - entry.candidates.length} more</span> : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {report.ips_truncated ? (
+            <p className="border-t border-line px-4 py-3 text-xs text-muted">Showing the {report.ips.length} largest IP groups; more exist beyond the cap.</p>
+          ) : null}
+        </div>
       )}
     </section>
   );
