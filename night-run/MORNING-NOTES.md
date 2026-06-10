@@ -145,3 +145,12 @@ M2 disclose keystroke capture in consent/rules/what-is-recorded copy · M5 make 
 ## S3 delta-audit (the deferred invigilator review) — done
 - **Security: CLEAN** — invigilator auth timing-safe + closed-by-default + admin fallback; room-OTP gate enforced SERVER-SIDE on exec/run+submit (waiting-room hide is UX-only, not bypassable); 20-attempt brute-force cap real (429); room_gate_enabled=false = byte-identical legacy. Nits only (extra getSettings() read per exec when gate disabled; OTP plaintext is a documented deliberate choice for a re-displayable room code).
 - **PII: one MAJOR (queued to fix)** — M12: `ip_changed` alert embeds "IP changed from X to Y" in alert.detail, and invigilatorRoom projects detail verbatim → a room invigilator sees candidate IPs, violating the handler's own "NO IP addresses" promise. Fix: drop `detail` from the invigilator alert projection (invigilators need only type/severity/title/timestamp) + regression test seeding an ip_changed alert. Also M12b (minor): the projection trusts producer-supplied title/detail generally — scrub to a minimal field set.
+
+## Audit-fix batch — DONE (~07:50)
+All mechanically-fixable majors landed in 3 parallel lanes (e0cce53 backend, b02f9ca disclosure/CSV, 1bcb9c2 components), suites 299 backend + 143 frontend green, adversarial re-check confirmed every fix real:
+- M12/M13: invigilator responses carry NO session_id (bearer credential) and NO free-text alert detail (was leaking IPs) — regression-tested with a seeded ip_changed alert.
+- M7 validated language stored · M5 roster clear actually deletes current-version entries · GATE_ATTEMPT_LIMIT NaN guard · exec hot-path no longer pays a settings read when the gate already passed.
+- M2: keystroke-capture disclosure now in consent sentence + rules + What-is-recorded panel (own-editor copy only).
+- M8: csvField neutralizes =+-@ formula injection (new pure tests).
+- M9: judge failures show "Couldn't reach the judge — try again." (role=alert) · M10: FullscreenGate is a real dialog (aria-modal, focus trap, on-mount focus) · M11: AnomalyPanel announces via role=alert.
+- Residual minor (accepted): gate background not literally `inert` — Tab is trapped and aria-modal set; full inert needs DOM test infra we don't have tonight.
