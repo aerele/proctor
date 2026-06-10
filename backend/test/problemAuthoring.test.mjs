@@ -228,6 +228,24 @@ test("create -> get -> list roundtrip; list carries summaries WITHOUT test conte
   assert.equal(row.sampleTests, undefined);
 });
 
+test("tags ride the authoring roundtrip and the list summary (S-I §1.2)", async () => {
+  const { firestore } = freshClients();
+  const created = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ tags: ["Strings", "two-pointers"] }) }));
+  assert.equal(created.statusCode, 200);
+  assert.deepEqual(created.body.problem.tags, ["strings", "two-pointers"]);
+
+  // a legacy doc stored before tags existed summarizes as [] (never undefined)
+  firestore.collection("problems_bank").doc("old-one").set({
+    id: "old-one", title: "Old", status: "draft", sampleTests: [], hiddenTests: []
+  });
+
+  const list = await call(makeReq({ method: "GET", path: "/api/admin/problems", headers: ADMIN }));
+  const bySlug = Object.fromEntries(list.body.problems.map((p) => [p.id, p]));
+  assert.deepEqual(bySlug["rev-str"].tags, ["strings", "two-pointers"]);
+  assert.deepEqual(bySlug["old-one"].tags, []);
+});
+
 test("upsert preserves created_at and refreshes updated_at", async () => {
   const { firestore } = freshClients();
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
