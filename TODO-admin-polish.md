@@ -110,5 +110,10 @@ Identity + data-model RETHINK (big — design-first, Karthi offered a discussion
 6. **PROCESS (the big one)**: before editing further toward multi-test — imagine/spec the COMPLETE end-to-end product first (research standard platforms, fill in all our existing features + specific use cases), define the end product, then drive edits toward that goal. → product-vision exercise BEFORE the F8/F9 big build; its output amends the F9 design spec.
 7. Parallelize aggressively; current in-flight work must not be disturbed; nothing from this round may be lost.
 
+## Documentation (Karthi voice ~20:41, do at the END after all development) — [F11]
+1. **Deploy/build runbook**: how to build both images, deploy to Google Cloud end-to-end including all keys (Judge0 RapidAPI, admin/invigilator passwords, SA auth, env vars), from-scratch project setup.
+2. **Feature documentation**: proper README + a real docs/ folder where EVERY feature is documented, with screenshots where possible (walkthrough evidence PNGs can seed this).
+3. **Pulled forward because the team tests TOMORROW (2026-06-11)**: a 1-page exam-day OPS RUNBOOK tonight (setup roster/rooms/problem/window, invigilator flow, live-ops surfaces, what to do when a candidate gets locked).
+
 ## LAST GOAL (after everything else) — recording encoding optimization [F7]
 Research-first, then DISCUSS with Karthi before building: best encoding/codec + settings for screen recordings where most of the frame is static (small incremental updates). Evaluate size vs quality vs CPU on candidate laptops (weak CPUs), browser MediaRecorder support (VP9/AV1/H.264 profiles, keyframe interval, bitrate modes), and what the review pipeline/video worker can ingest. Deliverable: comparison + recommendation, NOT an unilateral implementation.
