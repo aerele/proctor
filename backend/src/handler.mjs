@@ -226,6 +226,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
+    if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
     if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
@@ -1857,13 +1858,111 @@ async function adminStats(req) {
   // a roster exists).
   stats.not_started_or_total = stats.total;
 
+  // S5: the console exam-time card rides on the existing 5 s stats poll, so the
+  // current end time + a server clock stamp come back with every poll.
+  const settings = await getSettings();
   return {
     contest_slug: contestSlug ? String(contestSlug) : null,
     room: room || null,
     stats,
     rooms,
-    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS
+    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS,
+    end_at: settings?.end_at || "",
+    server_now: new Date().toISOString()
   };
+}
+
+// ---- S5: dynamic exam time + end-now (admin) -------------------------------
+//
+// POST /api/admin/exam-time — live control over the exam END time. Deliberately
+// NOT part of adminSaveSettings: a merge-write touches ONLY the end-time fields,
+// so settings keys other features own (rooms, gate flags, contest_url) are never
+// clobbered, and the endpoint stays a single, small, testable concern.
+//
+// Body carries EXACTLY ONE of:
+//   { end_at: "<ISO>" }     → set an absolute new end time
+//   { extend_minutes: N }   → shift the CURRENT end by N minutes (negative shortens)
+//   { end_now: true }       → end_at := now AND force-end every non-ended session
+//                             in the current contest scope. Their next heartbeat
+//                             409s session_ended → the recorder self-stops (B1).
+//
+// Students pick a new end time up via the heartbeat response (≤15 s) — no
+// reload. A plain end_at/extend change NEVER force-ends sessions: recording
+// keeps running so candidates end their own test (manifest upload intact);
+// end_now is the explicit hard stop.
+async function adminExamTime(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+
+  const provided = ["end_at", "extend_minutes", "end_now"].filter(
+    (key) => body[key] !== undefined && body[key] !== null && body[key] !== ""
+  );
+  if (provided.length !== 1) {
+    return badRequest("Provide exactly one of end_at, extend_minutes, end_now");
+  }
+  const field = provided[0];
+
+  const settings = await getSettings();
+  if (!settings?.start_at || !settings?.end_at) {
+    return badRequest("Proctoring schedule is not configured yet.");
+  }
+  const startMs = Date.parse(settings.start_at);
+  const currentEndMs = Date.parse(settings.end_at);
+  const now = new Date().toISOString();
+
+  let newEndMs;
+  if (field === "end_now") {
+    if (body.end_now !== true) return badRequest("end_now must be true");
+    newEndMs = Date.parse(now);
+  } else if (field === "end_at") {
+    newEndMs = Date.parse(String(body.end_at));
+    if (!Number.isFinite(newEndMs)) return badRequest("end_at must be a valid ISO 8601 date");
+  } else {
+    const delta = Number(body.extend_minutes);
+    if (!Number.isFinite(delta) || delta === 0) return badRequest("extend_minutes must be a non-zero number");
+    if (!Number.isFinite(currentEndMs)) return badRequest("Stored end time is invalid; set an absolute end_at instead.");
+    newEndMs = currentEndMs + delta * 60_000;
+  }
+
+  // Window sanity: the end must stay after the start (also rejects an end-now
+  // pressed before the exam ever started).
+  if (!Number.isFinite(startMs) || newEndMs <= startMs) {
+    return badRequest("End time must be after the start time.");
+  }
+  const newEndAt = new Date(newEndMs).toISOString();
+
+  // merge:true → ONLY the end-time fields change; everything else on the
+  // settings doc survives (parallel features add their own keys to this doc).
+  await settingsRef().set({ end_at: newEndAt, end_at_updated_at: now, updated_at: now }, { merge: true });
+
+  let endedCount = 0;
+  if (field === "end_now") {
+    const contestSlug = settings.contest_slug || contestSlugFromUrl(settings.contest_url);
+    endedCount = await endAllLiveSessions(contestSlug, now);
+  }
+
+  return { ok: true, start_at: settings.start_at, end_at: newEndAt, server_now: now, ended_count: endedCount };
+}
+
+// S5: end every non-ended session in the given contest scope ("" matches
+// legacy/no-contest sessions). Mirrors applySessionAction("end") — status:ended
+// + ended_at + live-slot release — with a distinct ended_reason for the audit
+// trail, applied with bounded concurrency so an 800-session end-now never fans
+// out unbounded. Returns the number of sessions ended.
+async function endAllLiveSessions(contestSlug, now) {
+  const snapshot = await firestore
+    .collection(SESSION_COLLECTION)
+    .where("contest_slug", "==", contestSlug || "")
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
+  const live = snapshot.docs.map((doc) => doc.data()).filter((doc) => doc.status !== "ended");
+  await mapWithConcurrency(live, 12, async (session) => {
+    await sessionRef(session.session_id).update({
+      status: "ended", ended_at: now, updated_at: now, ended_reason: "exam_ended_by_admin"
+    });
+    await releaseLiveSlot(session);
+  });
+  return live.length;
 }
 
 // Normalize a ?room query param to the same sanitized form rooms are stored in,

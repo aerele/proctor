@@ -239,3 +239,117 @@ test("POST /api/heartbeat response carries end_at + server_now (the student's li
   assert.equal(res.body.end_at, seeded.end_at);
   assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
 });
+
+// ---- Task 2: POST /api/admin/exam-time + stats end_at -----------------------
+
+test("POST /api/admin/exam-time validation: admin auth, configured schedule, exactly-one field, sane values", async () => {
+  const { firestore } = freshFakes();
+
+  // 401 without the admin password
+  const noAuth = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", body: { end_now: true } }));
+  assert.equal(noAuth.statusCode, 401);
+
+  // 400 when the schedule was never configured
+  const unconfigured = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
+  assert.equal(unconfigured.statusCode, 400);
+
+  await seedSettings(firestore);
+  // exactly ONE of the three fields
+  const none = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: {} }));
+  assert.equal(none.statusCode, 400);
+  const two = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true, extend_minutes: 5 } }));
+  assert.equal(two.statusCode, 400);
+  // bad values
+  const badIso = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_at: "not-a-date" } }));
+  assert.equal(badIso.statusCode, 400);
+  const zero = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 0 } }));
+  assert.equal(zero.statusCode, 400);
+  const falseEnd = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: false } }));
+  assert.equal(falseEnd.statusCode, 400);
+  // window inversion: new end before start
+  const beforeStart = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_at: isoMinutesFromNow(-120) } }));
+  assert.equal(beforeStart.statusCode, 400);
+});
+
+test("POST /api/admin/exam-time {end_at}: sets the new end WITHOUT clobbering other settings fields (merge-write)", async () => {
+  const { firestore } = freshFakes();
+  await seedSettings(firestore);
+  const newEnd = isoMinutesFromNow(120);
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_at: newEnd } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.end_at, newEnd);
+  assert.equal(res.body.ended_count, 0);
+  assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
+  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
+  assert.equal(stored.end_at, newEnd);
+  assert.ok(stored.end_at_updated_at);
+  // merge:true preserved everything else (incl. fields other features add)
+  assert.equal(stored.contest_url, "https://www.hackerrank.com/contests/kec-2026");
+  assert.deepEqual(stored.rooms, ["Lab A-1"]);
+  assert.equal(stored.contest_slug, "kec-2026");
+  assert.equal(stored.start_at !== undefined, true);
+});
+
+test("POST /api/admin/exam-time {extend_minutes}: positive extends, negative shortens, never inverts the window", async () => {
+  const { firestore } = freshFakes();
+  const seeded = await seedSettings(firestore);
+
+  const plus = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 30 } }));
+  assert.equal(plus.statusCode, 200);
+  assert.equal(Date.parse(plus.body.end_at), Date.parse(seeded.end_at) + 30 * 60_000);
+
+  // deltas compose against the CURRENT (already-extended) end
+  const minus = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: -45 } }));
+  assert.equal(minus.statusCode, 200);
+  assert.equal(Date.parse(minus.body.end_at), Date.parse(seeded.end_at) - 15 * 60_000);
+
+  // a shorten that would land before start_at → 400, end unchanged
+  const invert = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: -10000 } }));
+  assert.equal(invert.statusCode, 400);
+  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
+  assert.equal(Date.parse(stored.end_at), Date.parse(seeded.end_at) - 15 * 60_000);
+});
+
+test("POST /api/admin/exam-time {end_now}: ends every non-ended session in the contest scope, releases live locks", async () => {
+  const { firestore } = freshFakes();
+  await seedSettings(firestore);
+  const sessions = firestore.collection(process.env.SESSION_COLLECTION);
+  await sessions.doc("s-active").set({ session_id: "s-active", status: "active", username_norm: "alice", contest_slug: "kec-2026" });
+  await sessions.doc("s-locked").set({ session_id: "s-locked", status: "locked", username_norm: "bob", contest_slug: "kec-2026" });
+  await sessions.doc("s-pending").set({ session_id: "s-pending", status: "pending_approval", username_norm: "cara", contest_slug: "kec-2026" });
+  await sessions.doc("s-done").set({ session_id: "s-done", status: "ended", username_norm: "dan", contest_slug: "kec-2026" });
+  await sessions.doc("s-other").set({ session_id: "s-other", status: "active", username_norm: "eve", contest_slug: "other-contest" });
+  // alice's live-slot lock must be released so a legitimate later start works
+  await firestore.collection(process.env.LIVE_LOCK_COLLECTION).doc("live:alice:kec-2026").set({
+    username_norm: "alice", contest_slug: "kec-2026", session_id: "s-active", acquired_at: new Date().toISOString()
+  });
+
+  const before = Date.now();
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.ended_count, 3);
+  // end_at moved to ~now
+  const endMs = Date.parse(res.body.end_at);
+  assert.ok(endMs >= before && endMs <= Date.now());
+
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  for (const id of ["s-active", "s-locked", "s-pending"]) {
+    assert.equal(store.get(id).status, "ended", `${id} force-ended`);
+    assert.equal(store.get(id).ended_reason, "exam_ended_by_admin");
+    assert.ok(store.get(id).ended_at);
+  }
+  assert.equal(store.get("s-done").ended_reason, undefined, "already-ended session untouched");
+  assert.equal(store.get("s-other").status, "active", "other contest untouched");
+  assert.equal(firestore._collections.get(process.env.LIVE_LOCK_COLLECTION).has("live:alice:kec-2026"), false, "live slot released");
+});
+
+test("GET /api/admin/stats carries end_at + server_now for the console exam-time card", async () => {
+  const { firestore } = freshFakes();
+  const seeded = await seedSettings(firestore);
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/stats", headers: ADMIN }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.end_at, seeded.end_at);
+  assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
+});
