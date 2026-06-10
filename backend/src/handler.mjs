@@ -140,6 +140,9 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 // the admin credential. Closed-by-default when unset (mirrors ALERTS_INGEST_API_KEY).
 const INVIGILATOR_PASSWORD = process.env.INVIGILATOR_PASSWORD;
 const ROOM_GATES_COLLECTION = process.env.ROOM_GATES_COLLECTION || "proctor_room_gates";
+// Per-session wrong-OTP cap: at the cap further code attempts get 429 (status
+// polls still work, and an invigilator start-now still admits the session).
+const GATE_ATTEMPT_LIMIT = Number(process.env.GATE_ATTEMPT_LIMIT || "20");
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
@@ -199,6 +202,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/beacon") return send(res, 200, await recordBeacon(req));
     if (req.method === "POST" && path === "/api/session/validate-end") return send(res, 200, await validateEndSession(req));
     if (req.method === "POST" && path === "/api/session/end") return send(res, 200, await endSession(req));
+    if (req.method === "POST" && path === "/api/session/room-gate") return send(res, 200, await sessionRoomGate(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
@@ -710,7 +714,8 @@ async function execRun(req) {
   const body = parseBody(req);
   const sessionId = String(body.session_id || "");
   // Ownership gate: unknown session → 404; ended/locked/pending → 409/403.
-  requireWritableSession(await getSession(sessionId));
+  const session = requireWritableSession(await getSession(sessionId));
+  await requireExamStarted(session); // S3 room gate
   // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
   const limiter = checkExecRunLimit(sessionId);
   const problem = getProblem(String(body.problem_id || ""));
@@ -761,7 +766,8 @@ async function execSubmit(req) {
   const body = parseBody(req);
   const sessionId = String(body.session_id || "");
   // Ownership gate (same as /api/events): unknown → 404; ended/locked/pending → 409/403.
-  requireWritableSession(await getSession(sessionId));
+  const session = requireWritableSession(await getSession(sessionId));
+  await requireExamStarted(session); // S3 room gate
   // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
   // The cap is keyed on the raw problem_id string; only stored submissions
   // increment it, so invalid ids can never grow the per-session count map.
@@ -2846,6 +2852,61 @@ async function invigilatorOpenRoom(req) {
   };
   await roomGateRef(contestSlug, roomKey).set(item);
   return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
+}
+
+// POST /api/session/room-gate — candidate-side gate poll/unlock. Auth = the
+// unguessable session token (like /api/events), never admin auth. With no
+// `code` it is a cheap status poll (the client re-polls ~5 s, so an invigilator
+// start-now admits candidates with ZERO typing); with a `code` it attempts the
+// room OTP. Recording/events/heartbeats are deliberately NOT gated — a
+// candidate "waiting" is still recorded. The attempt cap is checked BEFORE the
+// compare so a capped session stays capped even with the right code.
+async function sessionRoomGate(req) {
+  const body = parseBody(req);
+  requireFields(body, ["session_id"]);
+  const session = requireWritableSession(await getSession(String(body.session_id)));
+  const settings = await getSettings();
+  if (!settings?.room_gate_enabled) {
+    return { gate_enabled: false, exam_started: true, exam_started_at: session.exam_started_at || null };
+  }
+  if (session.exam_started_at) {
+    return { gate_enabled: true, exam_started: true, exam_started_at: session.exam_started_at };
+  }
+  const contestSlug = session.contest_slug || "";
+  const roomKey = gateRoomKey(session.room);
+  const gate = await getRoomGate(contestSlug, roomKey);
+  const now = new Date().toISOString();
+
+  if (gate && gate.mode === "open") {
+    await sessionRef(session.session_id).update({ exam_started_at: now, exam_start_method: "room_open", updated_at: now });
+    return { gate_enabled: true, exam_started: true, exam_started_at: now };
+  }
+
+  const code = body.code === undefined || body.code === null ? "" : String(body.code).trim();
+  if (!code) {
+    return { gate_enabled: true, exam_started: false, room: session.room || "" };
+  }
+
+  if (Number(session.gate_attempt_count || 0) >= GATE_ATTEMPT_LIMIT) {
+    throw httpError(429, "too_many_attempts");
+  }
+  if (gate && gate.mode === "otp" && gate.otp && safeEqual(code, gate.otp)) {
+    await sessionRef(session.session_id).update({ exam_started_at: now, exam_start_method: "otp", updated_at: now });
+    return { gate_enabled: true, exam_started: true, exam_started_at: now };
+  }
+  await sessionRef(session.session_id).update({ gate_attempt_count: FieldValue.increment(1), updated_at: now });
+  throw httpError(403, "invalid_code");
+}
+
+// S3 gate enforcement for code execution: with the gate enabled, Run/Submit are
+// blocked until the session was released (OTP / room open / admin turning the
+// gate off). Deliberately NOT inside requireWritableSession — evidence writes
+// (events, uploads, heartbeats) must keep flowing while the candidate waits.
+async function requireExamStarted(session) {
+  const settings = await getSettings();
+  if (settings?.room_gate_enabled && !session.exam_started_at) {
+    throw httpError(403, "exam_not_started");
+  }
 }
 
 // ---- Proctor alert settings (admin) ----------------------------------------

@@ -361,3 +361,110 @@ test("release-code for the unassigned pseudo-room ('_') stores key '_' with a bl
   assert.equal(res.body.gate.room, "");
   assert.ok(firestore._collections.get(process.env.ROOM_GATES_COLLECTION).has("gate:kec-2026:_"));
 });
+
+// ---- Task 3: candidate room-gate poll/unlock + exec enforcement -------------
+
+test("room-gate: gate disabled -> started immediately, no doc writes", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore, { room_gate_enabled: false });
+  seedSession(firestore, "s1");
+  const res = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual({ gate_enabled: res.body.gate_enabled, exam_started: res.body.exam_started },
+    { gate_enabled: false, exam_started: true });
+  assert.equal(firestore._collections.get(process.env.SESSION_COLLECTION).get("s1").exam_started_at, undefined);
+});
+
+test("room-gate: waiting before any release; invigilator open-room auto-starts and stamps the session", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s1");
+  const waiting = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  assert.equal(waiting.statusCode, 200);
+  assert.equal(waiting.body.exam_started, false);
+  await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
+    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  const started = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  assert.equal(started.body.exam_started, true);
+  const doc = firestore._collections.get(process.env.SESSION_COLLECTION).get("s1");
+  assert.ok(doc.exam_started_at);
+  assert.equal(doc.exam_start_method, "room_open");
+  // idempotent replay
+  const again = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  assert.equal(again.body.exam_started, true);
+  assert.equal(again.body.exam_started_at, doc.exam_started_at);
+});
+
+test("room-gate: correct OTP starts; wrong OTP -> 403 invalid_code and counts the attempt", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s1");
+  const released = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  const otp = released.body.gate.otp;
+  const wrong = await call(makeReq({ method: "POST", path: "/api/session/room-gate",
+    body: { session_id: "s1", code: "000000" === otp ? "999999" : "000000" } }));
+  assert.equal(wrong.statusCode, 403);
+  assert.equal(wrong.body.error, "invalid_code");
+  assert.equal(firestore._collections.get(process.env.SESSION_COLLECTION).get("s1").gate_attempt_count, 1);
+  const right = await call(makeReq({ method: "POST", path: "/api/session/room-gate",
+    body: { session_id: "s1", code: otp } }));
+  assert.equal(right.statusCode, 200);
+  assert.equal(right.body.exam_started, true);
+  assert.equal(firestore._collections.get(process.env.SESSION_COLLECTION).get("s1").exam_start_method, "otp");
+});
+
+test("room-gate: attempt cap -> 429 too_many_attempts (even with the right code)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s1", { gate_attempt_count: 20 });
+  const released = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
+    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  const res = await call(makeReq({ method: "POST", path: "/api/session/room-gate",
+    body: { session_id: "s1", code: released.body.gate.otp } }));
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.error, "too_many_attempts");
+  // a code-less status poll still works (and start-now can still admit them)
+  const poll = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  assert.equal(poll.statusCode, 200);
+  assert.equal(poll.body.exam_started, false);
+});
+
+test("room-gate: unknown session 404; ended session 409 (ownership gate)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const unknown = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "nope" } }));
+  assert.equal(unknown.statusCode, 404);
+  seedSession(firestore, "s1", { status: "ended" });
+  const ended = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  assert.equal(ended.statusCode, 409);
+});
+
+test("exec run/submit blocked with 403 exam_not_started until released; allowed after", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s1");
+  __setJudge0AdapterForTest({ runBatch: async (items) => items.map(() => (
+    { status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  const blockedRun = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  assert.equal(blockedRun.statusCode, 403);
+  assert.equal(blockedRun.body.error, "exam_not_started");
+  const blockedSubmit = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  assert.equal(blockedSubmit.statusCode, 403);
+  // release via start-now, then run again
+  await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
+    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+  await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
+  const allowed = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  assert.equal(allowed.statusCode, 200);
+  __setJudge0AdapterForTest(null);
+});
