@@ -7,19 +7,24 @@
 // Bar presence semantics: bar = all good; NO bar = walk over.
 
 import type { SessionStatus } from "../types";
-import { fullscreenGateVisible, stageHint, topBarVisible, type ShellGate } from "./examShell";
+import { fullscreenGateVisible, permissionsGateVisible, stageHint, topBarVisible, type ShellGate } from "./examShell";
 import { AnomalyPanel } from "./AnomalyPanel";
 import { ExamTopBar } from "./ExamTopBar";
 import { FullscreenGate } from "./FullscreenGate";
+import { PermissionsGate, type PermissionsGateProps } from "./PermissionsGate";
 import type { ExamShellApi } from "./useExamShell";
 
-export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds, examReleased, ownEditor, remainingLabel, timeUp }: {
+export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds, examReleased, permissionsReady, permissionsGate, ownEditor, remainingLabel, timeUp }: {
   shell: ExamShellApi;
   gate: ShellGate;
   status: SessionStatus;
   identity: { name: string; username: string; room: string } | null;
   elapsedSeconds: number;
   examReleased: boolean;
+  // F5.1: stage-1 state + the PermissionsGate's checklist/handlers (App owns
+  // the acquisition glue; the chrome only decides visibility).
+  permissionsReady: boolean;
+  permissionsGate: PermissionsGateProps;
   ownEditor: boolean;
   // S5: skew-corrected exam countdown ("H:MM:SS") + time-up flag for the top
   // bar. null → no end time known (no countdown shown).
@@ -28,9 +33,11 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
 }) {
   const barVisible = topBarVisible(shell.barHidden, gate);
   // While an anomaly episode is active the AnomalyPanel owns fullscreen
-  // re-entry; the pre-recording gate overlay stays out of its way (§5.2). The
-  // locked screen also takes precedence over the overlay — pure decision in
-  // examShell.fullscreenGateVisible.
+  // re-entry; the pre-recording gate overlays stay out of its way (§5.2). The
+  // locked screen also takes precedence over the overlays — pure decisions in
+  // examShell.permissionsGateVisible / fullscreenGateVisible (mutually
+  // exclusive: stage 1 vs stage 2).
+  const permGateVisible = permissionsGateVisible({ stage: shell.stage, barHidden: shell.barHidden, gate });
   const gateVisible = fullscreenGateVisible({ fullscreen: shell.fullscreen, stage: shell.stage, barHidden: shell.barHidden, gate });
 
   return (
@@ -40,7 +47,7 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
           stage={shell.stage}
           identity={identity}
           elapsedSeconds={elapsedSeconds}
-          recording={status === "recording" || status === "ending"}
+          recording={(status === "recording" || status === "ending") && gate !== "ended"}
           flagCount={shell.flagCount}
           remainingLabel={remainingLabel}
           timeUp={timeUp}
@@ -56,9 +63,10 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
       ) : null}
       {barVisible ? (
         <p className="mb-5 text-sm leading-6 text-muted">
-          {stageHint({ fullscreen: shell.fullscreen, gate, status, examReleased, ownEditor })}
+          {stageHint({ permissionsReady, fullscreen: shell.fullscreen, gate, status, examReleased, ownEditor })}
         </p>
       ) : null}
+      {permGateVisible ? <PermissionsGate {...permissionsGate} /> : null}
       {gateVisible ? <FullscreenGate onEnter={shell.enterFullscreen} /> : null}
     </>
   );

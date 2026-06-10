@@ -11,10 +11,11 @@ import { ProblemBankSection } from "./admin/ProblemBank";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
-import { topBarVisible } from "./shell/examShell";
+import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
+import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
 import { useExamShell } from "./shell/useExamShell";
-import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
+import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
@@ -143,6 +144,19 @@ function StudentApp() {
   const hasProblem = activeProblem !== null;
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  // F5.1 permissions-first onboarding (stage 1, before fullscreen): the
+  // checklist mirrors the per-permission prompt results; the acquired streams
+  // wait here until beginRecording hands them to the recorder (start() then
+  // reuses them — no second prompt). Streams never survive a reload, so a
+  // resumed session naturally reruns stage 1+2 without re-asking the form.
+  const [permissions, setPermissions] = useState<PermissionChecklist>(initialPermissionChecklist);
+  const [permissionsConfirmed, setPermissionsConfirmed] = useState(false);
+  const [permissionsBusy, setPermissionsBusy] = useState<PermissionKey | "all" | null>(null);
+  const [screenSetupMessage, setScreenSetupMessage] = useState("");
+  const acquiredMediaRef = useRef<AcquiredMedia>({ screen: null, cameraMic: null, cameraMicMode: null });
+  // Setup-stage audit events queued until a session exists (mirrors the
+  // shell's own pre-session buffer), flushed in beginRecording.
+  const preSessionEventsRef = useRef<ProctorEvent[]>([]);
 
   const rosterRequired = Boolean(examConfig?.roster_required);
   const rosterConfirmed = Boolean(form.roster_unique_id);
@@ -177,10 +191,124 @@ function StudentApp() {
   // coding workspace / contest link stay hidden and the shell stage stays 3.
   const examGateActive = Boolean(sessionConfig?.room_gate_enabled) && !examStarted;
 
+  // ---- F5.1 stage-1 permission acquisition (all prompts BEFORE fullscreen) --
+  // No session exists during setup, so fullscreen-exit/blur from the prompts
+  // can never be an anomaly (the reducer only fires while recording) — and the
+  // events emitted here are queued and flushed once the session is created.
+  const recordSetupEvent = (type: string, detail?: Record<string, unknown>) => {
+    const event = createUiEvent(type, detail);
+    addEvent(event);
+    if (sessionId) void sendEvents(sessionId, [event]);
+    else preSessionEventsRef.current = [...preSessionEventsRef.current, event].slice(-50);
+  };
+
+  const acquireScreenPermission = async (): Promise<void> => {
+    setPermissions((c) => ({ ...c, screen: "requesting" }));
+    setScreenSetupMessage("");
+    try {
+      const stream = await acquireScreenShareStream(SETUP_SCREEN_CONSTRAINTS, recordSetupEvent);
+      acquiredMediaRef.current.screen?.getTracks().forEach((track) => track.stop());
+      acquiredMediaRef.current.screen = stream;
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        // Killed between setup and start. Once beginRecording hands the stream
+        // to the recorder this listener disarms (identity check) — the recorder
+        // owns the fatal-stop path from then on.
+        if (acquiredMediaRef.current.screen !== stream) return;
+        acquiredMediaRef.current.screen = null;
+        setPermissions((c) => ({ ...c, screen: "pending" }));
+        recordSetupEvent("setup_screen_share_ended");
+      });
+      setPermissions((c) => ({ ...c, screen: "granted" }));
+      recordSetupEvent("setup_screen_share_granted", {
+        display_surface: (stream.getVideoTracks()[0]?.getSettings() as MediaTrackSettings & { displaySurface?: string })?.displaySurface || "unknown"
+      });
+    } catch (cause) {
+      const kind = classifyStartError(cause);
+      setPermissions((c) => ({ ...c, screen: screenStatusFromErrorKind(kind) }));
+      setScreenSetupMessage(screenShareFailureMessage(kind));
+      recordSetupEvent("setup_screen_share_failed", { kind, message: cause instanceof Error ? cause.message : String(cause) });
+    }
+  };
+
+  const acquireCameraMicPermission = async (): Promise<void> => {
+    setPermissions((c) => ({ ...c, camera: "requesting", microphone: "requesting" }));
+    const result = await acquireCameraMicrophone(recordSetupEvent);
+    acquiredMediaRef.current.cameraMic?.getTracks().forEach((track) => track.stop());
+    acquiredMediaRef.current.cameraMic = result.stream;
+    acquiredMediaRef.current.cameraMicMode = result.captureMode;
+    setPermissions((c) => ({ ...c, camera: result.camera, microphone: result.microphone }));
+  };
+
+  const acquireClipboardPermission = async (): Promise<void> => {
+    setPermissions((c) => ({ ...c, clipboard: "requesting" }));
+    if (!navigator.clipboard?.readText) {
+      setPermissions((c) => ({ ...c, clipboard: "unavailable" }));
+      recordSetupEvent("setup_clipboard_permission_failed", { message: "Clipboard read is not supported by this browser." });
+      return;
+    }
+    try {
+      // Permission primer only: the text itself is NOT kept — the authoritative
+      // entry snapshot still happens in collectEntryReviewEvidence at start
+      // (which now reads silently because the grant already happened here).
+      const text = await navigator.clipboard.readText();
+      setPermissions((c) => ({ ...c, clipboard: "granted" }));
+      recordSetupEvent("setup_clipboard_permission_granted", { text_length: text.length });
+    } catch (cause) {
+      setPermissions((c) => ({ ...c, clipboard: "denied" }));
+      recordSetupEvent("setup_clipboard_permission_failed", { message: cause instanceof Error ? cause.message : String(cause) });
+    }
+  };
+
+  // The single stage-1 gesture: screen share first (the required one), then
+  // the camera/mic ladder, then the clipboard primer. Skips already-granted
+  // items so the same button doubles as "request the remaining permissions".
+  const runPermissionsSetup = async () => {
+    setPermissionsBusy("all");
+    try {
+      if (permissions.screen !== "granted" || !acquiredMediaRef.current.screen) await acquireScreenPermission();
+      if (permissions.camera !== "granted" || permissions.microphone !== "granted" || !acquiredMediaRef.current.cameraMic) {
+        await acquireCameraMicPermission();
+      }
+      if (permissions.clipboard !== "granted") await acquireClipboardPermission();
+    } finally {
+      setPermissionsBusy(null);
+    }
+  };
+
+  const retryPermission = (key: PermissionKey) => {
+    setPermissionsBusy(key);
+    void (async () => {
+      try {
+        if (key === "screen") await acquireScreenPermission();
+        else if (key === "clipboard") await acquireClipboardPermission();
+        else await acquireCameraMicPermission();
+      } finally {
+        setPermissionsBusy(null);
+      }
+    })();
+  };
+
+  const confirmPermissions = () => {
+    if (permissionsConfirmed) return;
+    setPermissionsConfirmed(true);
+    recordSetupEvent("setup_permissions_confirmed", { ...permissions });
+  };
+
+  // A flawless run needs no extra click — auto-continue to the fullscreen step.
+  useEffect(() => {
+    if (!permissionsConfirmed && allPermissionsGranted(permissions)) confirmPermissions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permissions, permissionsConfirmed]);
+
+  // Stage-1 gate satisfied: the required screen share is live and confirmed —
+  // or recording already runs (streams were handed to the recorder).
+  const permissionsReady = status === "recording" || status === "ending" ||
+    (permissionsConfirmed && permissions.screen === "granted");
+
   // S1 exam shell: fullscreen truth, 1-5 stage, top-bar vanish/restore.
   // examReleased is the S3 room-gate seam: released once the room code (or an
   // invigilator start-now) admits this session, or when the gate is disabled.
-  const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, addEvent });
+  const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, permissionsReady, addEvent });
   shellTapRef.current = shell.onShellEvent;
 
   // S5: remaining time on the SERVER clock. Recomputed every render — the 1 s
@@ -200,6 +328,15 @@ function StudentApp() {
       identity={identity}
       elapsedSeconds={elapsedSeconds}
       examReleased={!examGateActive}
+      permissionsReady={permissionsReady}
+      permissionsGate={{
+        checklist: permissions,
+        busy: permissionsBusy,
+        screenMessage: screenSetupMessage,
+        onRun: () => void runPermissionsSetup(),
+        onRetry: retryPermission,
+        onContinue: confirmPermissions
+      }}
       ownEditor={hasProblem}
       remainingLabel={examRemainingMs !== null ? formatRemaining(examRemainingMs) : null}
       timeUp={examTimeUp}
@@ -411,13 +548,17 @@ function StudentApp() {
     };
   }, [sessionId, status]);
 
+  // F5.7: the elapsed ticker is bound to the live test status — the pure
+  // elapsedTimerActive rule stops it the moment status OR gate reports ended
+  // (the last value freezes; the bar never shows a count-up after test end).
+  // The cleanup also covers unmount, so no interval survives the component.
   useEffect(() => {
-    if (status !== "recording" || !recordingStartedAt) return;
+    if (!elapsedTimerActive({ status, gate }) || !recordingStartedAt) return;
     const timer = window.setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - recordingStartedAt) / 1000));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [recordingStartedAt, status]);
+  }, [recordingStartedAt, status, gate]);
 
   // S5: announce "time is up" once when the countdown crosses zero while
   // recording. Soft enforcement by design: the recording continues so the
@@ -545,7 +686,9 @@ function StudentApp() {
   };
 
   // Bring up the recorder for an active session. Shared by first-start and by
-  // "Resume recording" after a reload (both need a fresh getDisplayMedia gesture).
+  // "Resume recording" after a reload. F5.1: recording starts IMMEDIATELY from
+  // the streams the stage-1 PermissionsGate already acquired — start() only
+  // re-prompts when the candidate killed the share in between.
   const beginRecording = async (session: SessionStartResponse) => {
     // If a prior recorder is still around (e.g. screen share dropped mid-session
     // and the student is retrying), tear it down first so we don't leave a second
@@ -554,6 +697,10 @@ function StudentApp() {
       await recorderRef.current.stop().catch(() => undefined);
       recorderRef.current = null;
     }
+    // Flush the queued setup-stage audit events now that a session exists.
+    const queuedSetupEvents = preSessionEventsRef.current;
+    preSessionEventsRef.current = [];
+    if (queuedSetupEvents.length) void sendEvents(session.session_id, queuedSetupEvents);
     setStartIp(session.start_ip || "unavailable");
     setCurrentIp(session.start_ip || "unavailable");
     setIpChanged(false);
@@ -561,10 +708,17 @@ function StudentApp() {
     // moments ago has not re-rendered into this closure yet.
     await collectEntryReviewEvidence(session.session_id, Boolean(session.problem));
 
+    // Hand the stage-1 streams over to the recorder. Clearing the ref disarms
+    // the setup ended-listener (identity check) — from here the recorder owns
+    // stream lifecycle, and recorder.stop() owns cleanup even on a failed start.
+    const acquired = acquiredMediaRef.current;
+    acquiredMediaRef.current = { screen: null, cameraMic: null, cameraMicMode: null };
+
     const recorder = createProctorRecorder({
       sessionId: session.session_id,
       config: session.upload_config,
       heartbeatSeconds: session.heartbeat_interval_seconds,
+      acquired,
       onEvent: addEvent,
       onUploadChange: (depth, uploaded) => {
         setQueueDepth(depth);

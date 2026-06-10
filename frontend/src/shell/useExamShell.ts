@@ -77,9 +77,12 @@ export function useExamShell(opts: {
   status: SessionStatus;
   sessionId: string;
   examReleased: boolean;
+  // F5.1: the stage-1 permissions gate is satisfied (screen share live or
+  // recording already running) — computed by App from the checklist state.
+  permissionsReady: boolean;
   addEvent: (event: ProctorEvent) => void;
 }): ExamShellApi {
-  const { gate, status, sessionId, examReleased, addEvent } = opts;
+  const { gate, status, sessionId, examReleased, permissionsReady, addEvent } = opts;
 
   const [fullscreen, setFullscreen] = useState<boolean>(() => Boolean(document.fullscreenElement));
   const [pageVisible, setPageVisible] = useState<boolean>(() => document.visibilityState === "visible");
@@ -193,7 +196,7 @@ export function useExamShell(opts: {
     void sendEvents(sessionId, buffered);
   }, [sessionId]);
 
-  const stage = deriveStage({ fullscreen, gate, status, examReleased });
+  const stage = deriveStage({ permissionsReady, fullscreen, gate, status, examReleased });
 
   // Spec §4: emit onboarding_stage on every transition (buffered pre-session).
   const prevStageRef = useRef<Stage | null>(null);
