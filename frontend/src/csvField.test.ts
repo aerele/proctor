@@ -1,7 +1,7 @@
 // frontend/src/csvField.test.ts
 //
 // M8 (CSV formula injection): admin exports (buildDetailsCsv / buildReviewsCsv)
-// run candidate-controlled cells — name, HackerRank username — through csvField.
+// run candidate-controlled cells — name, candidate ID — through csvField.
 // A cell starting with = + - @ (or a leading tab / carriage return some apps
 // strip before re-checking) executes as a formula when the CSV is opened in
 // Excel or Google Sheets. csvField must prefix any such cell with a single

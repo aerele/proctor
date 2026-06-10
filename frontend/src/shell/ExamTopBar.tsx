@@ -13,7 +13,7 @@ import { formatExamElapsed, formatWallClock, STAGE_META, type Stage } from "./ex
 
 export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCount, remainingLabel, timeUp }: {
   stage: Stage;
-  identity: { name: string; username: string; room: string } | null;
+  identity: { name: string; candidate_id: string; room: string } | null;
   elapsedSeconds: number;
   recording: boolean;
   flagCount: number;
@@ -42,7 +42,7 @@ export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCou
         {identity ? (
           <>
             <span className="truncate text-lg font-semibold">{identity.name}</span>
-            <span className="truncate font-mono text-sm text-white/70">{identity.username}</span>
+            <span className="truncate font-mono text-sm text-white/70">{identity.candidate_id}</span>
             <span className="shrink-0 text-sm text-white/70">Room {identity.room || "—"}</span>
           </>
         ) : (

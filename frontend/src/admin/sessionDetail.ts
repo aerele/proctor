@@ -5,6 +5,7 @@
 // F6.6 adds the capture-state language: per-source labels for the card rows
 // and the recordings-review "what does this recording contain" header line.
 import { normalizeJoinUsername, type JoinableAlert, type JoinableSession } from "./alertActions";
+import { candidateIdOf } from "../identity";
 import type { CaptureSource, CaptureState } from "../types";
 
 /** Every recorded chunk is a fixed 30-second .webm (uploadConfig.chunk_seconds
@@ -40,10 +41,10 @@ export type DetailJoinAlert = JoinableAlert & { id: string };
  * same candidate (those belong to that other attempt's card).
  */
 export function alertsForSession<T extends DetailJoinAlert>(alerts: T[], session: JoinableSession): T[] {
-  const sessionNorm = normalizeJoinUsername(session.hackerrank_username);
+  const sessionNorm = normalizeJoinUsername(candidateIdOf(session));
   return alerts.filter((alert) => {
     if (alert.session_id) return alert.session_id === session.session_id;
-    const alertNorm = alert.username_norm || normalizeJoinUsername(alert.hackerrank_username || "");
+    const alertNorm = alert.username_norm || normalizeJoinUsername(candidateIdOf(alert));
     return Boolean(alertNorm) && alertNorm === sessionNorm;
   });
 }

@@ -3,6 +3,8 @@
 // so it survives the 5 s auto-refresh; these helpers never mutate their input.
 // Vitest-covered (alertSelection.test.ts).
 
+import { candidateIdOf } from "./identity";
+
 /** Toggle a single alert id in/out of the selection. */
 export function toggleId(selected: ReadonlySet<string>, id: string): Set<string> {
   const next = new Set(selected);
@@ -30,15 +32,16 @@ export function isAllSelected(selected: ReadonlySet<string>, ids: string[]): boo
   return ids.length > 0 && ids.every((id) => selected.has(id));
 }
 
-/** Unique candidate usernames behind the selected alerts, in list order — the
- * targets for bulk SESSION actions (approve/lock/...), not alert archiving. */
+/** Unique candidate IDs behind the selected alerts, in list order — the
+ * targets for bulk SESSION actions (approve/lock/...), not alert archiving.
+ * (S-A: keeps its wire-era name; values resolve via candidateIdOf.) */
 export function usernamesForSelection(
-  alerts: Array<{ id: string; hackerrank_username: string }>,
+  alerts: Array<{ id: string; hackerrank_username: string; candidate_id?: string }>,
   selected: ReadonlySet<string>
 ): string[] {
   const usernames = new Set<string>();
   for (const alert of alerts) {
-    if (selected.has(alert.id)) usernames.add(alert.hackerrank_username);
+    if (selected.has(alert.id)) usernames.add(candidateIdOf(alert));
   }
   return [...usernames];
 }

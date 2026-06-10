@@ -8,9 +8,9 @@
 //   ownEditor=false — legacy flow; candidates open the external HackerRank
 //                     contest via the Start test link, original copy verbatim.
 //
-// Deliberately NOT here: admin-facing text and the "HackerRank username"
-// identity field label — the hackerrank_username field keeps its name in both
-// flows (it is the roster identifier, not a navigation instruction).
+// Deliberately NOT here: admin-facing text and the "Candidate ID" identity
+// field label (S-A interim label; the WIRE field hackerrank_username keeps its
+// name until S-E — it is the roster identifier, not a navigation instruction).
 
 export type TestRuleCopy = { title: string; body: string };
 
@@ -120,7 +120,7 @@ export function integrityNotices(ownEditor: boolean): string[] {
       ? "Submitted code may be checked for similarity, unusual structure, and copied code patterns."
       : "HackerRank submissions may be checked for similarity, unusual structure, and copied code patterns.",
     "Shortlisted candidates must be ready to explain and modify their submitted code live.",
-    "Suspicious username/session behavior may lead to manual verification before shortlisting.",
+    "Suspicious candidate-ID/session behavior may lead to manual verification before shortlisting.",
     "Upload gaps, missing recording chunks, and interrupted sessions are reviewed before results are accepted.",
     "Any unexplained proctoring anomaly can affect shortlisting even if the code passes all tests.",
     "Selection depends on score, originality, explanation, and clean proctoring evidence."

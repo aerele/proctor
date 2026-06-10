@@ -18,7 +18,7 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
   shell: ExamShellApi;
   gate: ShellGate;
   status: SessionStatus;
-  identity: { name: string; username: string; room: string } | null;
+  identity: { name: string; candidate_id: string; room: string } | null;
   elapsedSeconds: number;
   examReleased: boolean;
   // F5.1: stage-1 state + the PermissionsGate's checklist/handlers (App owns

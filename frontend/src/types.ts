@@ -1,5 +1,8 @@
 export type StudentForm = {
-  hackerrank_username: string;
+  // S-A: the typed identity value (UI label "Candidate ID"). Sent on the wire
+  // as BOTH candidate_id and the frozen hackerrank_username until S-E
+  // (identity.ts sessionStartPayload).
+  candidate_id: string;
   name: string;
   roll_number: string;
   email: string;
@@ -56,6 +59,9 @@ export type SessionStartResponse = {
   session_id: string;
   status?: ServerSessionStatus;
   hackerrank_username?: string;
+  /** S-A accept-both: newer backends deliver this alongside (or instead of)
+   * the frozen hackerrank_username — display via identity.ts candidateIdOf. */
+  candidate_id?: string;
   name?: string;
   room?: string;
   contest_slug?: string;
@@ -215,6 +221,8 @@ export type ExamTimeResponse = {
 export type RecordingSession = {
   session_id: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   name: string;
   room: string;
   contest_slug: string;
@@ -242,6 +250,8 @@ export type RecordingSessionsResponse = {
 export type SessionCardDetail = {
   session_id: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   name: string;
   roll_number: string;
   roster_unique_id: string;
@@ -278,6 +288,8 @@ export type SessionCardDetailResponse = {
 export type IpReportCandidate = {
   session_id: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   name: string;
   /** F8.1: roster identity for the drill-down ("" = legacy pre-roster session;
    * absent on older deployed backends). */
@@ -324,6 +336,8 @@ export type IpReportResponse = {
 export type SubmissionEvent = {
   submission_id: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   contest_slug?: string;
   challenge_slug?: string;
   challenge_name?: string;
@@ -377,6 +391,8 @@ export type SessionEvidence = {
 export type AdminSessionDetail = {
   session_id?: string;
   hackerrank_username?: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   name?: string;
   room?: string;
   contest_slug?: string;
@@ -443,7 +459,9 @@ export type Alert = {
   timestamp: string;
   contest_slug?: string;
   hackerrank_username: string;
-  /** Lowercase / sanitized username. */
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
+  /** Lowercase / sanitized identity value (wire name frozen — F9 D1). */
   username_norm?: string;
   session_id?: string;
   room?: string;
@@ -614,6 +632,8 @@ export type ReviewsResponse = {
 export type SessionDetail = {
   username: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   name: string;
   email: string;
   roll_number: string;
@@ -716,6 +736,8 @@ export type RosterLookupResult = {
   roll_number: string;
   room: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   email_masked: string;
 };
 
@@ -760,6 +782,8 @@ export type InvigilatorOverviewResponse = {
 export type InvigilatorSessionRow = {
   name: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
   roll_number: string;
   /** F9.4: the roster's unique id (identity data — joins the alert detail view). */
   roster_unique_id: string;
@@ -783,6 +807,8 @@ export type InvigilatorAlert = {
   timestamp: string;
   title: string;
   hackerrank_username: string;
+  /** S-A accept-both (see SessionStartResponse.candidate_id). */
+  candidate_id?: string;
 };
 
 export type InvigilatorRoomStats = {
