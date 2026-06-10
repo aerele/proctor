@@ -2,6 +2,7 @@ import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCi
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
+import { ProblemBankSection } from "./admin/ProblemBank";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import * as studentCopy from "./studentCopy";
 import { topBarVisible } from "./shell/examShell";
@@ -1161,7 +1162,7 @@ function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }:
   );
 }
 
-type AdminView = "stats" | "alerts" | "sessions" | "review" | "recordings" | "settings";
+type AdminView = "stats" | "alerts" | "sessions" | "review" | "recordings" | "problems" | "settings";
 
 // A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
 // AdminStats card labels. "" = no status filter (the Total card). "disconnected"
@@ -1416,6 +1417,7 @@ function AdminApp() {
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
+        problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
       setRoomsText((response.rooms ?? []).join(", "));
@@ -1436,6 +1438,7 @@ function AdminApp() {
         start_at: localInputToIso(settings.start_at),
         end_at: localInputToIso(settings.end_at),
         contest_url: settings.contest_url,
+        problem_id: settings.problem_id,
         // parseRosterInput = the existing comma/newline split + trim + dedupe.
         rooms: parseRosterInput(roomsText)
       });
@@ -1443,6 +1446,7 @@ function AdminApp() {
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
+        problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
       setRoomsText((response.rooms ?? []).join(", "));
@@ -1777,6 +1781,7 @@ function AdminApp() {
         <AdminTab active={view === "sessions"} onClick={() => { setView("sessions"); void loadSessions(); }} icon={<Users size={16} />} label="Sessions" />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
         <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
+        <AdminTab active={view === "problems"} onClick={() => setView("problems")} icon={<ClipboardList size={16} />} label="Problems" />
         <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
       </nav>
 
@@ -1857,6 +1862,8 @@ function AdminApp() {
         />
       ) : null}
 
+      {view === "problems" ? <ProblemBankSection password={password} /> : null}
+
       {view === "settings" ? (
       <div className="space-y-5">
       <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -1871,6 +1878,7 @@ function AdminApp() {
           <Field label="Start time" type="datetime-local" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
           <Field label="End time" type="datetime-local" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
+          <Field label="Active problem ID" value={settings.problem_id ?? ""} onChange={(value) => setSettings({ ...settings, problem_id: value })} />
           <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
           <div className="mt-6 flex flex-wrap gap-3 md:col-span-3">
             <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={loadSettings} disabled={settingsLoading}>
