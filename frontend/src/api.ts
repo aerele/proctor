@@ -70,6 +70,7 @@ import type {
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
 import { normalizeCameraRecording } from "./cameraRecording";
+import { sessionStartPayload } from "./identity";
 import { resolveSavedEndAt } from "./examTime";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
 import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
@@ -326,7 +327,7 @@ export async function startSession(form: StudentForm, existingSessionId?: string
       ? (demoRosterHit.row[demoMapping.hackerrank_username] ?? "").trim() : "";
     const rosterName = demoRosterHit && demoMapping.name
       ? (demoRosterHit.row[demoMapping.name] ?? "").trim() : "";
-    const effectiveUsername = rosterUsername || form.hackerrank_username.trim();
+    const effectiveUsername = rosterUsername || form.candidate_id.trim();
     const usernameNorm = normalizeUsername(effectiveUsername);
 
     // Idempotent replay: same session_id this browser already owns → return it.
@@ -363,38 +364,33 @@ export async function startSession(form: StudentForm, existingSessionId?: string
     return demoSessionResponse(session, contestUrl);
   }
 
+  // S-A: dual-field body — candidate_id AND the frozen hackerrank_username
+  // carry the same value (identity.ts) so the current backend is unchanged.
   return request<SessionStartResponse>("/api/session/start", {
     method: "POST",
-    body: JSON.stringify({
-      hackerrank_username: form.hackerrank_username,
-      name: form.name,
-      roll_number: form.roll_number,
-      email: form.email,
-      room: form.room,
-      consent_accepted: form.consent_accepted,
-      ...(form.roster_unique_id ? { roster_unique_id: form.roster_unique_id } : {}),
-      ...(existingSessionId ? { session_id: existingSessionId } : {})
-    })
+    body: JSON.stringify(sessionStartPayload(form, existingSessionId))
   });
 }
 
-export async function resumeSession(sessionId: string, hackerrankUsername?: string): Promise<SessionStartResponse> {
+export async function resumeSession(sessionId: string, candidateId?: string): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(150);
     const session = readDemoSessions().find((item) => item.session_id === sessionId);
     if (!session) throw new Error("Session not found");
-    if (hackerrankUsername && session.username_norm !== normalizeUsername(hackerrankUsername)) {
+    if (candidateId && session.username_norm !== normalizeUsername(candidateId)) {
       throw new Error("Session not found");
     }
     const contestUrl = getDemoSettings()?.contest_url || "";
     return demoSessionResponse(session, contestUrl);
   }
 
+  // S-A: when an identity value rides resume, send it dual-field (candidate_id
+  // + the frozen hackerrank_username) — same contract as session/start.
   return request<SessionStartResponse>("/api/session/resume", {
     method: "POST",
     body: JSON.stringify({
       session_id: sessionId,
-      ...(hackerrankUsername ? { hackerrank_username: hackerrankUsername } : {})
+      ...(candidateId ? { candidate_id: candidateId, hackerrank_username: candidateId } : {})
     })
   });
 }

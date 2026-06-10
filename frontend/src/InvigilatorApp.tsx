@@ -12,6 +12,7 @@ import {
   invigilatorPassword, invigilatorPasswordHash,
   openRoom, releaseRoomCode, releaseUnlockCode, sha256Hex
 } from "./api";
+import { candidateIdOf } from "./identity";
 import { gateStatusLabel } from "./invigilator/gateLogic";
 import { alertExplanation, matchesStatusFilter } from "./invigilator/roomView";
 import type { StatusFilter } from "./invigilator/roomView";
@@ -183,15 +184,15 @@ export function InvigilatorApp() {
   // screen tells the candidate the room proctor can "unlock you from their
   // console" — this is that console action). Admin locks never show the button.
   const unlockStudent = async (row: InvigilatorSessionRow) => {
-    if (!window.confirm(`Unlock ${row.name || row.hackerrank_username}? Their exam resumes immediately.`)) return;
+    if (!window.confirm(`Unlock ${row.name || candidateIdOf(row)}? Their exam resumes immediately.`)) return;
     setError("");
     try {
-      await invigilatorUnlock(password, room, row.hackerrank_username);
+      await invigilatorUnlock(password, room, candidateIdOf(row));
       setData((current) => current
         ? {
             ...current,
             sessions: current.sessions.map((session) =>
-              session.hackerrank_username === row.hackerrank_username
+              candidateIdOf(session) === candidateIdOf(row)
                 ? { ...session, status: "active", locked_reason: null }
                 : session)
           }
@@ -209,12 +210,12 @@ export function InvigilatorApp() {
     setError("");
     try {
       const next = { [key]: !(row.enforcement_exemptions?.[key] === true) } as EnforcementExemptions;
-      const response = await invigilatorExempt(password, room, row.hackerrank_username, next);
+      const response = await invigilatorExempt(password, room, candidateIdOf(row), next);
       setData((current) => current
         ? {
             ...current,
             sessions: current.sessions.map((session) =>
-              session.hackerrank_username === row.hackerrank_username
+              candidateIdOf(session) === candidateIdOf(row)
                 ? { ...session, enforcement_exemptions: response.enforcement_exemptions }
                 : session)
           }
@@ -389,7 +390,7 @@ export function InvigilatorApp() {
               <thead>
                 <tr className="border-b border-line text-xs font-semibold uppercase tracking-wide text-muted">
                   <th className="py-2 pr-3">Name</th>
-                  <th className="py-2 pr-3">Username</th>
+                  <th className="py-2 pr-3">Candidate ID</th>
                   <th className="py-2 pr-3">Roll no.</th>
                   <th className="py-2 pr-3">Status</th>
                   <th className="py-2 pr-3">Exam</th>
@@ -400,9 +401,9 @@ export function InvigilatorApp() {
                 {visibleSessions.map((row) => {
                   const badge = statusBadge(row);
                   return (
-                    <tr key={row.hackerrank_username || row.name} className="border-b border-line/60">
+                    <tr key={candidateIdOf(row) || row.name} className="border-b border-line/60">
                       <td className="py-2 pr-3 font-medium text-ink">{row.name || "—"}</td>
-                      <td className="py-2 pr-3 text-muted">{row.hackerrank_username || "—"}</td>
+                      <td className="py-2 pr-3 text-muted">{candidateIdOf(row) || "—"}</td>
                       <td className="py-2 pr-3 text-muted">{row.roll_number || "—"}</td>
                       <td className="py-2 pr-3">
                         <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.className}`}>{badge.label}</span>
@@ -465,7 +466,7 @@ export function InvigilatorApp() {
               <AlertRow
                 key={alert.id}
                 alert={alert}
-                candidate={sessions.find((row) => row.hackerrank_username === alert.hackerrank_username) ?? null}
+                candidate={sessions.find((row) => candidateIdOf(row) === candidateIdOf(alert)) ?? null}
                 expanded={expandedAlertId === alert.id}
                 onToggle={() => setExpandedAlertId((current) => (current === alert.id ? null : alert.id))}
               />
@@ -677,7 +678,7 @@ function AlertRow(props: {
         <AlertTriangle size={16} className={alert.severity === "critical" ? "text-danger" : "text-warning"} />
         <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${tone}`}>{alert.severity}</span>
         <span className="font-medium text-ink">{alert.title}</span>
-        <span className="text-muted">{alert.hackerrank_username}</span>
+        <span className="text-muted">{candidateIdOf(alert)}</span>
         <span className="ml-auto text-xs text-muted">{new Date(alert.timestamp).toLocaleTimeString()}</span>
         {expanded ? <ChevronUp size={14} className="text-muted" /> : <ChevronDown size={14} className="text-muted" />}
       </button>
@@ -686,7 +687,7 @@ function AlertRow(props: {
           <dl className="grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
             <div className="flex gap-2">
               <dt className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Candidate</dt>
-              <dd className="font-medium text-ink">{candidate?.name || alert.hackerrank_username || "—"}</dd>
+              <dd className="font-medium text-ink">{candidate?.name || candidateIdOf(alert) || "—"}</dd>
             </div>
             <div className="flex gap-2">
               <dt className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Roll no.</dt>

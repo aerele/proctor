@@ -25,6 +25,7 @@ import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
 import type { ApiError } from "./api";
+import { candidateIdOf } from "./identity";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
 
 // S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
@@ -47,7 +48,7 @@ const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_pa
 const sessionStorageKey = "aerele-proctor-session-id";
 
 const initialForm: StudentForm = {
-  hackerrank_username: "",
+  candidate_id: "",
   name: "",
   roll_number: "",
   email: "",
@@ -88,7 +89,7 @@ function StudentApp() {
   const [resuming, setResuming] = useState(true);
   const [sessionId, setSessionId] = useState("");
   const [sessionConfig, setSessionConfig] = useState<SessionStartResponse | null>(null);
-  const [identity, setIdentity] = useState<{ name: string; username: string; room: string } | null>(null);
+  const [identity, setIdentity] = useState<{ name: string; candidate_id: string; room: string } | null>(null);
   const [contestUrl, setContestUrl] = useState("");
   const [startIp, setStartIp] = useState("");
   const [currentIp, setCurrentIp] = useState("");
@@ -186,7 +187,7 @@ function StudentApp() {
   const canStart = useMemo(() => {
     return Boolean(
       (!rosterRequired || form.roster_unique_id) &&
-      form.hackerrank_username.trim() &&
+      form.candidate_id.trim() &&
       form.name.trim() &&
       form.roll_number.trim() &&
       form.email.trim() &&
@@ -444,7 +445,7 @@ function StudentApp() {
     setLockedReason(session.locked_reason ?? null);
     setIdentity({
       name: session.name || form.name.trim(),
-      username: session.hackerrank_username || form.hackerrank_username.trim(),
+      candidate_id: candidateIdOf(session) || form.candidate_id.trim(),
       room: session.room || form.room.trim()
     });
     const serverStatus: ServerSessionStatus = session.status || "active";
@@ -915,7 +916,7 @@ function StudentApp() {
     setForm({
       ...form,
       roster_unique_id: rosterMatch.unique_id,
-      hackerrank_username: rosterMatch.hackerrank_username || form.hackerrank_username,
+      candidate_id: candidateIdOf(rosterMatch) || form.candidate_id,
       name: rosterMatch.name || form.name,
       roll_number: rosterMatch.roll_number || form.roll_number,
       email: rosterMatch.email_masked || form.email,
@@ -943,7 +944,7 @@ function StudentApp() {
     try {
       session = await startSession({
         ...form,
-        hackerrank_username: form.hackerrank_username.trim(),
+        candidate_id: form.candidate_id.trim(),
         name: form.name.trim(),
         roll_number: form.roll_number.trim(),
         email: form.email.trim(),
@@ -1248,7 +1249,7 @@ function StudentApp() {
           icon={<Clock size={22} />}
           title="Waiting for proctor approval"
           lines={[
-            "Another session is already active for your HackerRank username.",
+            "Another session is already active for your Candidate ID.",
             "A proctor must approve this device before you can begin — or you can wait for the other session to be unlocked.",
             "Stay on this page. When the proctor approves you, press Check again to continue."
           ]}
@@ -1378,7 +1379,7 @@ function StudentApp() {
                 <>
                   <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
                   <div className="grid gap-4 md:grid-cols-2">
-                    <Field label="HackerRank username" value={form.hackerrank_username} disabled={rosterConfirmed && Boolean(rosterMatch?.hackerrank_username)} onChange={(value) => setForm({ ...form, hackerrank_username: value })} />
+                    <Field label="Candidate ID" value={form.candidate_id} disabled={rosterConfirmed && Boolean(candidateIdOf(rosterMatch))} onChange={(value) => setForm({ ...form, candidate_id: value })} />
                     <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
                     <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
                     <Field label="Email" type="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
@@ -1553,7 +1554,7 @@ function createUiEvent(type: string, detail?: Record<string, unknown>): ProctorE
 
 // Prominent identity confirmation (Epic 3): the student sees exactly who the
 // session is registered to before and during the test.
-function IdentityCard({ identity }: { identity: { name: string; username: string; room: string } }) {
+function IdentityCard({ identity }: { identity: { name: string; candidate_id: string; room: string } }) {
   return (
     <section className="mb-5 rounded-lg border border-accent/40 bg-accent/5 p-5 shadow-subtle">
       <div className="flex flex-wrap items-center gap-3">
@@ -1561,7 +1562,7 @@ function IdentityCard({ identity }: { identity: { name: string; username: string
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-accent">You are taking the test as</p>
           <p className="mt-1 text-lg font-semibold text-ink">
-            {identity.name} <span className="font-mono text-base text-muted">({identity.username})</span>
+            {identity.name} <span className="font-mono text-base text-muted">({identity.candidate_id})</span>
           </p>
           <p className="mt-1 text-sm text-muted">Room {identity.room || "—"} · Confirm this is you. If anything is wrong, call a proctor before continuing.</p>
         </div>
@@ -2271,11 +2272,11 @@ function AdminApp() {
       const sessionId = targetSessionId ?? alert.session_id;
       await sessionAction(password, {
         action: "approve",
-        ...(sessionId ? { session_id: sessionId } : { usernames: [alert.hackerrank_username] }),
+        ...(sessionId ? { session_id: sessionId } : { usernames: [candidateIdOf(alert)] }),
         ...(alert.contest_slug ? { contest_slug: alert.contest_slug } : {})
       });
       await alertAction(password, { action: "archive", ids: [alert.id] });
-      setActionMessage(`Approved ${alert.hackerrank_username} and archived the alert.`);
+      setActionMessage(`Approved ${candidateIdOf(alert)} and archived the alert.`);
       await loadStats();
       await loadAlerts();
       setSelected(new Set());
@@ -2292,7 +2293,7 @@ function AdminApp() {
     setActionMessage("");
     try {
       const response = await sessionAction(password, { action: "approve", session_id: session.session_id });
-      setActionMessage(`Approved ${session.hackerrank_username} (${response.updated.length} session(s)).`);
+      setActionMessage(`Approved ${candidateIdOf(session)} (${response.updated.length} session(s)).`);
       await loadSessions();
       await loadStats();
     } catch (cause) {
@@ -2326,7 +2327,7 @@ function AdminApp() {
     void loadSessions();
     openSessionDetail({
       session_id: candidate.session_id,
-      hackerrank_username: candidate.hackerrank_username,
+      hackerrank_username: candidateIdOf(candidate),
       name: candidate.name,
       room: candidate.room,
       contest_slug: ipReport?.contest_slug ?? "",
@@ -2346,7 +2347,7 @@ function AdminApp() {
   // "View recording" — jump to the Recordings tab pre-scoped to this candidate
   // and session (state-based deep link; RecordingReview consumes + clears it).
   const jumpToRecording = (session: RecordingSession) => {
-    setRecordingDeepLink({ username: session.hackerrank_username, sessionId: session.session_id });
+    setRecordingDeepLink({ username: candidateIdOf(session), sessionId: session.session_id });
     setDetailSession(null);
     setView("recordings");
   };
@@ -2354,7 +2355,7 @@ function AdminApp() {
   // "View alerts" — jump to the Alerts tab filtered to this candidate (no
   // server-side username filter exists, so it's a one-shot client-side filter).
   const jumpToAlerts = (session: RecordingSession) => {
-    setAlertCandidateFilter(session.hackerrank_username);
+    setAlertCandidateFilter(candidateIdOf(session));
     setDetailSession(null);
     setView("alerts");
   };
@@ -2423,7 +2424,7 @@ function AdminApp() {
         return;
       }
       setRosterUnavailable(false);
-      setRosterMessage(`Saved roster with ${result.count} username${result.count === 1 ? "" : "s"}.`);
+      setRosterMessage(`Saved roster with ${result.count} Candidate ID${result.count === 1 ? "" : "s"}.`);
       // Refresh the coverage summary after saving.
       const summary = await fetchReviewRoster(password);
       if (summary) {
@@ -2470,10 +2471,10 @@ function AdminApp() {
   };
 
   // DOWNLOAD ALL DETAILS CSV: resolve a candidate-detail row for each pasted
-  // username (POST /api/admin/session-details), build a CSV
-  // (header username,name,email,roll_number,room) with ONE row per INPUT username
-  // (blank cells when the candidate was not found, so the operator sees who is
-  // missing), and trigger a client download — mirrors exportReviewsCsv.
+  // Candidate ID (POST /api/admin/session-details), build a CSV
+  // (header candidate_id,name,email,roll_number,room) with ONE row per INPUT
+  // Candidate ID (blank cells when the candidate was not found, so the operator
+  // sees who is missing), and trigger a client download — mirrors exportReviewsCsv.
   const downloadDetailsCsv = async () => {
     setDownloadingDetails(true);
     setRosterMessage("");
@@ -2498,7 +2499,7 @@ function AdminApp() {
       URL.revokeObjectURL(url);
       const missing = details.filter((d) => !d.found).length;
       setRosterMessage(
-        `Exported details for ${details.length} username${details.length === 1 ? "" : "s"} to candidate-details.csv${missing ? ` (${missing} not found)` : ""}.`
+        `Exported details for ${details.length} Candidate ID${details.length === 1 ? "" : "s"} to candidate-details.csv${missing ? ` (${missing} not found)` : ""}.`
       );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2864,11 +2865,11 @@ function AdminApp() {
           <Search size={20} />
           <div>
             <h1 className="text-2xl font-semibold">Review dashboard</h1>
-            <p className="mt-1 text-sm text-muted">Search by HackerRank username to inspect sessions, events, and uploaded evidence — and run remote actions.</p>
+            <p className="mt-1 text-sm text-muted">Search by Candidate ID to inspect sessions, events, and uploaded evidence — and run remote actions.</p>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-          <Field label="HackerRank username" value={username} onChange={setUsername} />
+          <Field label="Candidate ID" value={username} onChange={setUsername} />
           <button className="focus-ring mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={search} disabled={loading || !username || !password}>
             <Search size={16} /> Search
           </button>
@@ -3135,7 +3136,7 @@ function CandidateRosterSection({ password }: { password: string }) {
                 {mappingSelect("name", "Name column")}
                 {mappingSelect("email", "Email column")}
                 {mappingSelect("roll_number", "Roll-number column")}
-                {mappingSelect("hackerrank_username", "HackerRank-username column")}
+                {mappingSelect("hackerrank_username", "Candidate-ID column")}
                 {mappingSelect("room", "Room column")}
               </div>
 
@@ -3313,19 +3314,21 @@ export function csvField(value: string): string {
   return neutralized;
 }
 
-// Build the reviews CSV: header `username,reviewer_name,verdict`, one row per
-// review record, verdict rendered as 1/0. Exported by the Settings page.
+// Build the reviews CSV: header `candidate_id,reviewer_name,verdict`, one row
+// per review record, verdict rendered as 1/0. Exported by the Settings page.
+// (S-A: the user-facing CSV header says candidate_id; the wire field `username`
+// inside review records stays frozen until S-E.)
 function buildReviewsCsv(reviews: Array<{ username: string; reviewer_name: string; verdict: number }>): string {
-  const header = "username,reviewer_name,verdict";
+  const header = "candidate_id,reviewer_name,verdict";
   const rows = reviews.map((r) => `${csvField(r.username)},${csvField(r.reviewer_name)},${r.verdict === 1 ? 1 : 0}`);
   return [header, ...rows].join("\n");
 }
 
-// Build the candidate-details CSV: header `username,name,email,roll_number,room`,
-// one row per INPUT username (blank cells when the candidate was not found so the
-// operator can see who is missing). Every field goes through csvField (escaping).
+// Build the candidate-details CSV: header `candidate_id,name,email,roll_number,room`,
+// one row per INPUT Candidate ID (blank cells when the candidate was not found so
+// the operator can see who is missing). Every field goes through csvField (escaping).
 function buildDetailsCsv(details: SessionDetail[]): string {
-  const header = "username,name,email,roll_number,room";
+  const header = "candidate_id,name,email,roll_number,room";
   const rows = details.map((d) =>
     [
       csvField(d.username),
@@ -3378,7 +3381,7 @@ function ReviewRosterSection({
           <ListChecks size={20} />
           <div>
             <h2 className="text-2xl font-semibold">Review roster</h2>
-            <p className="mt-1 text-sm text-muted">Paste the HackerRank usernames to be reviewed (comma or newline separated). Reviewers open Recordings → Review mode and are served these students one-by-one.</p>
+            <p className="mt-1 text-sm text-muted">Paste the Candidate IDs to be reviewed (comma or newline separated). Reviewers open Recordings → Review mode and are served these students one-by-one.</p>
           </div>
         </div>
         <button
@@ -3718,7 +3721,7 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
                   className="cursor-pointer border-b border-line/60 last:border-0 hover:bg-ink/5"
                 >
                   <td className="px-4 py-3">
-                    <div className="font-semibold text-ink">{s.hackerrank_username}</div>
+                    <div className="font-semibold text-ink">{candidateIdOf(s)}</div>
                     {s.name ? <div className="text-xs text-muted">{s.name}</div> : null}
                   </td>
                   <td className="px-4 py-3 text-muted">{s.room || "—"}</td>
@@ -3811,7 +3814,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
     setSubmissions(null);
     void (async () => {
       try {
-        const events = await fetchSubmissionEvents(password, session.hackerrank_username, session.contest_slug || undefined);
+        const events = await fetchSubmissionEvents(password, candidateIdOf(session), session.contest_slug || undefined);
         if (!cancelled) setSubmissions(events ?? []);
       } catch {
         if (!cancelled) setSubmissions([]);
@@ -3820,7 +3823,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
     return () => {
       cancelled = true;
     };
-  }, [password, session.hackerrank_username, session.contest_slug]);
+  }, [password, session.hackerrank_username, session.candidate_id, session.contest_slug]);
 
   // The truthful status: the refetched detail wins over the click-time row.
   const status = detail?.status || session.status;
@@ -3858,7 +3861,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
   // F6 review: Recordings-tab deep links. "View events" stays usable for
   // zero-chunk sessions (the activity log needs no chunks); both disable in
   // demo mode for candidates outside the seeded recording dataset.
-  const dataAvailable = recordingDataAvailable(session.hackerrank_username);
+  const dataAvailable = recordingDataAvailable(candidateIdOf(session));
   const recordingLink = viewRecordingAffordance(chunkCount, dataAvailable);
   const eventsLink = viewEventsAffordance(dataAvailable);
 
@@ -3903,7 +3906,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`Session detail for ${session.hackerrank_username}`}
+      aria-label={`Session detail for ${candidateIdOf(session)}`}
       className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-ink/40 p-4 sm:p-10"
       onClick={onClose}
       onKeyDown={onDialogKeyDown}
@@ -3917,7 +3920,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-xl font-semibold">{session.hackerrank_username}</h2>
+              <h2 className="text-xl font-semibold">{candidateIdOf(session)}</h2>
               <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{status}</span>
               {detailLoading ? <RefreshCw size={14} className="animate-spin text-muted" /> : null}
             </div>
@@ -4059,7 +4062,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
                 <SessionActionButton
                   key={action}
                   action={action}
-                  targetLabel={session.hackerrank_username}
+                  targetLabel={candidateIdOf(session)}
                   onRun={runCardAction}
                 />
               ))}
@@ -4404,9 +4407,9 @@ function IpReportView({ report, loading, unavailable, scope, onScopeChange, cont
                           <span
                             key={candidate.session_id}
                             className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
-                            title={`${candidate.name || candidate.hackerrank_username} · ${candidate.status}${candidate.ip_change_count > 0 ? ` · IP changed ${candidate.ip_change_count}×` : ""}`}
+                            title={`${candidate.name || candidateIdOf(candidate)} · ${candidate.status}${candidate.ip_change_count > 0 ? ` · IP changed ${candidate.ip_change_count}×` : ""}`}
                           >
-                            {candidate.hackerrank_username}
+                            {candidateIdOf(candidate)}
                             {candidate.ip_change_count > 0 ? <AlertTriangle size={12} className="text-warning" /> : null}
                           </span>
                         ))}
@@ -4463,8 +4466,8 @@ function IpCandidateRow({ candidate, onAction, onOpenSessionCard }: {
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white/70 p-3">
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
         <div className="min-w-36">
-          <div className="text-sm font-semibold text-ink">{candidate.name || candidate.hackerrank_username}</div>
-          <div className="font-mono text-xs text-muted">{candidate.hackerrank_username}</div>
+          <div className="text-sm font-semibold text-ink">{candidate.name || candidateIdOf(candidate)}</div>
+          <div className="font-mono text-xs text-muted">{candidateIdOf(candidate)}</div>
         </div>
         <span className="text-xs text-muted">Roster ID <span className="font-mono font-medium text-ink">{candidate.roster_unique_id || "—"}</span></span>
         <span className="text-xs text-muted">Room <span className="font-medium text-ink">{candidate.room || "—"}</span></span>
@@ -4622,7 +4625,7 @@ function ReviewSessionCard({ session, onAction }: { session: Record<string, unkn
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-xs text-muted">{sessionId ?? ""}</p>
-          <h2 className="mt-1 text-lg font-semibold">{String(session.hackerrank_username ?? "")}</h2>
+          <h2 className="mt-1 text-lg font-semibold">{candidateIdOf(session)}</h2>
           {session.room ? <p className="text-xs text-muted">Room {String(session.room)}</p> : null}
         </div>
         <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{status || "unknown"}</span>
@@ -4701,7 +4704,7 @@ function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filt
   const visibleAlerts = useMemo(() => {
     if (!candidateFilter) return alerts;
     const norm = normalizeJoinUsername(candidateFilter);
-    return alerts.filter((alert) => (alert.username_norm || normalizeJoinUsername(alert.hackerrank_username)) === norm);
+    return alerts.filter((alert) => (alert.username_norm || normalizeJoinUsername(candidateIdOf(alert))) === norm);
   }, [alerts, candidateFilter]);
   // Unique candidate usernames in the current (selected) alert set, for bulk actions.
   const selectedUsernames = useMemo(() => usernamesForSelection(alerts, selected), [alerts, selected]);
@@ -5019,13 +5022,13 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
     ? { sessionId: joined.session_id }
     : alert.session_id
       ? { sessionId: alert.session_id }
-      : { usernames: [alert.hackerrank_username] };
+      : { usernames: [candidateIdOf(alert)] };
   const archiveInfo = alert.archived ? ALERT_ACTION_INFO.unarchive : ALERT_ACTION_INFO.archive;
   return (
     <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.archived ? "opacity-70" : ""} ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 gap-3">
-          <input className="mt-1.5 h-4 w-4 shrink-0 accent-accent" type="checkbox" checked={selected} onChange={onToggleSelected} aria-label={`Select ${alert.hackerrank_username}`} />
+          <input className="mt-1.5 h-4 w-4 shrink-0 accent-accent" type="checkbox" checked={selected} onChange={onToggleSelected} aria-label={`Select ${candidateIdOf(alert)}`} />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <SeverityPill severity={alert.severity} />
@@ -5041,7 +5044,7 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
       </div>
 
       <div className="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
-        <AlertField label="Candidate" value={alert.hackerrank_username} mono />
+        <AlertField label="Candidate" value={candidateIdOf(alert)} mono />
         {alert.room ? <AlertField label="Room" value={alert.room} /> : null}
         {alert.contest_slug ? <AlertField label="Contest" value={alert.contest_slug} mono /> : null}
         {alert.session_id ? <AlertField label="Session" value={alert.session_id} mono /> : null}
@@ -5092,7 +5095,7 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
                     </button>
                   </ActionTooltip>
                 ) : (
-                  <SessionActionButton key={action} action={action} targetLabel={alert.hackerrank_username} onRun={(chosen) => onAction(chosen, actionTarget)} />
+                  <SessionActionButton key={action} action={action} targetLabel={candidateIdOf(alert)} onRun={(chosen) => onAction(chosen, actionTarget)} />
                 )
               )}
             </ActionGroup>
@@ -5235,7 +5238,7 @@ function IdentityLookupPanel({ label, value, onChange, busy, error, match, confi
               <div><dt className="inline text-muted">Roll number: </dt><dd className="inline font-medium">{match.roll_number}</dd></div>
             ) : null}
             {match.email_masked ? <div><dt className="inline text-muted">Email: </dt><dd className="inline font-medium">{match.email_masked}</dd></div> : null}
-            {match.hackerrank_username ? <div><dt className="inline text-muted">HackerRank: </dt><dd className="inline font-medium">{match.hackerrank_username}</dd></div> : null}
+            {candidateIdOf(match) ? <div><dt className="inline text-muted">Candidate ID: </dt><dd className="inline font-medium">{candidateIdOf(match)}</dd></div> : null}
             {match.room ? <div><dt className="inline text-muted">Room: </dt><dd className="inline font-medium">{match.room}</dd></div> : null}
           </dl>
           <div className="mt-4 flex flex-wrap gap-3">

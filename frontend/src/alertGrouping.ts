@@ -5,6 +5,7 @@
 // and a worst-severity chip for the section header. No React, no IO —
 // vitest-covered (alertGrouping.test.ts).
 import { normalizeJoinUsername } from "./admin/alertActions";
+import { candidateIdOf } from "./identity";
 import type { AlertSeverity } from "./types";
 
 export type AlertGroupBy = "none" | "candidate" | "type";
@@ -15,14 +16,16 @@ export type GroupableAlert = {
   type: string;
   severity: AlertSeverity;
   hackerrank_username: string;
+  /** S-A accept-both: newer backends may deliver candidate_id too. */
+  candidate_id?: string;
   /** Lowercase/sanitized form when the alert carries one. */
   username_norm?: string;
 };
 
 export type AlertGroup<T extends GroupableAlert = GroupableAlert> = {
-  /** Stable grouping key (normalized username / alert type). */
+  /** Stable grouping key (normalized identity value / alert type). */
   key: string;
-  /** Header label: the first-seen RAW username, or the type. */
+  /** Header label: the first-seen RAW candidate ID, or the type. */
   label: string;
   worstSeverity: AlertSeverity;
   alerts: T[];
@@ -54,13 +57,13 @@ export function groupAlerts<T extends GroupableAlert>(
   for (const alert of alerts) {
     const key =
       groupBy === "candidate"
-        ? alert.username_norm || normalizeJoinUsername(alert.hackerrank_username)
+        ? alert.username_norm || normalizeJoinUsername(candidateIdOf(alert))
         : alert.type;
     let group = groups.get(key);
     if (!group) {
       group = {
         key,
-        label: groupBy === "candidate" ? alert.hackerrank_username : alert.type,
+        label: groupBy === "candidate" ? candidateIdOf(alert) : alert.type,
         worstSeverity: alert.severity,
         alerts: [],
         ids: []
