@@ -5,7 +5,7 @@ import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { configureContestStore, createContest, listContests, resolveContest, setContestStatus, updateContest } from "./contests.mjs";
-import { configureIdentityStore, getContestRosterSummary, saveContestRoster } from "./identity.mjs";
+import { configureIdentityStore, findContestRosterEntries, getContestRosterMeta, getContestRosterSummary, identityNorm, listColleges, saveContestRoster } from "./identity.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -333,6 +333,14 @@ export const api = async (req, res) => {
 
 async function startSession(req) {
   const body = parseBody(req);
+  // S-C: a start that names a REAL person-mode contest takes the person-layer
+  // path (username_norm = person_id, server-side college resolution). Anything
+  // else — no contest param, or the synthesized legacy contest — keeps today's
+  // path below BIT-FOR-BIT (the S-C canary). The candidate-facing routing that
+  // sends `contest` lands at S-D; until then only direct callers reach this.
+  const personContest = await resolvePersonContestForStart(body);
+  if (personContest) return startPersonSession(req, body, personContest);
+
   // Phase 2 (0.1): the entry passcode is gone. Start is gated only by the
   // contest time window + complete details. `proctor_passcode` is no longer
   // required (a client may still send it harmlessly; it is ignored).
@@ -462,52 +470,270 @@ async function startSession(req) {
   return startResponse(item, settings);
 }
 
+// ---- S-C person-mode start (vision §2.4; F9 D2/D4/D6) ----------------------
+//
+// The identity chain for identity_mode:"person" contests:
+//   candidate types unique_id → server resolves college from the CONTEST
+//   roster (picker ONLY on genuine ambiguity) → person_id =
+//   "{college_norm}--{identityNorm(unique_id)}" → session.username_norm =
+//   person_id. Everything keyed on (username_norm, contest_slug) — live locks,
+//   alert ids, GCS paths — works unchanged; the norm simply gains its college
+//   prefix.
+
+// The person-mode contest for a start body, or null → legacy path. A present-
+// but-bogus contest is a HARD error (F9 §2.3.1: mandatory resolution kills the
+// shared-empty-slug bleed hazard); the synthesized legacy contest falls through
+// to the legacy path so today's exams are untouched.
+async function resolvePersonContestForStart(body) {
+  if (body.contest === undefined || body.contest === null || String(body.contest).trim() === "") {
+    return null;
+  }
+  const contest = await resolveContest(String(body.contest).trim()); // 400 unknown_contest / 403 contest_not_open
+  if (contest.legacy || contest.identity_mode !== "person") return null;
+  return contest;
+}
+
+// Mirrors validateProctorGate, reading the CONTEST window (S5 semantics moved
+// per-contest for person contests; the legacy settings window never gates them).
+function validateContestWindow(contest) {
+  if (!contest?.start_at || !contest?.end_at) {
+    throw httpError(403, "Proctoring is not configured yet.");
+  }
+  const now = Date.now();
+  const startAt = Date.parse(contest.start_at);
+  const endAt = Date.parse(contest.end_at);
+  if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || startAt >= endAt) {
+    throw httpError(403, "Proctoring schedule is invalid.");
+  }
+  if (now < startAt) throw httpError(403, "Proctoring has not started yet.");
+  if (now > endAt) throw httpError(403, "Proctoring has ended.");
+}
+
+// Resolve the typed unique id against the contest roster: 0 matches → 403,
+// 1 → that person, 2+ colleges → body.college picks or 409 college_choices
+// (the candidate-side picker payload). Mapped profile fields are server-
+// overridden from the roster exactly like the legacy path's rosterIdentity.
+async function resolvePersonRosterIdentity(meta, body) {
+  const typed = String(body.roster_unique_id ?? body.candidate_id ?? body.hackerrank_username ?? "").trim();
+  if (!typed) throw httpError(403, "roster_id_required");
+  const entries = await findContestRosterEntries(meta, typed);
+  if (!entries.length) throw httpError(403, "not_on_roster");
+  let entry = entries[0];
+  if (entries.length > 1) {
+    const college = String(body.college ?? "").trim().toLowerCase();
+    entry = college ? entries.find((e) => e.college_norm === college) : undefined;
+    if (!entry) {
+      const names = new Map((await listColleges()).map((c) => [c.college_norm, c.name]));
+      throw httpError(409, "college_choices", {
+        college_choices: entries.map((e) => ({
+          college_norm: e.college_norm,
+          name: names.get(e.college_norm) || e.college,
+          college: e.college
+        }))
+      });
+    }
+  }
+  const mapping = meta.column_mapping || {};
+  const fromRoster = (field) => (mapping[field] ? String(entry.fields?.[mapping[field]] || "") : "");
+  // A MAPPED field is authoritative even when blank (same rule as the legacy
+  // roster path); unmapped fields keep the typed value.
+  const mappedOrTyped = (field) => (mapping[field] ? fromRoster(field) : String(body[field] ?? "").trim());
+  return {
+    person_id: entry.person_id,
+    college_norm: entry.college_norm,
+    candidate_id: entry.unique_id, // display form — the roster is the source of truth
+    username_norm: entry.person_id,
+    roster_unique_id: entry.unique_id,
+    roster_verified: true,
+    name: mappedOrTyped("name"),
+    email: mappedOrTyped("email"),
+    roll_number: mappedOrTyped("roll_number")
+  };
+}
+
+async function startPersonSession(req, body, contest) {
+  if (body.consent_accepted !== true) {
+    return badRequest("Consent is required");
+  }
+  validateContestWindow(contest);
+
+  const meta = await getContestRosterMeta(contest);
+  let identity;
+  if (meta) {
+    identity = await resolvePersonRosterIdentity(meta, body);
+  } else {
+    // No-roster person contest (vision §2.4): person_id:null — these sessions
+    // never participate in multi-round linking (documented limitation). The
+    // candidate types id + name + email (F9 §1.4).
+    requireFields(body, ["name", "email"]);
+    const typed = String(body.candidate_id ?? body.hackerrank_username ?? "").trim();
+    if (!typed) return badRequest("candidate_id is required");
+    identity = {
+      person_id: null,
+      college_norm: "",
+      candidate_id: typed,
+      username_norm: identityNorm(typed),
+      roster_unique_id: "",
+      roster_verified: false,
+      name: String(body.name ?? "").trim(),
+      email: String(body.email ?? "").trim(),
+      roll_number: String(body.roll_number ?? "").trim()
+    };
+  }
+
+  const now = new Date().toISOString();
+  const clientIp = getClientIp(req);
+  const contestSlug = contest.slug;
+  const settings = await getSettings();
+
+  // Same replay/lock mechanics as the legacy path (H1 unchanged, F9 D6).
+  const existingActive = await findLiveSessionFor(identity.username_norm, contestSlug);
+  if (body.session_id) {
+    const replay = await getSessionOrNull(body.session_id);
+    if (replay && replay.username_norm === identity.username_norm && replay.contest_slug === contestSlug) {
+      return startResponse(replay, settings || {}, contest);
+    }
+  }
+
+  const sessionId = randomUUID();
+  const room = body.room !== undefined && body.room !== null ? sanitizeRoom(body.room) : "";
+  const slot = await acquireLiveSlot(identity.username_norm, contestSlug, sessionId);
+  const status = slot.acquired ? "active" : "pending_approval";
+  const blockedBy = slot.acquired
+    ? null
+    : (slot.ownerSessionId || (existingActive && existingActive.session_id) || null);
+
+  const item = {
+    session_id: sessionId,
+    candidate_id: identity.candidate_id,        // F9 D2: ONE identity field (display form);
+    username_norm: identity.username_norm,      //   hackerrank_username is never written here
+    person_id: identity.person_id,              // components stored as fields, never parsed
+    college_norm: identity.college_norm,
+    identity_label: contest.identity_label || "Candidate ID", // F9 D4: denormalized at start
+    name: identity.name,
+    roll_number: identity.roll_number,
+    email: identity.email,
+    roster_unique_id: identity.roster_unique_id,
+    roster_verified: identity.roster_verified,
+    room,
+    contest_slug: contestSlug,
+    storage_prefix: buildStoragePrefix(contestSlug, identity.username_norm, sessionId),
+    start_ip: clientIp,
+    current_ip: clientIp,
+    ip_change_count: 0,
+    consent_accepted: true,
+    status,
+    blocked_by_session_id: blockedBy,
+    created_at: now,
+    updated_at: now,
+    event_count: 0,
+    clipboard_event_count: 0,
+    focus_event_count: 0,
+    upload_error_count: 0,
+    heartbeat_count: 0,
+    chunk_count: 0,
+    camera_chunk_count: 0,
+    enforcement_exemptions: {}
+  };
+
+  await sessionRef(sessionId).create(item);
+  await putJsonl(`${item.storage_prefix}events/session.jsonl`, [{
+    type: "session_started",
+    timestamp: now,
+    detail: { user_agent: req.get?.("user-agent") || req.headers?.["user-agent"] || "", start_ip: clientIp }
+  }]);
+
+  return startResponse(item, settings || {}, contest);
+}
+
+// The person-mode contest a stored session belongs to, or null → the response
+// stays settings-driven (legacy sessions keep today's payload bit-for-bit).
+// Only person-path docs (they carry candidate_id) ever resolve a contest here.
+async function contestForSession(session) {
+  if (!session?.contest_slug || session.candidate_id === undefined) return null;
+  try {
+    const contest = await resolveContest(session.contest_slug, { requireOpen: false });
+    return contest.legacy || contest.identity_mode !== "person" ? null : contest;
+  } catch {
+    return null;
+  }
+}
+
 // Resume an existing session by its stored token without re-collecting details.
 // Used by a browser reload (Epic 2.1/2.2). 404 when the token is unknown or
 // does not belong to the supplied username.
+//
+// S-C (F9 D8): resume is CONTEST-PINNED when the client names a contest (the
+// S-D frontend always will; absence is tolerated for legacy clients + one
+// transitional release), and the identity check is DUAL-NORM — the legacy
+// normalizeUsername leg keeps old norms resuming, identityNorm covers F9-style
+// norms, and the candidate_id leg covers person sessions whose username_norm
+// is the college-prefixed person_id.
 async function resumeSession(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id"]);
   const session = await getSessionOrNull(body.session_id);
   if (!session) throw httpError(404, "Session not found");
-  if (body.hackerrank_username) {
-    const usernameNorm = normalizeUsername(body.hackerrank_username);
-    if (session.username_norm !== usernameNorm) throw httpError(404, "Session not found");
+  if (body.contest !== undefined && body.contest !== null && String(body.contest).trim() !== "") {
+    if ((session.contest_slug || "") !== String(body.contest).trim()) {
+      throw httpError(404, "Session not found");
+    }
+  }
+  const idValue = body.candidate_id ?? body.hackerrank_username;
+  if (idValue !== undefined && idValue !== null && String(idValue) !== "") {
+    const value = String(idValue);
+    const matches =
+      session.username_norm === normalizeUsername(value) ||  // legacy leg (today's check)
+      session.username_norm === identityNorm(value) ||       // F9 identity leg
+      (session.candidate_id !== undefined
+        && identityNorm(String(session.candidate_id)) === identityNorm(value)); // person leg
+    if (!matches) throw httpError(404, "Session not found");
   }
   const settings = await getSettings();
-  return startResponse(session, settings || {});
+  const contest = await contestForSession(session);
+  return startResponse(session, settings || {}, contest);
 }
 
 // Shared start/resume payload so the browser always gets the same shape whether
 // it just started, replayed a token, or resumed after reload. S4: async because
 // it resolves the assigned problem's candidate-facing view from the bank.
-async function startResponse(session, settings) {
+// S-C: pass the session's PERSON-MODE contest to source the window/gate fields
+// from the contest doc instead of the legacy settings doc (contest = null keeps
+// every legacy payload bit-for-bit; the added candidate_id/identity_label keys
+// are read-side additions the S-A frontend already accepts).
+async function startResponse(session, settings, contest = null) {
   return {
     session_id: session.session_id,
     status: session.status,
-    hackerrank_username: session.hackerrank_username,
+    hackerrank_username: session.hackerrank_username !== undefined ? session.hackerrank_username : (session.candidate_id || ""),
+    candidate_id: session.candidate_id || session.roster_unique_id || session.hackerrank_username || "",
+    identity_label: session.identity_label || "Candidate ID",
     name: session.name,
     room: session.room || "",
     contest_slug: session.contest_slug || "",
     storage_prefix: session.storage_prefix || buildStoragePrefix(session.contest_slug, session.username_norm, session.session_id),
     blocked_by_session_id: session.blocked_by_session_id || null,
     start_ip: session.start_ip || session.current_ip || "",
-    contest_url: settings?.contest_url || "",
+    // contest_url is DEAD for person contests (vision §2.7: URLs are derived).
+    contest_url: contest ? "" : (settings?.contest_url || ""),
     // S3: tells the candidate client whether to hold at the room-code screen.
-    room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
     // F5.3/F5.5: enforcement knobs + this session's exemptions + why a locked
     // session is locked (the candidate unlock-code UI keys off the reason).
     enforcement: enforcementConfig(settings),
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     locked_reason: session.locked_reason || null,
-    problem: await activeProblemPublic(settings),
+    // Person contests get their problem list at S-I (contest problems[]); the
+    // legacy settings problem_id must never leak into them.
+    problem: contest ? null : await activeProblemPublic(settings),
     // F10.1: the camera-recording knobs ride the same upload_config object the
     // screen constraints use, so the recorder reads ONE authoritative config.
     upload_config: { ...uploadConfig, camera: cameraRecordingConfig(settings) },
     heartbeat_interval_seconds: 15,
     // S5: authoritative exam end time + the server clock at response time, so
     // the client shows a skew-corrected countdown from the very first response.
-    end_at: settings?.end_at || "",
+    // Person contests read their OWN window (S5 semantics moved per-contest).
+    end_at: contest ? (contest.end_at || "") : (settings?.end_at || ""),
     server_now: new Date().toISOString()
   };
 }
@@ -4689,9 +4915,12 @@ function badRequest(message) {
   throw httpError(400, message);
 }
 
-function httpError(statusCode, message) {
+function httpError(statusCode, message, payload) {
   const error = new Error(message);
   error.statusCode = statusCode;
+  // S-C: optional structured payload merged into the JSON error body by the
+  // api() catch (college_choices picker, duplicate row lists, ...).
+  if (payload) error.payload = payload;
   return error;
 }
 
