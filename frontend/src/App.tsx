@@ -2042,7 +2042,9 @@ function AdminApp() {
               <p className="mt-1 text-sm text-muted">Enter the admin password to view proctoring controls.</p>
             </div>
           </div>
-          <Field label="Admin password" type="password" value={passwordInput} onChange={setPasswordInput} />
+          <div onKeyDown={(e) => { if (e.key === "Enter" && passwordInput) void unlockAdmin(); }}>
+            <Field label="Admin password" type="password" value={passwordInput} onChange={setPasswordInput} />
+          </div>
           <button className="focus-ring mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={unlockAdmin} disabled={!passwordInput}>
             <Lock size={16} /> Unlock admin
           </button>
