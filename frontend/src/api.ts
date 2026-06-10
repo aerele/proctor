@@ -69,6 +69,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
+import { emptyPersonRosterState, evaluatePersonRosterUpload, type PersonRosterState } from "./roster/personRoster";
 import { normalizeCameraRecording } from "./cameraRecording";
 import { sessionStartPayload } from "./identity";
 import { resolveSavedEndAt } from "./examTime";
@@ -123,16 +124,30 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
     const e = new Error(parseErrorMessage(errorText) || `Request failed: ${response.status}`) as ApiError;
     e.status = response.status;
     e.code = parseErrorCode(errorText);
+    e.body = parseErrorBody(errorText);
     throw e;
   }
 
   return response.json() as Promise<T>;
 }
 
-// An Error carrying the HTTP status and the backend's machine-readable error
-// code (e.g. "session_locked"), so callers can react to lock/end/pending without
-// string-matching the human message.
-export type ApiError = Error & { status?: number; code?: string };
+// An Error carrying the HTTP status, the backend's machine-readable error
+// code (e.g. "session_locked"), and the FULL parsed error body — S-C reject
+// payloads (duplicate_unique_ids rows, college_required rows, college_choices)
+// ride the same JSON error shape and panels render them from `body`.
+export type ApiError = Error & { status?: number; code?: string; body?: Record<string, unknown> };
+
+function parseErrorBody(errorText: string): Record<string, unknown> | undefined {
+  if (!errorText) return undefined;
+  try {
+    const parsed = JSON.parse(errorText) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function parseErrorCode(errorText: string): string | undefined {
   if (!errorText) return undefined;
@@ -2499,10 +2514,11 @@ function maskPasscode(value = "") {
 // ---- S2 roster (compulsory roster login) ------------------------------------
 // Spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md
 
-function demoApiError(status: number, code: string): ApiError {
+function demoApiError(status: number, code: string, body?: Record<string, unknown>): ApiError {
   const error = new Error(code) as ApiError;
   error.status = status;
   error.code = code;
+  if (body) error.body = { error: code, detail: code, ...body };
   return error;
 }
 
@@ -2513,6 +2529,31 @@ function getDemoRoster(): RosterUploadRequest | null {
     return JSON.parse(raw) as RosterUploadRequest;
   } catch {
     return null;
+  }
+}
+
+// ---- S-C demo person-roster stores (per-contest roster + the shared
+// colleges/persons/enrollments state, mirroring the backend identity core).
+const demoPersonRosterKeyPrefix = "aerele-proctor-demo-person-roster::";
+const demoPersonStateKey = "aerele-proctor-demo-person-state";
+
+function getDemoPersonRoster(contest: string): RosterUploadRequest | null {
+  const raw = window.localStorage.getItem(`${demoPersonRosterKeyPrefix}${contest}`);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RosterUploadRequest;
+  } catch {
+    return null;
+  }
+}
+
+function getDemoPersonState(): PersonRosterState {
+  const raw = window.localStorage.getItem(demoPersonStateKey);
+  if (!raw) return emptyPersonRosterState();
+  try {
+    return { ...emptyPersonRosterState(), ...(JSON.parse(raw) as PersonRosterState) };
+  } catch {
+    return emptyPersonRosterState();
   }
 }
 
@@ -2592,24 +2633,27 @@ export async function rosterLookup(uniqueId: string): Promise<RosterLookupResult
 
 // GET /api/admin/roster — roster meta (never the rows). `null` on 404 so the
 // Settings UI can show "not deployed yet" (same degrade as review-roster).
-export async function fetchRosterStatus(password: string): Promise<RosterStatus | null> {
+// S-C: `contest` reads that contest's roster meta (roster_meta::{slug}).
+export async function fetchRosterStatus(password: string, contest?: string): Promise<RosterStatus | null> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    const roster = getDemoRoster();
+    const roster = contest ? getDemoPersonRoster(contest) : getDemoRoster();
     return roster
       ? {
           configured: true,
+          ...(contest ? { contest, college_column: roster.college_column || roster.column_mapping.college || "college" } : {}),
           count: roster.rows.length,
           unique_id_column: roster.unique_id_column,
           column_mapping: roster.column_mapping,
           columns: roster.columns,
           updated_at: new Date().toISOString()
         }
-      : { configured: false };
+      : { configured: false, ...(contest ? { contest } : {}) };
   }
   try {
-    return await request<RosterStatus>("/api/admin/roster", {
+    const query = contest ? `?contest=${encodeURIComponent(contest)}` : "";
+    return await request<RosterStatus>(`/api/admin/roster${query}`, {
       method: "GET",
       headers: { "x-admin-password": password }
     });
@@ -2620,11 +2664,31 @@ export async function fetchRosterStatus(password: string): Promise<RosterStatus 
 }
 
 // POST /api/admin/roster — upload (replace) the roster. `null` on 404.
+// S-C: payload.contest routes the upload down the PERSON-layer pipeline; the
+// demo branch runs the same validation order via roster/personRoster.ts so
+// the college gate / dup-reject / confirmation panels behave identically.
 export async function uploadRoster(password: string, payload: RosterUploadRequest): Promise<RosterUploadResponse | null> {
   if (demoMode) {
     await wait(200);
     assertDemoAdmin(password);
-    // Mirror the backend skip rules so the demo reports realistic counts.
+    if (payload.contest) {
+      const result = evaluatePersonRosterUpload(payload, getDemoPersonState());
+      if (result.kind === "error") {
+        throw demoApiError(result.status, result.code, result.payload);
+      }
+      if (result.kind === "confirm") {
+        return {
+          ok: false,
+          needs_college_confirmation: true,
+          new_colleges: result.new_colleges,
+          known_colleges: result.known_colleges
+        };
+      }
+      window.localStorage.setItem(demoPersonStateKey, JSON.stringify(result.state));
+      window.localStorage.setItem(`${demoPersonRosterKeyPrefix}${payload.contest}`, JSON.stringify(payload));
+      return result.response;
+    }
+    // Legacy (no contest): mirror the backend skip rules unchanged.
     const seen = new Set<string>();
     const rows: Array<Record<string, string>> = [];
     const skipped: Array<{ row: number; reason: string }> = [];
@@ -2658,18 +2722,20 @@ export async function uploadRoster(password: string, payload: RosterUploadReques
 }
 
 // POST /api/admin/roster {clear:true} — roster off (login reverts to legacy).
-export async function clearRoster(password: string): Promise<{ ok: boolean } | null> {
+// S-C: with `contest`, clears THAT contest's roster (enrollments survive).
+export async function clearRoster(password: string, contest?: string): Promise<{ ok: boolean } | null> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    window.localStorage.removeItem(demoRosterKey);
+    if (contest) window.localStorage.removeItem(`${demoPersonRosterKeyPrefix}${contest}`);
+    else window.localStorage.removeItem(demoRosterKey);
     return { ok: true };
   }
   try {
     return await request<{ ok: boolean }>("/api/admin/roster", {
       method: "POST",
       headers: { "x-admin-password": password },
-      body: JSON.stringify({ clear: true })
+      body: JSON.stringify({ clear: true, ...(contest ? { contest } : {}) })
     });
   } catch (cause) {
     if ((cause as ApiError)?.status === 404) return null;

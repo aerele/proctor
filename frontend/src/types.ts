@@ -700,28 +700,69 @@ export type RosterColumnMapping = {
   roll_number?: string;
   hackerrank_username?: string;
   room?: string;
+  /** S-C: the COMPULSORY college column on per-contest (person) uploads. */
+  college?: string;
+};
+
+// S-C college canonicalization gate (vision §2.2): the admin maps each NEW
+// college string onto an existing college or confirms creating it.
+export type CollegeResolution =
+  | { action: "map"; college_norm: string }
+  | { action: "create"; name?: string };
+
+export type NewCollegePreview = {
+  college_norm: string;
+  name: string;
+  names: string[];
+  rows: number;
+};
+
+export type KnownCollege = { college_norm: string; name: string };
+
+// S-C duplicate hard-reject payload row (400 duplicate_unique_ids).
+export type RosterDuplicate = {
+  row: number;
+  college: string;
+  unique_id: string;
+  conflicts_with_row: number;
 };
 
 // POST /api/admin/roster — the client parses the CSV; the backend stores rows.
+// S-C: `contest` routes the upload down the person-layer pipeline (compulsory
+// college column + canonicalization gate + dup hard-reject); absent = legacy.
 export type RosterUploadRequest = {
+  contest?: string;
   unique_id_column: string;
   columns: string[];
   column_mapping: RosterColumnMapping;
   rows: Array<Record<string, string>>;
+  college_column?: string;
+  college_resolutions?: Record<string, CollegeResolution>;
 };
 
 export type RosterUploadResponse = {
   ok: boolean;
-  configured: boolean;
-  count: number;
-  skipped: Array<{ row: number; reason: string }>;
+  configured?: boolean;
+  count?: number;
+  skipped?: Array<{ row: number; reason: string }>;
+  contest?: string;
+  /** S-C canonicalization gate: the preview that blocks until the admin maps-or-confirms. */
+  needs_college_confirmation?: boolean;
+  new_colleges?: NewCollegePreview[];
+  known_colleges?: KnownCollege[];
+  ambiguous_ids?: Array<{ unique_id_norm: string; colleges: string[] }>;
+  colleges_created?: string[];
+  persons?: { created: number; updated: number };
+  enrollments?: { created: number; reactivated: number; removed: number };
 };
 
 // GET /api/admin/roster — meta only (never the rows).
 export type RosterStatus = {
   configured: boolean;
+  contest?: string;
   count?: number;
   unique_id_column?: string;
+  college_column?: string;
   column_mapping?: RosterColumnMapping;
   columns?: string[];
   updated_at?: string;
