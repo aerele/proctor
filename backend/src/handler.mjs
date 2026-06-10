@@ -4,7 +4,7 @@ import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { configureContestStore, createContest, listContests, resolveContest, setContestStatus, updateContest } from "./contests.mjs";
+import { ALL_CONTESTS, configureContestStore, createContest, listContests, resolveContest, scopedQuery, setContestStatus, updateContest } from "./contests.mjs";
 import { configureIdentityStore, findContestRosterEntries, getContestRosterMeta, getContestRosterSummary, identityNorm, listColleges, saveContestRoster } from "./identity.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
@@ -468,6 +468,24 @@ async function startSession(req) {
   }]);
 
   return startResponse(item, settings);
+}
+
+// ---- candidateOf — THE dual-read identity adapter (F9 §1.2) ----------------
+// ONE function used by every DTO/export; never writes. Renders whichever
+// identity a doc carries, preferring the new candidate_id, then the roster id
+// the candidate verified against, then the legacy HR username. Label falls
+// back to the S-A interim "Candidate ID" (F9 §4.3 — the word "username" is
+// banned from rendered UI, so the F9 §1.2 literal "Username" fallback is
+// deliberately not used).
+function candidateOf(doc) {
+  return {
+    id: doc?.candidate_id || doc?.roster_unique_id || doc?.hackerrank_username || "",
+    id_norm: doc?.username_norm || "",
+    label: doc?.identity_label || "Candidate ID",
+    name: doc?.name || "",
+    roll_number: doc?.roll_number || "",
+    room: doc?.room || ""
+  };
 }
 
 // ---- S-C person-mode start (vision §2.4; F9 D2/D4/D6) ----------------------
@@ -1228,6 +1246,13 @@ async function execSubmit(req) {
       // LANGUAGE_IDS), never the raw client body.language — a body shaped to
       // coerce to a valid key (e.g. ["python"]) must not land verbatim.
       session_id: sessionId, problem_id: problem.id, language,
+      // S-C (F9 D7 + vision §2.11): denormalized identity on every NEW doc at
+      // submit time — export/purge/results select by contest_slug directly;
+      // OLD docs keep resolving via the session_id join.
+      contest_slug: session.contest_slug || "",
+      username_norm: session.username_norm || "",
+      candidate_id: candidateOf(session).id,
+      person_id: session.person_id ?? null,
       source_code: source, verdict, passed_count: passedCount, total: results.length,
       tests, score, max_points: maxPoints, scoring: problem.scoring || "per_test",
       created_at: createdAt
@@ -2085,6 +2110,7 @@ async function adminRecordingSessions(req) {
     .map((doc) => ({
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
+      candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
       name: doc.name || "",
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",
@@ -2154,6 +2180,7 @@ async function adminSessionsList(req) {
     .map((doc) => ({
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
+      candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
       name: doc.name || "",
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",
@@ -2182,6 +2209,12 @@ async function adminSessionDetail(req) {
     session: {
       session_id: session.session_id,
       hackerrank_username: session.hackerrank_username || "",
+      // S-C: dual-read identity (F9 §1.2) + the person components so the card
+      // can link to the person and disambiguate multi-college contests.
+      candidate_id: candidateOf(session).id,
+      identity_label: candidateOf(session).label,
+      person_id: session.person_id ?? null,
+      college_norm: session.college_norm || "",
       name: session.name || "",
       roll_number: session.roll_number || "",
       roster_unique_id: session.roster_unique_id || "",
@@ -2313,6 +2346,11 @@ function submissionEventsRef(usernameNorm, contestSlug) {
 function normalizeSubmissionEvent(event, index) {
   if (!event || typeof event !== "object" || Array.isArray(event)) {
     throw httpError(400, `events[${index}] must be an object`);
+  }
+  // S-C (F9 §1.2): candidate_id accepted as an alias FOREVER (lazy poller fleet).
+  if ((event.hackerrank_username === undefined || event.hackerrank_username === null || event.hackerrank_username === "")
+      && event.candidate_id !== undefined && event.candidate_id !== null && event.candidate_id !== "") {
+    event = { ...event, hackerrank_username: event.candidate_id };
   }
   for (const field of ["hackerrank_username", "submission_id", "submitted_at"]) {
     const value = event[field];
@@ -2682,6 +2720,11 @@ function isStaleSession(doc, nowMs) {
 async function adminAttendance(req) {
   requireAdmin(req);
   const contestSlug = req.query?.contest_slug;
+  // S-C: a contest_slug naming a real person contest reads ITS OWN roster
+  // (roster_meta::{slug}) and joins sessions by person_id; any other filter
+  // value keeps today's global-roster path bit-for-bit.
+  const personContest = await personContestForFilter(contestSlug);
+  if (personContest) return personContestAttendance(personContest);
   const meta = await getRosterMeta();
   if (!meta) return { configured: false };
 
@@ -2740,6 +2783,87 @@ async function adminAttendance(req) {
   return {
     configured: true,
     contest_slug: contestSlug ? String(contestSlug) : null,
+    roster_total: entries.length,
+    taken,
+    not_taken: absentees.length,
+    absentees,
+    unmatched_sessions: unmatched,
+    generated_at: new Date().toISOString()
+  };
+}
+
+// The real person-mode contest behind an optional admin filter value, or null →
+// the caller keeps its legacy behavior. NEVER throws: admin GET signatures stay
+// unchanged (F9 D10), so an unknown/legacy slug filters exactly as today.
+async function personContestForFilter(contestSlug) {
+  if (contestSlug === undefined || contestSlug === null || String(contestSlug).trim() === "") return null;
+  try {
+    const contest = await resolveContest(String(contestSlug).trim(), { requireOpen: false });
+    return contest.legacy || contest.identity_mode !== "person" ? null : contest;
+  } catch {
+    return null;
+  }
+}
+
+// S-C attendance for a person contest: ITS roster (roster_meta::{slug}) joined
+// to ITS sessions by person_id (the only join that survives two colleges
+// sharing a roll number). Absentee rows gain the college (vision A11) — still
+// PII-minimized: mapped identity fields + college, no email, no raw fields.
+async function personContestAttendance(contest) {
+  const meta = await getContestRosterMeta(contest);
+  if (!meta) return { configured: false, contest_slug: contest.slug };
+
+  const entriesSnap = await firestore
+    .collection(ROSTER_COLLECTION)
+    .where("roster_version", "==", meta.version)
+    .limit(ROSTER_LIMIT)
+    .get();
+  const entries = entriesSnap.docs.map((doc) => doc.data());
+
+  const sessionsSnap = await scopedQuery(firestore.collection(SESSION_COLLECTION), contest)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
+  const sessions = sessionsSnap.docs.map((doc) => doc.data());
+
+  const knownPersons = new Set(entries.map((entry) => String(entry.person_id || "")));
+  const liveByPerson = new Map();
+  let unmatched = 0;
+  for (const session of sessions) {
+    const personId = String(session.person_id || "");
+    if (!personId || !knownPersons.has(personId)) {
+      unmatched += 1;
+      continue;
+    }
+    const live = session.status !== "ended";
+    liveByPerson.set(personId, Boolean(liveByPerson.get(personId)) || live);
+  }
+
+  const mapping = meta.column_mapping || {};
+  const mappedField = (entry, name) =>
+    (mapping[name] ? String(entry.fields?.[mapping[name]] || "") : "");
+  const taken = { total: 0, in_progress: 0, completed: 0 };
+  const absentees = [];
+  for (const entry of entries) {
+    const personId = String(entry.person_id || "");
+    if (liveByPerson.has(personId)) {
+      taken.total += 1;
+      if (liveByPerson.get(personId)) taken.in_progress += 1;
+      else taken.completed += 1;
+    } else {
+      absentees.push({
+        unique_id: String(entry.unique_id || ""),
+        name: mappedField(entry, "name"),
+        roll_number: mappedField(entry, "roll_number"),
+        room: mappedField(entry, "room"),
+        college: String(entry.college || "")
+      });
+    }
+  }
+  absentees.sort((a, b) => a.unique_id.localeCompare(b.unique_id) || a.college.localeCompare(b.college));
+
+  return {
+    configured: true,
+    contest_slug: contest.slug,
     roster_total: entries.length,
     taken,
     not_taken: absentees.length,
@@ -2899,6 +3023,7 @@ async function adminSessionDetails(req) {
     const blank = {
       username: u,
       hackerrank_username: "",
+      candidate_id: "",
       name: "",
       email: "",
       roll_number: "",
@@ -2938,6 +3063,7 @@ async function adminSessionDetails(req) {
     return {
       username: u,
       hackerrank_username: doc.hackerrank_username || "",
+      candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
       name: doc.name || "",
       email: doc.email || "",
       roll_number: doc.roll_number || "",
@@ -2969,20 +3095,42 @@ async function adminSessionDetails(req) {
 //              id = username_norm. A claim older than CLAIM_TTL_MS is free.
 //              Submitting a verdict deletes (releases) the claim.
 
-function reviewRosterRef() {
-  return firestore.collection(REVIEW_STATE_COLLECTION).doc(REVIEW_ROSTER_ID);
+// S-C (F9 D17): per-contest review state for NEW data — ids gain a ::{slug}
+// suffix (roster doc: roster::{slug}); SLUGLESS ids stay the legacy set and
+// keep working untouched. contestSlug = "" everywhere means "the legacy set".
+function reviewRosterRef(contestSlug = "") {
+  return firestore.collection(REVIEW_STATE_COLLECTION)
+    .doc(contestSlug ? `${REVIEW_ROSTER_ID}::${contestSlug}` : REVIEW_ROSTER_ID);
 }
 
-function reviewRecordId(usernameNorm, reviewerKey) {
-  return `${usernameNorm}::${reviewerKey}`;
+function reviewRecordId(usernameNorm, reviewerKey, contestSlug = "") {
+  const base = `${usernameNorm}::${reviewerKey}`;
+  return contestSlug ? `${base}::${contestSlug}` : base;
 }
 
-function reviewRecordRef(usernameNorm, reviewerKey) {
-  return firestore.collection(REVIEW_COLLECTION).doc(reviewRecordId(usernameNorm, reviewerKey));
+function reviewRecordRef(usernameNorm, reviewerKey, contestSlug = "") {
+  return firestore.collection(REVIEW_COLLECTION).doc(reviewRecordId(usernameNorm, reviewerKey, contestSlug));
 }
 
-function reviewClaimRef(usernameNorm) {
-  return firestore.collection(REVIEW_CLAIMS_COLLECTION).doc(usernameNorm);
+function reviewClaimRef(usernameNorm, contestSlug = "") {
+  return firestore.collection(REVIEW_CLAIMS_COLLECTION)
+    .doc(contestSlug ? `${usernameNorm}::${contestSlug}` : usernameNorm);
+}
+
+// Resolve the optional review-scope contest param: absent → "" (the legacy
+// slugless set); the synthesized legacy contest → "" too (its review data IS
+// the legacy set); a real contest → its slug; unknown → 400 (typo safety).
+async function reviewContestSlugOf(param) {
+  if (param === undefined || param === null || String(param).trim() === "") return "";
+  const contest = await resolveContest(String(param).trim(), { requireOpen: false });
+  return contest.legacy ? "" : contest.slug;
+}
+
+// A review/claim doc belongs to scope `contestSlug` when its contest_slug field
+// matches ("" matches docs WITHOUT the field — the legacy set). New scoped
+// writes always stamp the field; legacy docs never get rewritten.
+function inReviewScope(doc, contestSlug) {
+  return String(doc?.contest_slug || "") === contestSlug;
 }
 
 // A reviewer name is normalized to a key the same way usernames are (lowercased,
@@ -3014,6 +3162,7 @@ function normalizeRoster(usernames) {
 async function adminSetReviewRoster(req) {
   requireAdmin(req);
   const body = parseBody(req);
+  const contestSlug = await reviewContestSlugOf(body.contest);
   if (!Array.isArray(body.usernames)) return badRequest("usernames must be an array");
   if (body.usernames.length > REVIEW_ROSTER_LIMIT) {
     return badRequest(`Too many usernames in one request (max ${REVIEW_ROSTER_LIMIT})`);
@@ -3022,24 +3171,27 @@ async function adminSetReviewRoster(req) {
   const now = new Date().toISOString();
   // .set() (no merge) REPLACES the roster — a removed username is gone, matching
   // "replace the roster" rather than "append".
-  await reviewRosterRef().set({ entries, updated_at: now });
+  await reviewRosterRef(contestSlug).set({
+    entries,
+    updated_at: now,
+    ...(contestSlug ? { contest_slug: contestSlug } : {})
+  });
   return { ok: true, count: entries.length };
 }
 
 // Read the persisted roster as [{ username, username_norm }] in roster order.
-async function getReviewRoster() {
-  const doc = await reviewRosterRef().get();
+async function getReviewRoster(contestSlug = "") {
+  const doc = await reviewRosterRef(contestSlug).get();
   if (!doc.exists) return [];
   const entries = doc.data()?.entries;
   return Array.isArray(entries) ? entries : [];
 }
 
-// All review records across the whole collection (used for summary counts and
-// the serving priority). Capped so a pathological collection can't bloat a
-// request.
-async function getAllReviews() {
+// All review records IN SCOPE (S-C: contest slug or the legacy slugless set).
+// Capped so a pathological collection can't bloat a request.
+async function getAllReviews(contestSlug = "") {
   const snapshot = await firestore.collection(REVIEW_COLLECTION).limit(REVIEWS_QUERY_LIMIT).get();
-  return snapshot.docs.map((doc) => doc.data());
+  return snapshot.docs.map((doc) => doc.data()).filter((review) => inReviewScope(review, contestSlug));
 }
 
 // Index reviews by username_norm → { records:[...] }. Each record is one
@@ -3059,9 +3211,10 @@ function indexReviewsByUsername(reviews) {
 // reviews + claims collections.
 async function adminGetReviewRoster(req) {
   requireAdmin(req);
-  const roster = await getReviewRoster();
-  const reviews = await getAllReviews();
-  const claims = await getActiveClaims();
+  const contestSlug = await reviewContestSlugOf(req.query?.contest);
+  const roster = await getReviewRoster(contestSlug);
+  const reviews = await getAllReviews(contestSlug);
+  const claims = await getActiveClaims(contestSlug);
 
   const byUsername = indexReviewsByUsername(reviews);
   let with0 = 0;
@@ -3100,11 +3253,13 @@ function isClaimActive(claim, nowMs) {
   return nowMs - claimedMs < CLAIM_TTL_MS;
 }
 
-// Every currently-active (non-expired) claim across the claims collection.
-async function getActiveClaims() {
+// Every currently-active (non-expired) claim IN SCOPE.
+async function getActiveClaims(contestSlug = "") {
   const snapshot = await firestore.collection(REVIEW_CLAIMS_COLLECTION).limit(REVIEW_ROSTER_LIMIT).get();
   const nowMs = Date.now();
-  return snapshot.docs.map((doc) => doc.data()).filter((claim) => isClaimActive(claim, nowMs));
+  return snapshot.docs.map((doc) => doc.data())
+    .filter((claim) => inReviewScope(claim, contestSlug))
+    .filter((claim) => isClaimActive(claim, nowMs));
 }
 
 // POST /api/admin/review-next — serve reviewer R the next student to review by
@@ -3125,37 +3280,38 @@ async function adminReviewNext(req) {
   requireAdmin(req);
   const body = parseBody(req);
   requireFields(body, ["reviewer_name"]);
+  const contestSlug = await reviewContestSlugOf(body.contest);
   const reviewerName = String(body.reviewer_name).trim();
   if (!reviewerName) return badRequest("reviewer_name is required");
   const reviewerKey = reviewerKeyFor(reviewerName);
 
-  const roster = await getReviewRoster();
+  const roster = await getReviewRoster(contestSlug);
   if (!roster.length) return { done: true };
 
-  const reviews = await getAllReviews();
+  const reviews = await getAllReviews(contestSlug);
   const byUsername = indexReviewsByUsername(reviews);
-  const claimsByNorm = await loadClaimsByNorm();
+  const claimsByNorm = await loadClaimsByNorm(contestSlug);
 
   const candidates = rankReviewCandidates(roster, byUsername, reviewerKey, Date.now(), claimsByNorm);
 
   // Walk candidates best-first; the first one we can atomically claim wins. A
   // lost claim race falls through to the next candidate.
   for (const candidate of candidates) {
-    const claimed = await claimReviewUsername(candidate.username_norm, reviewerName);
+    const claimed = await claimReviewUsername(candidate.username_norm, reviewerName, contestSlug);
     if (claimed) return { username: candidate.username };
   }
   return { done: true };
 }
 
-// Load every claim doc keyed by username_norm (raw, including stale ones) so the
-// ranking pass can decide claimable-ness with a single read. Stale claims are
-// filtered in rankReviewCandidates so they don't exclude a username.
-async function loadClaimsByNorm() {
+// Load every IN-SCOPE claim doc keyed by username_norm (raw, including stale
+// ones) so the ranking pass can decide claimable-ness with a single read. Stale
+// claims are filtered in rankReviewCandidates so they don't exclude a username.
+async function loadClaimsByNorm(contestSlug = "") {
   const snapshot = await firestore.collection(REVIEW_CLAIMS_COLLECTION).limit(REVIEW_ROSTER_LIMIT).get();
   const byNorm = new Map();
   for (const doc of snapshot.docs) {
     const claim = doc.data();
-    if (claim?.username_norm) byNorm.set(claim.username_norm, claim);
+    if (claim?.username_norm && inReviewScope(claim, contestSlug)) byNorm.set(claim.username_norm, claim);
   }
   return byNorm;
 }
@@ -3216,10 +3372,13 @@ function rankReviewCandidates(roster, byUsername, reviewerKey, nowMs, claimsByNo
 //                                              return true.
 //   - stale/expired claim                      → take it over (.set) → true.
 // Returns true on a successful claim, false when another reviewer holds it live.
-async function claimReviewUsername(usernameNorm, reviewerName) {
-  const ref = reviewClaimRef(usernameNorm);
+async function claimReviewUsername(usernameNorm, reviewerName, contestSlug = "") {
+  const ref = reviewClaimRef(usernameNorm, contestSlug);
   const now = new Date().toISOString();
-  const claimBody = { username_norm: usernameNorm, reviewer_name: reviewerName, claimed_at: now };
+  const claimBody = {
+    username_norm: usernameNorm, reviewer_name: reviewerName, claimed_at: now,
+    ...(contestSlug ? { contest_slug: contestSlug } : {})
+  };
 
   try {
     await ref.create(claimBody);
@@ -3263,15 +3422,16 @@ async function adminReviewVerdict(req) {
   const verdict = Number(body.verdict);
   if (verdict !== 0 && verdict !== 1) return badRequest("verdict must be 0 or 1");
 
+  const contestSlug = await reviewContestSlugOf(body.contest);
   const usernameNorm = normalizeUsername(body.username);
   // Roster-only: a verdict may only be recorded for a username currently on the
   // roster, so a typo / stale username can't create an orphan review record.
-  const roster = await getReviewRoster();
+  const roster = await getReviewRoster(contestSlug);
   const rosterEntry = roster.find((entry) => entry.username_norm === usernameNorm);
   if (!rosterEntry) return badRequest("username is not on the review roster");
 
   const reviewerKey = reviewerKeyFor(reviewerName);
-  const ref = reviewRecordRef(usernameNorm, reviewerKey);
+  const ref = reviewRecordRef(usernameNorm, reviewerKey, contestSlug);
   const now = new Date().toISOString();
 
   // Preserve created_at on the first write; a re-verdict only bumps updated_at +
@@ -3285,12 +3445,13 @@ async function adminReviewVerdict(req) {
     reviewer_name: reviewerName,
     verdict,
     created_at: createdAt,
-    updated_at: now
+    updated_at: now,
+    ...(contestSlug ? { contest_slug: contestSlug } : {})
   });
 
   // Release the claim so the username is immediately free for the next reviewer.
   // Best-effort + idempotent (delete of a missing doc is a no-op).
-  await reviewClaimRef(usernameNorm).delete();
+  await reviewClaimRef(usernameNorm, contestSlug).delete();
 
   return { ok: true };
 }
@@ -3303,8 +3464,9 @@ async function adminReviewMine(req) {
   if (reviewerName === undefined || reviewerName === null || String(reviewerName).trim() === "") {
     return badRequest("reviewer_name is required");
   }
+  const contestSlug = await reviewContestSlugOf(req.query?.contest);
   const reviewerKey = reviewerKeyFor(reviewerName);
-  const reviews = (await getAllReviews())
+  const reviews = (await getAllReviews(contestSlug))
     .filter((review) => reviewerKeyFor(review.reviewer_name) === reviewerKey)
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 
@@ -3323,7 +3485,8 @@ async function adminReviewMine(req) {
 async function adminReviews(req) {
   requireAdmin(req);
   const usernameFilter = req.query?.username;
-  let reviews = await getAllReviews();
+  const contestSlug = await reviewContestSlugOf(req.query?.contest);
+  let reviews = await getAllReviews(contestSlug);
   if (usernameFilter !== undefined && usernameFilter !== null && String(usernameFilter).trim() !== "") {
     const norm = normalizeUsername(usernameFilter);
     reviews = reviews.filter((review) => review.username_norm === norm);
@@ -3591,13 +3754,18 @@ async function upsertProctorAlert(session, { type, severity, timestamp, title, d
   const id = `proctor:${type}:${usernameNorm}:${contestSlug}:${dedupe}`;
   const now = new Date().toISOString();
 
+  // S-C: person-path sessions carry candidate_id instead of
+  // hackerrank_username — the dual-read adapter keeps the frozen field
+  // populated with the display id either way (never undefined).
+  const displayId = candidateOf(session).id;
   const item = {
     id,
     source: "proctor",
     type,
     severity,
     timestamp: isoOrNow(timestamp),
-    hackerrank_username: session.hackerrank_username,
+    hackerrank_username: session.hackerrank_username !== undefined ? session.hackerrank_username : displayId,
+    candidate_id: displayId,
     username_norm: usernameNorm,
     title,
     session_id: session.session_id,
@@ -3655,6 +3823,12 @@ function normalizeAlert(alert, index, receivedAt) {
   if (!alert || typeof alert !== "object" || Array.isArray(alert)) {
     throw httpError(400, `alerts[${index}] must be an object`);
   }
+  // S-C (F9 §1.2): ingest accepts candidate_id as an alias for the frozen
+  // hackerrank_username field FOREVER — the poller fleet upgrades lazily.
+  if ((alert.hackerrank_username === undefined || alert.hackerrank_username === null || alert.hackerrank_username === "")
+      && alert.candidate_id !== undefined && alert.candidate_id !== null && alert.candidate_id !== "") {
+    alert = { ...alert, hackerrank_username: alert.candidate_id };
+  }
   for (const field of ALERT_REQUIRED_FIELDS) {
     const value = alert[field];
     if (value === undefined || value === null || value === "") {
@@ -3686,6 +3860,7 @@ function normalizeAlert(alert, index, receivedAt) {
     severity: String(alert.severity),
     timestamp: String(alert.timestamp),
     hackerrank_username: username,
+    candidate_id: username, // S-C dual-field: same display id under both names
     username_norm: usernameNorm,
     title: String(alert.title),
     received_at: receivedAt
@@ -4425,6 +4600,7 @@ async function invigilatorRoom(req) {
       // username, not session_id.
       name: doc.name || "",
       hackerrank_username: doc.hackerrank_username || "",
+      candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
       roll_number: doc.roll_number || "",
       // F9.4: the roster's unique id — alert-detail expansion joins on username
       // and shows this alongside the roll number. Identity data, not a credential.
