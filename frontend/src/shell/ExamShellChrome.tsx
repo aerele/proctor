@@ -13,7 +13,7 @@ import { ExamTopBar } from "./ExamTopBar";
 import { FullscreenGate } from "./FullscreenGate";
 import type { ExamShellApi } from "./useExamShell";
 
-export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds, examReleased, ownEditor }: {
+export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds, examReleased, ownEditor, remainingLabel, timeUp }: {
   shell: ExamShellApi;
   gate: ShellGate;
   status: SessionStatus;
@@ -21,6 +21,10 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
   elapsedSeconds: number;
   examReleased: boolean;
   ownEditor: boolean;
+  // S5: skew-corrected exam countdown ("H:MM:SS") + time-up flag for the top
+  // bar. null → no end time known (no countdown shown).
+  remainingLabel: string | null;
+  timeUp: boolean;
 }) {
   const barVisible = topBarVisible(shell.barHidden, gate);
   // While an anomaly episode is active the AnomalyPanel owns fullscreen
@@ -38,6 +42,8 @@ export function ExamShellChrome({ shell, gate, status, identity, elapsedSeconds,
           elapsedSeconds={elapsedSeconds}
           recording={status === "recording" || status === "ending"}
           flagCount={shell.flagCount}
+          remainingLabel={remainingLabel}
+          timeUp={timeUp}
         />
       ) : null}
       {shell.barHidden ? (

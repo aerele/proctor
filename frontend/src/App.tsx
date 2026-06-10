@@ -2,6 +2,7 @@ import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCi
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
@@ -98,6 +99,16 @@ function StudentApp() {
   const [checkpoint, setCheckpoint] = useState<IntegrityCheckpoint | null>(null);
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  // S5: authoritative exam end time + server-clock skew, fed by start/resume
+  // responses and refreshed by every heartbeat (≤15 s — the existing student
+  // polling channel). examEndAtRef mirrors examEndAt for the recorder-callback
+  // closure (the recorder options are built once); timeUpAnnouncedRef makes the
+  // time-up voice warning fire exactly once.
+  const [examEndAt, setExamEndAt] = useState("");
+  const [clockSkewMs, setClockSkewMs] = useState(0);
+  const [examTimeNotice, setExamTimeNotice] = useState("");
+  const examEndAtRef = useRef("");
+  const timeUpAnnouncedRef = useRef(false);
   const [endRequested, setEndRequested] = useState(false);
   // Recording already stopped but the final end/manifest submit failed — show an
   // inline "Retry submitting" instead of dead-ending in the error state.
@@ -168,6 +179,14 @@ function StudentApp() {
   const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, addEvent });
   shellTapRef.current = shell.onShellEvent;
 
+  // S5: remaining time on the SERVER clock. Recomputed every render — the 1 s
+  // elapsed ticker already re-renders while recording, so this stays live
+  // without another interval. null (no end_at yet / old backend) → no countdown.
+  // (Plan anchored this at isFormStage; it lives here because the shell chrome
+  // below consumes it — the S1 exam shell replaced the old TimerBar.)
+  const examRemainingMs = status === "recording" || status === "ending" ? remainingMs(examEndAt, Date.now(), clockSkewMs) : null;
+  const examTimeUp = examRemainingMs !== null && examRemainingMs <= 0;
+
   // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
   const shellChrome = (
     <ExamShellChrome
@@ -178,6 +197,8 @@ function StudentApp() {
       elapsedSeconds={elapsedSeconds}
       examReleased={!examGateActive}
       ownEditor={hasProblem}
+      remainingLabel={examRemainingMs !== null ? formatRemaining(examRemainingMs) : null}
+      timeUp={examTimeUp}
     />
   );
   // The fixed bar needs page top padding only while it is actually rendered.
@@ -394,6 +415,27 @@ function StudentApp() {
     return () => window.clearInterval(timer);
   }, [recordingStartedAt, status]);
 
+  // S5: announce "time is up" once when the countdown crosses zero while
+  // recording. Soft enforcement by design: the recording continues so the
+  // candidate ends their own test (manifest intact); the hard stop is the
+  // admin's End-now (which 409s the heartbeat → B1 self-stop).
+  useEffect(() => {
+    if (status !== "recording" || !examEndAt) return;
+    const check = () => {
+      const left = remainingMs(examEndAt, Date.now(), clockSkewMs);
+      if (left === null || left > 0 || timeUpAnnouncedRef.current) return;
+      timeUpAnnouncedRef.current = true;
+      speakWarning("Time is up. Please end your test now.");
+      const event = createUiEvent("exam_time_up", { end_at: examEndAt });
+      addEvent(event);
+      if (sessionId) void sendEvents(sessionId, [event]);
+    };
+    check();
+    const timer = window.setInterval(check, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, examEndAt, clockSkewMs, sessionId]);
+
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (status !== "recording" && status !== "ending") return;
@@ -478,6 +520,26 @@ function StudentApp() {
     }
   };
 
+  // S5: apply a server-reported exam end time + clock stamp. Announces a
+  // mid-exam change (extended/shortened) exactly once per change; the notice
+  // stays visible until the next change. The first end_at received is silent.
+  const applyExamTime = (endAt?: string, serverNow?: string) => {
+    if (!endAt) return;
+    setClockSkewMs(computeClockSkewMs(serverNow, Date.now()));
+    const change = classifyEndAtChange(examEndAtRef.current, endAt);
+    examEndAtRef.current = endAt;
+    setExamEndAt(endAt);
+    if (change !== "extended" && change !== "shortened") return;
+    const at = new Date(endAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (change === "extended") {
+      timeUpAnnouncedRef.current = false; // more time: a past "time is up" no longer holds
+      setExamTimeNotice(`The proctor extended the exam — new end time ${at}.`);
+    } else {
+      setExamTimeNotice(`The proctor moved the exam end earlier — new end time ${at}.`);
+      speakWarning("Attention: the exam end time has been moved earlier. Check the timer.");
+    }
+  };
+
   // Bring up the recorder for an active session. Shared by first-start and by
   // "Resume recording" after a reload (both need a fresh getDisplayMedia gesture).
   const beginRecording = async (session: SessionStartResponse) => {
@@ -545,6 +607,8 @@ function StudentApp() {
         setIpChanged(ipStatus.ipChanged);
         if (ipStatus.newlyChanged) speakIpChangeWarning();
       },
+      // S5: heartbeat-delivered exam end time → live countdown update.
+      onExamTimeChange: ({ endAt, serverNow }) => applyExamTime(endAt, serverNow),
       onCameraStream: (stream) => {
         setCameraStream(stream);
         const video = cameraVideoRef.current;
@@ -646,6 +710,7 @@ function StudentApp() {
       });
       // Persist the token so a reload resumes the same session (Epic 2).
       window.localStorage.setItem(sessionStorageKey, session.session_id);
+      applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         // pending_approval / locked / ended — do not start the recorder.
@@ -684,6 +749,7 @@ function StudentApp() {
     let session: SessionStartResponse;
     try {
       session = await resumeSession(sessionConfig.session_id);
+      applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         setStatus("idle");
@@ -719,6 +785,7 @@ function StudentApp() {
     setError("");
     try {
       const session = await resumeSession(sessionConfig.session_id);
+      applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus === "ended") {
         setStatus("ended");
@@ -958,6 +1025,18 @@ function StudentApp() {
     <Shell padTop={shellPadTop}>
       {shellChrome}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
+
+      {/* S5: end-time change notice + time-up banner. The countdown itself lives
+          in the shell's ExamTopBar (the S1 replacement for the old TimerBar). */}
+      {examTimeNotice && (status === "recording" || status === "ending") ? (
+        <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-ink">{examTimeNotice}</div>
+      ) : null}
+      {examTimeUp && status === "recording" ? (
+        <div className="mb-5 rounded-lg border border-danger/40 bg-danger/10 p-4">
+          <p className="text-sm font-semibold text-danger">Time is up</p>
+          <p className="mt-1 text-sm leading-6 text-ink">The exam has ended. Stop working now and end your test from this page — your recording continues until you end it.</p>
+        </div>
+      ) : null}
 
       {/* Pre-start: the rules are the headline, not a sidebar afterthought. The
           candidate reads exactly what is required and what is recorded before the
