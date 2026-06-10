@@ -4,6 +4,7 @@ import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
+import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
 let storage = new Storage();
@@ -226,6 +227,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
+    if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));
     if (req.method === "GET" && path === "/api/admin/attendance") return send(res, 200, await adminAttendance(req));
     if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
@@ -1987,6 +1989,36 @@ function distinctRooms(docs) {
   return [...set].sort((a, b) => a.localeCompare(b)).slice(0, ROOMS_LIST_LIMIT);
 }
 
+// S7 — IP-wise report of logged-in users (proxy-detection signal). Groups the
+// contest's session docs by the IP we already capture (current_ip, refreshed by
+// every heartbeat; start_ip fallback) and returns counts + a bounded candidate
+// sample per IP — see backend/src/ipReport.mjs. scope=live (default) reports
+// non-ended sessions ("logged-in users"); scope=all adds ended sessions for
+// after-the-exam forensics. Query/filter pattern mirrors adminSessionsList.
+async function adminIpReport(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+  const room = normalizeRoomFilter(req.query?.room);
+  const scope = String(req.query?.scope || "live");
+  if (scope !== "live" && scope !== "all") return badRequest("scope must be live or all");
+
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  let docs = snapshot.docs.map((doc) => doc.data());
+  if (room) docs = docs.filter((doc) => String(doc.room || "") === room);
+  if (scope === "live") docs = docs.filter((doc) => doc.status && doc.status !== "ended");
+
+  return {
+    contest_slug: contestSlug ? String(contestSlug) : null,
+    room: room || null,
+    scope,
+    ...buildIpReport(docs)
+  };
+}
+
 // An active session is "stale" (a derived disconnected signal) when its most
 // recent LIVENESS signal — last_heartbeat_at OR last_seen_at (beacon), whichever
 // is newer — is older than DISCONNECTED_STALENESS_MS. Only when NEITHER liveness
@@ -3640,10 +3672,16 @@ function sanitizeEditorDetail(rawDetail) {
 }
 
 function getClientIp(req) {
+  // Cloud Run's ingress proxy APPENDS the real connecting client IP as the
+  // LAST x-forwarded-for value; any earlier entries arrived in the client's
+  // own request and are spoofable. Take the last hop (the only trustworthy one
+  // for a direct Cloud Run deployment); fall back to the socket address when
+  // there is no proxy (local dev).
   const forwarded = req.get?.("x-forwarded-for") || req.headers?.["x-forwarded-for"] || "";
-  const firstForwarded = String(forwarded).split(",").map((part) => part.trim()).find(Boolean);
+  const hops = String(forwarded).split(",").map((part) => part.trim()).filter(Boolean);
+  const lastForwarded = hops.length ? hops[hops.length - 1] : "";
   const direct = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || "";
-  return normalizeIp(firstForwarded || direct || "unknown");
+  return normalizeIp(lastForwarded || direct || "unknown");
 }
 
 function normalizeIp(value) {
