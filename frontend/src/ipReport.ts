@@ -18,6 +18,8 @@ export type IpRow = {
   ip: string;
   start_ip?: string;
   ip_change_count?: number;
+  /** F8.1: roster identity for the drill-down rows ("" / absent = legacy). */
+  roster_unique_id?: string;
 };
 
 export function groupIpEntries(rows: IpRow[]): IpReportEntry[] {
@@ -47,6 +49,7 @@ export function groupIpEntries(rows: IpRow[]): IpReportEntry[] {
         session_id: row.session_id,
         hackerrank_username: row.hackerrank_username,
         name: row.name,
+        roster_unique_id: row.roster_unique_id ?? "",
         room: row.room,
         status: row.status,
         created_at: row.created_at,

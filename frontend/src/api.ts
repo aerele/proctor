@@ -789,8 +789,8 @@ export async function fetchSessionCardDetail(password: string, sessionId: string
       session_id: row.session_id,
       hackerrank_username: row.hackerrank_username,
       name: row.name,
-      roll_number: `R-${row.session_id.slice(-4).toUpperCase()}`,
-      roster_unique_id: `R-${row.session_id.slice(-4).toUpperCase()}`,
+      roll_number: demoRosterIdFor(row),
+      roster_unique_id: demoRosterIdFor(row),
       room: row.room,
       contest_slug: row.contest_slug,
       status: row.status,
@@ -919,6 +919,12 @@ function demoIpFor(session: DemoAdminSessionRow): { ip: string; start_ip: string
   const ip = override?.ip ?? roomIp;
   const startIp = override?.start_ip ?? ip;
   return { ip, start_ip: startIp, ip_change_count: startIp !== ip ? 1 : 0 };
+}
+
+// Deterministic demo roster id — ONE derivation shared by the session card and
+// the IP report (F8.1) so the same session always shows the same roster id.
+function demoRosterIdFor(session: DemoAdminSessionRow): string {
+  return `R-${session.session_id.slice(-4).toUpperCase()}`;
 }
 
 // F6.6 demo capture states — deterministic per-session overrides (same pattern
@@ -1416,6 +1422,9 @@ export async function fetchIpReport(
           session_id: session.session_id,
           hackerrank_username: session.hackerrank_username,
           name: session.name,
+          // F8.1: same derivation as the demo session card, so the drill-down
+          // roster id matches what "Open session card" then shows.
+          roster_unique_id: demoRosterIdFor(session),
           room: session.room,
           status: session.status,
           created_at: session.created_at,

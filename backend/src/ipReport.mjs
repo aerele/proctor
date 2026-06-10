@@ -66,6 +66,9 @@ export function buildIpReport(docs) {
           session_id: doc.session_id || "",
           hackerrank_username: doc.hackerrank_username || "",
           name: doc.name || "",
+          // F8.1: the roster identity for the drill-down rows ("" for legacy
+          // pre-roster sessions — the UI falls back to the username).
+          roster_unique_id: doc.roster_unique_id || "",
           room: doc.room || "",
           status: doc.status || "",
           created_at: doc.created_at || "",

@@ -1,8 +1,9 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
+import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "./admin/alertActions";
 import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, viewEventsAffordance, viewRecordingAffordance } from "./admin/sessionDetail";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
@@ -18,8 +19,9 @@ import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMe
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
+import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
 import type { ApiError } from "./api";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
 
@@ -2251,6 +2253,33 @@ function AdminApp() {
     await loadSessions();
   };
 
+  // F8.1: "Open session card" from an IP-report candidate row — jump to the
+  // Sessions tab with the detail card seeded from the drill-down row (the
+  // fields the report carries; chunk_count arrives via the card's own
+  // session-detail fetch). The fresh sessions list loads in parallel and its
+  // row takes over as soon as it lands (same layering as a Sessions click).
+  const openSessionCardFromIp = (candidate: IpReportCandidate) => {
+    setView("sessions");
+    void loadSessions();
+    openSessionDetail({
+      session_id: candidate.session_id,
+      hackerrank_username: candidate.hackerrank_username,
+      name: candidate.name,
+      room: candidate.room,
+      contest_slug: ipReport?.contest_slug ?? "",
+      chunk_count: 0,
+      created_at: candidate.created_at,
+      status: candidate.status
+    });
+  };
+
+  // F8.1: a session action from the IP-report drill-down refreshes the report
+  // (and stats/alerts via runAction) so the row reflects the new status.
+  const runIpReportAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+    await runAction(action, opts);
+    await loadIpReport();
+  };
+
   // "View recording" — jump to the Recordings tab pre-scoped to this candidate
   // and session (state-based deep link; RecordingReview consumes + clears it).
   const jumpToRecording = (session: RecordingSession) => {
@@ -2605,6 +2634,8 @@ function AdminApp() {
           }}
           contestSlug={alertFilters.contest_slug ?? ""}
           onRefresh={() => loadIpReport()}
+          onAction={(action, opts) => void runIpReportAction(action, opts)}
+          onOpenSessionCard={openSessionCardFromIp}
         />
       ) : null}
 
@@ -2875,6 +2906,23 @@ function CandidateRosterSection({ password }: { password: string }) {
     }
   };
 
+  // F8.3: client-side template download — headers are EXACTLY the parser's
+  // accepted names (compulsory first), so the filled file re-uploads with
+  // every column auto-mapped and unique_id pre-picked as the ID column.
+  const downloadTemplate = () => {
+    const blob = new Blob([buildRosterTemplateCsv()], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "roster-template.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  const compulsoryHeaders = ROSTER_TEMPLATE_COLUMNS.filter((column) => column.required).map((column) => column.header);
+  const optionalHeaders = ROSTER_TEMPLATE_COLUMNS.filter((column) => !column.required).map((column) => column.header);
+
   const mappingSelect = (field: keyof RosterFieldMapping, label: string) => (
     <label className="block">
       <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
@@ -2925,7 +2973,7 @@ function CandidateRosterSection({ password }: { password: string }) {
             )}
           </div>
 
-          <div className="mt-4">
+          <div className="mt-4 flex flex-wrap items-center gap-3">
             <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium">
               <UploadCloud size={16} /> Choose roster file (.csv / .tsv)
               <input
@@ -2935,8 +2983,23 @@ function CandidateRosterSection({ password }: { password: string }) {
                 onChange={(event) => void onFile(event.target.files?.[0] ?? null)}
               />
             </label>
-            {fileName ? <span className="ml-3 text-sm text-muted">{fileName}</span> : null}
+            {/* F8.3: pre-named template so colleges never need the column-mapping UI. */}
+            <button
+              type="button"
+              onClick={downloadTemplate}
+              className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium text-ink hover:border-ink/40"
+            >
+              <Download size={16} /> Download template CSV
+            </button>
+            {fileName ? <span className="text-sm text-muted">{fileName}</span> : null}
           </div>
+          <p className="mt-2 text-xs text-muted">
+            Template columns — compulsory: {compulsoryHeaders.map((header, index) => (
+              <Fragment key={header}>{index > 0 ? ", " : null}<span className="font-mono font-semibold text-ink">{header}</span></Fragment>
+            ))} · optional: {optionalHeaders.map((header, index) => (
+              <Fragment key={header}>{index > 0 ? ", " : null}<span className="font-mono">{header}</span></Fragment>
+            ))}. Ships with 2 example rows — replace them with your students. Files with other column names also work (you map the columns after choosing the file).
+          </p>
 
           {parsed ? (
             <div className="mt-4 space-y-4">
@@ -4128,7 +4191,7 @@ const IP_SCOPE_OPTIONS: Array<{ value: IpReportScope; label: string }> = [
 // with 2+ distinct users get a warning tint; candidates whose IP changed
 // mid-exam get a warning icon. Interpretation stays with the admin — the
 // report never auto-flags.
-function IpReportView({ report, loading, unavailable, scope, onScopeChange, contestSlug, onRefresh }: {
+function IpReportView({ report, loading, unavailable, scope, onScopeChange, contestSlug, onRefresh, onAction, onOpenSessionCard }: {
   report: IpReportResponse | null;
   loading: boolean;
   unavailable: boolean;
@@ -4136,7 +4199,23 @@ function IpReportView({ report, loading, unavailable, scope, onScopeChange, cont
   onScopeChange: (scope: IpReportScope) => void;
   contestSlug: string;
   onRefresh: () => void;
+  /** F8.1: status-valid session actions from the drill-down rows. */
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
+  /** F8.1: jump to the Sessions tab with this candidate's detail card open. */
+  onOpenSessionCard: (candidate: IpReportCandidate) => void;
 }) {
+  // F8.1: which IP rows are expanded into their candidate-session drill-down.
+  // A Set keyed by IP so several clusters can be open at once; survives the
+  // 'report' object being replaced by a refresh.
+  const [expandedIps, setExpandedIps] = useState<Set<string>>(new Set());
+  const toggleIp = (ip: string) => {
+    setExpandedIps((current) => {
+      const next = new Set(current);
+      if (next.has(ip)) next.delete(ip);
+      else next.add(ip);
+      return next;
+    });
+  };
   return (
     <section className="space-y-5">
       <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -4191,33 +4270,69 @@ function IpReportView({ report, loading, unavailable, scope, onScopeChange, cont
             </thead>
             <tbody>
               {report.ips.map((entry) => (
-                <tr key={entry.ip} className={`border-b border-line/60 last:border-0 ${entry.users >= 2 ? "bg-warning/5" : ""}`}>
-                  <td className="px-4 py-3 font-mono text-ink">{entry.ip}</td>
-                  <td className="px-4 py-3 font-semibold text-ink">{entry.users}</td>
-                  <td className="px-4 py-3 font-mono text-muted">{entry.sessions}</td>
-                  <td className="px-4 py-3 text-xs text-muted">
-                    {entry.active ? <span className="mr-2">{entry.active} live</span> : null}
-                    {entry.locked ? <span className="mr-2">{entry.locked} locked</span> : null}
-                    {entry.pending_approval ? <span className="mr-2">{entry.pending_approval} pending</span> : null}
-                    {entry.ended ? <span>{entry.ended} ended</span> : null}
-                  </td>
-                  <td className="px-4 py-3 text-xs text-muted">{entry.rooms.length ? entry.rooms.join(", ") : "—"}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1.5">
-                      {entry.candidates.map((candidate) => (
-                        <span
-                          key={candidate.session_id}
-                          className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
-                          title={`${candidate.name || candidate.hackerrank_username} · ${candidate.status}${candidate.ip_change_count > 0 ? ` · IP changed ${candidate.ip_change_count}×` : ""}`}
-                        >
-                          {candidate.hackerrank_username}
-                          {candidate.ip_change_count > 0 ? <AlertTriangle size={12} className="text-warning" /> : null}
-                        </span>
-                      ))}
-                      {entry.candidates_truncated ? <span className="text-xs text-muted">+{entry.sessions - entry.candidates.length} more</span> : null}
-                    </div>
-                  </td>
-                </tr>
+                <Fragment key={entry.ip}>
+                  {/* F8.1: the row is the drill-down toggle (cursor + chevron
+                      make it discoverable, like the Sessions rows). */}
+                  <tr
+                    onClick={() => toggleIp(entry.ip)}
+                    title={expandedIps.has(entry.ip) ? "Hide candidate sessions" : "Show candidate sessions"}
+                    aria-expanded={expandedIps.has(entry.ip)}
+                    className={`cursor-pointer border-b border-line/60 last:border-0 hover:bg-ink/5 ${entry.users >= 2 ? "bg-warning/5" : ""}`}
+                  >
+                    <td className="px-4 py-3 font-mono text-ink">
+                      <span className="inline-flex items-center gap-1.5">
+                        {expandedIps.has(entry.ip) ? <ChevronDown size={14} className="text-muted" /> : <ChevronRight size={14} className="text-muted" />}
+                        {entry.ip}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 font-semibold text-ink">{entry.users}</td>
+                    <td className="px-4 py-3 font-mono text-muted">{entry.sessions}</td>
+                    <td className="px-4 py-3 text-xs text-muted">
+                      {entry.active ? <span className="mr-2">{entry.active} live</span> : null}
+                      {entry.locked ? <span className="mr-2">{entry.locked} locked</span> : null}
+                      {entry.pending_approval ? <span className="mr-2">{entry.pending_approval} pending</span> : null}
+                      {entry.ended ? <span>{entry.ended} ended</span> : null}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-muted">{entry.rooms.length ? entry.rooms.join(", ") : "—"}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1.5">
+                        {entry.candidates.map((candidate) => (
+                          <span
+                            key={candidate.session_id}
+                            className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
+                            title={`${candidate.name || candidate.hackerrank_username} · ${candidate.status}${candidate.ip_change_count > 0 ? ` · IP changed ${candidate.ip_change_count}×` : ""}`}
+                          >
+                            {candidate.hackerrank_username}
+                            {candidate.ip_change_count > 0 ? <AlertTriangle size={12} className="text-warning" /> : null}
+                          </span>
+                        ))}
+                        {entry.candidates_truncated ? <span className="text-xs text-muted">+{entry.sessions - entry.candidates.length} more</span> : null}
+                      </div>
+                    </td>
+                  </tr>
+                  {/* F8.1 drill-down: the candidate sessions on this IP with
+                      status-valid actions (same validity table as everywhere)
+                      and a session-card deep link per candidate. */}
+                  {expandedIps.has(entry.ip) ? (
+                    <tr className="border-b border-line/60 last:border-0">
+                      <td colSpan={6} className="bg-ink/[0.03] px-4 py-3">
+                        <div className="space-y-2">
+                          {entry.candidates.map((candidate) => (
+                            <IpCandidateRow
+                              key={candidate.session_id}
+                              candidate={candidate}
+                              onAction={onAction}
+                              onOpenSessionCard={onOpenSessionCard}
+                            />
+                          ))}
+                          {entry.candidates_truncated ? (
+                            <p className="text-xs text-muted">Showing the newest {entry.candidates.length} of {entry.sessions} sessions on this IP.</p>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -4227,6 +4342,51 @@ function IpReportView({ report, loading, unavailable, scope, onScopeChange, cont
         </div>
       )}
     </section>
+  );
+}
+
+// F8.1: one candidate session inside an expanded IP-report row — identity
+// (name, roster id, room), a status badge, the session start time, the
+// status-VALID session actions (validSessionActionsFor — same table as the
+// alerts console / session card), and an "Open session card" deep link.
+function IpCandidateRow({ candidate, onAction, onOpenSessionCard }: {
+  candidate: IpReportCandidate;
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
+  onOpenSessionCard: (candidate: IpReportCandidate) => void;
+}) {
+  const actions = validSessionActionsFor(candidate.status);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white/70 p-3">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+        <div className="min-w-36">
+          <div className="text-sm font-semibold text-ink">{candidate.name || candidate.hackerrank_username}</div>
+          <div className="font-mono text-xs text-muted">{candidate.hackerrank_username}</div>
+        </div>
+        <span className="text-xs text-muted">Roster ID <span className="font-mono font-medium text-ink">{candidate.roster_unique_id || "—"}</span></span>
+        <span className="text-xs text-muted">Room <span className="font-medium text-ink">{candidate.room || "—"}</span></span>
+        <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{candidate.status}</span>
+        <span className="text-xs text-muted">Started <span className="font-medium text-ink">{candidate.created_at ? new Date(candidate.created_at).toLocaleString() : "—"}</span></span>
+        {candidate.ip_change_count > 0 ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-0.5 text-xs font-medium text-warning">
+            <AlertTriangle size={12} /> IP changed {candidate.ip_change_count}×
+          </span>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {actions.length ? (
+          <ActionButtons onAction={onAction} sessionId={candidate.session_id} actions={actions} />
+        ) : (
+          <span className="text-xs text-muted">{candidate.status === "ended" ? "Ended — view-only." : "No session actions apply."}</span>
+        )}
+        <button
+          type="button"
+          onClick={() => onOpenSessionCard(candidate)}
+          className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+        >
+          Open session card <ExternalLink size={12} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -4462,6 +4622,40 @@ function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filt
     [joinState, sessions, selectedUsernames]
   );
 
+  // TG-1581 grouping: none (flat, default) | candidate | type. Pure grouping
+  // (alertGrouping.ts) over the VISIBLE list, so the room/severity/candidate
+  // filters scope the groups too. collapsedGroups is keyed by group key and
+  // reset when the mode changes (candidate keys and type keys could collide).
+  const [groupBy, setGroupBy] = useState<AlertGroupBy>("none");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const groups = useMemo(
+    () => (groupBy === "none" ? null : groupAlerts(visibleAlerts, groupBy)),
+    [groupBy, visibleAlerts]
+  );
+  const toggleGroupCollapsed = (key: string) => {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  // The same row everywhere — the grouped sections must render EXACTLY what the
+  // flat list renders (selection, actions, archive all keep working).
+  const renderAlertRow = (alert: Alert) => (
+    <AlertRow
+      key={alert.id}
+      alert={alert}
+      sessions={sessions}
+      joinState={joinState}
+      selected={selected.has(alert.id)}
+      onToggleSelected={() => onToggleSelected(alert.id)}
+      onAction={onAction}
+      onArchive={onArchive}
+      onApproveArchive={onApproveArchive}
+    />
+  );
+
   return (
     <>
       <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -4492,6 +4686,16 @@ function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filt
             onChange={(value) => onFiltersChange({ ...filters, severity: value ? (value as AlertSeverity) : undefined })}
           />
           <RoomFilter rooms={rooms} value={filters.room ?? ""} onChange={(room) => onFiltersChange({ ...filters, room: room || undefined })} />
+          {/* TG-1581: group related alerts for easier triage (client-side). */}
+          <FilterSelect
+            label="Group by"
+            value={groupBy}
+            options={[{ value: "none", label: "No grouping" }, { value: "candidate", label: "Candidate" }, { value: "type", label: "Alert type" }]}
+            onChange={(value) => {
+              setGroupBy(value as AlertGroupBy);
+              setCollapsedGroups(new Set());
+            }}
+          />
           {/* A1: the contest filter is now the GLOBAL banner below the nav; the
               per-console contest input was removed to avoid two sources of truth. */}
           {/* F6.3: one-shot candidate filter chip (set by the session detail card). */}
@@ -4599,20 +4803,45 @@ function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filt
               ? <>No alerts for candidate <span className="font-mono">{candidateFilter}</span> under the current filters. Clear the candidate chip above to see everyone.</>
               : "No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive."}
           </div>
+        ) : groups === null ? (
+          visibleAlerts.map(renderAlertRow)
         ) : (
-          visibleAlerts.map((alert) => (
-            <AlertRow
-              key={alert.id}
-              alert={alert}
-              sessions={sessions}
-              joinState={joinState}
-              selected={selected.has(alert.id)}
-              onToggleSelected={() => onToggleSelected(alert.id)}
-              onAction={onAction}
-              onArchive={onArchive}
-              onApproveArchive={onApproveArchive}
-            />
-          ))
+          // TG-1581 grouped view: collapsible sections, same AlertRow inside.
+          groups.map((group) => {
+            const collapsed = collapsedGroups.has(group.key);
+            const allGroupSelected = isAllSelected(selected, group.ids);
+            return (
+              <section key={group.key} className="rounded-lg border border-line bg-white/40">
+                <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+                  {/* Group-select feeds the SAME selection model as the
+                      select-all bar (union add / filtered remove), so bulk
+                      archive + bulk session actions work across groups. */}
+                  <input
+                    className="h-4 w-4 accent-accent"
+                    type="checkbox"
+                    checked={allGroupSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !allGroupSelected && group.ids.some((id) => selected.has(id));
+                    }}
+                    onChange={() => (allGroupSelected ? onDeselectAll(group.ids) : onSelectAll(group.ids))}
+                    aria-label={`Select all alerts for ${group.label}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => toggleGroupCollapsed(group.key)}
+                    aria-expanded={!collapsed}
+                    className="focus-ring flex flex-wrap items-center gap-2 rounded-md text-left"
+                  >
+                    {collapsed ? <ChevronRight size={16} className="text-muted" /> : <ChevronDown size={16} className="text-muted" />}
+                    <span className={`font-semibold ${groupBy === "candidate" ? "" : "font-mono text-sm"}`}>{group.label}</span>
+                    <span className="rounded-full bg-ink/10 px-2 py-0.5 text-xs font-semibold text-ink">{group.alerts.length}</span>
+                    <SeverityPill severity={group.worstSeverity} />
+                  </button>
+                </div>
+                {!collapsed ? <div className="space-y-3 px-3 pb-3">{group.alerts.map(renderAlertRow)}</div> : null}
+              </section>
+            );
+          })
         )}
       </section>
     </>

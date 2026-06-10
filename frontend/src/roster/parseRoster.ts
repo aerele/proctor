@@ -126,7 +126,10 @@ export function suggestMapping(columns: string[]): { mapping: RosterFieldMapping
       taken.add(match);
     }
   }
-  // Unique-ID preference: roll/register number, then email, then first column.
-  const uniqueIdColumn = mapping.roll_number || mapping.email || columns[0] || "";
+  // Unique-ID preference: an EXPLICIT unique-id header first (the F8.3 template
+  // ships "unique_id"; whole-word "id"/"uid" count, but not a mere substring —
+  // "Candidate" contains "id"), then roll/register number, email, first column.
+  const explicitId = columns.find((column) => /unique|^\s*u?id\s*$/i.test(column));
+  const uniqueIdColumn = explicitId || mapping.roll_number || mapping.email || columns[0] || "";
   return { mapping, uniqueIdColumn };
 }
