@@ -53,6 +53,8 @@ import type {
   SessionCardDetailResponse,
   SessionDetail,
   SessionDetailsResponse,
+  SessionEventItem,
+  SessionEventsResponse,
   SessionEvidence,
   SessionStartResponse,
   StudentForm,
@@ -72,10 +74,13 @@ const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 export const isDemoMode = demoMode;
 const demoSettingsKey = "aerele-proctor-demo-settings";
 const demoSessionsKey = "aerele-proctor-demo-sessions";
+// v3: F6.7 retimed the demo alerts INTO their candidates' demo recording
+// windows and added Vikram_T alerts (incl. one inside a recording gap) so the
+// recordings activity overlay + log render meaningfully in demo mode.
 // v2: F6.4 reseeded the demo alerts so their session_ids/usernames join to the
 // DEMO_ALL_SESSIONS admin population (contextual action buttons need real
 // statuses behind every alert) — the key bump discards stale v1 stores.
-const demoAlertsKey = "aerele-proctor-demo-alerts-v2";
+const demoAlertsKey = "aerele-proctor-demo-alerts-v3";
 const demoAlertSettingsKey = "aerele-proctor-demo-alert-settings";
 const demoReviewRosterKey = "aerele-proctor-demo-review-roster";
 const demoReviewVerdictsKey = "aerele-proctor-demo-review-verdicts";
@@ -875,6 +880,34 @@ export async function fetchSubmissionEvents(
   }
 }
 
+// F6.7 — GET /api/admin/session-events?session_id= : the candidate's proctor
+// event stream (visibility/blur/clipboard/IP/recording-state...) for the
+// recordings timeline overlay + activity log. Returns `null` on a 404 (endpoint
+// not deployed yet) so the timeline renders WITHOUT event markers instead of
+// erroring. In demo mode it returns canned per-session events so the overlay
+// and log are fully demoable offline.
+export async function fetchSessionEvents(password: string, sessionId: string): Promise<SessionEventItem[] | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    return DEMO_SESSION_EVENTS[sessionId] ?? [];
+  }
+
+  const query = new URLSearchParams();
+  query.set("session_id", sessionId);
+  try {
+    const response = await request<SessionEventsResponse>(
+      `/api/admin/session-events?${query.toString()}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return response.events;
+  } catch (cause) {
+    // Endpoint not deployed yet → no event markers (graceful), not a hard error.
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
 // ---- Demo recording dataset ----------------------------------------------
 // A small, self-contained set of fake students whose sessions carry screen
 // chunks so the recording-playback UI (search → timeline → player → auto-advance)
@@ -1024,6 +1057,65 @@ function demoSubmissionEventsFor(usernameNorm: string, contestSlug?: string): Su
     .map(({ username_norm: _drop, ...event }) => event)
     .sort((a, b) => a.submitted_at.localeCompare(b.submitted_at));
 }
+
+// ---- Demo session events (F6.7) ------------------------------------------
+// Canned per-session proctor events placed ON each demo recording's timeline so
+// the activity overlay + click-to-jump log render offline. Each session tells a
+// believable story: focus churn, clipboard activity, and recording-state events
+// that EXPLAIN the seeded gaps (upload/heartbeat errors and share-stops at the
+// blackout boundaries, with some events landing INSIDE a gap so the "during
+// blackout" tag is demoable). Keyed by session_id (events are per-session).
+const DEMO_SESSION_EVENTS: Record<string, SessionEventItem[]> = {
+  // Asha: 09:00:00–09:04:00, no gaps — light focus churn + one paste.
+  "rec-asha-9f2a": [
+    { type: "session_started", timestamp: "2026-06-05T09:00:02.000Z", detail: { start_ip: "203.0.113.10" } },
+    { type: "combined_recording_started", timestamp: "2026-06-05T09:00:06.000Z", detail: { width: 1920, height: 1080 } },
+    { type: "visibility_change", timestamp: "2026-06-05T09:01:32.000Z", detail: { state: "hidden" } },
+    { type: "visibility_change", timestamp: "2026-06-05T09:01:54.000Z", detail: { state: "visible" } },
+    { type: "clipboard_activity", timestamp: "2026-06-05T09:02:18.000Z", detail: { action: "paste", length: 184 } },
+    { type: "window_blur", timestamp: "2026-06-05T09:03:05.000Z" },
+    { type: "window_focus", timestamp: "2026-06-05T09:03:18.000Z" }
+  ],
+  // Karan: 09:02:00–09:06:00 with a recording gap 09:03:30–09:04:30 — the
+  // upload error + blur land INSIDE the blackout; recording resumes after it.
+  "rec-karan-71b4": [
+    { type: "session_started", timestamp: "2026-06-05T09:02:01.000Z", detail: { start_ip: "203.0.113.11" } },
+    { type: "combined_recording_started", timestamp: "2026-06-05T09:02:05.000Z", detail: { width: 1366, height: 768 } },
+    { type: "window_blur", timestamp: "2026-06-05T09:03:40.000Z" },
+    { type: "upload_error", timestamp: "2026-06-05T09:03:55.000Z", detail: { kind: "screen", message: "Failed to fetch" } },
+    { type: "combined_recording_started", timestamp: "2026-06-05T09:04:32.000Z", detail: { width: 1366, height: 768 } },
+    { type: "visibility_change", timestamp: "2026-06-05T09:05:10.000Z", detail: { state: "hidden" } }
+  ],
+  // Neha: 09:00:30–09:02:30 — short and quiet, one copy.
+  "rec-neha-3c10": [
+    { type: "session_started", timestamp: "2026-06-05T09:00:31.000Z", detail: { start_ip: "203.0.113.11" } },
+    { type: "clipboard_activity", timestamp: "2026-06-05T09:01:42.000Z", detail: { action: "copy", length: 56 } }
+  ],
+  // Vikram (the real-scale seed): 09:00:00–10:57:30 with gaps 09:40–09:45 and
+  // 10:20–10:22:30 — a full sitting's worth of events, incl. blackout-interior
+  // ones and the recording-state churn around both gaps.
+  "rec-vikram-load": [
+    { type: "session_started", timestamp: "2026-06-05T09:00:01.000Z", detail: { start_ip: "10.4.1.18" } },
+    { type: "combined_recording_started", timestamp: "2026-06-05T09:00:08.000Z", detail: { width: 1920, height: 1080 } },
+    { type: "visibility_change", timestamp: "2026-06-05T09:09:40.000Z", detail: { state: "hidden" } },
+    { type: "visibility_change", timestamp: "2026-06-05T09:09:52.000Z", detail: { state: "visible" } },
+    { type: "window_blur", timestamp: "2026-06-05T09:16:25.000Z" },
+    { type: "window_focus", timestamp: "2026-06-05T09:16:41.000Z" },
+    { type: "clipboard_activity", timestamp: "2026-06-05T09:24:10.000Z", detail: { action: "paste", length: 312 } },
+    { type: "screen_share_stopped", timestamp: "2026-06-05T09:40:02.000Z", detail: { reason: "track_ended" } },
+    { type: "window_blur", timestamp: "2026-06-05T09:41:30.000Z" },
+    { type: "visibility_change", timestamp: "2026-06-05T09:43:05.000Z", detail: { state: "hidden" } },
+    { type: "combined_recording_started", timestamp: "2026-06-05T09:45:04.000Z", detail: { width: 1920, height: 1080 } },
+    { type: "ip_address_changed", timestamp: "2026-06-05T09:52:30.000Z", detail: { previous_ip: "10.4.1.18", current_ip: "10.4.2.7" } },
+    { type: "clipboard_activity", timestamp: "2026-06-05T10:05:40.000Z", detail: { action: "copy", length: 88 } },
+    { type: "upload_error", timestamp: "2026-06-05T10:20:06.000Z", detail: { kind: "screen", message: "network unreachable" } },
+    { type: "heartbeat_error", timestamp: "2026-06-05T10:21:00.000Z", detail: { message: "Failed to fetch" } },
+    { type: "combined_recording_started", timestamp: "2026-06-05T10:22:33.000Z", detail: { width: 1920, height: 1080 } },
+    { type: "visibility_change", timestamp: "2026-06-05T10:38:20.000Z", detail: { state: "hidden" } },
+    { type: "visibility_change", timestamp: "2026-06-05T10:38:30.000Z", detail: { state: "visible" } },
+    { type: "session_stop_requested", timestamp: "2026-06-05T10:57:20.000Z" }
+  ]
+};
 
 // Build the signed-evidence playlist for a demo session: one screen chunk per
 // index, last_modified stamped at chunkSeconds spacing from created_at (a chunk's
@@ -1540,14 +1632,16 @@ function demoAlerts(): Alert[] {
       source: "proctor",
       type: "recording_stopped",
       severity: "critical",
-      timestamp: "2026-06-05T09:42:11.000Z",
+      // F6.7: inside Asha's demo recording window (09:00–09:04) so the marker
+      // lands on her timeline overlay.
+      timestamp: "2026-06-05T09:03:42.000Z",
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Asha_R",
       username_norm: "asha_r",
       session_id: "live-asha-4d01",
       room: "Lab A-1",
       title: "Recording stopped mid-assessment",
-      detail: "MediaRecorder stopped 18m before submission with no end-session event. Possible deliberate stop.",
+      detail: "MediaRecorder stopped before submission with no end-session event. Possible deliberate stop.",
       data: { gap_seconds: 1080, last_chunk_index: 54 },
       video_key: "mcet-june-2026/asha_r/live-asha-4d01.webm",
       download_url: sampleVideo
@@ -1557,7 +1651,9 @@ function demoAlerts(): Alert[] {
       source: "contest-eval",
       type: "peer_copy_cluster",
       severity: "critical",
-      timestamp: "2026-06-05T09:31:54.000Z",
+      // F6.7: INSIDE Karan's recording gap (09:03:30–09:04:30) — the log row
+      // gets the "during blackout" tag.
+      timestamp: "2026-06-05T09:04:10.000Z",
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Karan_V",
       username_norm: "karan_v",
@@ -1572,7 +1668,8 @@ function demoAlerts(): Alert[] {
       source: "proctor",
       type: "screen_share_stopped",
       severity: "warning",
-      timestamp: "2026-06-05T09:25:03.000Z",
+      // F6.7: inside Neha's demo recording window (09:00:30–09:02:30).
+      timestamp: "2026-06-05T09:01:58.000Z",
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Neha_S",
       username_norm: "neha_s",
@@ -1604,7 +1701,8 @@ function demoAlerts(): Alert[] {
       source: "proctor",
       type: "ip_changed",
       severity: "info",
-      timestamp: "2026-06-05T09:05:22.000Z",
+      // F6.7: inside Asha's demo recording window (09:00–09:04).
+      timestamp: "2026-06-05T09:01:25.000Z",
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Asha_R",
       username_norm: "asha_r",
@@ -1612,6 +1710,59 @@ function demoAlerts(): Alert[] {
       room: "Lab A-1",
       title: "Network IP changed",
       detail: "Source IP changed once early in the session (likely a Wi-Fi handoff). Informational only.",
+      data: { start_ip: "10.4.1.18", current_ip: "10.4.2.7" },
+      download_url: sampleVideo
+    },
+    // F6.7: Vikram_T — the real-scale recording seed (rec-vikram-load,
+    // 09:00–10:57 with gaps 09:40–09:45 and 10:20–10:22:30) gets alerts of all
+    // three severities so the overlay's severity colors + the blackout tag are
+    // demoable on the dense timeline. Joins live-vikram-4d04 (ended).
+    {
+      id: "proctor:tab_away:vikram_t:mcet-june-2026:1",
+      source: "proctor",
+      type: "tab_away",
+      severity: "warning",
+      timestamp: "2026-06-05T09:09:42.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Vikram_T",
+      username_norm: "vikram_t",
+      session_id: "live-vikram-4d04",
+      room: "Lab A-1",
+      title: "Tab switched away for 13s",
+      detail: "Candidate left the exam tab for 13 seconds, then returned. Above the configured threshold.",
+      data: { away_seconds: 13, threshold_seconds: 12 },
+      download_url: sampleVideo
+    },
+    {
+      id: "proctor:recording_stopped:vikram_t:mcet-june-2026:1",
+      source: "proctor",
+      type: "recording_stopped",
+      severity: "critical",
+      // Lands INSIDE recording gap 1 (09:40–09:45) — "during blackout" row.
+      timestamp: "2026-06-05T09:40:05.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Vikram_T",
+      username_norm: "vikram_t",
+      session_id: "live-vikram-4d04",
+      room: "Lab A-1",
+      title: "Recording stopped mid-assessment",
+      detail: "Screen share ended and the recorder stopped; chunks resumed 5 minutes later. Review the blackout window.",
+      data: { gap_seconds: 300, last_chunk_index: 80 },
+      download_url: sampleVideo
+    },
+    {
+      id: "proctor:ip_changed:vikram_t:mcet-june-2026:1",
+      source: "proctor",
+      type: "ip_changed",
+      severity: "info",
+      timestamp: "2026-06-05T09:52:30.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Vikram_T",
+      username_norm: "vikram_t",
+      session_id: "live-vikram-4d04",
+      room: "Lab A-1",
+      title: "Network IP changed",
+      detail: "Source IP changed mid-session shortly after the recording resumed (10.4.1.18 → 10.4.2.7).",
       data: { start_ip: "10.4.1.18", current_ip: "10.4.2.7" },
       download_url: sampleVideo
     }
