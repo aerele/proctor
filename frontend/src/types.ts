@@ -26,6 +26,8 @@ export type SessionStartResponse = {
   blocked_by_session_id?: string | null;
   start_ip?: string;
   contest_url?: string;
+  /** S3: when true the client holds at the room-code screen until released. */
+  room_gate_enabled?: boolean;
   upload_config: {
     chunk_seconds: number;
     video_bits_per_second: number;
@@ -81,6 +83,8 @@ export type ProctorSettings = {
   start_at: string;
   end_at: string;
   contest_url?: string;
+  /** S3: opt-in room start gate (invigilator OTP / start-now). */
+  room_gate_enabled?: boolean;
   // S2: admin-configured room labels for the student room dropdown.
   rooms?: string[];
   // Passcodes are removed (Phase 2). These remain optional/backward-compatible so
@@ -492,4 +496,84 @@ export type RosterLookupResult = {
   room: string;
   hackerrank_username: string;
   email_masked: string;
+};
+
+// ---- S3: invigilator portal + room start gate -------------------------------
+
+export type RoomGateMode = "otp" | "open";
+
+export type RoomGate = {
+  room: string;
+  room_key: string;
+  mode: RoomGateMode;
+  otp: string;
+  released_at: string | null;
+  released_by: string;
+  opened_at: string | null;
+  opened_by: string;
+  updated_at: string;
+};
+
+export type RoomGateActionResponse = {
+  ok: boolean;
+  contest_slug: string | null;
+  gate: RoomGate;
+};
+
+export type InvigilatorOverviewResponse = {
+  contest_slug: string | null;
+  room_gate_enabled: boolean;
+  rooms: string[];
+  has_unassigned: boolean;
+};
+
+export type InvigilatorSessionRow = {
+  session_id: string;
+  name: string;
+  hackerrank_username: string;
+  roll_number: string;
+  status: ServerSessionStatus | "";
+  stale: boolean;
+  exam_started_at: string | null;
+  created_at: string;
+};
+
+export type InvigilatorAlert = {
+  id: string;
+  type: string;
+  severity: AlertSeverity;
+  timestamp: string;
+  title: string;
+  detail: string;
+  hackerrank_username: string;
+  session_id: string;
+};
+
+export type InvigilatorRoomStats = {
+  live: number;
+  locked: number;
+  pending_approval: number;
+  finished: number;
+  disconnected: number;
+  started: number;
+  total: number;
+};
+
+export type InvigilatorRoomResponse = {
+  contest_slug: string | null;
+  room: string | null;
+  room_key: string;
+  room_gate_enabled: boolean;
+  stats: InvigilatorRoomStats;
+  sessions: InvigilatorSessionRow[];
+  gate: RoomGate | null;
+  alerts: InvigilatorAlert[];
+  disconnected_staleness_ms?: number;
+};
+
+export type RoomGatePollResponse = {
+  gate_enabled: boolean;
+  exam_started: boolean;
+  exam_started_at?: string | null;
+  room?: string;
 };
