@@ -69,6 +69,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
+import { normalizeCameraRecording } from "./cameraRecording";
 import { resolveSavedEndAt } from "./examTime";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
 import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
@@ -248,6 +249,13 @@ function demoEnforcement(): EnforcementConfigPayload {
   };
 }
 
+// F10.1 demo parity: the camera-recording knobs from the demo settings store,
+// normalized with the exact backend rules (default ENABLED / 10 fps / 640 w;
+// invalid values fall back, never 0).
+function demoCameraRecording() {
+  return normalizeCameraRecording(getDemoSettings()?.camera_recording);
+}
+
 function demoSessionResponse(session: DemoSession, contestUrl: string): SessionStartResponse {
   return {
     session_id: session.session_id,
@@ -275,7 +283,10 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
       media_bits_per_second: 180_000,
       audio_bits_per_second: 32_000,
       max_width: 1280,
-      max_frame_rate: 5
+      max_frame_rate: 5,
+      // F10.1: the recorder reads the camera knobs from upload_config
+      // (backend startResponse parity).
+      camera: demoCameraRecording()
     },
     heartbeat_interval_seconds: 15,
     // S5: demo sessions read the exam end time from the demo settings store.
@@ -398,6 +409,9 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
           ...settings,
           // F5.3: GET always reports normalized enforcement values (backend parity).
           ...normalizeEnforcementSettings(settings),
+          // F10.1: always normalized on read — a legacy store reports the
+          // defaults (enabled / 10 fps / 640 w), exactly like the backend.
+          camera_recording: normalizeCameraRecording(settings.camera_recording),
           passcode: "",
           end_code: "",
           passcode_set: Boolean(settings.passcode),
@@ -405,7 +419,7 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
           end_code_set: Boolean(settings.end_code),
           end_code_preview: maskPasscode(settings.end_code)
         }
-      : { start_at: "", end_at: "", ...normalizeEnforcementSettings(null), passcode_set: false, end_code_set: false };
+      : { start_at: "", end_at: "", ...normalizeEnforcementSettings(null), camera_recording: normalizeCameraRecording(null), passcode_set: false, end_code_set: false };
   }
 
   return request<ProctorSettings>("/api/admin/settings", {
@@ -443,6 +457,9 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
         fullscreen_exit_limit: settings.fullscreen_exit_limit ?? getDemoSettings()?.fullscreen_exit_limit,
         enforcement_mode: settings.enforcement_mode ?? getDemoSettings()?.enforcement_mode
       }),
+      // F10.1: same preserve-when-absent + normalize rules as the backend.
+      camera_recording: normalizeCameraRecording(
+        settings.camera_recording !== undefined ? settings.camera_recording : getDemoSettings()?.camera_recording),
       problem_id: settings.problem_id || "",
       rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
       // Passcodes are removed from the start/end flow, but we keep persisting any
@@ -666,6 +683,7 @@ export async function fetchRecordingSessions(password: string, contestSlug?: str
       room: s.room,
       contest_slug: s.contest_slug,
       chunk_count: s.chunk_count,
+      camera_chunk_count: s.camera_chunk_count ?? 0,
       created_at: s.created_at,
       status: s.status
     }));
@@ -750,6 +768,7 @@ export async function fetchSessionsList(
         room: session.room || "",
         contest_slug: session.contest_slug || "",
         chunk_count: session.chunk_count,
+        camera_chunk_count: session.camera_chunk_count ?? 0,
         created_at: session.created_at,
         status: session.status || ""
       }));
@@ -805,6 +824,7 @@ export async function fetchSessionCardDetail(password: string, sessionId: string
       current_ip: ip,
       ip_change_count,
       chunk_count: row.chunk_count,
+      camera_chunk_count: row.camera_chunk_count ?? 0,
       // Deterministic activity counters: scale off the recording length so a
       // longer demo session also "did more" (heartbeats every 15s ≈ 2/chunk).
       event_count: row.chunk_count * 3 + 4,
@@ -856,6 +876,9 @@ type DemoAdminSessionRow = {
   contest_slug: string;
   status: "active" | "locked" | "pending_approval" | "ended";
   chunk_count: number;
+  // F10.1: separate camera-stream chunk counter (only Asha's row carries one —
+  // the same candidate whose recording seed has camera chunks).
+  camera_chunk_count?: number;
   created_at: string;
   // Deterministic "disconnected" marker: true on the one active row that should
   // derive as disconnected, falsy/omitted on every other row. A flag (not
@@ -891,7 +914,7 @@ const DEMO_ALL_SESSIONS: DemoAdminSessionRow[] = [
   { session_id: "live-fatima-3c01", hackerrank_username: "Fatima_A", name: "Fatima Ansari", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "pending_approval", chunk_count: 0, created_at: demoCreated(4) },
   { session_id: "live-vivek-3c02", hackerrank_username: "Vivek_N", name: "Vivek Nair", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "pending_approval", chunk_count: 0, created_at: demoCreated(3) },
   // 14 ended.
-  { session_id: "live-asha-4d01", hackerrank_username: "Asha_R", name: "Asha Ramanathan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 18, created_at: demoCreated(120) },
+  { session_id: "live-asha-4d01", hackerrank_username: "Asha_R", name: "Asha Ramanathan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 18, camera_chunk_count: 18, created_at: demoCreated(120) },
   { session_id: "live-karan-4d02", hackerrank_username: "Karan_V", name: "Karan Verma", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 16, created_at: demoCreated(118) },
   { session_id: "live-neha-4d03", hackerrank_username: "Neha_S", name: "Neha Sharma", room: "Lab B-2", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 20, created_at: demoCreated(115) },
   { session_id: "live-vikram-4d04", hackerrank_username: "Vikram_T", name: "Vikram Thiagarajan", room: "Lab A-1", contest_slug: DEMO_CONTEST_SLUG, status: "ended", chunk_count: 22, created_at: demoCreated(110) },
@@ -1049,6 +1072,10 @@ type DemoRecordingSeed = {
   status: string;
   created_at: string;
   chunk_count: number;
+  // F10.1: how many camera/chunk-*.webm files to seed (0/absent = none). The
+  // camera chunks share the screen chunks' last_modified placement so both
+  // sources line up on the timeline.
+  camera_chunk_count?: number;
   // Index offsets (0-based positions on the timeline). A jump between consecutive
   // values models a recording gap. Defaults to contiguous 0..chunk_count-1.
   gapAfterIndex?: number; // chunks after this 1-based index are shifted later
@@ -1070,7 +1097,10 @@ const DEMO_RECORDING_SESSIONS: DemoRecordingSeed[] = [
     contest_slug: "mcet-june-2026",
     status: "ended",
     created_at: "2026-06-05T09:00:00.000Z",
-    chunk_count: 8
+    chunk_count: 8,
+    // F10.1: THE camera-recording demo candidate — same 8 windows on the
+    // camera series so the Screen/Camera toggle is demoable offline.
+    camera_chunk_count: 8
   },
   {
     session_id: "rec-karan-71b4",
@@ -1191,6 +1221,7 @@ const DEMO_SESSION_EVENTS: Record<string, SessionEventItem[]> = {
   "rec-asha-9f2a": [
     { type: "session_started", timestamp: "2026-06-05T09:00:02.000Z", detail: { start_ip: "203.0.113.10" } },
     { type: "combined_recording_started", timestamp: "2026-06-05T09:00:06.000Z", detail: { width: 1920, height: 1080 } },
+    { type: "camera_recording_started", timestamp: "2026-06-05T09:00:07.000Z", detail: { fps: 10, width: 640 } },
     { type: "visibility_change", timestamp: "2026-06-05T09:01:32.000Z", detail: { state: "hidden" } },
     { type: "visibility_change", timestamp: "2026-06-05T09:01:54.000Z", detail: { state: "visible" } },
     { type: "clipboard_activity", timestamp: "2026-06-05T09:02:18.000Z", detail: { action: "paste", length: 184 } },
@@ -1265,6 +1296,16 @@ function demoEvidenceFor(seed: DemoRecordingSeed): SessionEvidence[] {
       download_url: DEMO_SAMPLE_CLIP
     });
   }
+  // F10.1: the separate low-res camera series (contiguous from created_at —
+  // the camera seeds carry no gaps; same END-time last_modified semantics).
+  for (let i = 1; i <= (seed.camera_chunk_count ?? 0); i += 1) {
+    evidence.push({
+      key: `${prefix}camera/chunk-${String(i).padStart(5, "0")}.webm`,
+      size: 60_000 + i * 500,
+      last_modified: new Date(createdMs + i * DEMO_CHUNK_SECONDS * 1000).toISOString(),
+      download_url: DEMO_SAMPLE_CLIP
+    });
+  }
   // Add a couple of non-screen files so filtering is exercised too.
   evidence.push({ key: `${prefix}manifest.json`, size: 412, last_modified: seed.created_at, download_url: DEMO_SAMPLE_CLIP });
   return evidence;
@@ -1295,6 +1336,7 @@ function demoRecordingSessionsFor(usernameNorm: string): AdminSessionsResponse["
       status: seed.status,
       created_at: seed.created_at,
       chunk_count: seed.chunk_count,
+      camera_chunk_count: seed.camera_chunk_count ?? 0,
       evidence: demoEvidenceFor(seed),
       // F6.6: the recordings-review header reads this to say what the loaded
       // recording contains (varied across the demo seeds).
@@ -2512,7 +2554,9 @@ export async function fetchExamConfig(): Promise<ExamConfig> {
       roster_required: Boolean(roster),
       unique_id_label: roster?.unique_id_column ?? "",
       rooms: getDemoSettings()?.rooms ?? [],
-      enforcement: demoEnforcement()
+      enforcement: demoEnforcement(),
+      // F10.1: the consent disclosure renders pre-session off exam-config.
+      camera_recording: demoCameraRecording()
     };
   }
   try {

@@ -32,6 +32,17 @@ export type EnforcementExemptions = {
   switch_away?: boolean;
 };
 
+// ---- F10.1: separate low-res camera recording -------------------------------
+// Server-validated camera-recording knobs (default ENABLED / 10 fps / 640 w),
+// served via exam-config (pre-session consent copy), admin settings, and the
+// session-start upload_config (the recorder's authoritative source). The wire
+// shape matches cameraRecording.ts's CameraRecordingConfig.
+export type CameraRecordingConfigPayload = {
+  enabled: boolean;
+  fps: number;
+  width: number;
+};
+
 // POST /api/session/enforcement-violation — the server decides lock vs alert.
 export type EnforcementViolationResponse = {
   ok: boolean;
@@ -67,6 +78,9 @@ export type SessionStartResponse = {
     audio_bits_per_second?: number;
     max_width: number;
     max_frame_rate: number;
+    /** F10.1: separate low-res camera stream knobs (absent on an older
+     * backend — the recorder then records NO camera, see shouldRecordCamera). */
+    camera?: CameraRecordingConfigPayload;
   };
   heartbeat_interval_seconds: number;
   // S5: authoritative exam end time + the server clock at response time (for
@@ -137,6 +151,8 @@ export type ProctorSettings = {
   fullscreen_reentry_seconds?: number;
   fullscreen_exit_limit?: number;
   enforcement_mode?: EnforcementMode;
+  // F10.1: separate low-res camera recording (default enabled / 10 / 640).
+  camera_recording?: CameraRecordingConfigPayload;
   // S5/D1: stamped when the exam-time endpoint adjusts the end — while set (and
   // the start is unchanged) exam-time owns end_at, so a stale Settings save
   // cannot revert a live change. Used by the demo store for backend parity.
@@ -203,6 +219,8 @@ export type RecordingSession = {
   room: string;
   contest_slug: string;
   chunk_count: number;
+  /** F10.1: separate camera-stream chunk counter (absent on older backends). */
+  camera_chunk_count?: number;
   created_at: string;
   status: string;
 };
@@ -237,6 +255,8 @@ export type SessionCardDetail = {
   current_ip: string;
   ip_change_count: number;
   chunk_count: number;
+  /** F10.1: separate camera-stream chunk counter (absent on older backends). */
+  camera_chunk_count?: number;
   event_count: number;
   clipboard_event_count: number;
   focus_event_count: number;
@@ -364,6 +384,7 @@ export type AdminSessionDetail = {
   status?: string;
   created_at?: string;
   chunk_count?: number;
+  camera_chunk_count?: number;
   merged_video_key?: string;
   evidence?: SessionEvidence[];
   capture_state?: CaptureState | null;
@@ -642,6 +663,9 @@ export type ExamConfig = {
   rooms: string[];
   /** F5.3: fullscreen enforcement knobs (absent on an older backend). */
   enforcement?: EnforcementConfigPayload;
+  /** F10.1: camera-recording knobs — the consent disclosure renders
+   * pre-session, so the form needs them before any session exists. */
+  camera_recording?: CameraRecordingConfigPayload;
 };
 
 // Identity fields a roster column can be mapped onto (matches the backend's

@@ -50,10 +50,12 @@ export function alertsForSession<T extends DetailJoinAlert>(alerts: T[], session
 
 // ---- F6.6 capture-state language -------------------------------------------
 // What gets RECORDED is the direct screen stream with the microphone audio
-// mixed in; the camera feed is live-monitor only (student-side preview /
-// invigilator check) and is NEVER part of the recorded video. Every label
-// below states that plainly so a proctor never goes hunting for a camera
-// file that does not exist.
+// mixed in. F10.1 added an optional SEPARATE low-res camera stream (its own
+// camera/chunk-*.webm series): when a session actually uploaded camera chunks
+// (camera_chunk_count > 0 — the authoritative signal) the camera labels say
+// "recorded"; otherwise the camera feed was live-monitor only (student-side
+// preview / invigilator check) and the labels state that plainly so a proctor
+// never goes hunting for a camera file that does not exist.
 
 // Labels shared by every source for the non-"recording" states.
 const COMMON_CAPTURE_LABELS: Record<string, string> = {
@@ -80,8 +82,13 @@ const CAPTURE_LABELS: Record<CaptureSource, Record<string, string>> = {
   }
 };
 
-/** Plain-language label for one capture source's last-reported state. */
-export function captureSourceLabel(source: CaptureSource, state: string): string {
+/** Plain-language label for one capture source's last-reported state.
+ * `cameraRecorded` = this session uploaded camera chunks (F10.1) — flips the
+ * camera "recording" label from live-monitor-only to a real recording. */
+export function captureSourceLabel(source: CaptureSource, state: string, cameraRecorded = false): string {
+  if (source === "camera" && state === "recording" && cameraRecorded) {
+    return "recording (separate low-res camera video)";
+  }
   return CAPTURE_LABELS[source][state] ?? COMMON_CAPTURE_LABELS[state] ?? "unknown";
 }
 
@@ -100,16 +107,29 @@ const CAMERA_CONTENTS: Record<string, string> = {
   stopped: "camera stopped mid-exam"
 };
 
+// F10.1 — the fragments when this session DID upload camera chunks: the camera
+// is a real (separate, low-res) recording; a non-"recording" final state still
+// notes what happened to the live capture.
+const CAMERA_RECORDED_CONTENTS: Record<string, string> = {
+  recording: "camera recorded separately (low-res)",
+  stopped: "camera recorded separately (low-res; stopped mid-exam)",
+  error: "camera recorded separately (low-res; capture error)"
+};
+
 /**
  * One header line for the recordings review: what the loaded recording
  * contains. Derived from the same last-reported capture state the session
  * card shows; null/undefined (legacy session, no composite heartbeat yet)
- * degrades to a "not reported" line rather than guessing.
+ * degrades to a "not reported" line rather than guessing. `cameraChunkCount`
+ * (F10.1) switches the camera fragment to the recorded-separately wording —
+ * actual uploaded chunks are the authoritative signal, not the setting.
  */
-export function describeRecordingContents(state: CaptureState | null | undefined): string {
+export function describeRecordingContents(state: CaptureState | null | undefined, cameraChunkCount = 0): string {
   if (!state) return "screen video — capture detail not reported for this session";
   const base = MIC_CONTENTS[state.microphone] ?? "screen video only — no microphone audio";
-  const camera = CAMERA_CONTENTS[state.camera];
+  const camera = cameraChunkCount > 0
+    ? (CAMERA_RECORDED_CONTENTS[state.camera] ?? CAMERA_RECORDED_CONTENTS.recording)
+    : CAMERA_CONTENTS[state.camera];
   return camera ? `${base}; ${camera}` : base;
 }
 
