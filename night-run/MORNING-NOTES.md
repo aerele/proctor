@@ -186,3 +186,14 @@ All mechanically-fixable majors landed in 3 parallel lanes (e0cce53 backend, b02
 
 ### S7 judgment calls (review these)
 1. **S7 changed `getClientIp` to trust the LAST `x-forwarded-for` hop (Cloud Run-appended) instead of the spoofable first; existing tests unaffected (single-hop headers).** Local dev (no proxy) still falls back to the socket address.
+
+## S5-S7 final delta-review (4 minors, 3 nits — post-compaction fix list)
+- **D1 (minor)**: stale admin Settings-form save can silently revert a live exam-time change (saveSettings writes full settings incl cached end_at). Fix shape: omit end_at from the settings save unless the field was edited, or merge-write.
+- **D2 (minor)**: end-now flips sessions to ended server-side BEFORE the student's recorder stops → final chunk + manifest upload 409 (lost) for force-ended sessions. Fix shape: grace window for uploads on admin-ended sessions.
+- **D3 (minor)**: endAllLiveSessions query capped at 2000 docs — live sessions beyond the cap never ended (multi-day slug reuse). Paginate.
+- **D4 (minor)**: getClientIp last-hop is correct ONLY for direct Cloud Run; any future LB/CDN silently breaks the IP report + ip_changed (needs a trusted-hop count env when infra changes). Documented in code; revisit on infra change.
+- Nits: requireAdmin not timing-safe (pre-existing; align with safeEqual) · demo ipReport grouping ignores its own 200-cap · end-now race can overwrite a self-ended session's ended_reason.
+
+## Live-test items from Karthi (~10:35, while testing the DEPLOYED 04:35 image)
+- ✅ FIXED (5c850a5): Enter key now submits the admin unlock password. (Note: the deployed instance he tested predates this + S3-S7 — redeploy pending.)
+- F5 backlog filed (TODO-admin-polish.md): permission-order before fullscreen, integrity-checkpoint review/removal, fullscreen-exit hard-block + typed ack + 20s countdown, switch-away → proctor notification, per-session enforcement override, L1/L2 escalation ladder.
