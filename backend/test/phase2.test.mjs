@@ -1627,9 +1627,12 @@ test("M1: empty username is rejected at the contract (400), never key-built", as
   assert.equal(res.statusCode, 400);
 });
 
-// A pure-dot value on a NON-username segment (upload `kind`) also reaches
-// sanitizeSegment and must not produce a traversal in the object key.
-test("M1: upload kind '..' → safe segment, no traversal in the storage_key", async () => {
+// A pure-dot value on a NON-username segment (upload `kind`) must not produce
+// a traversal in any object key. F10.1 strengthened the M1 guarantee: kind is
+// now an ALLOWLIST (screen | camera), so a dot kind is rejected outright
+// instead of being sanitized into a "_" folder (cameraRecording.test.mjs
+// covers the allowlist itself).
+test("M1: upload kind '..' → rejected outright, no traversal possible", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   const sessionId = await startedSession(firestore, storage);
@@ -1638,9 +1641,7 @@ test("M1: upload kind '..' → safe segment, no traversal in the storage_key", a
     path: "/api/upload-url",
     body: { session_id: sessionId, kind: "..", chunk_index: 0, content_type: "video/webm" }
   }));
-  assert.equal(res.statusCode, 200);
-  assert.ok(!res.body.storage_key.includes("/../"), `no traversal in ${res.body.storage_key}`);
-  assert.ok(res.body.storage_key.includes("/_/"), "pure-dot kind became the safe '_' token");
+  assert.equal(res.statusCode, 400);
 });
 
 // ---- M3: 500s must not leak internal messages ----

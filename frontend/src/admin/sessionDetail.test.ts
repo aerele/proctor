@@ -95,6 +95,15 @@ describe("captureSourceLabel", () => {
     expect(captureSourceLabel("camera", "recording")).toBe("on (live monitor only — not in the recorded video)");
   });
 
+  // F10.1: when this session ACTUALLY uploaded camera chunks, the camera row
+  // says so — the live-monitor wording only applies when nothing was recorded.
+  it("a recording camera WITH camera chunks reads as a real recording", () => {
+    expect(captureSourceLabel("camera", "recording", true)).toBe("recording (separate low-res camera video)");
+    // The flag changes nothing for the other sources/states.
+    expect(captureSourceLabel("camera", "permission_denied", true)).toBe("permission denied");
+    expect(captureSourceLabel("screen", "recording", true)).toBe("recording");
+  });
+
   it("labels denied/missing camera and microphone plainly", () => {
     expect(captureSourceLabel("camera", "permission_denied")).toBe("permission denied");
     expect(captureSourceLabel("camera", "unavailable")).toBe("no camera detected");
@@ -138,6 +147,20 @@ describe("describeRecordingContents", () => {
   it("degrades to a no-detail line when the state was never reported (legacy sessions)", () => {
     expect(describeRecordingContents(null)).toBe("screen video — capture detail not reported for this session");
     expect(describeRecordingContents(undefined)).toBe("screen video — capture detail not reported for this session");
+  });
+
+  // F10.1: a session that uploaded camera chunks describes the separate
+  // low-res camera video instead of the live-monitor-only fragment.
+  it("describes the separate camera video when camera chunks exist", () => {
+    expect(describeRecordingContents({ screen: "recording", camera: "recording", microphone: "recording" }, 12))
+      .toBe("screen video + microphone audio; camera recorded separately (low-res)");
+    expect(describeRecordingContents({ screen: "recording", camera: "stopped", microphone: "recording" }, 4))
+      .toBe("screen video + microphone audio; camera recorded separately (low-res; stopped mid-exam)");
+  });
+
+  it("zero camera chunks keeps the live-monitor wording (count is authoritative)", () => {
+    expect(describeRecordingContents({ screen: "recording", camera: "recording", microphone: "recording" }, 0))
+      .toBe("screen video + microphone audio; camera live-monitored only (not recorded)");
   });
 });
 

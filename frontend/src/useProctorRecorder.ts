@@ -1,5 +1,6 @@
 import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
 import type { ApiError } from "./api";
+import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 type RecorderOptions = {
@@ -216,6 +217,12 @@ function createEvent(type: string, detail?: Record<string, unknown>): ProctorEve
   };
 }
 
+// F10.1: bitrate for the separate low-res camera stream. At ~10 fps / 640 w
+// this keeps eye direction legible while staying far below the screen
+// stream's budget (admin tunes fps/width via settings; bitrate scales little
+// at this size so it stays fixed).
+const CAMERA_VIDEO_BITS_PER_SECOND = 250_000;
+
 export function createProctorRecorder(options: RecorderOptions): RecorderControls {
   let screenStream: MediaStream | null = null;
   let cameraStream: MediaStream | null = null;
@@ -237,10 +244,22 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   };
 
   // NOTE: the old camera-over-screen canvas compositor was removed — the ONLY
-  // recording path is startDirectScreenRecordingStream (direct display stream +
-  // mixed mic audio), chosen so capture survives a hidden proctor tab. The
-  // camera is still ACQUIRED (startCameraAndMicrophone) for the live self-view
-  // and state tracking, but its frames are never drawn into the recording.
+  // SCREEN recording path is startDirectScreenRecordingStream (direct display
+  // stream + mixed mic audio), chosen so capture survives a hidden proctor tab.
+  //
+  // F10.1: when the server-side camera_recording setting is enabled AND a live
+  // camera track exists, a SECOND MediaRecorder runs directly on a video-only
+  // MediaStream of the camera track (again no canvas — a raw track keeps
+  // capturing while the tab is hidden). Independent 30s segment loop, own
+  // chunk series (kind "camera" → camera/chunk-*.webm) and OWN upload chain:
+  // any camera failure degrades to mediaState.camera "error" + an audit event
+  // and never touches the screen recording (no onFatalError, no retry loop).
+  let cameraRecorder: MediaRecorder | null = null;
+  let cameraSegmentTimer: number | undefined;
+  let cameraChunkIndex = 0;
+  let cameraUploadQueue = Promise.resolve();
+  let cameraOnlyStream: MediaStream | null = null;
+  let cameraRecordingFailed = false;
 
   let fatalStatusHandled = false;
 
@@ -325,6 +344,46 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         // B1: a 403/409 on upload means the session is no longer writable.
         handleFatalStatus(fatalStatusFromError(error));
         throw error;
+      })
+      .finally(() => {
+        queueDepth = Math.max(0, queueDepth - 1);
+        updateUploadState();
+      });
+  };
+
+  // F10.1: camera chunks ride the SAME upload-url flow but on their OWN chain.
+  // The screen chain re-throws (stop() surfaces a failed screen upload as a
+  // fatal error); the camera chain SWALLOWS after auditing, so one failed
+  // camera chunk neither poisons later camera chunks nor fails the session.
+  // A session-level 403/409 still self-stops via handleFatalStatus.
+  const enqueueCameraUpload = (blob: Blob, index: number) => {
+    const startedAt = new Date().toISOString();
+    queueDepth += 1;
+    updateUploadState();
+
+    cameraUploadQueue = cameraUploadQueue
+      .then(async () => {
+        const upload = await getUploadUrl({
+          session_id: options.sessionId,
+          kind: "camera",
+          chunk_index: index,
+          content_type: blob.type || "video/webm"
+        });
+        await uploadBlob(upload.upload_url, blob);
+        manifest.push({
+          kind: "camera",
+          index,
+          storage_key: upload.storage_key,
+          bytes: blob.size,
+          started_at: startedAt,
+          completed_at: new Date().toISOString()
+        });
+        uploadedCount += 1;
+        emit("chunk_uploaded", { kind: "camera", index, bytes: blob.size, storage_key: upload.storage_key });
+      })
+      .catch((error) => {
+        emit("upload_error", { kind: "camera", index, bytes: blob.size, message: String(error) });
+        handleFatalStatus(fatalStatusFromError(error));
       })
       .finally(() => {
         queueDepth = Math.max(0, queueDepth - 1);
@@ -486,15 +545,25 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       });
       startHeartbeat();
       startSegmentRecorder();
+      // F10.1: the separate camera stream starts LAST and behind its own
+      // try/catch — by contract no camera failure may abort or degrade the
+      // screen recording that is now running.
+      try {
+        startCameraRecording();
+      } catch (error) {
+        failCameraRecording("start_failed", error);
+      }
     },
     async stop() {
       stopping = true;
       if (heartbeatTimer) window.clearInterval(heartbeatTimer);
       if (segmentTimer) window.clearTimeout(segmentTimer);
+      if (cameraSegmentTimer) window.clearTimeout(cameraSegmentTimer);
       unbindPageEvents();
       emit("session_stop_requested");
 
       await stopRecorder();
+      await stopCameraRecorder();
 
       screenStream?.getTracks().forEach((track) => track.stop());
       cameraStream?.getTracks().forEach((track) => track.stop());
@@ -506,6 +575,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       await uploadQueue.catch((error) => {
         options.onFatalError(`Upload queue failed: ${String(error)}`);
       });
+      // The camera chain never rejects (errors are audited + swallowed), so
+      // this only waits for the final camera chunk to land in the manifest.
+      await cameraUploadQueue;
       await flushEvents();
       return manifest;
     },
@@ -625,9 +697,111 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       recorder.stop();
     });
   }
+
+  // ---- F10.1: separate low-res camera recording ----------------------------
+
+  // Flag the camera stream as failed: state + audit event ONLY. By contract a
+  // camera failure never reaches onFatalError, never raises an anomaly, and
+  // never retries (a broken camera/encoder would otherwise loop) — the screen
+  // recording continues untouched.
+  function failCameraRecording(reason: string, cause: unknown) {
+    cameraRecordingFailed = true;
+    if (cameraSegmentTimer) window.clearTimeout(cameraSegmentTimer);
+    updateMediaState("camera", "error");
+    emit("camera_recording_error", { reason, message: String(cause) });
+  }
+
+  function startCameraRecording() {
+    const cameraConfig = options.config.camera;
+    const cameraTrack = cameraStream?.getVideoTracks()[0] ?? null;
+    const trackLive = Boolean(cameraTrack && cameraTrack.readyState === "live");
+    // Setting disabled, older backend (no camera block), or no usable camera →
+    // the camera stays whatever the acquisition ladder reported (live monitor /
+    // denied / unavailable). Nothing to record, nothing to fail.
+    if (!cameraConfig || !cameraTrack || !shouldRecordCamera(cameraConfig, trackLive)) return;
+
+    // Re-align the track with the server's authoritative fps/width. Async and
+    // non-fatal: the browser picks the nearest supported mode, and a constraint
+    // rejection just keeps the acquisition-time mode.
+    void cameraTrack.applyConstraints(cameraTrackConstraints(cameraConfig)).catch(() => undefined);
+
+    // Video-only stream of the RAW camera track (no canvas, mic stays on the
+    // screen recording) — keeps capturing while the proctor tab is hidden.
+    cameraOnlyStream = new MediaStream([cameraTrack]);
+    emit("camera_recording_started", {
+      fps: cameraConfig.fps,
+      width: cameraConfig.width,
+      camera_label: cameraTrack.label || "unknown",
+      chunk_seconds: options.config.chunk_seconds,
+      reason: "Separate low-res camera stream (eye-movement evidence), independent of the screen recording."
+    });
+    startCameraSegmentRecorder();
+  }
+
+  // Same fresh-recorder-per-segment pattern as the screen loop, so every
+  // camera chunk is independently playable. The loop ends quietly when the
+  // camera track dies (the bindOptionalMediaTracks "ended" listener already
+  // reported camera "stopped") and permanently on any recorder error.
+  function startCameraSegmentRecorder() {
+    if (!cameraOnlyStream || stopping || cameraRecordingFailed) return;
+    const [track] = cameraOnlyStream.getVideoTracks();
+    if (!track || track.readyState !== "live") return;
+
+    try {
+      cameraRecorder = new MediaRecorder(cameraOnlyStream, {
+        mimeType: getSupportedCameraMimeType(),
+        videoBitsPerSecond: CAMERA_VIDEO_BITS_PER_SECOND
+      });
+    } catch (error) {
+      failCameraRecording("recorder_create_failed", error);
+      return;
+    }
+
+    cameraRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size > 0) {
+        // Deliberately NO small-chunk anomaly here (screen-only signal): a
+        // low-fps camera segment is legitimately tiny.
+        enqueueCameraUpload(event.data, ++cameraChunkIndex);
+      }
+    });
+    cameraRecorder.addEventListener("error", (event) => {
+      failCameraRecording("recorder_error", event);
+    });
+    cameraRecorder.addEventListener("stop", () => {
+      if (!stopping && !cameraRecordingFailed) startCameraSegmentRecorder();
+    }, { once: true });
+
+    try {
+      cameraRecorder.start();
+    } catch (error) {
+      failCameraRecording("recorder_start_failed", error);
+      return;
+    }
+    cameraSegmentTimer = window.setTimeout(() => {
+      if (cameraRecorder?.state === "recording") cameraRecorder.stop();
+    }, options.config.chunk_seconds * 1000);
+  }
+
+  function stopCameraRecorder() {
+    return new Promise<void>((resolve) => {
+      if (!cameraRecorder || cameraRecorder.state === "inactive") {
+        resolve();
+        return;
+      }
+      cameraRecorder.addEventListener("stop", () => resolve(), { once: true });
+      cameraRecorder.stop();
+    });
+  }
 }
 
 function getSupportedMimeType() {
   const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
+}
+
+// F10.1: the camera stream is VIDEO-ONLY (the mic already rides the screen
+// recording), so its mime candidates carry no audio codec.
+function getSupportedCameraMimeType() {
+  const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
   return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
 }

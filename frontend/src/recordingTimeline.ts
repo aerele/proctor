@@ -83,7 +83,10 @@ const EVENT_LABELS: Record<string, string> = {
   camera_microphone_started: "Camera + microphone started",
   camera_stopped: "Camera stopped",
   microphone_stopped: "Microphone stopped",
-  camera_microphone_unavailable: "Camera/microphone unavailable"
+  camera_microphone_unavailable: "Camera/microphone unavailable",
+  // F10.1: separate low-res camera stream lifecycle.
+  camera_recording_started: "Camera recording started",
+  camera_recording_error: "Camera recording error"
 };
 
 const DETAIL_SUMMARY_MAX_ENTRIES = 3;

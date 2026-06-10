@@ -12,6 +12,7 @@ import { ProblemBankSection } from "./admin/ProblemBank";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
+import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
 import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
@@ -152,6 +153,13 @@ function StudentApp() {
   // drives every own-editor-vs-HackerRank copy fork (studentCopy.ts, stageHint).
   const activeProblem = sessionConfig?.problem ?? null;
   const hasProblem = activeProblem !== null;
+  // F10.1: is the separate low-res camera RECORDING enabled? Pre-session the
+  // public exam-config carries it (the consent disclosure renders before any
+  // session exists); once a session starts, its upload_config is authoritative.
+  // normalizeCameraRecording defaults to ENABLED, matching the server default.
+  const cameraRecordingOn = sessionConfig?.upload_config.camera
+    ? sessionConfig.upload_config.camera.enabled
+    : normalizeCameraRecording(examConfig?.camera_recording).enabled;
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   // F5.1 permissions-first onboarding (stage 1, before fullscreen): the
@@ -1356,7 +1364,7 @@ function StudentApp() {
                       onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
                     />
                     <span>
-                      {studentCopy.consentDisclosure(hasProblem)}
+                      {studentCopy.consentDisclosure(hasProblem, cameraRecordingOn)}
                     </span>
                   </label>
                 </>
@@ -1455,7 +1463,7 @@ function StudentApp() {
             <WhatIsRecordedPanel hasProblem={hasProblem} />
           ) : (
             <>
-              <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
+              <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
               <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
               <RulesPanel hasProblem={hasProblem} />
@@ -1722,6 +1730,12 @@ function AdminApp() {
   const [alertSettingsMessage, setAlertSettingsMessage] = useState("");
   // S2: room labels for the student room dropdown, edited as comma-separated text.
   const [roomsText, setRoomsText] = useState("");
+  // F10.1: camera-recording knobs. fps/width are TEXT state so a cleared field
+  // stays blank while typing; cameraRecordingFromForm maps blank/invalid text
+  // to the defaults at save time (never 0 — the wave-2 blank-saves-0 finding).
+  const [cameraRecEnabled, setCameraRecEnabled] = useState(true);
+  const [cameraFpsText, setCameraFpsText] = useState("10");
+  const [cameraWidthText, setCameraWidthText] = useState("640");
   // Review roster (multi-reviewer workflow): pasted usernames + the coverage
   // summary. `rosterUnavailable` flags a 404 (endpoint not deployed yet).
   const [rosterText, setRosterText] = useState("");
@@ -2092,6 +2106,10 @@ function AdminApp() {
         updated_at: response.updated_at
       });
       setRoomsText((response.rooms ?? []).join(", "));
+      const camera = normalizeCameraRecording(response.camera_recording);
+      setCameraRecEnabled(camera.enabled);
+      setCameraFpsText(String(camera.fps));
+      setCameraWidthText(String(camera.width));
       setSettingsMessage("Loaded current gate.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2114,6 +2132,9 @@ function AdminApp() {
         fullscreen_exit_limit: settings.fullscreen_exit_limit,
         enforcement_mode: settings.enforcement_mode,
         problem_id: settings.problem_id,
+        // F10.1: blank/invalid fps/width text falls back to the defaults here
+        // (never 0); the server normalizes again with the same rules.
+        camera_recording: cameraRecordingFromForm({ enabled: cameraRecEnabled, fps: cameraFpsText, width: cameraWidthText }),
         // parseRosterInput = the existing comma/newline split + trim + dedupe.
         rooms: parseRosterInput(roomsText)
       });
@@ -2129,6 +2150,10 @@ function AdminApp() {
         updated_at: response.updated_at
       });
       setRoomsText((response.rooms ?? []).join(", "));
+      const savedCamera = normalizeCameraRecording(response.camera_recording);
+      setCameraRecEnabled(savedCamera.enabled);
+      setCameraFpsText(String(savedCamera.fps));
+      setCameraWidthText(String(savedCamera.width));
       setSettingsMessage("Saved. The time window is now the only start gate (no passcode).");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2711,6 +2736,37 @@ function AdminApp() {
               <option value="alert_first">Alert first — raise a critical alert, never auto-lock</option>
             </select>
           </label>
+          {/* F10.1: separate low-res camera recording. Default ON; tuned for
+              eye-movement evidence (glancing down at notes/a phone). Blank or
+              out-of-range fps/width saves the DEFAULT (10 / 640), never 0. */}
+          <div className="rounded-md border border-line bg-white/60 p-4 md:col-span-3">
+            <label className="flex items-start gap-3 text-sm leading-6 text-muted">
+              <input
+                className="mt-1 h-4 w-4 accent-accent"
+                type="checkbox"
+                checked={cameraRecEnabled}
+                onChange={(event) => setCameraRecEnabled(event.target.checked)}
+              />
+              <span>
+                <span className="font-medium text-ink">Camera recording (separate low-res stream)</span> — record the candidate's camera alongside the screen, low frame rate and resolution tuned to catch eye movement (repeated glances at notes or a phone). When off, the camera is live-monitored only and candidates are told so.
+              </span>
+            </label>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 md:max-w-md">
+              <Field
+                label={`Camera frame rate (fps, ${CAMERA_FPS_MIN}-${CAMERA_FPS_MAX})`}
+                type="number"
+                value={cameraFpsText}
+                onChange={setCameraFpsText}
+              />
+              <Field
+                label={`Camera width (px, ${CAMERA_WIDTH_MIN}-${CAMERA_WIDTH_MAX})`}
+                type="number"
+                value={cameraWidthText}
+                onChange={setCameraWidthText}
+              />
+            </div>
+            <p className="mt-2 text-xs text-muted">Blank or out-of-range values save the defaults (10 fps, 640 px). The camera picks its nearest supported resolution.</p>
+          </div>
           <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
             <input
               className="mt-1 h-4 w-4 accent-accent"
@@ -3732,6 +3788,9 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
   // The truthful status: the refetched detail wins over the click-time row.
   const status = detail?.status || session.status;
   const chunkCount = detail?.chunk_count ?? session.chunk_count;
+  // F10.1: the separate camera stream's chunk counter (0 for legacy sessions /
+  // older backends). Drives the camera metric + the recorded-camera labels.
+  const cameraChunkCount = detail?.camera_chunk_count ?? session.camera_chunk_count ?? 0;
   const actions = validSessionActionsFor(status);
   const sessionAlerts = useMemo(() => alertsForSession(alerts, session), [alerts, session]);
   const sortedSubmissions = useMemo(
@@ -3896,6 +3955,9 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
         <div className="mt-4 flex flex-wrap gap-3 text-sm">
           <Metric icon={<Video size={16} />} label="Chunks" value={String(chunkCount)} />
           <Metric icon={<Clock size={16} />} label="Recorded" value={formatApproxDuration(approxRecordingSeconds(chunkCount))} />
+          {/* F10.1: the separate camera stream's own chunk counter (only shown
+              when this session actually uploaded camera chunks). */}
+          {cameraChunkCount > 0 ? <Metric icon={<Camera size={16} />} label="Camera chunks" value={String(cameraChunkCount)} /> : null}
           <Metric icon={<Bell size={16} />} label="Alerts" value={alertsLoaded ? String(sessionAlerts.length) : "…"} />
           <Metric icon={<CheckCircle2 size={16} />} label="Submissions" value={submissions === null ? "…" : String(sortedSubmissions.length)} />
           {detail ? <Metric icon={<Activity size={16} />} label="Events" value={`${detail.event_count} (${detail.clipboard_event_count} clipboard · ${detail.focus_event_count} focus)`} /> : null}
@@ -3903,9 +3965,11 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
 
         {/* CAPTURE — F6.6: last-reported per-source capture state (from the
             heartbeat's composite recording_state). The recorded webm is the
-            direct screen stream with mic audio mixed in; the camera is
-            live-monitor only and never produces a separate file — the labels
-            say so plainly. Hidden until a composite heartbeat reported it. */}
+            direct screen stream with mic audio mixed in. F10.1: when this
+            session uploaded camera chunks the camera row reads as a real
+            (separate, low-res) recording; otherwise the camera was
+            live-monitor only and the labels say so plainly. Hidden until a
+            composite heartbeat reported it. */}
         {detail?.capture_state ? (
           <div className="mt-4 rounded-md border border-line bg-white/60 p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted">Capture — last reported</p>
@@ -3918,7 +3982,7 @@ function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, o
               <li className="flex flex-wrap items-center gap-2">
                 <Camera size={14} className="shrink-0 text-muted" aria-hidden />
                 <span className="w-24 font-medium text-ink">Camera</span>
-                <span className="text-muted">{captureSourceLabel("camera", detail.capture_state.camera)}</span>
+                <span className="text-muted">{captureSourceLabel("camera", detail.capture_state.camera, cameraChunkCount > 0)}</span>
               </li>
               <li className="flex flex-wrap items-center gap-2">
                 <Mic size={14} className="shrink-0 text-muted" aria-hidden />
@@ -5204,7 +5268,7 @@ function StatusPill({ status }: { status: SessionStatus }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase ${styles[status]}`}>{status}</span>;
 }
 
-function CameraSelfView({ videoRef, mediaCapture, pipMessage, onPopOut, pipAvailable }: { videoRef: React.RefObject<HTMLVideoElement>; mediaCapture: MediaCaptureState; pipMessage: string; onPopOut: () => void; pipAvailable: boolean }) {
+function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, onPopOut, pipAvailable }: { videoRef: React.RefObject<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean; pipMessage: string; onPopOut: () => void; pipAvailable: boolean }) {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -5212,9 +5276,10 @@ function CameraSelfView({ videoRef, mediaCapture, pipMessage, onPopOut, pipAvail
           <Camera size={18} />
           <h2 className="font-semibold">Camera self-view</h2>
         </div>
-        {/* The camera is a live monitor only — never part of the recorded
-            video — so its "recording" state reads "monitored, not recorded". */}
-        <span className={`rounded-full border px-2 py-1 text-xs font-medium ${mediaCapture.camera === "recording" ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>{studentCopy.cameraStateLabel(mediaCapture.camera)}</span>
+        {/* F10.1: with the camera-recording setting ON, a working camera reads
+            "recording" (a separate low-res stream IS recorded); with it off
+            the camera is a live monitor only — "monitored, not recorded". */}
+        <span className={`rounded-full border px-2 py-1 text-xs font-medium ${mediaCapture.camera === "recording" ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>{studentCopy.cameraStateLabel(mediaCapture.camera, cameraRecorded)}</span>
       </div>
       <div className="overflow-hidden rounded-md border border-line bg-ink">
         <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
@@ -5259,7 +5324,7 @@ function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, man
         <Metric icon={<MonitorUp size={16} />} label="Chunk interval" value={config ? `${config.upload_config.chunk_seconds}s` : "Not started"} />
         <Metric icon={<MonitorUp size={16} />} label="Screen" value={mediaCapture.screen} />
         {/* Camera = live monitor only; its stream is never recorded. */}
-        <Metric icon={<Camera size={16} />} label="Camera" value={studentCopy.cameraStateLabel(mediaCapture.camera)} />
+        <Metric icon={<Camera size={16} />} label="Camera" value={studentCopy.cameraStateLabel(mediaCapture.camera, config?.upload_config.camera?.enabled === true)} />
         <Metric icon={<Mic size={16} />} label="Microphone" value={mediaCapture.microphone} />
         <Metric icon={<ClipboardList size={16} />} label="Manifest items" value={String(manifest.length)} />
         <Metric icon={<Activity size={16} />} label="Start IP" value={startIp || "pending"} />

@@ -82,9 +82,11 @@ describe("own-editor copy (ownEditor=true)", () => {
     expect(rule?.body).toContain(KEYSTROKE_DISCLOSURE);
   });
 
-  it("consent sentence discloses editor keystroke recording", () => {
-    expect(consentDisclosure(true)).toContain("coding editor");
-    expect(consentDisclosure(true)).toContain(KEYSTROKE_DISCLOSURE);
+  it("consent sentence discloses editor keystroke recording (camera mode aside)", () => {
+    for (const cameraRecorded of [true, false]) {
+      expect(consentDisclosure(true, cameraRecorded)).toContain("coding editor");
+      expect(consentDisclosure(true, cameraRecorded)).toContain(KEYSTROKE_DISCLOSURE);
+    }
   });
 });
 
@@ -141,7 +143,7 @@ describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", 
   it("never claims editor keystroke recording where there is no own editor", () => {
     const legacyStrings = [
       ...testRules(false).flatMap((r) => [r.title, r.body]),
-      consentDisclosure(false)
+      consentDisclosure(false, false)
     ];
     for (const s of legacyStrings) {
       expect(s).not.toContain(KEYSTROKE_DISCLOSURE);
@@ -150,26 +152,50 @@ describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", 
   });
 });
 
-// F6 review / post-F6 wording fix: the camera is a LIVE MONITOR only — its
-// stream is never part of the recorded video (the webm is the direct screen
-// stream + mixed mic audio). No candidate-facing string may claim the camera
-// is recorded, and the capture-state readout must say "monitored".
-describe("camera is monitored, not recorded", () => {
+// F6 review / post-F6 wording fix, made CONDITIONAL by F10.1: with the
+// camera_recording setting OFF the camera is a LIVE MONITOR only — its stream
+// is never part of any recorded video — and no candidate-facing string may
+// claim a camera recording exists; the capture-state readout must say
+// "monitored". (cameraRecorded=false everywhere below.)
+describe("camera recording DISABLED: monitored, not recorded", () => {
   it("cameraStateLabel rewords the recorder's 'recording' state as monitored-only", () => {
-    expect(cameraStateLabel("recording")).toBe("monitored, not recorded");
+    expect(cameraStateLabel("recording", false)).toBe("monitored, not recorded");
   });
 
   it("cameraStateLabel passes the other capture states through unchanged", () => {
     for (const state of ["inactive", "stopped", "error", "permission_denied", "unavailable"]) {
-      expect(cameraStateLabel(state)).toBe(state);
+      expect(cameraStateLabel(state, false)).toBe(state);
     }
   });
 
   it("the consent sentence never claims camera recording (both surfaces)", () => {
     for (const ownEditor of [true, false]) {
-      expect(consentDisclosure(ownEditor)).not.toMatch(/camera and microphone recording/i);
-      expect(consentDisclosure(ownEditor).toLowerCase()).toContain("camera");
-      expect(consentDisclosure(ownEditor).toLowerCase()).toContain("monitor");
+      expect(consentDisclosure(ownEditor, false)).not.toMatch(/camera recording/i);
+      expect(consentDisclosure(ownEditor, false).toLowerCase()).toContain("camera");
+      expect(consentDisclosure(ownEditor, false).toLowerCase()).toContain("monitor");
+    }
+  });
+});
+
+// F10.1: with the camera_recording setting ON (the default) a separate low-res
+// camera stream IS recorded — the consent must disclose it and the camera
+// capture state must read plainly as "recording".
+describe("camera recording ENABLED: disclosed and labelled as recording", () => {
+  it("cameraStateLabel keeps the 'recording' state as recording", () => {
+    expect(cameraStateLabel("recording", true)).toBe("recording");
+  });
+
+  it("cameraStateLabel passes the other capture states through unchanged", () => {
+    for (const state of ["inactive", "stopped", "error", "permission_denied", "unavailable"]) {
+      expect(cameraStateLabel(state, true)).toBe(state);
+    }
+  });
+
+  it("the consent sentence discloses the low-res camera recording (both surfaces)", () => {
+    for (const ownEditor of [true, false]) {
+      const text = consentDisclosure(ownEditor, true);
+      expect(text).toContain("low-resolution camera recording where available");
+      expect(text).not.toContain("live camera monitoring");
     }
   });
 });

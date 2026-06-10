@@ -57,23 +57,32 @@ export function testRules(ownEditor: boolean): TestRuleCopy[] {
 // Consent-checkbox sentence (form stage). The own-editor variant discloses that
 // editor keystrokes (full text + timing) are recorded, since Slice 1 captures
 // every keystroke in the coding workspace; the HackerRank fallback has no own
-// editor, so it must NOT claim keystroke capture. TRUTHFUL capture wording
-// (post-F6): the recorded webm is the screen stream + mixed microphone audio;
-// the camera is a live monitor (self-view) only and is never recorded — the
-// consent must not claim a camera recording that does not exist.
-export function consentDisclosure(ownEditor: boolean): string {
+// editor, so it must NOT claim keystroke capture. TRUTHFUL capture wording:
+// the recorded webm is the screen stream + mixed microphone audio. F10.1 made
+// the camera clause CONDITIONAL on the camera_recording setting (exam-config /
+// upload_config): when enabled, a separate low-resolution camera video is
+// recorded and the consent says so; when disabled, the camera is a live
+// monitor (self-view) only and the consent must not claim a recording that
+// does not exist (the post-F6 truthfulness bar, both directions).
+export function consentDisclosure(ownEditor: boolean, cameraRecorded: boolean): string {
   const editorClause = ownEditor
     ? " Everything I type in the coding editor, including keystroke timing, is recorded."
     : "";
-  return `I have read the rules above and consent to screen recording, microphone recording where available, and live camera monitoring for this hiring assessment.${editorClause} I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.`;
+  const cameraClause = cameraRecorded
+    ? "low-resolution camera recording where available"
+    : "live camera monitoring";
+  return `I have read the rules above and consent to screen recording, microphone recording where available, and ${cameraClause} for this hiring assessment.${editorClause} I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.`;
 }
 
-// Candidate-facing capture-state label for the CAMERA row/pill: the camera is
-// a live monitor only (self-view / pop-out) and is never part of the recorded
-// video, so its internal "recording" state must not read as "recorded". Every
-// other state (stopped / permission_denied / ...) passes through unchanged.
-export function cameraStateLabel(state: string): string {
-  return state === "recording" ? "monitored, not recorded" : state;
+// Candidate-facing capture-state label for the CAMERA row/pill. F10.1: when
+// the separate camera recording is enabled, a recording camera reads plainly
+// as "recording"; when it is disabled the camera is a live monitor only
+// (self-view / pop-out) and its internal "recording" state must not read as
+// "recorded". Every other state (stopped / permission_denied / ...) passes
+// through unchanged in both modes.
+export function cameraStateLabel(state: string, cameraRecorded: boolean): string {
+  if (state !== "recording") return state;
+  return cameraRecorded ? "recording" : "monitored, not recorded";
 }
 
 // EndTestPanel confirmation copy (shown when the candidate presses End test).

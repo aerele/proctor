@@ -303,7 +303,9 @@ test("GET /api/exam-config: roster off + no rooms -> all-empty config", async ()
   assert.deepEqual(res.body, {
     roster_required: false, unique_id_label: "", rooms: [],
     // F5.3: enforcement defaults always ride the public config.
-    enforcement: { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" }
+    enforcement: { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" },
+    // F10.1: camera-recording defaults too (pre-session consent copy).
+    camera_recording: { enabled: true, fps: 10, width: 640 }
   });
 });
 
@@ -314,7 +316,8 @@ test("GET /api/exam-config reflects the roster label + configured rooms", async 
   const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
   assert.deepEqual(res.body, {
     roster_required: true, unique_id_label: "Roll No", rooms: ["Lab A-1", "Lab B-2"],
-    enforcement: { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" }
+    enforcement: { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" },
+    camera_recording: { enabled: true, fps: 10, width: 640 }
   });
 });
 

@@ -25,6 +25,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
 import { describeRecordingContents } from "./admin/sessionDetail";
 import {
+  CHUNK_SECONDS,
+  buildPlaylist,
+  isSourceChunk,
+  type RecordingSource,
+  type TimelineChunk
+} from "./recordingPlaylist";
+import {
   DEFAULT_LOG_FILTERS,
   alertsForCandidate,
   buildTimelineLog,
@@ -33,25 +40,10 @@ import {
   type TimelineLogEntry,
   type TimelineLogFilters
 } from "./recordingTimeline";
-import type { AdminSessionDetail, Alert, AlertSeverity, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SessionEvidence, SubmissionEvent } from "./types";
+import type { AdminSessionDetail, Alert, AlertSeverity, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SubmissionEvent } from "./types";
 
 // localStorage key for the reviewer's own name so a refresh keeps them reviewing.
 const REVIEWER_NAME_KEY = "proctor_reviewer_name";
-
-// Every recorded chunk is a fixed 30-second .webm (uploadConfig.chunk_seconds on
-// the backend). The playback timeline is built around this constant.
-const CHUNK_SECONDS = 30;
-
-// A single chunk placed on the test-relative timeline. offsetSec is the chunk's
-// START time in seconds relative to the test start; [offsetSec, offsetSec+CHUNK_SECONDS]
-// is the span it occupies. `url` is the signed download URL (refreshable).
-type TimelineChunk = {
-  index: number; // 1-based numeric index parsed from the chunk key
-  key: string;
-  url: string;
-  offsetSec: number; // start, relative to test start
-  endSec: number; // offsetSec + CHUNK_SECONDS
-};
 
 // A SUBMISSION-TIME MARKER placed on the test-relative timeline: offsetSec is the
 // submission's real time relative to the test start, valid drives GREEN/RED.
@@ -68,16 +60,8 @@ type TimelineGap = {
   toSec: number;
 };
 
-// Pull the numeric index out of a screen-chunk key, e.g.
-// ".../screen/chunk-00007.webm" → 7. Returns NaN for non-matching keys.
-function chunkIndexFromKey(key: string): number {
-  const match = key.match(/screen\/chunk-(\d+)\.(?:webm|bin)$/);
-  return match ? Number(match[1]) : NaN;
-}
-
-function isScreenChunk(evidence: SessionEvidence): boolean {
-  return /screen\/chunk-\d+\.(?:webm|bin)$/.test(evidence.key);
-}
+// F10.1: chunk-key parsing + playlist construction moved to recordingPlaylist.ts
+// (pure, vitest-covered) so the Screen/Camera source toggle filters one place.
 
 // Format seconds as mm:ss (or h:mm:ss past an hour). Negative inputs clamp to 0.
 function formatClock(totalSeconds: number): string {
@@ -102,49 +86,6 @@ function isoToLocalInput(value?: string): string {
 function localInputToMs(value: string): number {
   if (!value) return NaN;
   return new Date(value).getTime();
-}
-
-// Build the playlist for one session against a chosen test-start time.
-//
-// Each chunk is placed on the timeline by REAL time when its last_modified is
-// known: a chunk's object is finalized when its 30s window CLOSES, so its START
-// offset is (last_modified − CHUNK_SECONDS) relative to the test start. This is
-// what correctly handles late-joiners (their first chunk lands after 0) and
-// recording GAPS (a missing minute leaves a blank span). When last_modified is
-// missing we fall back to index-based contiguous placement anchored on the
-// session's created_at, so the playlist is still coherent.
-function buildPlaylist(
-  evidence: SessionEvidence[],
-  sessionCreatedAt: string | undefined,
-  testStartMs: number
-): TimelineChunk[] {
-  const createdMs = sessionCreatedAt ? Date.parse(sessionCreatedAt) : NaN;
-  const chunks = evidence
-    .filter(isScreenChunk)
-    .map((file) => ({ file, index: chunkIndexFromKey(file.key) }))
-    .filter((entry) => Number.isFinite(entry.index))
-    .sort((a, b) => a.index - b.index);
-
-  return chunks.map((entry) => {
-    const modifiedMs = entry.file.last_modified ? Date.parse(entry.file.last_modified) : NaN;
-    let offsetSec: number;
-    if (Number.isFinite(modifiedMs) && Number.isFinite(testStartMs)) {
-      offsetSec = (modifiedMs - CHUNK_SECONDS * 1000 - testStartMs) / 1000;
-    } else {
-      // Index-based contiguous fallback, anchored on created_at vs test start.
-      const anchorOffset = Number.isFinite(createdMs) && Number.isFinite(testStartMs)
-        ? (createdMs - testStartMs) / 1000
-        : 0;
-      offsetSec = (entry.index - 1) * CHUNK_SECONDS + anchorOffset;
-    }
-    return {
-      index: entry.index,
-      key: entry.file.key,
-      url: entry.file.download_url,
-      offsetSec,
-      endSec: offsetSec + CHUNK_SECONDS
-    };
-  });
 }
 
 // Pick the chunk whose [offset, end] span contains testTime; if none contains it
@@ -280,6 +221,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
 
   // Player state.
   const [currentPos, setCurrentPos] = useState(0); // playlist index of the loaded chunk
+  // F10.1: which chunk series plays — the screen recording or the separate
+  // low-res camera stream. The toggle renders only when camera chunks exist;
+  // both share the same test-relative timeline + overlays.
+  const [source, setSource] = useState<RecordingSource>("screen");
   const [playing, setPlaying] = useState(false);
   const [currentTestTime, setCurrentTestTime] = useState(0); // seconds, test-relative
   const [refreshNote, setRefreshNote] = useState("");
@@ -367,10 +312,21 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
 
   const testStartMs = useMemo(() => localInputToMs(testStartInput), [testStartInput]);
 
+  // F10.1: this session's camera-chunk count (from the signed evidence list —
+  // the authoritative signal). Drives the Screen/Camera toggle visibility and
+  // the recorded-camera wording in the contents line.
+  const cameraChunkCount = useMemo(
+    () => (activeSession?.evidence ?? []).filter((file) => isSourceChunk(file, "camera")).length,
+    [activeSession]
+  );
+  // A session without camera chunks always plays the screen series (also
+  // resets the toggle when switching from a camera-carrying session).
+  const activeSource: RecordingSource = cameraChunkCount > 0 ? source : "screen";
+
   const playlist = useMemo(() => {
     if (!activeSession) return [];
-    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs);
-  }, [activeSession, testStartMs]);
+    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs, activeSource);
+  }, [activeSession, testStartMs, activeSource]);
 
   // Timeline span: from the first chunk's start to the last chunk's end. Clamped
   // so a single-chunk or all-gap session still yields a usable bar.
@@ -703,9 +659,18 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
       setCurrentPos(0);
       setCurrentTestTime(0);
       setPlaying(false);
+      // F10.1: a different session starts back on the screen series.
+      setSource("screen");
     },
     [sessions]
   );
+
+  // F10.1: switch between the screen recording and the camera stream, holding
+  // the playhead position (the [playlist] effect reloads the matching chunk).
+  const switchSource = useCallback((next: RecordingSource) => {
+    setSource(next);
+    setPlaying(false);
+  }, []);
 
   // Refresh the signed evidence URLs (they expire ~1h) by re-calling
   // fetchAdminSessions, preserving the current selection/position. Returns the
@@ -721,14 +686,14 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
       const refreshed = fresh.find((s) => String(s.session_id) === selectedSessionId) ?? fresh[0];
-      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs);
+      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs, activeSource);
       return list[currentPos]?.url ?? null;
     } catch {
       return null;
     } finally {
       refreshingRef.current = false;
     }
-  }, [activeSession, password, selectedSessionId, currentPos, testStartMs]);
+  }, [activeSession, password, selectedSessionId, currentPos, testStartMs, activeSource]);
 
   // ---- Load the current chunk into the <video> and (optionally) play. -----
   // We set src imperatively (not via JSX) so we can also drive seek + play/pause
@@ -1228,7 +1193,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     >
                       {sessions.map((s) => (
                         <option key={String(s.session_id)} value={String(s.session_id)}>
-                          {s.created_at ? new Date(s.created_at).toLocaleString() : String(s.session_id)} · {String(s.status ?? "")} · {(s.evidence ?? []).filter((e) => isScreenChunk(e)).length} chunks
+                          {s.created_at ? new Date(s.created_at).toLocaleString() : String(s.session_id)} · {String(s.status ?? "")} · {(s.evidence ?? []).filter((e) => isSourceChunk(e, "screen")).length} chunks
                         </option>
                       ))}
                     </select>
@@ -1251,11 +1216,40 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   {spanDuration >= 3600 ? ", h:mm:ss" : ", mm:ss"}).
                 </p>
                 {/* F6.6 — what THIS recording contains, from the session's
-                    last-reported capture state (the camera is live-monitor
-                    only and is never part of the recorded video). */}
+                    last-reported capture state. F10.1: camera chunks in the
+                    evidence flip the camera fragment to "recorded separately". */}
                 <p className="mt-1 text-xs text-muted">
-                  Recording contains: {describeRecordingContents(activeSession.capture_state)}.
+                  Recording contains: {describeRecordingContents(activeSession.capture_state, cameraChunkCount)}.
                 </p>
+                {/* F10.1 — source toggle: only sessions that uploaded camera
+                    chunks offer the separate low-res camera stream. Both
+                    sources share the timeline + every overlay marker. */}
+                {cameraChunkCount > 0 ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted">Source</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-line">
+                      <button
+                        type="button"
+                        onClick={() => switchSource("screen")}
+                        className={`focus-ring inline-flex h-8 items-center gap-1.5 px-3 text-xs font-medium ${activeSource === "screen" ? "bg-ink text-white" : "bg-white text-ink hover:bg-line/30"}`}
+                      >
+                        <Film size={13} /> Screen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => switchSource("camera")}
+                        className={`focus-ring inline-flex h-8 items-center gap-1.5 px-3 text-xs font-medium ${activeSource === "camera" ? "bg-ink text-white" : "bg-white text-ink hover:bg-line/30"}`}
+                      >
+                        <Video size={13} /> Camera
+                      </button>
+                    </div>
+                    <span className="text-xs text-muted">
+                      {activeSource === "camera"
+                        ? `low-res camera stream · ${cameraChunkCount} chunks`
+                        : `camera stream available (${cameraChunkCount} chunks)`}
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {/* PLAYER — focusable wrapper so ARROW KEYS nudge playback (±5s, Shift

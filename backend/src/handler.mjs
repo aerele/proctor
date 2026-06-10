@@ -191,6 +191,13 @@ const uploadConfig = {
   max_frame_rate: 4
 };
 
+// F10.1: the chunk-upload surface is EXACTLY two kinds — the screen recording
+// and the separate low-res camera stream. Everything else under the session
+// prefix (events, manifest, merged video) is written server-side, so an
+// unknown kind is rejected outright rather than sanitized into a fresh
+// folder (path-traversal hardening on top of sanitizeSegment).
+const UPLOAD_CHUNK_KINDS = new Set(["screen", "camera"]);
+
 export const api = async (req, res) => {
   try {
     setCors(res);
@@ -392,6 +399,9 @@ async function startSession(req) {
     upload_error_count: 0,
     heartbeat_count: 0,
     chunk_count: 0,
+    // F10.1: the separate low-res camera stream's chunk counter (chunk_count
+    // stays screen-only — the admin duration math depends on that).
+    camera_chunk_count: 0,
     // F5.5: per-session enforcement exemptions — empty by default; set via the
     // admin session-action "exempt" or the invigilator exempt endpoint.
     enforcement_exemptions: {}
@@ -446,7 +456,9 @@ async function startResponse(session, settings) {
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     locked_reason: session.locked_reason || null,
     problem: await activeProblemPublic(settings),
-    upload_config: uploadConfig,
+    // F10.1: the camera-recording knobs ride the same upload_config object the
+    // screen constraints use, so the recorder reads ONE authoritative config.
+    upload_config: { ...uploadConfig, camera: cameraRecordingConfig(settings) },
     heartbeat_interval_seconds: 15,
     // S5: authoritative exam end time + the server clock at response time, so
     // the client shows a skew-corrected countdown from the very first response.
@@ -642,7 +654,11 @@ async function createUploadUrl(req) {
   // D2: an admin-ended session may still flush its in-flight final chunk for a
   // bounded window; everything else goes through the normal status gate.
   const session = inAdminEndGrace(fetched) ? fetched : requireWritableSession(fetched);
-  const kind = sanitizeSegment(body.kind);
+  // F10.1: only the two known chunk kinds may mint a signed write URL.
+  const kind = String(body.kind || "");
+  if (!UPLOAD_CHUNK_KINDS.has(kind)) {
+    return badRequest("kind must be screen or camera");
+  }
   const chunkIndex = Number(body.chunk_index);
   if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
     return badRequest("Invalid chunk_index");
@@ -661,7 +677,12 @@ async function createUploadUrl(req) {
 
   await sessionRef(session.session_id).update({
     updated_at: new Date().toISOString(),
-    chunk_count: FieldValue.increment(1)
+    // F10.1: chunk_count stays the SCREEN counter — the admin UI's recording-
+    // duration math (chunks × 30s) and the recordings picker both read it, so
+    // camera chunks must never inflate it. The camera stream counts separately.
+    ...(kind === "camera"
+      ? { camera_chunk_count: FieldValue.increment(1) }
+      : { chunk_count: FieldValue.increment(1) })
   });
 
   return {
@@ -1310,6 +1331,12 @@ async function adminSaveSettings(req) {
       FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
     enforcement_mode: resolveEnforcementMode(
       body.enforcement_mode !== undefined ? body.enforcement_mode : existing?.enforcement_mode),
+    // F10.1: camera-recording knobs — same rules as the enforcement fields:
+    // invalid values fall back to the defaults (enabled / 10 fps / 640 w,
+    // never 0), and an older admin UI that doesn't SEND the field preserves
+    // the stored value rather than resetting it.
+    camera_recording: normalizeCameraRecording(
+      body.camera_recording !== undefined ? body.camera_recording : existing?.camera_recording),
     passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
     passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
     end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
@@ -1566,7 +1593,11 @@ async function publicExamConfig() {
     rooms: normalizeRooms(settings?.rooms),
     // F5.3: the candidate runtime needs the enforcement knobs before a session
     // exists (the heartbeat keeps them fresh afterwards).
-    enforcement: enforcementConfig(settings)
+    enforcement: enforcementConfig(settings),
+    // F10.1: the consent disclosure + camera capture labels render BEFORE a
+    // session exists, so the candidate must know pre-session whether the
+    // camera is recorded or live-monitored only.
+    camera_recording: cameraRecordingConfig(settings)
   };
 }
 
@@ -1725,6 +1756,7 @@ async function adminRecordingSessions(req) {
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",
       chunk_count: Number(doc.chunk_count || 0),
+      camera_chunk_count: Number(doc.camera_chunk_count || 0),
       created_at: doc.created_at || "",
       status: doc.status || ""
     }));
@@ -1793,6 +1825,7 @@ async function adminSessionsList(req) {
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",
       chunk_count: Number(doc.chunk_count || 0),
+      camera_chunk_count: Number(doc.camera_chunk_count || 0),
       created_at: doc.created_at || "",
       status: doc.status || ""
     }));
@@ -1829,6 +1862,7 @@ async function adminSessionDetail(req) {
       current_ip: session.current_ip || session.start_ip || "",
       ip_change_count: Number(session.ip_change_count || 0),
       chunk_count: Number(session.chunk_count || 0),
+      camera_chunk_count: Number(session.camera_chunk_count || 0),
       event_count: Number(session.event_count || 0),
       clipboard_event_count: Number(session.clipboard_event_count || 0),
       focus_event_count: Number(session.focus_event_count || 0),
@@ -4355,6 +4389,40 @@ function enforcementConfig(settings) {
   };
 }
 
+// F10.1 — separate low-res CAMERA recording stream. Defaults target Karthi's
+// eye-movement bar (catch a candidate repeatedly glancing down at notes/a
+// phone): ~10 fps, and just enough width to read eye direction. Admin-tunable
+// within tight bounds; an invalid/blank value falls back to its DEFAULT
+// (never 0 — the wave-2 blank-saves-0 hazard) so a bad payload can never
+// persist an unusable camera config. Default ENABLED: only an explicit
+// boolean false turns the camera stream off.
+const CAMERA_RECORDING_DEFAULTS = { enabled: true, fps: 10, width: 640 };
+const CAMERA_FPS_MIN = 1;
+const CAMERA_FPS_MAX = 15;
+const CAMERA_WIDTH_MIN = 320;
+const CAMERA_WIDTH_MAX = 1280;
+
+// intSettingOr with an upper bound too: out-of-range → fallback (not clamped),
+// matching the existing "garbage falls back to the default" settings rule.
+function boundedIntOr(raw, fallback, minimum, maximum) {
+  const num = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(num) || !Number.isInteger(num) || num < minimum || num > maximum) return fallback;
+  return num;
+}
+
+function normalizeCameraRecording(raw) {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : CAMERA_RECORDING_DEFAULTS.enabled,
+    fps: boundedIntOr(source.fps, CAMERA_RECORDING_DEFAULTS.fps, CAMERA_FPS_MIN, CAMERA_FPS_MAX),
+    width: boundedIntOr(source.width, CAMERA_RECORDING_DEFAULTS.width, CAMERA_WIDTH_MIN, CAMERA_WIDTH_MAX)
+  };
+}
+
+function cameraRecordingConfig(settings) {
+  return normalizeCameraRecording(settings?.camera_recording);
+}
+
 // Per-session enforcement exemptions (F5.5): ONLY the known keys, ONLY real
 // booleans — everything else is dropped so client/admin payloads can never
 // stash arbitrary data on the session doc.
@@ -4383,6 +4451,9 @@ function publicSettings(settings) {
     fullscreen_reentry_seconds: enforcement.fullscreen_reentry_seconds,
     fullscreen_exit_limit: enforcement.fullscreen_exit_limit,
     enforcement_mode: enforcement.mode,
+    // F10.1: always normalized on read, so a legacy doc (no stored block)
+    // reports the defaults (enabled / 10 fps / 640 w).
+    camera_recording: cameraRecordingConfig(settings),
     start_at: settings?.start_at || "",
     end_at: settings?.end_at || "",
     contest_url: settings?.contest_url || "",

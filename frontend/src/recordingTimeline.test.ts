@@ -86,6 +86,9 @@ describe("eventLabel", () => {
     expect(eventLabel("clipboard_activity")).toBe("Clipboard activity");
     expect(eventLabel("ip_address_changed")).toBe("IP address changed");
     expect(eventLabel("session_started")).toBe("Session started");
+    // F10.1: the separate camera stream's lifecycle events read plainly.
+    expect(eventLabel("camera_recording_started")).toBe("Camera recording started");
+    expect(eventLabel("camera_recording_error")).toBe("Camera recording error");
   });
   it("visibility_change uses the detail state", () => {
     expect(eventLabel("visibility_change", { state: "hidden" })).toBe("Tab hidden");
