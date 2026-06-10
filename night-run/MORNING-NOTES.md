@@ -134,3 +134,10 @@ Do NOT push until this is decided. (I did not rewrite history autonomously — i
 
 ### Mechanical majors — QUEUED to auto-fix once S3 frees handler.mjs/App.tsx (no design call)
 M2 disclose keystroke capture in consent/rules/what-is-recorded copy · M5 make "clear roster" actually delete entry docs · M7 store validated language not raw body.language · M8 CSV formula-injection guard on admin exports · M9 surface Run/Submit API errors to the candidate · M10 FullscreenGate real modal (focus trap) · M11 AnomalyPanel role=alert/aria-live.
+
+## S4 problem authoring — BUILT in worktree (branch feat/s4-problem-authoring, ~06:25), MERGE PENDING
+- 9/9 plan tasks (41e4506…1045d34): Firestore-backed problem bank (validation, scoring per_test/all_or_nothing, async getProblem with sum-two seed fallback), admin problem CRUD endpoints, active-problem assignment in settings, exec reads the bank + submit-time scoring, frontend types + draft logic, api client + demo store, admin "Problems" tab, server-driven candidate problem replacing the SLICE1_PROBLEM constant.
+- Worktree suites green: backend 293/293, frontend 128/128 + tsc + build.
+- **Built in an ISOLATED git worktree** (parallel to S3 on master) → will be merged into master after S3 lands; handler.mjs/App.tsx conflicts resolved at merge, then re-verified.
+- Infra note: the worktree's hardlinked node_modules was broken (cross-filesystem /home→/tmp drops files); a lane repaired it via rsync. Future worktrees on /tmp need a real npm/rsync, not cp -al.
+- Deferred to post-merge: S4 demo-browser walkthrough + real-backend smoke (the :5173 dev server is the master checkout).
