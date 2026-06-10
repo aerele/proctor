@@ -16,6 +16,10 @@ type RecorderOptions = {
   onMediaStateChange?: (state: MediaCaptureState) => void;
   onCameraStream?: (stream: MediaStream | null) => void;
   onIpStatusChange?: (status: { startIp: string; currentIp: string; ipChanged: boolean; newlyChanged: boolean }) => void;
+  // S5: every heartbeat echoes the authoritative exam end time + server clock;
+  // the host updates its countdown so a proctor's live time change propagates
+  // within one heartbeat interval (no reload).
+  onExamTimeChange?: (info: { endAt: string; serverNow: string }) => void;
 };
 
 type RecorderControls = {
@@ -254,6 +258,10 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
             current_ip: response.current_ip,
             message: "IP address changed after the test started."
           });
+        }
+        // S5: surface the current exam end time on every heartbeat.
+        if (response.end_at) {
+          options.onExamTimeChange?.({ endAt: response.end_at, serverNow: response.server_now ?? "" });
         }
         // B1: an active heartbeat reports the live status; if a proctor
         // locked/ended/paused the session, self-stop the recorder.

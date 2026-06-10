@@ -11,12 +11,17 @@
 import { useEffect, useState } from "react";
 import { formatExamElapsed, formatWallClock, STAGE_META, type Stage } from "./examShell";
 
-export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCount }: {
+export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCount, remainingLabel, timeUp }: {
   stage: Stage;
   identity: { name: string; username: string; room: string } | null;
   elapsedSeconds: number;
   recording: boolean;
   flagCount: number;
+  // S5: skew-corrected "Time left" countdown beside the elapsed timer; turns
+  // red with a TIME UP label once the exam end passes. null hides the slot
+  // (no schedule configured / pre-S5 backend).
+  remainingLabel: string | null;
+  timeUp: boolean;
 }) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -58,9 +63,17 @@ export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCou
             <span className="text-xs font-bold text-red-400">REC</span>
           </span>
         ) : null}
+        {recording && remainingLabel !== null ? (
+          // S5: the authoritative countdown — server-clock corrected, fed by the
+          // 15 s heartbeat. Red TIME UP state is readable at a distance.
+          <span className="text-right">
+            <span className={`block text-[10px] font-semibold uppercase tracking-widest ${timeUp ? "text-red-400" : "text-white/60"}`}>{timeUp ? "Time up" : "Time left"}</span>
+            <span className={`block font-mono text-xl font-semibold leading-none ${timeUp ? "text-red-400" : ""}`}>{remainingLabel}</span>
+          </span>
+        ) : null}
         {recording ? (
           <span className="text-right">
-            {/* S5 seam: this slot later shows remaining time instead of elapsed. */}
+            <span className="block text-[10px] font-semibold uppercase tracking-widest text-white/60">Elapsed</span>
             <span className="block font-mono text-xl font-semibold leading-none">{formatExamElapsed(elapsedSeconds)}</span>
             <span className="block font-mono text-[11px] text-white/60">{formatWallClock(now)}</span>
           </span>
