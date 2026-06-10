@@ -169,6 +169,48 @@ export type RecordingSessionsResponse = {
   sessions: RecordingSession[];
 };
 
+// S7 — GET /api/admin/ip-report: IP-wise count of logged-in users (the
+// proxy-detection signal surface). One IpReportEntry per client IP, biggest
+// clusters first; candidate rows are a bounded newest-first sample.
+export type IpReportCandidate = {
+  session_id: string;
+  hackerrank_username: string;
+  name: string;
+  room: string;
+  status: string;
+  created_at: string;
+  start_ip: string;
+  ip_change_count: number;
+};
+
+export type IpReportEntry = {
+  ip: string;
+  sessions: number;
+  users: number;
+  active: number;
+  locked: number;
+  pending_approval: number;
+  ended: number;
+  rooms: string[];
+  candidates: IpReportCandidate[];
+  candidates_truncated: boolean;
+};
+
+// live = non-ended sessions only ("logged-in users"); all = include ended.
+export type IpReportScope = "live" | "all";
+
+export type IpReportResponse = {
+  contest_slug: string | null;
+  room: string | null;
+  scope: IpReportScope;
+  total_sessions: number;
+  distinct_ips: number;
+  multi_user_ips: number;
+  ip_changed_sessions: number;
+  ips: IpReportEntry[];
+  ips_truncated: boolean;
+};
+
 // A SUBMISSION-TIME MARKER for the recording-review timeline. Sourced from the
 // contest-eval poller via POST /api/submission-events and read back (admin) via
 // GET /api/admin/submission-events. `valid` is the GREEN(true)/RED(false) flag
