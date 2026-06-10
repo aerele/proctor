@@ -22,7 +22,7 @@ Detailed TDD tasks: `docs/superpowers/plans/2026-06-09-own-editor-slice1.md`. Su
 - [x] T9 — `MonacoEditor.tsx` (lazy; keystroke/cursor/selection/paste/focus capture).
 - [x] T10 — `CodingWorkspace.tsx` + render in `StudentApp` (gate `status==='recording'`).
 - [x] T11 — E2E verify: backend `npm test` green; frontend `vitest` + `build`; demo-mode browser walkthrough on :9222 (screenshot); commit.
-- [ ] Add the adapter **queue + bounded-concurrency + 429 backoff + separate Run/Submit lanes** (design §11) — can be a focused add after T1–T11 land.
+- [x] Add the adapter **queue + bounded-concurrency + 429 backoff + separate Run/Submit lanes** (design §11) — can be a focused add after T1–T11 land.
 
 ## STRETCH (priority order — each = spec → plan → build → test → commit)
 - [x] S1 — Fullscreen-first onboarding + unique top bar (vanishes on anomaly) + 1–5 onboarding progress (at-a-distance invigilation).
