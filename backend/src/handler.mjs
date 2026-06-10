@@ -7,6 +7,7 @@ import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LA
 import { configureContestStore, createContest, listContests, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
+import { computeSessionSummary } from "./scoreboard.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -470,7 +471,19 @@ async function resumeSession(req) {
 // Shared start/resume payload so the browser always gets the same shape whether
 // it just started, replayed a token, or resumed after reload. S4: async because
 // it resolves the assigned problem's candidate-facing view from the bank.
+// S-I §3.4: serves the ORDERED problems[] (real contest doc when the session
+// belongs to one, else the legacy settings shim), the per-problem submissions
+// summary (resume restores chips/totals) and the submit budget. `problem`
+// stays as a one-release compatibility alias = problems[0] minus `order`
+// (bit-for-bit with the pre-S-I shape for cached bundles).
 async function startResponse(session, settings) {
+  const contest = await contestForSession(session);
+  const problems = await contestProblemsPublic(contest || settings);
+  let problemAlias = null;
+  if (problems.length) {
+    const { order: _order, ...alias } = problems[0];
+    problemAlias = alias;
+  }
   return {
     session_id: session.session_id,
     status: session.status,
@@ -489,7 +502,10 @@ async function startResponse(session, settings) {
     enforcement: enforcementConfig(settings),
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     locked_reason: session.locked_reason || null,
-    problem: await activeProblemPublic(settings),
+    problem: problemAlias,
+    problems,
+    submissions_summary: await sessionSubmissionsSummary(session.session_id),
+    submit_budget: EXEC_MAX_SUBMISSIONS_PER_SESSION,
     // F10.1: the camera-recording knobs ride the same upload_config object the
     // screen constraints use, so the recorder reads ONE authoritative config.
     upload_config: { ...uploadConfig, camera: cameraRecordingConfig(settings) },
@@ -501,25 +517,50 @@ async function startResponse(session, settings) {
   };
 }
 
-// The candidate-facing view of the assigned contest problem: statement, samples
-// (non-secret — /api/exec/run echoes them anyway), limits, points. NEVER
-// hiddenTests, never the lifecycle status. null when nothing is assigned or the
-// assignment is no longer published (degrade to the link-flow fallback).
-async function activeProblemPublic(settings) {
-  const problemId = String(settings?.problem_id || "");
-  if (!problemId) return null;
-  const problem = await getProblem(problemId);
-  if (!problem) return null;
-  return {
-    id: problem.id,
-    title: problem.title,
-    statement: problem.statement,
-    languages: problem.languages || [],
-    points: problem.points ?? 100,
-    cpuTimeLimit: problem.cpuTimeLimit,
-    memoryLimit: problem.memoryLimit,
-    sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected }))
-  };
+// The candidate-facing view of a contest's problems (S-I §3.4): the shim's
+// ordered entries mapped to the public per-problem view — statement, samples
+// (non-secret — /api/exec/run echoes them anyway), limits, EFFECTIVE points,
+// plus `order`. NEVER hiddenTests, never the lifecycle status. Unpublished/
+// missing entries are skipped (the guard prevents; degrade gracefully).
+async function contestProblemsPublic(contestOrSettings) {
+  const contestLanguages = Array.isArray(contestOrSettings?.languages) && contestOrSettings.languages.length
+    ? contestOrSettings.languages
+    : null;
+  const problems = [];
+  for (const entry of contestProblemEntries(contestOrSettings)) {
+    const problem = await getProblem(entry.problem_id);
+    if (!problem) continue;
+    // §1.1: the contest's language allow-list intersects each problem's own
+    // languages at serve time; an empty intersection degrades to the
+    // problem's list (never serve a problem with zero languages).
+    const ownLanguages = problem.languages || [];
+    const intersected = contestLanguages
+      ? ownLanguages.filter((language) => contestLanguages.includes(language))
+      : ownLanguages;
+    problems.push({
+      id: problem.id,
+      title: problem.title,
+      statement: problem.statement,
+      languages: intersected.length ? intersected : ownLanguages,
+      points: effectivePoints(entry, problem),
+      cpuTimeLimit: problem.cpuTimeLimit,
+      memoryLimit: problem.memoryLimit,
+      sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected })),
+      order: entry.order
+    });
+  }
+  return problems;
+}
+
+// This session's stored submissions -> per-problem summary (≤50×n docs, fine).
+const SESSION_SUBMISSIONS_QUERY_LIMIT = 2000;
+async function sessionSubmissionsSummary(sessionId) {
+  const snapshot = await firestore
+    .collection(SUBMISSIONS_COLLECTION)
+    .where("session_id", "==", String(sessionId))
+    .limit(SESSION_SUBMISSIONS_QUERY_LIMIT)
+    .get();
+  return computeSessionSummary(snapshot.docs.map((doc) => doc.data()));
 }
 
 // Find the session that currently holds the live slot for (username, contest):

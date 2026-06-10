@@ -297,6 +297,10 @@ export async function synthesizeLegacyContest() {
     end_at_updated_at: settings.end_at_updated_at || null,
     room_gate_enabled: Boolean(settings.room_gate_enabled),
     rooms: Array.isArray(settings.rooms) ? settings.rooms : [],
+    // S-I: the legacy single-problem assignment rides the synthesized doc so
+    // contestProblemEntries (the §1.3 shim) reads it like any other contest.
+    problem_id: String(settings.problem_id || ""),
+    template_slug: null,
     created_at: null,
     updated_at: settings.updated_at || null,
     selection_done_at: null,
