@@ -10,6 +10,8 @@ import type {
   BeaconKind,
   EditorEvent,
   ExamConfig,
+  ExamTimeRequest,
+  ExamTimeResponse,
   ExecRequest,
   HeartbeatResponse,
   InvigilatorAlert,
@@ -221,7 +223,10 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
       max_width: 1280,
       max_frame_rate: 5
     },
-    heartbeat_interval_seconds: 15
+    heartbeat_interval_seconds: 15,
+    // S5: demo sessions read the exam end time from the demo settings store.
+    end_at: getDemoSettings()?.end_at || "",
+    server_now: new Date().toISOString()
   };
 }
 
@@ -485,7 +490,9 @@ export async function heartbeat(params: {
       e.code = code;
       throw e;
     }
-    return { ok: true, status: session?.status ?? "active", start_ip: "demo.local", current_ip: "demo.local", ip_changed: false, newly_changed: false };
+    // S5: mirror the real heartbeat — carry the current demo end time so the
+    // student countdown updates live when the demo admin changes it.
+    return { ok: true, status: session?.status ?? "active", start_ip: "demo.local", current_ip: "demo.local", ip_changed: false, newly_changed: false, end_at: getDemoSettings()?.end_at || "", server_now: new Date().toISOString() };
   }
   return request<HeartbeatResponse>("/api/heartbeat", {
     method: "POST",
@@ -1008,7 +1015,7 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
       else if (session.status === "ended") stats.finished += 1;
     }
     stats.not_started_or_total = stats.total;
-    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000 };
+    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000, end_at: getDemoSettings()?.end_at || "", server_now: new Date().toISOString() };
   }
 
   const query = new URLSearchParams();
@@ -1036,6 +1043,55 @@ export async function sessionAction(password: string, body: SessionActionRequest
     headers: {
       "x-admin-password": password
     },
+    body: JSON.stringify(body)
+  });
+}
+
+// S5: live exam-time control — set an absolute end_at, shift it by
+// extend_minutes, or end_now (which also force-ends every live session). The
+// demo branch mirrors the backend exactly: merge-update the demo settings, and
+// for end_now mark every non-ended demo session ended so the demo heartbeat
+// throws the same 409 session_ended the real backend would (B8 parity).
+export async function adjustExamTime(password: string, body: ExamTimeRequest): Promise<ExamTimeResponse> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const settings = getDemoSettings();
+    if (!settings?.start_at || !settings?.end_at) {
+      throw new Error("Proctoring schedule is not configured yet.");
+    }
+    const now = new Date().toISOString();
+    let newEndMs: number;
+    if (body.end_now === true) {
+      newEndMs = Date.parse(now);
+    } else if (body.end_at) {
+      newEndMs = Date.parse(body.end_at);
+      if (!Number.isFinite(newEndMs)) throw new Error("end_at must be a valid ISO 8601 date");
+    } else {
+      const delta = Number(body.extend_minutes);
+      if (!Number.isFinite(delta) || delta === 0) throw new Error("extend_minutes must be a non-zero number");
+      newEndMs = Date.parse(settings.end_at) + delta * 60_000;
+    }
+    if (newEndMs <= Date.parse(settings.start_at)) {
+      throw new Error("End time must be after the start time.");
+    }
+    const newEndAt = new Date(newEndMs).toISOString();
+    window.localStorage.setItem(demoSettingsKey, JSON.stringify({ ...settings, end_at: newEndAt, updated_at: now }));
+    let endedCount = 0;
+    if (body.end_now === true) {
+      for (const session of readDemoSessions()) {
+        if (session.status !== "ended") {
+          upsertDemoSession({ ...session, status: "ended", blocked_by_session_id: null });
+          endedCount += 1;
+        }
+      }
+    }
+    return { ok: true, start_at: settings.start_at, end_at: newEndAt, server_now: now, ended_count: endedCount };
+  }
+
+  return request<ExamTimeResponse>("/api/admin/exam-time", {
+    method: "POST",
+    headers: { "x-admin-password": password },
     body: JSON.stringify(body)
   });
 }

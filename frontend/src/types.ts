@@ -39,6 +39,11 @@ export type SessionStartResponse = {
     max_frame_rate: number;
   };
   heartbeat_interval_seconds: number;
+  // S5: authoritative exam end time + the server clock at response time (for
+  // client skew correction). Empty/absent when no schedule is configured or
+  // the backend predates S5.
+  end_at?: string;
+  server_now?: string;
 };
 
 // Event `type` is an open string (the backend stores arbitrary types). S1
@@ -60,6 +65,9 @@ export type HeartbeatResponse = {
   current_ip?: string;
   ip_changed?: boolean;
   newly_changed?: boolean;
+  // S5: current exam end time + server clock — the live update channel.
+  end_at?: string;
+  server_now?: string;
 };
 
 export type UploadUrlResponse = {
@@ -121,6 +129,26 @@ export type AdminStatsResponse = {
   // Distinct room labels for the console room dropdown (full contest scope).
   rooms?: string[];
   disconnected_staleness_ms?: number;
+  // S5: current exam end time + server clock for the console exam-time card.
+  end_at?: string;
+  server_now?: string;
+};
+
+// S5: POST /api/admin/exam-time — live end-time control. EXACTLY ONE field set:
+// an absolute end_at, a signed extend_minutes delta, or end_now (force-end).
+export type ExamTimeRequest = {
+  end_at?: string;
+  extend_minutes?: number;
+  end_now?: true;
+};
+
+export type ExamTimeResponse = {
+  ok: boolean;
+  start_at: string;
+  end_at: string;
+  server_now: string;
+  // Sessions force-ended by end_now (0 for plain time changes).
+  ended_count: number;
 };
 
 // GET /api/admin/recording-sessions — a LIGHTWEIGHT picker row for the screen-
