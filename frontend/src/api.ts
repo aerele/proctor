@@ -70,7 +70,10 @@ const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 export const isDemoMode = demoMode;
 const demoSettingsKey = "aerele-proctor-demo-settings";
 const demoSessionsKey = "aerele-proctor-demo-sessions";
-const demoAlertsKey = "aerele-proctor-demo-alerts";
+// v2: F6.4 reseeded the demo alerts so their session_ids/usernames join to the
+// DEMO_ALL_SESSIONS admin population (contextual action buttons need real
+// statuses behind every alert) — the key bump discards stale v1 stores.
+const demoAlertsKey = "aerele-proctor-demo-alerts-v2";
 const demoAlertSettingsKey = "aerele-proctor-demo-alert-settings";
 const demoReviewRosterKey = "aerele-proctor-demo-review-roster";
 const demoReviewVerdictsKey = "aerele-proctor-demo-review-verdicts";
@@ -1176,7 +1179,11 @@ export async function sessionAction(password: string, body: SessionActionRequest
   if (demoMode) {
     await wait(150);
     assertDemoAdmin(password);
-    const updated = applyDemoSessionAction(body);
+    // Two demo stores cover different demo flows: the localStorage session store
+    // (student-flow sessions started in this browser) and the canned admin
+    // population (DEMO_ALL_SESSIONS — what the admin console lists). Apply to
+    // both; their ids/usernames don't overlap, so counts don't double.
+    const updated = [...applyDemoSessionAction(body), ...applyDemoAdminPopulationAction(body)];
     return { ok: true, action: body.action, updated };
   }
 
@@ -1238,6 +1245,36 @@ export async function adjustExamTime(password: string, body: ExamTimeRequest): P
     headers: { "x-admin-password": password },
     body: JSON.stringify(body)
   });
+}
+
+// F6.4 demo parity: apply the action to the shared admin population
+// (DEMO_ALL_SESSIONS) too, so the alerts-console status join, the Sessions
+// drill-down, and the stat cards all reflect the new status on the next poll.
+// In-memory only (module const — resets on reload), mirroring the same target
+// resolution as the backend: a single session_id, or each username's newest
+// live session. Returns the updated rows for the action's "N session(s)" count.
+function applyDemoAdminPopulationAction(body: SessionActionRequest): Array<Record<string, unknown>> {
+  const targets: DemoAdminSessionRow[] = [];
+  if (body.session_id) {
+    const found = DEMO_ALL_SESSIONS.find((row) => row.session_id === body.session_id);
+    if (found) targets.push(found);
+  } else if (body.usernames?.length) {
+    for (const username of body.usernames) {
+      const usernameNorm = normalizeUsername(username);
+      const live = DEMO_ALL_SESSIONS
+        .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status !== "ended")
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      if (live.length) targets.push(live[0]);
+    }
+  }
+  const updated: Array<Record<string, unknown>> = [];
+  for (const row of targets) {
+    if (body.action === "approve" || body.action === "unlock" || body.action === "bypass") row.status = "active";
+    else if (body.action === "lock") row.status = "locked";
+    else if (body.action === "end") row.status = "ended";
+    updated.push({ ...row });
+  }
+  return updated;
 }
 
 // Mirror the backend applySessionAction semantics against the demo store so the
@@ -1398,8 +1435,48 @@ function writeDemoAlerts(alerts: Alert[]) {
 
 function demoAlerts(): Alert[] {
   // A small placeholder clip lives at /sample.webm so the video link is demoable.
+  // F6.4: every session_id / username here joins to a DEMO_ALL_SESSIONS row so
+  // the contextual action buttons render real statuses across the spectrum:
+  // active (Arav), pending_approval (Fatima), locked (Imran), ended (Asha,
+  // Neha, Karan) — plus the no-session contest-eval shape via Karan/Imran
+  // username joins.
   const sampleVideo = "/sample.webm";
   return [
+    {
+      // PENDING second-device candidate — no session_id on the alert; the
+      // username join resolves her latest live session (pending_approval) so
+      // the row offers Approve / Unblock / End.
+      id: "proctor:disconnected:fatima_a:mcet-june-2026:1",
+      source: "proctor",
+      type: "disconnected",
+      severity: "warning",
+      timestamp: "2026-06-05T09:50:08.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Fatima_A",
+      username_norm: "fatima_a",
+      room: "Lab A-1",
+      title: "Disconnected — second device waiting for approval",
+      detail: "Heartbeats stopped on the first device; a second device then started and is blocked pending admin approval.",
+      data: { last_heartbeat_age_seconds: 95, pending_session_id: "live-fatima-3c01" }
+    },
+    {
+      // ACTIVE candidate — joins live-arav-1a01 (active) → Lock / End.
+      id: "proctor:tab_away:arav_m:mcet-june-2026:1",
+      source: "proctor",
+      type: "tab_away",
+      severity: "warning",
+      timestamp: "2026-06-05T09:46:30.000Z",
+      contest_slug: "mcet-june-2026",
+      hackerrank_username: "Arav_M",
+      username_norm: "arav_m",
+      session_id: "live-arav-1a01",
+      room: "Lab A-1",
+      title: "Tab switched away for 14s",
+      detail: "Candidate left the exam tab for 14 seconds, then returned. Above the configured threshold.",
+      data: { away_seconds: 14, threshold_seconds: 12 },
+      video_key: "mcet-june-2026/arav_m/live-arav-1a01.webm",
+      download_url: sampleVideo
+    },
     {
       id: "proctor:recording_stopped:asha_r:mcet-june-2026:1",
       source: "proctor",
@@ -1409,12 +1486,12 @@ function demoAlerts(): Alert[] {
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Asha_R",
       username_norm: "asha_r",
-      session_id: "sess-9f2a",
+      session_id: "live-asha-4d01",
       room: "Lab A-1",
       title: "Recording stopped mid-assessment",
       detail: "MediaRecorder stopped 18m before submission with no end-session event. Possible deliberate stop.",
       data: { gap_seconds: 1080, last_chunk_index: 54 },
-      video_key: "mcet-june-2026/asha_r/sess-9f2a.webm",
+      video_key: "mcet-june-2026/asha_r/live-asha-4d01.webm",
       download_url: sampleVideo
     },
     {
@@ -1441,12 +1518,12 @@ function demoAlerts(): Alert[] {
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Neha_S",
       username_norm: "neha_s",
-      session_id: "sess-71b4",
+      session_id: "live-neha-4d03",
       room: "Lab B-2",
       title: "Screen share stopped",
       detail: "Candidate ended screen share for 42s, then resumed. Logged for review.",
       data: { interruptions: 1, gap_seconds: 42 },
-      video_key: "mcet-june-2026/neha_s/sess-71b4.webm",
+      video_key: "mcet-june-2026/neha_s/live-neha-4d03.webm",
       download_url: sampleVideo
     },
     {
@@ -1473,7 +1550,7 @@ function demoAlerts(): Alert[] {
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Asha_R",
       username_norm: "asha_r",
-      session_id: "sess-9f2a",
+      session_id: "live-asha-4d01",
       room: "Lab A-1",
       title: "Network IP changed",
       detail: "Source IP changed once early in the session (likely a Wi-Fi handoff). Informational only.",
