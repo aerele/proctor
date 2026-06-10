@@ -4,9 +4,9 @@
 // own-editor problem configured (SLICE1_PROBLEM truthy → ownEditor=true) NO
 // candidate-facing string may direct the candidate to HackerRank; with no
 // problem configured the original HackerRank copy is served verbatim.
-// Admin-facing text and the "HackerRank username" identity field label are
-// intentionally NOT part of this module — they keep the HackerRank name in
-// both flows.
+// Admin-facing text and the "Candidate ID" identity field label (S-A interim
+// label; wire field hackerrank_username frozen until S-E) are intentionally
+// NOT part of this module.
 import { describe, it, expect } from "vitest";
 import {
   cameraStateLabel,

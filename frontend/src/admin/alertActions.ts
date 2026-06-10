@@ -15,6 +15,7 @@
 //   end     → end any non-ended session.
 // Ended or unknown/missing sessions take NO session action (the backend bulk
 // path resolveActionTargets skips ended docs; acting on nothing is noise).
+import { candidateIdOf } from "../identity";
 import type { SessionAction } from "../types";
 
 export type SessionActionInfo = {
@@ -104,6 +105,8 @@ export function validSessionActionsFor(status: string | null | undefined): Sessi
 export type JoinableSession = {
   session_id: string;
   hackerrank_username: string;
+  /** S-A accept-both: newer backends may deliver candidate_id too. */
+  candidate_id?: string;
   status: string;
   created_at: string;
 };
@@ -111,6 +114,8 @@ export type JoinableSession = {
 export type JoinableAlert = {
   session_id?: string;
   hackerrank_username: string;
+  /** S-A accept-both: newer backends may deliver candidate_id too. */
+  candidate_id?: string;
   /** Lowercase/sanitized form when the alert carries one. */
   username_norm?: string;
 };
@@ -127,7 +132,7 @@ export function normalizeJoinUsername(value: string): string {
 function latestLiveSessionFor(username: string, sessions: JoinableSession[]): JoinableSession | null {
   const norm = normalizeJoinUsername(username);
   const live = sessions
-    .filter((session) => session.status !== "ended" && normalizeJoinUsername(session.hackerrank_username) === norm)
+    .filter((session) => session.status !== "ended" && normalizeJoinUsername(candidateIdOf(session)) === norm)
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
   return live[0] ?? null;
 }
@@ -144,7 +149,7 @@ function latestLiveSessionFor(username: string, sessions: JoinableSession[]): Jo
  * never started).
  */
 export function sessionForAlert(alert: JoinableAlert, sessions: JoinableSession[]): JoinableSession | null {
-  const username = alert.username_norm || alert.hackerrank_username;
+  const username = alert.username_norm || candidateIdOf(alert);
   const live = username ? latestLiveSessionFor(username, sessions) : null;
   if (alert.session_id) {
     const direct = sessions.find((session) => session.session_id === alert.session_id);
