@@ -225,6 +225,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
     if (req.method === "GET" && path === "/api/admin/session-detail") return send(res, 200, await adminSessionDetail(req));
+    if (req.method === "GET" && path === "/api/admin/session-events") return send(res, 200, await adminSessionEvents(req));
     if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
@@ -1757,6 +1758,83 @@ async function adminSessionDetail(req) {
       focus_event_count: Number(session.focus_event_count || 0),
       heartbeat_count: Number(session.heartbeat_count || 0)
     }
+  };
+}
+
+// Session event log (admin) — F6.7: the per-session candidate event stream for
+// the recordings timeline overlay. Events are NOT in Firestore — every batch is
+// a JSONL object under the session's GCS prefix: events/events-*.jsonl (client
+// batches via /api/events), events/session.jsonl (the session_started record),
+// and events/ip-change-*.jsonl (heartbeat-detected IP changes). This lists +
+// parses them all, projects each record to the LEAST-PRIVILEGE shape the
+// timeline needs ({type, timestamp, small scalar detail}), sorts by time and
+// caps the merged list so a pathological session can't return megabytes.
+const SESSION_EVENTS_LIMIT = 2000;
+const SESSION_EVENT_DETAIL_STRING_MAX = 200;
+const SESSION_EVENT_DETAIL_KEY_MAX = 8;
+// GCS object keys inside detail (chunk_uploaded carries storage_key) stay
+// server-side — the admin evidence listing is the sanctioned path to keys.
+const SESSION_EVENT_DETAIL_EXCLUDED_KEYS = new Set(["storage_key"]);
+
+// Project a stored event detail to a SMALL flat object: scalar values only
+// (strings truncated), excluded keys dropped, bounded key count. Never throws.
+function projectSessionEventDetail(detail) {
+  const out = {};
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return out;
+  let kept = 0;
+  for (const [key, value] of Object.entries(detail)) {
+    if (kept >= SESSION_EVENT_DETAIL_KEY_MAX) break;
+    if (SESSION_EVENT_DETAIL_EXCLUDED_KEYS.has(key)) continue;
+    if (typeof value === "string") out[key] = value.slice(0, SESSION_EVENT_DETAIL_STRING_MAX);
+    else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
+    else continue; // nested objects/arrays/null: dropped, scalars only
+    kept += 1;
+  }
+  return out;
+}
+
+async function adminSessionEvents(req) {
+  requireAdmin(req);
+  const sessionId = String(req.query?.session_id || "");
+  if (!sessionId) return badRequest("session_id required");
+  const session = await getSessionOrNull(sessionId);
+  if (!session) throw httpError(404, "Session not found");
+
+  const prefix = `${sessionPrefix(session)}events/`;
+  const [files] = await bucket().getFiles({ prefix, maxResults: 1000 });
+  // Download + parse with bounded concurrency (same rationale as the evidence
+  // listing). A malformed line or unreadable object is skipped, never fatal.
+  const batches = await mapWithConcurrency(files, 12, async (file) => {
+    try {
+      const [contents] = await file.download();
+      return String(contents)
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter((record) => record && typeof record === "object");
+    } catch {
+      return [];
+    }
+  });
+
+  const events = batches
+    .flat()
+    .map((record) => ({
+      type: String(record.type || "unknown"),
+      timestamp: String(record.timestamp || ""),
+      detail: projectSessionEventDetail(record.detail)
+    }))
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  return {
+    events: events.slice(0, SESSION_EVENTS_LIMIT),
+    truncated: events.length > SESSION_EVENTS_LIMIT
   };
 }
 

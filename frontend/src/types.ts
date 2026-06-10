@@ -267,6 +267,23 @@ export type SubmissionEventsResponse = {
   events: SubmissionEvent[];
 };
 
+// One candidate proctor event from GET /api/admin/session-events (F6.7): the
+// least-privilege projection of the session's stored event stream (GCS JSONL).
+// `detail` is a SMALL flat object — scalar values only, strings truncated
+// server-side — never the raw stored payload.
+export type SessionEventItem = {
+  type: string;
+  /** ISO 8601 timestamp of when the event fired on the candidate's machine. */
+  timestamp: string;
+  detail?: Record<string, string | number | boolean>;
+};
+
+export type SessionEventsResponse = {
+  events: SessionEventItem[];
+  /** True when the merged list was capped server-side. */
+  truncated?: boolean;
+};
+
 // One signed-URL evidence file as returned (per session) by GET /api/admin/sessions.
 export type SessionEvidence = {
   key: string;

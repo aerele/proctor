@@ -144,6 +144,9 @@ function makeFakeStorage() {
             },
             async getMetadata() {
               return [{ size: 1, updated: "2026-06-05T00:00:00Z" }];
+            },
+            async download() {
+              return [saved.get(key) ?? ""];
             }
           };
         },
@@ -154,7 +157,8 @@ function makeFakeStorage() {
               name,
               metadata: { size: 1, updated: "2026-06-05T00:00:00Z" },
               async getMetadata() { return [{ size: 1, updated: "2026-06-05T00:00:00Z" }]; },
-              async getSignedUrl() { return [`https://signed.example/${name}`]; }
+              async getSignedUrl() { return [`https://signed.example/${name}`]; },
+              async download() { return [saved.get(name) ?? ""]; }
             }));
           return [files];
         }
@@ -1915,4 +1919,129 @@ test("review routes: all require x-admin-password", async () => {
     const res = await call(req);
     assert.equal(res.statusCode, 401, `${req.method} ${req.path} must require admin`);
   }
+});
+
+// =====================================================================
+// F6.7 — GET /api/admin/session-events (recordings timeline event log)
+// =====================================================================
+// The candidate's proctor events live as JSONL objects under the session's
+// GCS prefix (events/events-*.jsonl batches, events/session.jsonl, and
+// events/ip-change-*.jsonl). This endpoint lists + parses them for the admin
+// recordings timeline: least-privilege projection ({type, timestamp, small
+// scalar detail}), ordered by time, capped.
+
+test("session-events: requires admin", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore(), storage: makeFakeStorage() });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-events", query: { session_id: "s1" } }));
+  assert.equal(res.statusCode, 401);
+});
+
+test("session-events: session_id required → 400; unknown session → 404", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore(), storage: makeFakeStorage() });
+  const missing = await call(makeReq({ method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS }));
+  assert.equal(missing.statusCode, 400);
+  const unknown = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: "nope" }
+  }));
+  assert.equal(unknown.statusCode, 404);
+});
+
+test("session-events: merges every events/ jsonl, time-ordered, least-privilege projection", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+
+  // Two batches posted OUT OF ORDER (later batch first) so the read must sort.
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [
+        // detail carries a GCS storage_key (must be dropped), a nested object
+        // (must be dropped — scalars only), and an oversized string (truncated).
+        { type: "chunk_uploaded", timestamp: "2026-06-05T10:05:00Z", detail: { kind: "screen", index: 3, storage_key: "contests/c/x.webm", nested: { deep: 1 }, message: "y".repeat(500) } },
+        { type: "window_blur", timestamp: "2026-06-05T10:04:00Z" }
+      ]
+    }
+  }));
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [
+        { type: "visibility_change", timestamp: "2026-06-05T10:01:00Z", visibility_state: "hidden", detail: { state: "hidden" } },
+        { type: "clipboard_activity", timestamp: "2026-06-05T10:02:30Z", detail: { action: "paste", length: 42 } }
+      ]
+    }
+  }));
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.truncated, false);
+
+  const events = res.body.events;
+  // 4 posted events + the session_started record from events/session.jsonl.
+  assert.equal(events.length, 5, JSON.stringify(events.map((e) => e.type)));
+  const stamps = events.map((e) => e.timestamp);
+  assert.deepEqual(stamps, [...stamps].sort(), "events must be time-ordered ascending");
+  assert.ok(events.some((e) => e.type === "session_started"), "session.jsonl record included");
+
+  // Least-privilege projection: exactly {type, timestamp, detail} per event.
+  for (const event of events) {
+    assert.deepEqual(Object.keys(event).sort(), ["detail", "timestamp", "type"]);
+  }
+  const uploaded = events.find((e) => e.type === "chunk_uploaded");
+  assert.equal(uploaded.detail.storage_key, undefined, "storage_key must be dropped");
+  assert.equal(uploaded.detail.nested, undefined, "nested objects must be dropped (scalars only)");
+  assert.equal(uploaded.detail.message.length, 200, "long strings truncated to 200 chars");
+  assert.equal(uploaded.detail.index, 3, "numeric scalars kept");
+  const clipboard = events.find((e) => e.type === "clipboard_activity");
+  assert.deepEqual(clipboard.detail, { action: "paste", length: 42 });
+});
+
+test("session-events: includes ip-change jsonl records written outside /api/events", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // The heartbeat path writes ip-change records as their own jsonl objects.
+  storage._saved.set(
+    `${prefix}events/ip-change-1234-abcd.jsonl`,
+    JSON.stringify({ type: "ip_address_changed", timestamp: "2026-06-05T10:03:00Z", detail: { previous_ip: "10.0.0.1", current_ip: "10.0.0.2" } }) + "\n"
+  );
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  const ipChange = res.body.events.find((e) => e.type === "ip_address_changed");
+  assert.ok(ipChange, "ip-change record included");
+  assert.equal(ipChange.detail.current_ip, "10.0.0.2");
+});
+
+test("session-events: caps the merged list and flags truncation", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // 2100 records in one jsonl (the cap is 2000). Malformed lines are skipped.
+  const lines = [];
+  for (let i = 0; i < 2100; i += 1) {
+    lines.push(JSON.stringify({ type: "window_blur", timestamp: `2026-06-05T10:00:00.${String(i).padStart(4, "0")}Z` }));
+  }
+  lines.push("not-json {");
+  storage._saved.set(`${prefix}events/events-1-bulk.jsonl`, lines.join("\n") + "\n");
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.events.length, 2000, "capped at 2000");
+  assert.equal(res.body.truncated, true);
 });

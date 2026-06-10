@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Check,
   ChevronDown,
@@ -21,8 +22,17 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchAdminSessions, fetchMyReviews, fetchRecordingSessions, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
-import type { AdminSessionDetail, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEvidence, SubmissionEvent } from "./types";
+import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
+import {
+  DEFAULT_LOG_FILTERS,
+  alertsForCandidate,
+  buildTimelineLog,
+  clusterMarkers,
+  filterTimelineLog,
+  type TimelineLogEntry,
+  type TimelineLogFilters
+} from "./recordingTimeline";
+import type { AdminSessionDetail, Alert, AlertSeverity, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SessionEvidence, SubmissionEvent } from "./types";
 
 // localStorage key for the reviewer's own name so a refresh keeps them reviewing.
 const REVIEWER_NAME_KEY = "proctor_reviewer_name";
@@ -188,6 +198,20 @@ function tickIntervals(spanSeconds: number): { major: number; minor: number } {
   return { major: 15 * 60, minor: 5 * 60 }; // 15min labels, 5min minors
 }
 
+// F6.7: severity → marker/dot color classes shared by the timeline alert dots
+// and the activity-log rows (critical/warning/info on the standard palette).
+const SEVERITY_DOT: Record<AlertSeverity, string> = {
+  critical: "bg-danger",
+  warning: "bg-warning",
+  info: "bg-accent"
+};
+
+const SEVERITY_BADGE: Record<AlertSeverity, string> = {
+  critical: "bg-danger/10 text-danger",
+  warning: "bg-warning/10 text-warning",
+  info: "bg-accent/10 text-accent"
+};
+
 // Parse a "jump to time" string into seconds. Accepts mm:ss, h:mm:ss, a bare
 // minutes number (e.g. "75" → 75min) or a decimal minutes (e.g. "12.5"). Returns
 // NaN when the input can't be understood so callers can ignore it.
@@ -236,6 +260,13 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // The selected user's SUBMISSION-TIME MARKERS (poller-sourced). Empty when the
   // user has none or the endpoint is not deployed (graceful — no markers shown).
   const [submissionEvents, setSubmissionEvents] = useState<SubmissionEvent[]>([]);
+  // F6.7: the active session's proctor EVENT stream (visibility/clipboard/IP/
+  // recording-state) + the candidate's ALERTS, for the activity overlay + log.
+  // Both degrade to empty (no markers) when unavailable — never block playback.
+  const [sessionEvents, setSessionEvents] = useState<SessionEventItem[]>([]);
+  const [candidateAlerts, setCandidateAlerts] = useState<Alert[]>([]);
+  // Activity-log filter state — everything on by default (usability bar).
+  const [logFilters, setLogFilters] = useState<TimelineLogFilters>(DEFAULT_LOG_FILTERS);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [loadingUser, setLoadingUser] = useState(false);
   const [error, setError] = useState("");
@@ -388,6 +419,67 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
 
   // A3: total recording-gap duration (seconds) across all gaps, for the summary card.
   const totalGapSeconds = useMemo(() => gaps.reduce((sum, g) => sum + (g.toSec - g.fromSec), 0), [gaps]);
+
+  // ---- F6.7: activity overlay + log data ----------------------------------
+  // Fetch the active session's EVENT stream (per-session) and the candidate's
+  // ALERTS (per-candidate over the session's contest scope; archived included —
+  // a reviewer wants the full history). Re-runs when the active session
+  // changes; both fetches degrade to empty on failure/404.
+  useEffect(() => {
+    const session = activeSession;
+    const sessionId = session?.session_id ? String(session.session_id) : "";
+    if (!sessionId) {
+      setSessionEvents([]);
+      setCandidateAlerts([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const events = await fetchSessionEvents(password, sessionId);
+        if (!cancelled) setSessionEvents(events ?? []);
+      } catch {
+        if (!cancelled) setSessionEvents([]);
+      }
+      try {
+        const response = await fetchAlerts(password, {
+          contest_slug: session?.contest_slug || undefined,
+          include_archived: true
+        });
+        if (!cancelled) setCandidateAlerts(alertsForCandidate(response.alerts ?? [], session ?? {}));
+      } catch {
+        if (!cancelled) setCandidateAlerts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.session_id, password]);
+
+  // The merged, time-ordered activity entries (alerts + events + submissions)
+  // on the SAME test-relative scale, blackout-tagged via the gap spans — then
+  // the filtered view + the per-kind marker lists the overlay renders.
+  const logEntries = useMemo(
+    () => buildTimelineLog({ alerts: candidateAlerts, events: sessionEvents, submissions: submissionEvents, testStartMs, gaps }),
+    [candidateAlerts, sessionEvents, submissionEvents, testStartMs, gaps]
+  );
+  const visibleLog = useMemo(() => filterTimelineLog(logEntries, logFilters), [logEntries, logFilters]);
+  const alertMarkers = useMemo(() => visibleLog.filter((entry) => entry.kind === "alert"), [visibleLog]);
+  // Event ticks CLUSTER when closer than ~0.8% of the span (min 2s) so a dense
+  // stream stays individually hoverable instead of smearing into a blob.
+  const eventClusters = useMemo(
+    () => clusterMarkers(visibleLog.filter((entry) => entry.kind === "event"), Math.max(spanDuration * 0.008, 2)),
+    [visibleLog, spanDuration]
+  );
+  const logCounts = useMemo(
+    () => ({
+      alerts: logEntries.filter((entry) => entry.kind === "alert").length,
+      events: logEntries.filter((entry) => entry.kind === "event").length,
+      submissions: logEntries.filter((entry) => entry.kind === "submission").length
+    }),
+    [logEntries]
+  );
 
   // ---- Load a chosen user's sessions (with signed evidence). --------------
   // `silentIfEmpty` (review mode) suppresses the "No sessions found" banner so
@@ -1428,6 +1520,38 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       );
                     })}
 
+                    {/* ALERT MARKERS (F6.7) — severity-colored DOTS riding the
+                        track center: a distinct shape from the thin submission
+                        ticks above/below, white-ringed so they read against the
+                        fill and gaps. Hover gives headline + time (+ blackout);
+                        click jumps the recording there. */}
+                    {alertMarkers.map((entry) => {
+                      const clamped = Math.max(span.start, Math.min(entry.offsetSec, span.end));
+                      const left = ((clamped - span.start) / spanDuration) * 100;
+                      const label = `⚠ ${entry.label} · ${formatClock(entry.offsetSec)}${entry.duringGap ? " · during blackout" : ""}`;
+                      return (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          title={label}
+                          aria-label={label}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            seekToTestTime(clamped, wantPlaying());
+                          }}
+                          className="group absolute top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 cursor-pointer"
+                          style={{ left: `${left}%` }}
+                        >
+                          {/* Invisible widened hit-area for easy hover at density. */}
+                          <span className="absolute -inset-1.5" />
+                          <span
+                            className={`block h-2.5 w-2.5 rounded-full ring-2 ring-white ${SEVERITY_DOT[entry.severity ?? "info"]} transition-transform group-hover:scale-125`}
+                          />
+                        </button>
+                      );
+                    })}
+
                     {/* DRAGGABLE PLAYHEAD with a live readout (shown while dragging). */}
                     <div className="pointer-events-none absolute bottom-0 top-0 z-30" style={{ left: `${playheadPct}%` }}>
                       <div className="absolute top-1/2 h-7 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-ink" />
@@ -1440,7 +1564,43 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     </div>
                   </div>
 
-                  <div className="mt-6 flex items-center justify-between text-[11px] text-muted">
+                  {/* EVENT LANE (F6.7) — the candidate's proctor events as
+                      SUBDUED ticks on a slim strip aligned under the scrubber
+                      (kept off the main bar so it stays clean at zoom-out).
+                      Near-coincident events cluster into one slightly wider
+                      tick whose tooltip lists them; click seeks to the first. */}
+                  {eventClusters.length ? (
+                    // mt-6 clears the major-tick labels hanging below the bar.
+                    <div className="relative mt-6 h-3 w-full" aria-label="Candidate events lane">
+                      {eventClusters.map((cluster) => {
+                        const clamped = Math.max(span.start, Math.min(cluster.offsetSec, span.end));
+                        const left = ((clamped - span.start) / spanDuration) * 100;
+                        const head = cluster.entries.slice(0, 3).map((entry) => entry.label);
+                        const more = cluster.entries.length - head.length;
+                        const label = `${head.join(" · ")}${more > 0 ? ` · +${more} more` : ""} · ${formatClock(cluster.offsetSec)}`;
+                        return (
+                          <button
+                            key={`evc-${cluster.entries[0].id}`}
+                            type="button"
+                            title={label}
+                            aria-label={label}
+                            onClick={() => seekToTestTime(clamped, wantPlaying())}
+                            className="group absolute top-0 -translate-x-1/2 cursor-pointer"
+                            style={{ left: `${left}%` }}
+                          >
+                            <span className="absolute -inset-x-1.5 inset-y-0" />
+                            <span
+                              className={`block h-2.5 ${cluster.entries.length > 1 ? "w-1 rounded-sm" : "w-0.5"} bg-muted/60 transition group-hover:bg-ink`}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {/* mt-6 clears the tick labels; the event lane (when shown)
+                      already did, so only a small gap is needed after it. */}
+                  <div className={`${eventClusters.length ? "mt-2" : "mt-6"} flex items-center justify-between text-[11px] text-muted`}>
                     <span>{formatClock(span.start)}</span>
                     <span>
                       {playlist.length} chunk(s) · {CHUNK_SECONDS}s each
@@ -1455,20 +1615,39 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     focused · gaps shown as hatched blanks.
                   </p>
 
-                  {/* SUBMISSION-TIME MARKERS legend + counts. Hidden entirely when
-                      the student has no markers (no endpoint / no submissions). */}
-                  {markers.length ? (
+                  {/* MARKER LEGEND — submissions (ticks above/below), alerts
+                      (severity dots on the track) and events (subdued lane
+                      below). Hidden entirely when nothing is overlaid. */}
+                  {markers.length || alertMarkers.length || eventClusters.length ? (
                     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs text-muted">
-                      <span className="font-medium text-ink">Submissions on timeline:</span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="inline-block h-3.5 w-0.5 bg-emerald-500" /> above
-                        <span className="font-medium text-ink">✓ {validCount} valid</span>
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="inline-block h-3.5 w-0.5 bg-danger" /> below
-                        <span className="font-medium text-ink">✗ {invalidCount} invalid</span>
-                      </span>
-                      <span className="text-muted/70">Hover a tick for details · click to jump the recording there.</span>
+                      <span className="font-medium text-ink">On the timeline:</span>
+                      {markers.length ? (
+                        <>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="inline-block h-3.5 w-0.5 bg-emerald-500" /> above
+                            <span className="font-medium text-ink">✓ {validCount} valid</span>
+                          </span>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="inline-block h-3.5 w-0.5 bg-danger" /> below
+                            <span className="font-medium text-ink">✗ {invalidCount} invalid</span>
+                          </span>
+                        </>
+                      ) : null}
+                      {alertMarkers.length ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="inline-block h-2.5 w-2.5 rounded-full bg-danger ring-2 ring-white" />
+                          <span className="font-medium text-ink">{alertMarkers.length} alert{alertMarkers.length > 1 ? "s" : ""}</span>
+                          on the track
+                        </span>
+                      ) : null}
+                      {eventClusters.length ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="inline-block h-2.5 w-0.5 bg-muted/60" />
+                          <span className="font-medium text-ink">{logCounts.events} event{logCounts.events > 1 ? "s" : ""}</span>
+                          in the lane below
+                        </span>
+                      ) : null}
+                      <span className="text-muted/70">Hover a marker for details · click to jump the recording there.</span>
                     </div>
                   ) : null}
                 </div>
@@ -1479,6 +1658,22 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                 </div>
               )}
               </>
+              ) : null}
+
+              {/* F6.7 ACTIVITY LOG — alerts + events + submissions merged
+                  time-ordered with kind/severity filters; click a row to jump
+                  the player there. Outside the timeline-detail toggle so the
+                  log keeps working with the scrubber collapsed. */}
+              {logEntries.length ? (
+                <ActivityLogPanel
+                  entries={visibleLog}
+                  counts={logCounts}
+                  filters={logFilters}
+                  onFilters={setLogFilters}
+                  onJump={(offsetSec) =>
+                    seekToTestTime(Math.max(span.start, Math.min(offsetSec, span.end)), wantPlaying())
+                  }
+                />
               ) : null}
             </>
           )}
@@ -1495,6 +1690,141 @@ function SummaryStat({ label, value, hint }: { label: string; value: string; hin
       <dt className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</dt>
       <dd className="mt-1 font-mono text-lg font-semibold text-ink">{value}</dd>
       {hint ? <dd className="mt-0.5 text-[11px] text-muted">{hint}</dd> : null}
+    </div>
+  );
+}
+
+// F6.7 — one kind-toggle chip in the activity-log header (Alerts / Events /
+// Submissions with their counts). Filled when active, outlined when off.
+function LogFilterChip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`focus-ring inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${
+        active ? "border-ink bg-ink text-white" : "border-line bg-white text-muted hover:border-ink/40"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+// F6.7 — the ACTIVITY LOG card: the merged alert/event/submission entries as a
+// time-ordered, click-to-jump list. Each row carries the test-relative clock,
+// the absolute wall time, a one-line label + detail, the alert severity where
+// applicable, and a "during blackout" tag when the moment has no footage.
+function ActivityLogPanel({
+  entries,
+  counts,
+  filters,
+  onFilters,
+  onJump
+}: {
+  entries: TimelineLogEntry[];
+  counts: { alerts: number; events: number; submissions: number };
+  filters: TimelineLogFilters;
+  onFilters: (next: TimelineLogFilters) => void;
+  onJump: (offsetSec: number) => void;
+}) {
+  const total = counts.alerts + counts.events + counts.submissions;
+  return (
+    <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted">
+          <Activity size={15} /> Activity log
+          <span className="font-normal normal-case text-muted/80">
+            {entries.length === total ? `${total} entries` : `${entries.length} of ${total}`}
+          </span>
+        </h2>
+        {/* Kind toggles + alert-severity narrowing (defaults: everything on). */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <LogFilterChip
+            active={filters.alerts}
+            label={`Alerts ${counts.alerts}`}
+            onClick={() => onFilters({ ...filters, alerts: !filters.alerts })}
+          />
+          <LogFilterChip
+            active={filters.events}
+            label={`Events ${counts.events}`}
+            onClick={() => onFilters({ ...filters, events: !filters.events })}
+          />
+          <LogFilterChip
+            active={filters.submissions}
+            label={`Submissions ${counts.submissions}`}
+            onClick={() => onFilters({ ...filters, submissions: !filters.submissions })}
+          />
+          <select
+            className="focus-ring h-7 rounded-md border border-line bg-white px-2 text-xs text-ink disabled:opacity-50"
+            value={filters.severity}
+            onChange={(event) => onFilters({ ...filters, severity: event.target.value as TimelineLogFilters["severity"] })}
+            disabled={!filters.alerts}
+            aria-label="Alert severity filter"
+            title="Narrow the alert rows by severity"
+          >
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="info">Info</option>
+          </select>
+        </div>
+      </div>
+
+      {entries.length ? (
+        <ol className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              <button
+                type="button"
+                onClick={() => onJump(entry.offsetSec)}
+                title={`Jump the recording to ${formatClock(entry.offsetSec)}`}
+                className="focus-ring flex w-full items-start gap-3 rounded px-1.5 py-2 text-left hover:bg-ink/5"
+              >
+                {/* Kind dot: alert = severity color, event = subdued, submission
+                    = green/red by validity (matches the timeline markers). */}
+                <span
+                  className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                    entry.kind === "alert"
+                      ? SEVERITY_DOT[entry.severity ?? "info"]
+                      : entry.kind === "submission"
+                        ? entry.valid
+                          ? "bg-emerald-500"
+                          : "bg-danger"
+                        : "bg-muted/60"
+                  }`}
+                />
+                <span className="w-16 shrink-0 pt-0.5 font-mono text-xs font-medium text-ink">
+                  {formatClock(entry.offsetSec)}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="text-sm font-medium text-ink">{entry.label}</span>
+                    {entry.kind === "alert" ? (
+                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase ${SEVERITY_BADGE[entry.severity ?? "info"]}`}>
+                        {entry.severity}
+                      </span>
+                    ) : null}
+                    {entry.duringGap ? (
+                      <span className="rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">
+                        during blackout
+                      </span>
+                    ) : null}
+                  </span>
+                  {entry.detail ? <span className="mt-0.5 block truncate text-xs text-muted">{entry.detail}</span> : null}
+                </span>
+                <span className="shrink-0 pt-0.5 text-[11px] text-muted" title={entry.timestamp}>
+                  {new Date(entry.timestamp).toLocaleTimeString()}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-3 rounded-md border border-line bg-white/60 px-3 py-2 text-xs text-muted">
+          Nothing matches the current filters.
+        </p>
+      )}
     </div>
   );
 }
