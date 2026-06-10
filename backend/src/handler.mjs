@@ -226,6 +226,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
+    if (req.method === "GET" && path === "/api/admin/attendance") return send(res, 200, await adminAttendance(req));
     if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
@@ -2006,6 +2007,91 @@ function isStaleSession(doc, nowMs) {
     newest = created;
   }
   return nowMs - newest > DISCONNECTED_STALENESS_MS;
+}
+
+// ---- S6 attendance (spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md)
+
+// GET /api/admin/attendance?contest_slug=<optional> — roster-based attendance:
+// taken / not-taken counts + the absentee list. "Taken" = the roster student has
+// AT LEAST ONE session doc whose roster_unique_id matches their ACTIVE-version
+// roster entry (any status — pending_approval/locked still means they showed
+// up); "in_progress" = any of their sessions is non-ended; "completed" = all
+// ended. Sessions that can't be tied to the active roster (legacy pre-roster,
+// blank id, replaced-roster ids) are surfaced as unmatched_sessions — never
+// silently dropped, never counted as attendance. Absentee rows carry ONLY the
+// mapped identity fields (unique_id, name, roll_number, room) — no email, no
+// raw roster fields (PII minimization). Computed on demand: one version-
+// filtered roster scan + one session scan, joined in memory (no new state, no
+// composite index — both filters are single-field equalities). The admin UI
+// loads this on tab-open + manual refresh only (NO auto-poll).
+async function adminAttendance(req) {
+  requireAdmin(req);
+  const contestSlug = req.query?.contest_slug;
+  const meta = await getRosterMeta();
+  if (!meta) return { configured: false };
+
+  // Active-version roster entries (stale versions are invisible — S2 invariant).
+  const entriesSnap = await firestore
+    .collection(ROSTER_COLLECTION)
+    .where("roster_version", "==", meta.version)
+    .limit(ROSTER_LIMIT)
+    .get();
+  const entries = entriesSnap.docs.map((doc) => doc.data());
+
+  // Session docs, optionally contest-scoped (same pattern as adminStats).
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  }
+  const sessionsSnap = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const sessions = sessionsSnap.docs.map((doc) => doc.data());
+
+  // norm unique id -> true when ANY of that student's sessions is still live.
+  const knownNorms = new Set(entries.map((entry) => String(entry.unique_id_norm || "")));
+  const liveByNorm = new Map();
+  let unmatched = 0;
+  for (const session of sessions) {
+    const idNorm = normalizeUniqueId(String(session.roster_unique_id || ""));
+    if (!idNorm || !knownNorms.has(idNorm)) {
+      unmatched += 1;
+      continue;
+    }
+    const live = session.status !== "ended";
+    liveByNorm.set(idNorm, Boolean(liveByNorm.get(idNorm)) || live);
+  }
+
+  const mapping = meta.column_mapping || {};
+  const mappedField = (entry, name) =>
+    (mapping[name] ? String(entry.fields?.[mapping[name]] || "") : "");
+  const taken = { total: 0, in_progress: 0, completed: 0 };
+  const absentees = [];
+  for (const entry of entries) {
+    const idNorm = String(entry.unique_id_norm || "");
+    if (liveByNorm.has(idNorm)) {
+      taken.total += 1;
+      if (liveByNorm.get(idNorm)) taken.in_progress += 1;
+      else taken.completed += 1;
+    } else {
+      absentees.push({
+        unique_id: String(entry.unique_id || ""),
+        name: mappedField(entry, "name"),
+        roll_number: mappedField(entry, "roll_number"),
+        room: mappedField(entry, "room")
+      });
+    }
+  }
+  absentees.sort((a, b) => a.unique_id.localeCompare(b.unique_id));
+
+  return {
+    configured: true,
+    contest_slug: contestSlug ? String(contestSlug) : null,
+    roster_total: entries.length,
+    taken,
+    not_taken: absentees.length,
+    absentees,
+    unmatched_sessions: unmatched,
+    generated_at: new Date().toISOString()
+  };
 }
 
 // Phase 2 (2.4 / Epic 4.3): remote admin actions, per-session (session_id) or in
