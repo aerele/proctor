@@ -6,6 +6,7 @@ import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { configureContestStore, createContest, listContests, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
+import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -1417,9 +1418,40 @@ async function adminGetProblem(req) {
   if (!isValidProblemId(id)) return badRequest("invalid id");
   const doc = await problemRef(id).get();
   if (!doc.exists) throw httpError(404, "Problem not found");
+  // S-I §5.3: surface what references this problem so the editor can render
+  // the "Referenced by" line and pre-warn before delete/unpublish.
+  const refs = findProblemReferences(id, await problemReferenceUniverse());
   // Full doc INCLUDING hiddenTests — admin-only surface.
-  return { problem: doc.data() };
+  return {
+    problem: doc.data(),
+    references: {
+      contests: refs.contests.map((contest) => contest.slug),
+      templates: refs.templates.map((template) => template.slug)
+    }
+  };
 }
+
+// ---- S-I §1.4.3: live-reference guard ----------------------------------------
+// Problem CONTENT stays live on contests (exec/start read the bank at serve
+// time), so destructive bank edits must be guarded:
+//   delete while referenced                  -> 409 problem_referenced
+//   unpublish while CONTEST-referenced       -> 409 problem_referenced
+//     (template-only references allow it — instantiation re-validates)
+//   hiddenTests edit while an OPEN contest references it -> typed confirm
+//     (body.confirm_live_edit === the problem id), else 409.
+
+// Bounded pre-fetch for findProblemReferences: real contest docs (limit 500;
+// archived filtered by the pure function) + templates with seeds merged. The
+// synthesized LEGACY contest is deliberately absent — its settings doc keeps
+// the original silent-clear branch below instead of a 409.
+async function problemReferenceUniverse() {
+  const [contestSnapshot, templates] = await Promise.all([
+    firestore.collection(CONTESTS_COLLECTION).limit(CONTESTS_REFERENCE_LIMIT).get(),
+    listTemplates()
+  ]);
+  return { contests: contestSnapshot.docs.map((doc) => doc.data()), templates };
+}
+const CONTESTS_REFERENCE_LIMIT = 500;
 
 async function adminSaveProblem(req) {
   requireAdmin(req);
@@ -1427,6 +1459,28 @@ async function adminSaveProblem(req) {
   const checked = validateProblemInput(body);
   if (!checked.ok) return badRequest(checked.error);
   const existing = await problemRef(checked.problem.id).get();
+  // Guard comparisons run against doc-or-seed (a draft doc shadowing a
+  // published seed IS an unpublish); created_at preservation stays doc-only.
+  const current = existing.exists ? existing.data() : await getBankProblem(checked.problem.id);
+  if (current) {
+    const unpublishing = current.status === "published" && checked.problem.status === "draft";
+    const hiddenChanged = JSON.stringify(current.hiddenTests || []) !== JSON.stringify(checked.problem.hiddenTests);
+    if (unpublishing || hiddenChanged) {
+      const refs = findProblemReferences(checked.problem.id, await problemReferenceUniverse());
+      if (unpublishing && refs.contests.length) {
+        throw httpErrorWith(409, "problem_referenced", {
+          contests: refs.contests.map((contest) => contest.slug),
+          templates: refs.templates.map((template) => template.slug)
+        });
+      }
+      const openContests = refs.contests.filter((contest) => contest.status === "open");
+      if (hiddenChanged && openContests.length && body.confirm_live_edit !== checked.problem.id) {
+        throw httpErrorWith(409, "live_edit_confirmation_required", {
+          contests: openContests.map((contest) => contest.slug)
+        });
+      }
+    }
+  }
   const now = new Date().toISOString();
   const item = {
     ...checked.problem,
@@ -1442,9 +1496,18 @@ async function adminDeleteProblem(req) {
   const body = parseBody(req);
   const id = String(body.id || "");
   if (!isValidProblemId(id)) return badRequest("invalid id");
+  // S-I §1.4.3: references found -> 409, NO silent clearing of contest or
+  // template assignments. (Replaces the old delete-clears-assignment rule.)
+  const refs = findProblemReferences(id, await problemReferenceUniverse());
+  if (refs.contests.length || refs.templates.length) {
+    throw httpErrorWith(409, "problem_referenced", {
+      contests: refs.contests.map((contest) => contest.slug),
+      templates: refs.templates.map((template) => template.slug)
+    });
+  }
   await problemRef(id).delete();
-  // If the deleted problem was the assigned contest problem, clear the
-  // assignment so start/resume stop advertising a dead id (link-flow fallback).
+  // LEGACY contest path only (spec §1.4.3): the SETTINGS doc assignment is
+  // still silently cleared so legacy start/resume stop advertising a dead id.
   const settings = await getSettings();
   if (settings?.problem_id === id) {
     await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
