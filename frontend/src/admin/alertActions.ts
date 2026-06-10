@@ -140,6 +140,22 @@ export function sessionForAlert(alert: JoinableAlert, sessions: JoinableSession[
 }
 
 /**
+ * F6 review: the sessions-list response is CAPPED server-side, and the backend
+ * flags a page that may be MISSING live sessions as truncated (query cap hit,
+ * or more live rows than the page holds). Joining against such a list would
+ * show "no live session" — and hide Lock/End — for candidates who are actually
+ * live. Treat truncated exactly like "no join data": return null so callers
+ * fall back to the full action set (the backend resolves the real target
+ * session per candidate when an action runs, so capability is never lost).
+ */
+export function joinableSessions<T extends JoinableSession>(
+  result: { sessions: T[]; truncated: boolean } | null
+): T[] | null {
+  if (result === null || result.truncated) return null;
+  return result.sessions;
+}
+
+/**
  * Bulk buttons over a selection: the UNION of valid actions across each
  * selected candidate's latest live session (deduped, canonical order). The
  * backend bulk path applies an action per-candidate to that same latest live

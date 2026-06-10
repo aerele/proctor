@@ -155,6 +155,8 @@ const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
 const SESSIONS_QUERY_LIMIT = 2000;
+// Max rows per sessions-list response page (the drill-down/status-join list).
+const SESSIONS_LIST_PAGE_LIMIT = 500;
 const SETTINGS_ID = "active";
 // Settings doc id for the per-type proctor alert configuration (enabled +
 // severity). Lives in the same SETTINGS_COLLECTION but under a distinct doc id
@@ -1710,10 +1712,27 @@ async function adminSessionsList(req) {
       default: return false;
     }
   };
-  const sessions = docs
-    .filter(matchesStatus)
-    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
-    .slice(0, 500)
+  const matched = docs.filter(matchesStatus);
+  const byNewest = (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""));
+  // F6 review: the page is capped, but LIVE (non-ended) rows must never be
+  // displaced by newer ended rows — the alerts-console status join (F6.4)
+  // reads this list to decide which actions a live candidate gets, and cutting
+  // a live row would silently hide their Lock/End. Select every live row first
+  // (they are the actionable ones), fill the remainder with the newest ended
+  // rows, then present the final page newest-first as before.
+  const live = matched.filter((doc) => doc.status !== "ended").sort(byNewest);
+  const ended = matched.filter((doc) => doc.status === "ended").sort(byNewest);
+  const page = live.slice(0, SESSIONS_LIST_PAGE_LIMIT)
+    .concat(ended.slice(0, Math.max(0, SESSIONS_LIST_PAGE_LIMIT - live.length)))
+    .sort(byNewest);
+  // truncated = live coverage may be incomplete: the raw query hit its cap (it
+  // has no orderBy, so ARBITRARY docs — live ones included — may be missing
+  // from the snapshot) or more live rows matched than the page holds. Status-
+  // join consumers must treat a truncated list like no list at all and fall
+  // back to the full action set; ended rows cut by the cap don't matter (an
+  // ended session takes no session action anyway).
+  const truncated = snapshot.docs.length >= SESSIONS_QUERY_LIMIT || live.length > SESSIONS_LIST_PAGE_LIMIT;
+  const sessions = page
     .map((doc) => ({
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
@@ -1724,7 +1743,7 @@ async function adminSessionsList(req) {
       created_at: doc.created_at || "",
       status: doc.status || ""
     }));
-  return { sessions };
+  return { sessions, truncated };
 }
 
 // Session detail (admin) — F6.3: ONE session doc for the Sessions detail card,

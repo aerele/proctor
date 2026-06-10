@@ -1121,6 +1121,79 @@ test("sessions-list: requires admin password", async () => {
   assert.equal(res.statusCode, 401);
 });
 
+// Seed session docs DIRECTLY into the fake store (bypassing /api/session/start)
+// so the cap/truncation tests below can create hundreds of docs cheaply. Each
+// doc gets a monotonically increasing created_at, so seeding order == age order
+// (later seeds are newer).
+function seedSessionDocs(firestore, count, make = () => ({})) {
+  firestore.collection(process.env.SESSION_COLLECTION); // materialize the store
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  for (let i = 0; i < count; i += 1) {
+    const seq = store.size;
+    const doc = {
+      session_id: `seed-${String(seq).padStart(5, "0")}`,
+      hackerrank_username: `bulk_user_${seq}`,
+      name: `Bulk User ${seq}`,
+      room: "Lab-1",
+      contest_slug: "bulk-contest",
+      chunk_count: 0,
+      created_at: new Date(Date.UTC(2026, 5, 9) + seq * 1000).toISOString(),
+      status: "active",
+      last_heartbeat_at: new Date().toISOString(),
+      ...make(i)
+    };
+    store.set(doc.session_id, doc);
+  }
+}
+
+test("sessions-list: capped page keeps live rows over newer ended rows (F6.4 join must see every live session)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // 30 live sessions created EARLY, then 600 ended rows created later — a plain
+  // newest-500 cut would drop every live row, making the alerts-console join
+  // render "no live session" (and hide Lock/End) for candidates who are live.
+  seedSessionDocs(firestore, 30, () => ({ status: "active" }));
+  seedSessionDocs(firestore, 600, () => ({ status: "ended" }));
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 500, "the page stays capped at 500 rows");
+  const liveRows = res.body.sessions.filter((row) => row.status !== "ended");
+  assert.equal(liveRows.length, 30, "EVERY live row survives the cap");
+  // Presentation order is unchanged: newest-first within the selected page.
+  const stamps = res.body.sessions.map((row) => row.created_at);
+  assert.deepEqual(stamps, [...stamps].sort((a, b) => b.localeCompare(a)), "page is newest-first");
+  assert.equal(res.body.truncated, false, "live coverage is complete → not truncated");
+});
+
+test("sessions-list: truncated:true when live rows exceed the page cap", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSessionDocs(firestore, 520, () => ({ status: "active" }));
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 500, "the page stays capped");
+  assert.equal(res.body.truncated, true, "live rows were cut → consumers must not trust the join");
+});
+
+test("sessions-list: truncated:true when the raw query hits SESSIONS_QUERY_LIMIT", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // Exactly 2000 docs = the handler's SESSIONS_QUERY_LIMIT. The raw query has
+  // no orderBy, so at the cap ARBITRARY docs (live ones included) may have been
+  // dropped — the list must self-report as truncated even though the returned
+  // page itself is small and the matched live rows fit.
+  seedSessionDocs(firestore, 2000, () => ({ status: "ended" }));
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.truncated, true, "query-cap truncation is flagged");
+});
+
 // =====================================================================
 // Session detail — GET /api/admin/session-detail (F6.3 detail card). ONE
 // session doc projected to the least-privilege fields the admin card shows:

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
-import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
+import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
 import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration } from "./admin/sessionDetail";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
@@ -1446,8 +1446,9 @@ function AdminApp() {
   // F6.4: ALL session docs (status "" = no filter) under the current contest
   // scope, used by the alerts console to join each alert to its candidate's
   // CURRENT session status so rows render only the actions valid for it.
-  // null = not loaded yet OR sessions-list not deployed → rows fall back to the
-  // full action set (a stale backend must not lose admin capability).
+  // null = not loaded yet, sessions-list not deployed, OR the list came back
+  // truncated (live rows may be missing — joinableSessions) → rows fall back
+  // to the full action set (incomplete data must not lose admin capability).
   const [alertSessions, setAlertSessions] = useState<RecordingSession[] | null>(null);
 
   const loadAlerts = async (filters?: AlertFilters) => {
@@ -1468,13 +1469,14 @@ function AdminApp() {
   };
 
   // F6.4: refresh the status-join data for the alerts console. Errors are
-  // non-fatal (the join is an enhancement; alerts stay usable without it) and a
-  // 404 keeps null via fetchSessionsList's graceful-degrade contract.
+  // non-fatal (the join is an enhancement; alerts stay usable without it); a
+  // 404 or a TRUNCATED list maps to null via joinableSessions → rows fall back
+  // to the full action set rather than trusting an incomplete join.
   const loadAlertSessions = async (filters?: AlertFilters) => {
     try {
       const active = filters ?? alertFilters;
       const list = await fetchSessionsList(password, { status: "", contestSlug: active.contest_slug });
-      setAlertSessions(list);
+      setAlertSessions(joinableSessions(list));
     } catch {
       // Keep the previous join data — stale statuses beat dropping the buttons.
     }
@@ -1556,7 +1558,7 @@ function AdminApp() {
         return;
       }
       setSessionsUnavailable(false);
-      setSessionsList(list);
+      setSessionsList(list.sessions);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1615,7 +1617,7 @@ function AdminApp() {
         if (cancelled) return;
         const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
         setAlerts(sorted);
-        setAlertSessions(sessions);
+        setAlertSessions(joinableSessions(sessions));
         if (response.rooms) setRooms(response.rooms);
         setAlertsLoaded(true);
       } catch (cause) {
@@ -1682,7 +1684,7 @@ function AdminApp() {
           if (cancelled) return;
           const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
           setAlerts(sorted);
-          setAlertSessions(sessions);
+          setAlertSessions(joinableSessions(sessions));
           if (response.rooms) setRooms(response.rooms);
           setAlertsLoaded(true);
         }
