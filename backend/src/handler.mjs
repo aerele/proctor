@@ -144,7 +144,9 @@ const INVIGILATOR_PASSWORD = process.env.INVIGILATOR_PASSWORD;
 const ROOM_GATES_COLLECTION = process.env.ROOM_GATES_COLLECTION || "proctor_room_gates";
 // Per-session wrong-OTP cap: at the cap further code attempts get 429 (status
 // polls still work, and an invigilator start-now still admits the session).
-const GATE_ATTEMPT_LIMIT = Number(process.env.GATE_ATTEMPT_LIMIT || "20");
+// S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
+// silently disable the brute-force cap; fall back to the safe default of 20.
+const GATE_ATTEMPT_LIMIT = positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20);
 // Caps for the invigilator room dashboard payload.
 const INVIGILATOR_SESSIONS_LIMIT = 500;
 const INVIGILATOR_ALERTS_LIMIT = 100;
@@ -877,7 +879,10 @@ async function execSubmit(req) {
   const submissionId = randomUUID();
   try {
     await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
-      session_id: sessionId, problem_id: problem.id, language: body.language,
+      // M7: store the VALIDATED language variable (already checked against
+      // LANGUAGE_IDS), never the raw client body.language — a body shaped to
+      // coerce to a valid key (e.g. ["python"]) must not land verbatim.
+      session_id: sessionId, problem_id: problem.id, language,
       source_code: source, verdict, passed_count: passedCount, total: results.length,
       tests, score, max_points: maxPoints, scoring: problem.scoring || "per_test",
       created_at: createdAt
@@ -1337,6 +1342,23 @@ async function adminSaveRoster(req) {
   requireAdmin(req);
   const body = parseBody(req);
   if (body.clear === true) {
+    // M5: a clear must PURGE the roster PII, not merely flip the meta flag.
+    // Delete the CURRENT version's entry docs (each holds name/email/roll/etc.).
+    // We delete only the active version's docs: orphaned docs from PRIOR
+    // re-uploads (the versioned-replace design never mass-deletes them) are left
+    // behind and grow storage by one roster per upload — cleanup of those
+    // version-orphans is deliberately deferred (matches rosterEntryId's note).
+    const currentMeta = await getRosterMeta();
+    if (currentMeta?.version) {
+      const snapshot = await firestore.collection(ROSTER_COLLECTION)
+        .where("roster_version", "==", currentMeta.version)
+        .limit(ROSTER_LIMIT)
+        .get();
+      const ids = snapshot.docs.map((doc) => doc.data()).map((entry) => rosterEntryId(currentMeta.version, entry.unique_id_norm));
+      await mapWithConcurrency(ids, 20, async (entryId) => {
+        await firestore.collection(ROSTER_COLLECTION).doc(entryId).delete();
+      });
+    }
     await rosterMetaRef().set({ configured: false, cleared_at: new Date().toISOString() });
     return { ok: true, configured: false, count: 0, skipped: [] };
   }
@@ -3021,9 +3043,16 @@ async function sessionRoomGate(req) {
 // blocked until the session was released (OTP / room open / admin turning the
 // gate off). Deliberately NOT inside requireWritableSession — evidence writes
 // (events, uploads, heartbeats) must keep flowing while the candidate waits.
-async function requireExamStarted(session) {
-  const settings = await getSettings();
-  if (settings?.room_gate_enabled && !session.exam_started_at) {
+async function requireExamStarted(session, settings) {
+  // S3 nit: avoid the extra Firestore settings read on the exec HOT PATH. Once a
+  // session has been released (exam_started_at stamped), the gate can never
+  // reject it regardless of settings — so short-circuit BEFORE any read. The
+  // settings read only happens for a not-yet-started session (the rare waiting
+  // case). A caller that already holds settings may pass them through to skip the
+  // read entirely. Behavior is identical: reject iff gate enabled AND not started.
+  if (session.exam_started_at) return;
+  const effectiveSettings = settings !== undefined ? settings : await getSettings();
+  if (effectiveSettings?.room_gate_enabled && !session.exam_started_at) {
     throw httpError(403, "exam_not_started");
   }
 }
@@ -3068,7 +3097,10 @@ async function invigilatorRoom(req) {
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
     .slice(0, INVIGILATOR_SESSIONS_LIMIT)
     .map((doc) => ({
-      session_id: doc.session_id,
+      // M13: NO session_id — it is the SOLE bearer credential for candidate write
+      // endpoints (/api/session/end etc.), so leaking it would let an invigilator
+      // end a candidate's exam. Invigilators identify candidates by name/roll/
+      // username, not session_id.
       name: doc.name || "",
       hackerrank_username: doc.hackerrank_username || "",
       roll_number: doc.roll_number || "",
@@ -3092,14 +3124,16 @@ async function invigilatorRoom(req) {
     .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
     .slice(0, INVIGILATOR_ALERTS_LIMIT)
     .map((alert) => ({
+      // M12/M13: keep ONLY type/severity/title/timestamp/hackerrank_username.
+      //   - drop `detail`: the ip_changed alert embeds "IP changed from X to Y",
+      //     leaking candidate IPs the invigilator has no need to see.
+      //   - drop `session_id`: it is the candidate's write-endpoint bearer token.
       id: alert.id,
       type: alert.type,
       severity: alert.severity,
       timestamp: alert.timestamp,
       title: alert.title,
-      detail: alert.detail ? String(alert.detail) : "",
-      hackerrank_username: alert.hackerrank_username || "",
-      session_id: alert.session_id || ""
+      hackerrank_username: alert.hackerrank_username || ""
     }));
 
   return {
@@ -3439,6 +3473,14 @@ function httpError(statusCode, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+// Parse an env-supplied count into a POSITIVE integer, falling back to `fallback`
+// when the value is missing, non-numeric (NaN), or <= 0. Used for caps where a
+// silent NaN/0 would disable a safety limit (e.g. the brute-force GATE cap).
+function positiveIntOr(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
 function setCors(res) {

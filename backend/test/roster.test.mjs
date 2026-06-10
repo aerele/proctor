@@ -264,6 +264,24 @@ test("POST /api/admin/roster {clear:true} disables the roster", async () => {
   assert.equal(status.body.configured, false);
 });
 
+// M5: clear must DELETE the entry docs (PII), not just flip the meta flag. After
+// a clear the entry docs are gone from Firestore AND a lookup 404s (not_on_roster).
+test("POST /api/admin/roster {clear:true} deletes the current roster entry docs (PII purge)", async () => {
+  const { firestore } = freshClients();
+  await uploadSampleRoster();
+  const entries = firestore._collections.get(process.env.ROSTER_COLLECTION);
+  assert.equal(entries.size, 2); // two valid rows were stored
+  const clear = await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN, body: { clear: true } }));
+  assert.equal(clear.statusCode, 200);
+  // The entry docs (which hold candidate PII) are actually gone, not just orphaned.
+  assert.equal(entries.size, 0);
+  // And a lookup for a previously-present id now 404s with roster_not_configured
+  // (meta is off) — the PII is unreachable.
+  const lookup = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "21CS001" } }));
+  assert.equal(lookup.statusCode, 404);
+  assert.equal(lookup.body.error, "roster_not_configured");
+});
+
 test("settings rooms: sanitized + deduped on save and returned by GET", async () => {
   freshClients();
   const save = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {

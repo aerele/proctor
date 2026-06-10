@@ -325,6 +325,30 @@ test("POST /api/exec/submit runs HIDDEN tests, returns ONLY verdict + counts (§
   __setJudge0AdapterForTest(null);
 });
 
+// M7: the STORED submission must record the VALIDATED language variable (the one
+// checked against LANGUAGE_IDS), never the raw client body.language. A body
+// shaped to coerce to a valid key — e.g. ["python"] (String(["python"]) ===
+// "python", so it passes Object.hasOwn) — must land in Firestore as the clean
+// primitive "python", not the array.
+test("POST /api/exec/submit stores the VALIDATED language, not the raw client body.language", async () => {
+  advanceClock(3600_000); // step past any prior submit cooldown for "s1"
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("ml-sub").set({ session_id: "ml-sub", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/submit",
+    body: { session_id: "ml-sub", problem_id: "sum-two", language: ["python"], source_code: "x" } }));
+  assert.equal(res.statusCode, 200);
+  const subs = firestore._collections.get(process.env.SUBMISSIONS_COLLECTION);
+  const stored = [...subs.values()].at(-1);
+  // The clean validated primitive string is stored — NOT the array body sent.
+  assert.equal(stored.language, "python");
+  assert.equal(Array.isArray(stored.language), false);
+  __setJudge0AdapterForTest(null);
+});
+
 test("POST /api/exec/submit: one failing hidden test -> verdict wrong_answer", async () => {
   advanceClock(3600_000); // step past the submit cooldown the previous test started for "s1"
   const firestore = makeFakeFirestore();
