@@ -143,6 +143,9 @@ const ROOM_GATES_COLLECTION = process.env.ROOM_GATES_COLLECTION || "proctor_room
 // Per-session wrong-OTP cap: at the cap further code attempts get 429 (status
 // polls still work, and an invigilator start-now still admits the session).
 const GATE_ATTEMPT_LIMIT = Number(process.env.GATE_ATTEMPT_LIMIT || "20");
+// Caps for the invigilator room dashboard payload.
+const INVIGILATOR_SESSIONS_LIMIT = 500;
+const INVIGILATOR_ALERTS_LIMIT = 100;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
@@ -225,6 +228,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/review-mine") return send(res, 200, await adminReviewMine(req));
     if (req.method === "GET" && path === "/api/admin/reviews") return send(res, 200, await adminReviews(req));
     if (req.method === "GET" && path === "/api/invigilator/overview") return send(res, 200, await invigilatorOverview(req));
+    if (req.method === "GET" && path === "/api/invigilator/room") return send(res, 200, await invigilatorRoom(req));
     if (req.method === "POST" && path === "/api/invigilator/release-code") return send(res, 200, await invigilatorReleaseCode(req));
     if (req.method === "POST" && path === "/api/invigilator/open-room") return send(res, 200, await invigilatorOpenRoom(req));
 
@@ -2907,6 +2911,93 @@ async function requireExamStarted(session) {
   if (settings?.room_gate_enabled && !session.exam_started_at) {
     throw httpError(403, "exam_not_started");
   }
+}
+
+// GET /api/invigilator/room?room=<label> — the ONE-CALL room dashboard the
+// portal polls every ~5 s: counts (same classification rules as adminStats,
+// incl. the derived disconnected signal) + a lightweight per-student list + the
+// room gate + the room's OPEN alerts. The special label "_" selects sessions
+// with NO room. Least privilege: rows carry NO email and NO IPs; alerts carry
+// NO video/download fields — invigilators read presence, not recordings.
+async function invigilatorRoom(req) {
+  requireInvigilator(req);
+  const roomParam = req.query?.room;
+  if (roomParam === undefined || roomParam === null || roomParam === "") {
+    return badRequest("room is required");
+  }
+  const settings = await getSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const roomKey = gateRoomKey(roomParam);
+  const roomLabel = roomKey === "_" ? "" : sanitizeRoom(roomParam);
+
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const docs = snapshot.docs.map((doc) => doc.data())
+    .filter((doc) => String(doc.room || "") === roomLabel);
+
+  const nowMs = Date.now();
+  const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, started: 0, total: 0 };
+  for (const doc of docs) {
+    stats.total += 1;
+    if (doc.exam_started_at) stats.started += 1;
+    if (doc.status === "active") {
+      stats.live += 1;
+      if (isStaleSession(doc, nowMs)) stats.disconnected += 1;
+    } else if (doc.status === "locked") stats.locked += 1;
+    else if (doc.status === "pending_approval") stats.pending_approval += 1;
+    else if (doc.status === "ended") stats.finished += 1;
+  }
+
+  const sessions = docs
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+    .slice(0, INVIGILATOR_SESSIONS_LIMIT)
+    .map((doc) => ({
+      session_id: doc.session_id,
+      name: doc.name || "",
+      hackerrank_username: doc.hackerrank_username || "",
+      roll_number: doc.roll_number || "",
+      status: doc.status || "",
+      stale: doc.status === "active" ? isStaleSession(doc, nowMs) : false,
+      exam_started_at: doc.exam_started_at || null,
+      created_at: doc.created_at || ""
+    }));
+
+  const gate = publicRoomGate(await getRoomGate(contestSlug, roomKey));
+
+  // Same index-free pattern as adminAlerts: at most ONE equality filter
+  // (contest_slug) pushed to Firestore; room/archive filtering in memory.
+  let alertQuery = firestore.collection(ALERTS_COLLECTION);
+  if (contestSlug) alertQuery = alertQuery.where("contest_slug", "==", contestSlug);
+  const alertSnapshot = await alertQuery.limit(ALERTS_QUERY_LIMIT).get();
+  const alerts = alertSnapshot.docs
+    .map((doc) => doc.data())
+    .filter((alert) => String(alert.room || "") === roomLabel)
+    .filter((alert) => !alert.archived)
+    .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
+    .slice(0, INVIGILATOR_ALERTS_LIMIT)
+    .map((alert) => ({
+      id: alert.id,
+      type: alert.type,
+      severity: alert.severity,
+      timestamp: alert.timestamp,
+      title: alert.title,
+      detail: alert.detail ? String(alert.detail) : "",
+      hackerrank_username: alert.hackerrank_username || "",
+      session_id: alert.session_id || ""
+    }));
+
+  return {
+    contest_slug: contestSlug || null,
+    room: roomLabel || null,
+    room_key: roomKey,
+    room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    stats,
+    sessions,
+    gate,
+    alerts,
+    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS
+  };
 }
 
 // ---- Proctor alert settings (admin) ----------------------------------------
