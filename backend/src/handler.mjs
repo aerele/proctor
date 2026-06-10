@@ -4,6 +4,7 @@ import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
+import { configureContestStore, createContest, listContests, setContestStatus, updateContest } from "./contests.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -174,6 +175,18 @@ const ROOMS_LIST_LIMIT = 200;
 // the instance) so __setClientsForTest fakes propagate to problem reads too.
 configureProblemStore({ getFirestore: () => firestore, collection: PROBLEMS_COLLECTION });
 
+// S-B (SHIPS DARK): contests collection + scoping chokepoints. Same getter
+// pattern; the settings collection/id let contests.mjs synthesize the
+// READ-ONLY legacy contest from the "active" doc (F9 §6). No production
+// candidate/session path reads contests yet — only the admin CRUD below.
+const CONTESTS_COLLECTION = process.env.CONTESTS_COLLECTION || "proctor_contests";
+configureContestStore({
+  getFirestore: () => firestore,
+  collection: CONTESTS_COLLECTION,
+  settingsCollection: SETTINGS_COLLECTION,
+  settingsId: SETTINGS_ID
+});
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -228,6 +241,10 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/unlock-gate") return send(res, 200, await sessionUnlockGate(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
+    if (req.method === "GET" && path === "/api/admin/contests") return send(res, 200, await adminListContests(req));
+    if (req.method === "POST" && path === "/api/admin/contests") return send(res, 200, await adminCreateContest(req));
+    if (req.method === "POST" && path === "/api/admin/contest-update") return send(res, 200, await adminUpdateContest(req));
+    if (req.method === "POST" && path === "/api/admin/contest-status") return send(res, 200, await adminContestStatus(req));
     if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
     if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
     if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
@@ -1416,6 +1433,38 @@ async function adminDeleteProblem(req) {
     await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
   }
   return { ok: true };
+}
+
+// ---- S-B: contests (F9 §2 / F10 §2.7) — SHIPS DARK ---------------------------
+// Thin admin glue over src/contests.mjs (validation + slug/access-code minting
+// + legacy synthesis live there). The synthesized legacy contest appears in
+// the LIST only — the write endpoints 404 on it by construction. No candidate
+// path is routed through any of this yet.
+
+async function adminListContests(req) {
+  requireAdmin(req);
+  const includeArchived = ["1", "true"].includes(String(req.query?.include_archived ?? "").toLowerCase());
+  return { contests: await listContests({ includeArchived }) };
+}
+
+async function adminCreateContest(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  return { ok: true, contest: await createContest(body) };
+}
+
+async function adminUpdateContest(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  return { ok: true, contest: await updateContest(String(body.slug), body) };
+}
+
+async function adminContestStatus(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug", "status"]);
+  return { ok: true, contest: await setContestStatus(String(body.slug), String(body.status)) };
 }
 
 // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
