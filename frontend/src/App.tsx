@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
+import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
@@ -1431,6 +1432,13 @@ function AdminApp() {
   const [ipScope, setIpScope] = useState<IpReportScope>("live");
   const [ipReportUnavailable, setIpReportUnavailable] = useState(false);
 
+  // F6.4: ALL session docs (status "" = no filter) under the current contest
+  // scope, used by the alerts console to join each alert to its candidate's
+  // CURRENT session status so rows render only the actions valid for it.
+  // null = not loaded yet OR sessions-list not deployed → rows fall back to the
+  // full action set (a stale backend must not lose admin capability).
+  const [alertSessions, setAlertSessions] = useState<RecordingSession[] | null>(null);
+
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
     setError("");
@@ -1440,10 +1448,24 @@ function AdminApp() {
       setAlerts(sorted);
       if (response.rooms) setRooms(response.rooms);
       setAlertsLoaded(true);
+      await loadAlertSessions(filters);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setAlertsLoading(false);
+    }
+  };
+
+  // F6.4: refresh the status-join data for the alerts console. Errors are
+  // non-fatal (the join is an enhancement; alerts stay usable without it) and a
+  // 404 keeps null via fetchSessionsList's graceful-degrade contract.
+  const loadAlertSessions = async (filters?: AlertFilters) => {
+    try {
+      const active = filters ?? alertFilters;
+      const list = await fetchSessionsList(password, { status: "", contestSlug: active.contest_slug });
+      setAlertSessions(list);
+    } catch {
+      // Keep the previous join data — stale statuses beat dropping the buttons.
     }
   };
 
@@ -1573,10 +1595,16 @@ function AdminApp() {
       setAlertsLoading(true);
       setError("");
       try {
-        const response = await fetchAlerts(password, alertFilters);
+        // F6.4: the status-join data loads alongside the alerts themselves so
+        // the first render already shows the contextual action buttons.
+        const [response, sessions] = await Promise.all([
+          fetchAlerts(password, alertFilters),
+          fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
+        ]);
         if (cancelled) return;
         const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
         setAlerts(sorted);
+        setAlertSessions(sessions);
         if (response.rooms) setRooms(response.rooms);
         setAlertsLoaded(true);
       } catch (cause) {
@@ -1634,10 +1662,16 @@ function AdminApp() {
           captureExamTime(response);
           if (response.rooms) setRooms(response.rooms);
         } else {
-          const response = await fetchAlerts(password, alertFilters);
+          // F6.4: the join data refreshes on the same cadence as the alerts so
+          // the contextual buttons track live status changes.
+          const [response, sessions] = await Promise.all([
+            fetchAlerts(password, alertFilters),
+            fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
+          ]);
           if (cancelled) return;
           const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
           setAlerts(sorted);
+          setAlertSessions(sessions);
           if (response.rooms) setRooms(response.rooms);
           setAlertsLoaded(true);
         }
@@ -1797,14 +1831,19 @@ function AdminApp() {
 
   // APPROVE-then-ARCHIVE: the Approve button on an alert row both approves the
   // session (session-action) AND archives that alert (alert-action), orchestrated
-  // here on the frontend. runAction already refreshes stats/alerts afterward.
-  const approveAndArchive = async (alert: Alert) => {
+  // here on the frontend. F6.4: when the row's status-join resolved a DIFFERENT
+  // session than the alert references (e.g. the alert's session ended and the
+  // candidate has a newer pending one), the caller passes that joined session id
+  // so approve targets the session the buttons were rendered for — never an
+  // ended doc.
+  const approveAndArchive = async (alert: Alert, targetSessionId?: string) => {
     setError("");
     setActionMessage("");
     try {
+      const sessionId = targetSessionId ?? alert.session_id;
       await sessionAction(password, {
         action: "approve",
-        ...(alert.session_id ? { session_id: alert.session_id } : { usernames: [alert.hackerrank_username] }),
+        ...(sessionId ? { session_id: sessionId } : { usernames: [alert.hackerrank_username] }),
         ...(alert.contest_slug ? { contest_slug: alert.contest_slug } : {})
       });
       await alertAction(password, { action: "archive", ids: [alert.id] });
@@ -2159,6 +2198,7 @@ function AdminApp() {
       {view === "alerts" ? (
         <AlertsConsole
           alerts={alerts}
+          sessions={alertSessions}
           loading={alertsLoading}
           loaded={alertsLoaded}
           filters={alertFilters}
@@ -2174,7 +2214,7 @@ function AdminApp() {
           onRefresh={() => loadAlerts()}
           onAction={runAction}
           onArchive={(ids, action) => void archiveAlerts(ids, action)}
-          onApproveArchive={(alert) => void approveAndArchive(alert)}
+          onApproveArchive={(alert, targetSessionId) => void approveAndArchive(alert, targetSessionId)}
         />
       ) : null}
 
@@ -3417,34 +3457,69 @@ function StatCard({ label, value, tone, icon, onClick }: { label: string; value:
   return <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>{inner}</div>;
 }
 
-const ACTION_LABELS: Array<{ action: SessionAction; label: string; destructive: boolean }> = [
-  { action: "approve", label: "Approve", destructive: false },
-  { action: "unlock", label: "Unlock", destructive: false },
-  { action: "lock", label: "Lock", destructive: true },
-  { action: "bypass", label: "Bypass", destructive: false },
-  { action: "end", label: "End", destructive: true }
-];
+// F6.4: design-system hover tooltip (CSS-only, shows on hover AND keyboard
+// focus). Every action button is wrapped in one so the plain-language
+// explanation from SESSION_ACTION_INFO / ALERT_ACTION_INFO is one hover away.
+function ActionTooltip({ tip, children }: { tip: string; children: React.ReactNode }) {
+  return (
+    <span className="group relative inline-flex">
+      {children}
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-60 -translate-x-1/2 rounded-md bg-ink px-3 py-2 text-xs font-normal leading-5 text-white opacity-0 shadow-subtle transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        {tip}
+      </span>
+    </span>
+  );
+}
 
-// Compact per-candidate remote-action buttons. Destructive actions confirm first.
-function ActionButtons({ onAction, sessionId, username, actions = ACTION_LABELS }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions?: typeof ACTION_LABELS }) {
-  const run = (action: SessionAction, destructive: boolean) => {
-    if (destructive) {
-      const target = sessionId ? `session ${sessionId.slice(0, 8)}…` : `${username}`;
-      if (!window.confirm(`Apply "${action}" to ${target}? This affects the live session.`)) return;
-    }
-    onAction(action, sessionId ? { sessionId } : username ? { usernames: [username] } : {});
+// F6.4: visually separated, labeled cluster of action buttons (session actions
+// vs alert actions on an alert row).
+function ActionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-white/60 p-1.5 pl-2.5">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+// One session-action button: label + tooltip from SESSION_ACTION_INFO, confirm
+// dialog on destructive actions (end, lock). targetLabel names the confirm target.
+function SessionActionButton({ action, targetLabel, onRun }: { action: SessionAction; targetLabel: string; onRun: (action: SessionAction) => void }) {
+  const info = SESSION_ACTION_INFO[action];
+  const run = () => {
+    if (info.destructive && !window.confirm(`Apply "${info.label}" to ${targetLabel}? This affects the live session.`)) return;
+    onRun(action);
   };
   return (
+    <ActionTooltip tip={info.tooltip}>
+      <button
+        type="button"
+        onClick={run}
+        className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${info.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
+      >
+        {info.label}
+      </button>
+    </ActionTooltip>
+  );
+}
+
+// Compact per-candidate remote-action buttons. Destructive actions confirm first.
+// `actions` defaults to the FULL set (Review tab shows every action; the alerts
+// console passes the status-filtered valid set instead).
+function ActionButtons({ onAction, sessionId, username, actions = SESSION_ACTION_ORDER }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions?: SessionAction[] }) {
+  const targetLabel = sessionId ? `session ${sessionId.slice(0, 8)}…` : `${username}`;
+  return (
     <div className="flex flex-wrap gap-2">
-      {actions.map((item) => (
-        <button
-          key={item.action}
-          type="button"
-          onClick={() => run(item.action, item.destructive)}
-          className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${item.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
-        >
-          {item.label}
-        </button>
+      {actions.map((action) => (
+        <SessionActionButton
+          key={action}
+          action={action}
+          targetLabel={targetLabel}
+          onRun={(chosen) => onAction(chosen, sessionId ? { sessionId } : username ? { usernames: [username] } : {})}
+        />
       ))}
     </div>
   );
@@ -3495,8 +3570,10 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onToggleSelected, onSelectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
+function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, selected, onToggleSelected, onSelectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
   alerts: Alert[];
+  /** F6.4 status-join data; null = sessions-list unavailable → full action set. */
+  sessions: RecordingSession[] | null;
   loading: boolean;
   loaded: boolean;
   filters: AlertFilters;
@@ -3509,7 +3586,7 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
   onRefresh: () => void;
   onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
   onArchive: (ids: string[], action?: "archive" | "unarchive") => void;
-  onApproveArchive: (alert: Alert) => void;
+  onApproveArchive: (alert: Alert, targetSessionId?: string) => void;
 }) {
   // Unique candidate usernames in the current (selected) alert set, for bulk actions.
   const selectedUsernames = useMemo(() => usernamesForSelection(alerts, selected), [alerts, selected]);
@@ -3518,6 +3595,12 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
   // filter changes); bulk archive acts on ALL selected ids, not just visible ones.
   const visibleIds = useMemo(() => alerts.map((alert) => alert.id), [alerts]);
   const allSelected = isAllSelected(selected, visibleIds);
+  // F6.4: bulk buttons show only the UNION of actions valid for the selected
+  // candidates' live sessions (no join data → full set, same fallback as rows).
+  const bulkActions = useMemo(
+    () => (sessions === null ? SESSION_ACTION_ORDER : bulkSessionActionsFor(selectedUsernames, sessions)),
+    [sessions, selectedUsernames]
+  );
 
   return (
     <>
@@ -3614,7 +3697,7 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
             <span className="text-sm font-medium">{selectedUsernames.length} candidate(s) selected:</span>
             <span className="font-mono text-xs text-muted">{selectedUsernames.join(", ")}</span>
-            <BulkActionButtons usernames={selectedUsernames} onAction={onAction} />
+            <BulkActionButtons usernames={selectedUsernames} actions={bulkActions} onAction={onAction} />
           </div>
         ) : null}
       </section>
@@ -3629,6 +3712,7 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
             <AlertRow
               key={alert.id}
               alert={alert}
+              sessions={sessions}
               selected={selected.has(alert.id)}
               onToggleSelected={() => onToggleSelected(alert.id)}
               onAction={onAction}
@@ -3643,23 +3727,33 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
 }
 
 // Bulk actions operate on the live session of each selected candidate username.
-function BulkActionButtons({ usernames, onAction }: { usernames: string[]; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
-  const run = (action: SessionAction, destructive: boolean) => {
-    if (destructive && !window.confirm(`Apply "${action}" to ${usernames.length} candidate(s)? This affects their live sessions.`)) return;
+// F6.4: only the actions valid for at least one selected candidate render
+// (union — the backend applies each action per-candidate and skips the rest).
+function BulkActionButtons({ usernames, actions, onAction }: { usernames: string[]; actions: SessionAction[]; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
+  if (!actions.length) {
+    return <span className="text-xs text-muted">No session actions apply — the selected candidates have no live sessions.</span>;
+  }
+  const run = (action: SessionAction) => {
+    const info = SESSION_ACTION_INFO[action];
+    if (info.destructive && !window.confirm(`Apply "${info.label}" to ${usernames.length} candidate(s)? This affects their live sessions.`)) return;
     onAction(action, { usernames });
   };
   return (
     <div className="flex flex-wrap gap-2">
-      {ACTION_LABELS.map((item) => (
-        <button
-          key={item.action}
-          type="button"
-          onClick={() => run(item.action, item.destructive)}
-          className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${item.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
-        >
-          Bulk {item.label}
-        </button>
-      ))}
+      {actions.map((action) => {
+        const info = SESSION_ACTION_INFO[action];
+        return (
+          <ActionTooltip key={action} tip={`${info.tooltip} Applies to each selected candidate's latest live session.`}>
+            <button
+              type="button"
+              onClick={() => run(action)}
+              className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${info.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
+            >
+              Bulk {info.label}
+            </button>
+          </ActionTooltip>
+        );
+      })}
     </div>
   );
 }
@@ -3677,13 +3771,26 @@ function FilterSelect({ label, value, options, onChange }: { label: string; valu
   );
 }
 
-// Session actions shown on an alert row EXCLUDING approve — approve is handled
-// by the dedicated Approve button below, which also archives the alert.
-const ALERT_ROW_ACTIONS = ACTION_LABELS.filter((item) => item.action !== "approve");
-
-function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert) => void }) {
+function AlertRow({ alert, sessions, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; sessions: RecordingSession[] | null; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
+  // F6.4: join the alert to the session its actions would target (the alert's
+  // own session_id, else the candidate's latest live session) and render ONLY
+  // the actions valid for that session's status. sessions === null means the
+  // sessions-list endpoint is unavailable → fall back to the full action set so
+  // a stale backend never costs admin capability. Contest-eval alerts whose
+  // candidate has no session resolve to joined === null → alert actions only.
+  const joined = sessions === null ? null : sessionForAlert(alert, sessions);
+  const sessionActions = sessions === null ? SESSION_ACTION_ORDER : validSessionActionsFor(joined?.status);
+  const sessionGroupLabel = sessions === null ? "Session" : `Session — ${joined?.status ?? "none"}`;
+  // Actions target the JOINED session (never a stale alert.session_id whose doc
+  // fell back to a newer live one); without join data, legacy targeting applies.
+  const actionTarget = joined
+    ? { sessionId: joined.session_id }
+    : alert.session_id
+      ? { sessionId: alert.session_id }
+      : { usernames: [alert.hackerrank_username] };
+  const archiveInfo = alert.archived ? ALERT_ACTION_INFO.unarchive : ALERT_ACTION_INFO.archive;
   return (
     <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.archived ? "opacity-70" : ""} ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -3708,6 +3815,8 @@ function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onAp
         {alert.room ? <AlertField label="Room" value={alert.room} /> : null}
         {alert.contest_slug ? <AlertField label="Contest" value={alert.contest_slug} mono /> : null}
         {alert.session_id ? <AlertField label="Session" value={alert.session_id} mono /> : null}
+        {/* F6.4: the joined status explains WHY the row offers these actions. */}
+        {sessions !== null ? <AlertField label="Session status" value={joined?.status ?? "no live session"} /> : null}
         {alert.verdict ? <AlertField label="Verdict" value={alert.verdict.status} /> : null}
       </div>
 
@@ -3731,33 +3840,42 @@ function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onAp
             </button>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Approve also archives this alert (frontend orchestrates approve → archive). */}
-          <button
-            type="button"
-            onClick={() => onApproveArchive(alert)}
-            className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
-          >
-            Approve
-          </button>
-          {alert.archived ? (
-            <button
-              type="button"
-              onClick={() => onArchive([alert.id], "unarchive")}
-              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
-            >
-              <ArchiveRestore size={14} /> Unarchive
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => onArchive([alert.id], "archive")}
-              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
-            >
-              <Archive size={14} /> Archive
-            </button>
-          )}
-          <ActionButtons onAction={onAction} username={alert.hackerrank_username} sessionId={alert.session_id} actions={ALERT_ROW_ACTIONS} />
+        <div className="flex flex-wrap items-center gap-3">
+          {/* F6.4: session actions and alert actions are separate labeled groups;
+              the session group renders only when an action is valid for the
+              joined session's status. */}
+          {sessionActions.length ? (
+            <ActionGroup label={sessionGroupLabel}>
+              {sessionActions.map((action) =>
+                action === "approve" ? (
+                  // Approve also archives this alert (frontend orchestrates
+                  // approve → archive), targeting the JOINED session.
+                  <ActionTooltip key="approve" tip={`${SESSION_ACTION_INFO.approve.tooltip} Also archives this alert.`}>
+                    <button
+                      type="button"
+                      onClick={() => onApproveArchive(alert, joined?.session_id)}
+                      className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                    >
+                      {SESSION_ACTION_INFO.approve.label}
+                    </button>
+                  </ActionTooltip>
+                ) : (
+                  <SessionActionButton key={action} action={action} targetLabel={alert.hackerrank_username} onRun={(chosen) => onAction(chosen, actionTarget)} />
+                )
+              )}
+            </ActionGroup>
+          ) : null}
+          <ActionGroup label="Alert">
+            <ActionTooltip tip={archiveInfo.tooltip}>
+              <button
+                type="button"
+                onClick={() => onArchive([alert.id], alert.archived ? "unarchive" : "archive")}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+              >
+                {alert.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />} {archiveInfo.label}
+              </button>
+            </ActionTooltip>
+          </ActionGroup>
         </div>
       </div>
 
