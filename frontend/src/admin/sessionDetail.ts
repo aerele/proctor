@@ -2,7 +2,10 @@
 // sessionDetail.test.ts): the chunk-count → approximate-recording-duration
 // math and the alert→session join the card's "Alerts for this session" stat
 // uses over the ALREADY-FETCHED alerts list (no extra backend read).
+// F6.6 adds the capture-state language: per-source labels for the card rows
+// and the recordings-review "what does this recording contain" header line.
 import { normalizeJoinUsername, type JoinableAlert, type JoinableSession } from "./alertActions";
+import type { CaptureSource, CaptureState } from "../types";
 
 /** Every recorded chunk is a fixed 30-second .webm (uploadConfig.chunk_seconds
  * on the backend; CHUNK_SECONDS in RecordingReview.tsx). */
@@ -43,4 +46,69 @@ export function alertsForSession<T extends DetailJoinAlert>(alerts: T[], session
     const alertNorm = alert.username_norm || normalizeJoinUsername(alert.hackerrank_username || "");
     return Boolean(alertNorm) && alertNorm === sessionNorm;
   });
+}
+
+// ---- F6.6 capture-state language -------------------------------------------
+// What gets RECORDED is the direct screen stream with the microphone audio
+// mixed in; the camera feed is live-monitor only (student-side preview /
+// invigilator check) and is NEVER part of the recorded video. Every label
+// below states that plainly so a proctor never goes hunting for a camera
+// file that does not exist.
+
+// Labels shared by every source for the non-"recording" states.
+const COMMON_CAPTURE_LABELS: Record<string, string> = {
+  stopped: "stopped mid-exam",
+  error: "capture error",
+  inactive: "not started"
+};
+
+// Per-source overrides: what "recording" means differs per source, and the
+// optional sources (camera/mic) have denied/missing states.
+const CAPTURE_LABELS: Record<CaptureSource, Record<string, string>> = {
+  screen: {
+    recording: "recording"
+  },
+  camera: {
+    recording: "on (live monitor only — not in the recorded video)",
+    permission_denied: "permission denied",
+    unavailable: "no camera detected"
+  },
+  microphone: {
+    recording: "recording (audio mixed into the screen video)",
+    permission_denied: "permission denied",
+    unavailable: "no microphone detected"
+  }
+};
+
+/** Plain-language label for one capture source's last-reported state. */
+export function captureSourceLabel(source: CaptureSource, state: string): string {
+  return CAPTURE_LABELS[source][state] ?? COMMON_CAPTURE_LABELS[state] ?? "unknown";
+}
+
+// The recordings-review header fragments, derived per optional source.
+const MIC_CONTENTS: Record<string, string> = {
+  recording: "screen video + microphone audio",
+  permission_denied: "screen video only — microphone permission denied",
+  unavailable: "screen video only — no microphone detected",
+  stopped: "screen video — microphone stopped mid-exam"
+};
+
+const CAMERA_CONTENTS: Record<string, string> = {
+  recording: "camera live-monitored only (not recorded)",
+  permission_denied: "camera permission denied",
+  unavailable: "no camera detected",
+  stopped: "camera stopped mid-exam"
+};
+
+/**
+ * One header line for the recordings review: what the loaded recording
+ * contains. Derived from the same last-reported capture state the session
+ * card shows; null/undefined (legacy session, no composite heartbeat yet)
+ * degrades to a "not reported" line rather than guessing.
+ */
+export function describeRecordingContents(state: CaptureState | null | undefined): string {
+  if (!state) return "screen video — capture detail not reported for this session";
+  const base = MIC_CONTENTS[state.microphone] ?? "screen video only — no microphone audio";
+  const camera = CAMERA_CONTENTS[state.camera];
+  return camera ? `${base}; ${camera}` : base;
 }

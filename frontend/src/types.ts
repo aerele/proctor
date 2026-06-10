@@ -198,6 +198,7 @@ export type SessionCardDetail = {
   clipboard_event_count: number;
   focus_event_count: number;
   heartbeat_count: number;
+  capture_state: CaptureState | null;
 };
 
 export type SessionCardDetailResponse = {
@@ -284,6 +285,14 @@ export type SessionEventsResponse = {
   truncated?: boolean;
 };
 
+// F6.6 — the last-reported per-source capture state, parsed server-side from
+// the composite heartbeat recording_state. The recorded webm is the DIRECT
+// screen stream + mixed microphone audio; the camera is live-monitor only and
+// is never part of the recorded video — hence per-source states rather than
+// one recording flag. null until a composite heartbeat arrives (legacy docs).
+export type CaptureSource = "screen" | "camera" | "microphone";
+export type CaptureState = Record<CaptureSource, string>;
+
 // One signed-URL evidence file as returned (per session) by GET /api/admin/sessions.
 export type SessionEvidence = {
   key: string;
@@ -307,6 +316,7 @@ export type AdminSessionDetail = {
   chunk_count?: number;
   merged_video_key?: string;
   evidence?: SessionEvidence[];
+  capture_state?: CaptureState | null;
   [key: string]: unknown;
 };
 

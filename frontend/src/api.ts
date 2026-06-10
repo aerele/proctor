@@ -8,6 +8,7 @@ import type {
   AlertSettings,
   AlertsResponse,
   BeaconKind,
+  CaptureState,
   EditorEvent,
   ExamConfig,
   ExamTimeRequest,
@@ -740,7 +741,10 @@ export async function fetchSessionCardDetail(password: string, sessionId: string
       event_count: row.chunk_count * 3 + 4,
       clipboard_event_count: Math.floor(row.chunk_count / 5),
       focus_event_count: Math.floor(row.chunk_count / 3),
-      heartbeat_count: row.chunk_count * 2
+      heartbeat_count: row.chunk_count * 2,
+      // F6.6: varied per-source capture states (null for pending_approval —
+      // those sessions never sent a composite heartbeat).
+      capture_state: demoCaptureStateFor(row)
     };
   }
 
@@ -842,6 +846,34 @@ function demoIpFor(session: DemoAdminSessionRow): { ip: string; start_ip: string
   const ip = override?.ip ?? roomIp;
   const startIp = override?.start_ip ?? ip;
   return { ip, start_ip: startIp, ip_change_count: startIp !== ip ? 1 : 0 };
+}
+
+// F6.6 demo capture states — deterministic per-session overrides (same pattern
+// as DEMO_IP_OVERRIDES) so the session card and the recordings header show
+// every real-world shape OFFLINE: full capture, denied camera, denied mic,
+// missing devices, and a capture that stopped mid-exam. Everything else gets
+// the healthy default; a pending_approval session never sent a composite
+// heartbeat, so it reports null (exactly like production).
+const DEMO_CAPTURE_OVERRIDES: Record<string, CaptureState> = {
+  // Live: Rohan never granted the camera; Sneha has no mic on her machine.
+  "live-rohan-1a03": { screen: "recording", camera: "permission_denied", microphone: "recording" },
+  "live-sneha-1a04": { screen: "recording", camera: "recording", microphone: "unavailable" },
+  // The stale/disconnected row: everything stopped mid-exam.
+  "live-meera-1a06": { screen: "stopped", camera: "stopped", microphone: "stopped" },
+  // Ended outliers: Karan's lab machine had neither camera nor mic; Neha
+  // denied both optional prompts.
+  "live-karan-4d02": { screen: "recording", camera: "unavailable", microphone: "unavailable" },
+  "live-neha-4d03": { screen: "recording", camera: "permission_denied", microphone: "permission_denied" },
+  // Recording-review seeds (the demo playback dataset reuses the same helper).
+  "rec-karan-71b4": { screen: "recording", camera: "permission_denied", microphone: "recording" },
+  "rec-neha-3c10": { screen: "recording", camera: "recording", microphone: "unavailable" }
+};
+
+const DEMO_CAPTURE_DEFAULT: CaptureState = { screen: "recording", camera: "recording", microphone: "recording" };
+
+function demoCaptureStateFor(session: { session_id: string; status: string }): CaptureState | null {
+  if (session.status === "pending_approval") return null;
+  return DEMO_CAPTURE_OVERRIDES[session.session_id] ?? DEMO_CAPTURE_DEFAULT;
 }
 
 // Demo "disconnected" is a deterministic per-row `stale` flag on DEMO_ALL_SESSIONS
@@ -1163,7 +1195,10 @@ function demoRecordingSessionsFor(usernameNorm: string): AdminSessionsResponse["
       status: seed.status,
       created_at: seed.created_at,
       chunk_count: seed.chunk_count,
-      evidence: demoEvidenceFor(seed)
+      evidence: demoEvidenceFor(seed),
+      // F6.6: the recordings-review header reads this to say what the loaded
+      // recording contains (varied across the demo seeds).
+      capture_state: demoCaptureStateFor(seed)
     }));
 }
 

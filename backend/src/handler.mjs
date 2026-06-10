@@ -1626,7 +1626,11 @@ async function adminSessions(req) {
           download_url: downloadUrl
         };
       });
-      return { ...item, evidence };
+      // F6.6: structured per-source capture state so the recordings-review
+      // header can say what the loaded recording contains (screen video +
+      // mic audio? camera live-monitor only?) without re-parsing the raw
+      // composite recording_state client-side.
+      return { ...item, evidence, capture_state: parseCaptureState(item.recording_state) };
     }));
 
   return { sessions };
@@ -1756,7 +1760,10 @@ async function adminSessionDetail(req) {
       event_count: Number(session.event_count || 0),
       clipboard_event_count: Number(session.clipboard_event_count || 0),
       focus_event_count: Number(session.focus_event_count || 0),
-      heartbeat_count: Number(session.heartbeat_count || 0)
+      heartbeat_count: Number(session.heartbeat_count || 0),
+      // F6.6: last-reported per-source capture state (null until a composite
+      // heartbeat arrives) — the card's screen/camera/mic rows.
+      capture_state: parseCaptureState(session.recording_state)
     }
   };
 }
@@ -2987,6 +2994,32 @@ function parseRecordingStateSegments(raw) {
     if (key && value !== undefined) segments[key.trim()] = value.trim();
   }
   return segments;
+}
+
+// F6.6: project the persisted composite recording_state (the heartbeat already
+// stores the recorder's "combined:X;screen:Y;camera:Z;microphone:W" on the
+// session doc) into a STRUCTURED per-source capture state for the admin
+// surfaces — the session detail card and the recordings-review header. Camera
+// and microphone matter here because the recorded webm is the DIRECT screen
+// stream + mixed mic audio; the camera is live-monitor only and is never part
+// of the recorded video, so the admin needs the per-source truth to know what
+// a recording contains. Returns null for legacy bare strings ("recording") or
+// missing state; an unexpected segment value projects as "unknown" so raw
+// client input never leaks through.
+const CAPTURE_SOURCES = ["screen", "camera", "microphone"];
+const CAPTURE_SOURCE_STATES = new Set(["inactive", "recording", "stopped", "error", "permission_denied", "unavailable"]);
+
+function parseCaptureState(recordingState) {
+  const raw = String(recordingState || "").toLowerCase().trim();
+  if (!raw.includes(":")) return null;
+  const segments = parseRecordingStateSegments(raw);
+  if (!CAPTURE_SOURCES.some((source) => source in segments)) return null;
+  const state = {};
+  for (const source of CAPTURE_SOURCES) {
+    const value = segments[source];
+    state[source] = CAPTURE_SOURCE_STATES.has(value) ? value : "unknown";
+  }
+  return state;
 }
 
 async function raiseSureShotAlertsFromEvents(session, events, settings) {
