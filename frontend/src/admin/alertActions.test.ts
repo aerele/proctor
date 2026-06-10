@@ -4,6 +4,7 @@ import {
   SESSION_ACTION_INFO,
   SESSION_ACTION_ORDER,
   bulkSessionActionsFor,
+  joinableSessions,
   sessionForAlert,
   validSessionActionsFor
 } from "./alertActions";
@@ -104,6 +105,22 @@ describe("bulkSessionActionsFor", () => {
   it("candidates with no live session contribute nothing", () => {
     expect(bulkSessionActionsFor(["Asha_R", "Ghost_X"], sessions)).toEqual([]);
     expect(bulkSessionActionsFor([], sessions)).toEqual([]);
+  });
+});
+
+describe("joinableSessions", () => {
+  it("passes a complete (untruncated) list through for the status join", () => {
+    expect(joinableSessions({ sessions, truncated: false })).toBe(sessions);
+  });
+
+  it("treats a truncated list like no list at all — null → full-action fallback", () => {
+    // A capped sessions-list may be MISSING live sessions; joining against it
+    // would show "no live session" (and hide Lock/End) for live candidates.
+    expect(joinableSessions({ sessions, truncated: true })).toBeNull();
+  });
+
+  it("returns null when the endpoint is unavailable (null result)", () => {
+    expect(joinableSessions(null)).toBeNull();
   });
 });
 

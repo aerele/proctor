@@ -633,16 +633,23 @@ export async function fetchRecordingSessions(password: string, contestSlug?: str
 // 'disconnected' = active && stale; literal otherwise), with room filtering — so
 // the list matches the cards and zero-chunk pending_approval sessions are reachable
 // for Approve. Returns `null` on 404 (endpoint not deployed yet) so the UI degrades
-// gracefully, same as fetchRecordingSessions. In demo mode it classifies the
-// SHARED admin population (DEMO_ALL_SESSIONS) — the SAME source fetchAdminStats
-// counts from, NOT the recording seeds — applying the same status + contest + room
-// filters and projecting the RecordingSession fields, so every drill-down list
-// count equals its stat card and the zero-chunk pending_approval sessions appear
-// with Approve exercisable.
+// gracefully, same as fetchRecordingSessions. The result also carries the
+// backend's `truncated` flag (F6 review): true when the capped page may be
+// missing LIVE rows, so the alerts-console status join knows to fall back to
+// the full action set instead of trusting an incomplete list (older backends
+// without the flag read as false — same trust as before). In demo mode it
+// classifies the SHARED admin population (DEMO_ALL_SESSIONS) — the SAME source
+// fetchAdminStats counts from, NOT the recording seeds — applying the same
+// status + contest + room filters and projecting the RecordingSession fields,
+// so every drill-down list count equals its stat card and the zero-chunk
+// pending_approval sessions appear with Approve exercisable (the demo
+// population is small, so truncated is always false).
+export type SessionsListResult = { sessions: RecordingSession[]; truncated: boolean };
+
 export async function fetchSessionsList(
   password: string,
   opts: { status?: string; contestSlug?: string; room?: string }
-): Promise<RecordingSession[] | null> {
+): Promise<SessionsListResult | null> {
   const status = opts.status || "";
   const contestSlug = opts.contestSlug || "";
   const room = opts.room || "";
@@ -671,7 +678,7 @@ export async function fetchSessionsList(
     };
     // Filter the SHARED admin population (same source the stat cards count from),
     // so the drill-down list count always equals the card count for every status.
-    return DEMO_ALL_SESSIONS
+    const sessions = DEMO_ALL_SESSIONS
       .filter((session) => !contestSlug || session.contest_slug === contestSlug)
       .filter((session) => !room || String(session.room || "") === room)
       .filter(matchesStatus)
@@ -685,6 +692,7 @@ export async function fetchSessionsList(
         created_at: session.created_at,
         status: session.status || ""
       }));
+    return { sessions, truncated: false };
   }
 
   const query = new URLSearchParams();
@@ -697,7 +705,7 @@ export async function fetchSessionsList(
       `/api/admin/sessions-list${suffix ? `?${suffix}` : ""}`,
       { method: "GET", headers: { "x-admin-password": password } }
     );
-    return response.sessions;
+    return { sessions: response.sessions, truncated: response.truncated === true };
   } catch (cause) {
     // Endpoint not deployed yet → degrade gracefully (same as fetchRecordingSessions).
     if ((cause as ApiError)?.status === 404) return null;

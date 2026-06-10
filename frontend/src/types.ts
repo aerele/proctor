@@ -171,6 +171,11 @@ export type RecordingSession = {
 
 export type RecordingSessionsResponse = {
   sessions: RecordingSession[];
+  // sessions-list only (F6 review): true when the capped page may be missing
+  // LIVE rows (raw query cap hit, or more live rows matched than the page
+  // holds) — the alerts-console status join must not trust such a list.
+  // Absent on recording-sessions and on older backends (treated as false).
+  truncated?: boolean;
 };
 
 // F6.3 — GET /api/admin/session-detail?session_id=: ONE session doc projected
