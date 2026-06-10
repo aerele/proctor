@@ -2028,6 +2028,24 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
+// S-C: route an OPTIONAL admin/invigilator contest filter through the
+// scopedQuery chokepoint (F9 §2.3.2). Absent/"" → ALL_CONTESTS (no filter —
+// today's behavior, explicit sentinel); a known contest → its resolved doc
+// (the synthesized legacy contest TRANSLATES to the `contest_slug == ""`
+// filter, F9 §6 — selecting the legacy entry now actually matches legacy
+// sessions); an unknown slug filters literally (today's raw-where semantics:
+// an empty result set, never an error — admin GET signatures stay unchanged,
+// F9 D10).
+async function contestScopeOf(slugRaw) {
+  const slug = slugRaw === undefined || slugRaw === null ? "" : String(slugRaw).trim();
+  if (!slug) return ALL_CONTESTS;
+  try {
+    return await resolveContest(slug, { requireOpen: false });
+  } catch {
+    return { slug, legacy: false, legacy_empty_slug: false };
+  }
+}
+
 async function adminSessions(req) {
   requireAdmin(req);
   const username = req.query?.username;
@@ -2090,13 +2108,10 @@ async function adminSessions(req) {
 // never empty against older data.
 async function adminRecordingSessions(req) {
   requireAdmin(req);
-  const contestSlug = req.query?.contest_slug;
-
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    query = query.where("contest_slug", "==", String(contestSlug));
-  }
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const scope = await contestScopeOf(req.query?.contest_slug);
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   const allDocs = snapshot.docs.map((doc) => doc.data());
 
   // Prefer sessions with recorded chunks; fall back to ALL when none report a
@@ -2134,14 +2149,12 @@ async function adminRecordingSessions(req) {
 // the console's per-stat-card drill-down lands on the right sessions.
 async function adminSessionsList(req) {
   requireAdmin(req);
-  const contestSlug = req.query?.contest_slug;
+  const scope = await contestScopeOf(req.query?.contest_slug);
   const room = normalizeRoomFilter(req.query?.room);
   const status = String(req.query?.status || "");
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    query = query.where("contest_slug", "==", String(contestSlug));
-  }
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   let docs = snapshot.docs.map((doc) => doc.data());
   if (room) docs = docs.filter((doc) => String(doc.room || "") === room);
   const nowMs = Date.now();
@@ -2472,13 +2485,12 @@ async function adminSubmissionEvents(req) {
 async function adminStats(req) {
   requireAdmin(req);
   const contestSlug = req.query?.contest_slug;
+  const scope = await contestScopeOf(contestSlug);
   const room = normalizeRoomFilter(req.query?.room);
 
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    query = query.where("contest_slug", "==", String(contestSlug));
-  }
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   const allDocs = snapshot.docs.map((doc) => doc.data());
 
   // Distinct rooms come from the full contest scope (NOT the room-filtered set)
@@ -2659,15 +2671,14 @@ function distinctRooms(docs) {
 async function adminIpReport(req) {
   requireAdmin(req);
   const contestSlug = req.query?.contest_slug;
+  const contestScope = await contestScopeOf(contestSlug);
   const room = normalizeRoomFilter(req.query?.room);
   const scope = String(req.query?.scope || "live");
   if (scope !== "live" && scope !== "all") return badRequest("scope must be live or all");
 
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    query = query.where("contest_slug", "==", String(contestSlug));
-  }
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), contestScope)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   let docs = snapshot.docs.map((doc) => doc.data());
   if (room) docs = docs.filter((doc) => String(doc.room || "") === room);
   if (scope === "live") docs = docs.filter((doc) => doc.status && doc.status !== "ended");
@@ -2737,11 +2748,9 @@ async function adminAttendance(req) {
   const entries = entriesSnap.docs.map((doc) => doc.data());
 
   // Session docs, optionally contest-scoped (same pattern as adminStats).
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    query = query.where("contest_slug", "==", String(contestSlug));
-  }
-  const sessionsSnap = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const sessionsSnap = await scopedQuery(firestore.collection(SESSION_COLLECTION), await contestScopeOf(contestSlug))
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   const sessions = sessionsSnap.docs.map((doc) => doc.data());
 
   // norm unique id -> true when ANY of that student's sessions is still live.
@@ -3890,7 +3899,7 @@ function normalizeVerdict(verdict) {
 
 async function adminAlerts(req) {
   requireAdmin(req);
-  const contestSlug = req.query?.contest_slug;
+  const scope = await contestScopeOf(req.query?.contest_slug);
   const severity = req.query?.severity;
   const source = req.query?.source;
   const room = normalizeRoomFilter(req.query?.room);
@@ -3902,8 +3911,8 @@ async function adminAlerts(req) {
   // AT MOST ONE equality filter to Firestore — the most selective, contest_slug —
   // and filter the remaining fields in memory. ALERTS_QUERY_LIMIT bounds the scan.
   let query = firestore.collection(ALERTS_COLLECTION);
-  if (contestSlug) {
-    query = query.where("contest_slug", "==", String(contestSlug));
+  if (scope !== ALL_CONTESTS) {
+    query = scopedQuery(query, scope);
   } else {
     // Zero-alerts bug (2026-06-10 investigation, root cause #1): without an
     // orderBy, Firestore fills the limit() window in DOC-ID order, so a
@@ -3940,19 +3949,18 @@ async function adminAlerts(req) {
   // Distinct rooms come from the SESSION docs (capped) so the console dropdown
   // lists every room, not just rooms that happen to have an alert. Scoped to the
   // same contest as the alerts query.
-  const rooms = await listSessionRooms(contestSlug);
+  const rooms = await listSessionRooms(scope);
 
   return { alerts: withUrls, rooms };
 }
 
-// Distinct room labels across session docs (optionally scoped to a contest),
-// capped. Shared by adminAlerts so its room dropdown matches adminStats'.
-async function listSessionRooms(contestSlug) {
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    query = query.where("contest_slug", "==", String(contestSlug));
-  }
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+// Distinct room labels across session docs in the given RESOLVED contest scope
+// (ALL_CONTESTS for unscoped), capped. Shared by adminAlerts so its room
+// dropdown matches adminStats'.
+async function listSessionRooms(scope) {
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   return distinctRooms(snapshot.docs.map((doc) => doc.data()));
 }
 
@@ -4016,9 +4024,9 @@ async function invigilatorOverview(req) {
   requireInvigilator(req);
   const settings = await getSettings();
   const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), await contestScopeOf(contestSlug))
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   const docs = snapshot.docs.map((doc) => doc.data());
   return {
     contest_slug: contestSlug || null,
@@ -4211,9 +4219,10 @@ async function invigilatorUnlock(req) {
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
   const usernameNorm = normalizeUsername(body.username);
 
-  let query = firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm);
-  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
-  const snapshot = await query.limit(50).get();
+  const snapshot = await scopedQuery(
+    firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
+    await contestScopeOf(contestSlug)
+  ).limit(50).get();
   const locked = snapshot.docs
     .map((doc) => doc.data())
     .filter((doc) => doc.status === "locked")
@@ -4257,9 +4266,10 @@ async function invigilatorExempt(req) {
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
   const usernameNorm = normalizeUsername(body.username);
 
-  let query = firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm);
-  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
-  const snapshot = await query.limit(50).get();
+  const snapshot = await scopedQuery(
+    firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
+    await contestScopeOf(contestSlug)
+  ).limit(50).get();
   const live = snapshot.docs
     .map((doc) => doc.data())
     .filter((doc) => doc.status && doc.status !== "ended")
@@ -4568,12 +4578,13 @@ async function invigilatorRoom(req) {
   }
   const settings = await getSettings();
   const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const contestScope = await contestScopeOf(contestSlug);
   const roomKey = gateRoomKey(roomParam);
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(roomParam);
 
-  let query = firestore.collection(SESSION_COLLECTION);
-  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
-  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), contestScope)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
   const docs = snapshot.docs.map((doc) => doc.data())
     .filter((doc) => String(doc.room || "") === roomLabel);
 
@@ -4627,8 +4638,8 @@ async function invigilatorRoom(req) {
   // filtered SERVER-SIDE so hidden alert types never leave the backend.
   const alertSettings = await getAlertSettings();
   let alertQuery = firestore.collection(ALERTS_COLLECTION);
-  if (contestSlug) {
-    alertQuery = alertQuery.where("contest_slug", "==", contestSlug);
+  if (contestScope !== ALL_CONTESTS) {
+    alertQuery = scopedQuery(alertQuery, contestScope);
   } else {
     // Same zero-alerts scan-window fix as adminAlerts: newest-first so an
     // archived doc-id-sorted pile cannot crowd live alerts out of the window
