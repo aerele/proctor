@@ -61,6 +61,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
+import { resolveSavedEndAt } from "./examTime";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
 import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
 
@@ -371,9 +372,19 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
   if (demoMode) {
     await wait(150);
     assertDemoAdmin(password);
+    // Phase 3: only the time window is required to save the gate.
+    if (!settings.start_at || !settings.end_at) {
+      throw new Error("Start time and end time are required.");
+    }
+    if (Date.parse(settings.start_at) >= Date.parse(settings.end_at)) {
+      throw new Error("Start time must be before end time.");
+    }
     const next = {
       start_at: settings.start_at,
-      end_at: settings.end_at,
+      // D1 (backend parity): a live exam-time adjustment owns end_at for the
+      // current window — a stale form value cannot revert it (pure rule in
+      // examTime.ts; spreads end_at + the end_at_updated_at stamp when owned).
+      ...resolveSavedEndAt(getDemoSettings(), { start_at: settings.start_at, end_at: settings.end_at }),
       contest_url: settings.contest_url || "",
       room_gate_enabled: settings.room_gate_enabled === true,
       problem_id: settings.problem_id || "",
@@ -384,13 +395,6 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       end_code: settings.end_code || getDemoSettings()?.end_code || "",
       updated_at: new Date().toISOString()
     };
-    // Phase 3: only the time window is required to save the gate.
-    if (!next.start_at || !next.end_at) {
-      throw new Error("Start time and end time are required.");
-    }
-    if (Date.parse(next.start_at) >= Date.parse(next.end_at)) {
-      throw new Error("Start time must be before end time.");
-    }
     window.localStorage.setItem(demoSettingsKey, JSON.stringify(next));
     return {
       ...next,
@@ -1214,7 +1218,9 @@ export async function adjustExamTime(password: string, body: ExamTimeRequest): P
       throw new Error("End time must be after the start time.");
     }
     const newEndAt = new Date(newEndMs).toISOString();
-    window.localStorage.setItem(demoSettingsKey, JSON.stringify({ ...settings, end_at: newEndAt, updated_at: now }));
+    // D1: end_at_updated_at stamps exam-time ownership of end_at (backend
+    // parity) so a stale Settings-form save cannot revert this live change.
+    window.localStorage.setItem(demoSettingsKey, JSON.stringify({ ...settings, end_at: newEndAt, end_at_updated_at: now, updated_at: now }));
     let endedCount = 0;
     if (body.end_now === true) {
       for (const session of readDemoSessions()) {

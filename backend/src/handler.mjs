@@ -1,5 +1,5 @@
 import { createHash, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
-import { Firestore, FieldValue } from "@google-cloud/firestore";
+import { Firestore, FieldValue, FieldPath } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
@@ -598,10 +598,33 @@ async function validateProctorGate() {
   return settings;
 }
 
+// D2 — post-admin-end grace. An admin end (end-now / per-session end / the
+// approve-supersede path) flips the session to "ended" SERVER-side while the
+// candidate's recorder is still flushing: the B1 self-stop fires on the next
+// 409 heartbeat and then uploads the FINAL chunk + the session/end manifest —
+// which a hard status gate would reject, losing the last seconds of evidence.
+// So for a short bounded window after an ADMIN-initiated end (never a student
+// self-end), /api/upload-url and /api/session/end still accept the session.
+// Nothing reopens: status/ended_at/ended_reason stay exactly as the admin set
+// them. 5 minutes comfortably covers a 409→stop→flush cycle on a slow uplink
+// while keeping the post-end write surface tightly bounded.
+const ADMIN_END_GRACE_MS = 5 * 60_000;
+const ADMIN_END_GRACE_REASONS = new Set(["exam_ended_by_admin", "admin_action", "superseded_by_approval"]);
+
+function inAdminEndGrace(session) {
+  if (session?.status !== "ended") return false;
+  if (!ADMIN_END_GRACE_REASONS.has(session.ended_reason)) return false;
+  const endedMs = Date.parse(session.ended_at || "");
+  return Number.isFinite(endedMs) && Date.now() - endedMs <= ADMIN_END_GRACE_MS;
+}
+
 async function createUploadUrl(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id", "kind", "chunk_index", "content_type"]);
-  const session = requireWritableSession(await getSession(body.session_id));
+  const fetched = await getSession(body.session_id);
+  // D2: an admin-ended session may still flush its in-flight final chunk for a
+  // bounded window; everything else goes through the normal status gate.
+  const session = inAdminEndGrace(fetched) ? fetched : requireWritableSession(fetched);
   const kind = sanitizeSegment(body.kind);
   const chunkIndex = Number(body.chunk_index);
   if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
@@ -1144,8 +1167,13 @@ async function endSession(req) {
   if (body.assurance_accepted !== true) return badRequest("Integrity assurance is required before ending the test.");
   // H3: a locked or pending session cannot be self-ended by the client; only an
   // already-ended session is rejected (idempotency handled below via 409). An
-  // active session ends normally (the happy path).
-  const session = requireWritableSession(await getSession(body.session_id));
+  // active session ends normally (the happy path). D2 exception: for a bounded
+  // window after an ADMIN end the client's own end still lands so the manifest
+  // isn't lost — accepted WITHOUT touching status/ended_at/ended_reason (the
+  // admin's end stays authoritative; nothing reopens).
+  const fetched = await getSession(body.session_id);
+  const adminEndGrace = inAdminEndGrace(fetched);
+  const session = adminEndGrace ? fetched : requireWritableSession(fetched);
   const manifest = Array.isArray(body.manifest) ? body.manifest : [];
   const now = new Date().toISOString();
   const manifestKey = `${sessionPrefix(session)}manifest.json`;
@@ -1156,10 +1184,11 @@ async function endSession(req) {
 
   await sessionRef(session.session_id).update({
     updated_at: now,
-    ended_at: now,
-    status: "ended",
     manifest_key: manifestKey,
-    uploaded_manifest_count: manifest.length
+    uploaded_manifest_count: manifest.length,
+    // Grace path: the session is ALREADY ended by the admin — keep that
+    // ended_at/status; only the manifest bookkeeping above is new.
+    ...(adminEndGrace ? {} : { ended_at: now, status: "ended" })
   });
 
   // H1: the session is over — free its live slot so a later legitimate start for
@@ -1207,9 +1236,21 @@ async function adminSaveSettings(req) {
   if (passcode && passcode.length < 4) return badRequest("Passcode must be at least 4 characters.");
   if (endCode && endCode.length < 4) return badRequest("End code must be at least 4 characters.");
 
+  // D1: once POST /api/admin/exam-time has adjusted the end time (stamped via
+  // end_at_updated_at), the S5 endpoint OWNS end_at for the current exam
+  // window. A Settings-form save posts back whatever end_at the form LOADED —
+  // possibly minutes stale — so honoring it here would silently revert a live
+  // extend/shorten/end-now. Rule: same start_at (same exam) + stamp present →
+  // keep the stored end_at and the stamp, ignore body.end_at. A CHANGED
+  // start_at is a new schedule: body.end_at applies and the stamp resets so
+  // the next exam isn't shackled to the old exam's live adjustments.
+  const sameWindowStart = Boolean(existing?.start_at) && Date.parse(existing.start_at) === startAt.getTime();
+  const examTimeOwnsEnd = sameWindowStart && Boolean(existing?.end_at_updated_at);
+
   const item = {
     start_at: startAt.toISOString(),
-    end_at: endAt.toISOString(),
+    end_at: examTimeOwnsEnd ? existing.end_at : endAt.toISOString(),
+    ...(examTimeOwnsEnd ? { end_at_updated_at: existing.end_at_updated_at } : {}),
     contest_url: contestUrl,
     contest_slug: contestSlugFromUrl(contestUrl),
     problem_id: problemId,
@@ -1952,20 +1993,35 @@ async function adminExamTime(req) {
 // + ended_at + live-slot release — with a distinct ended_reason for the audit
 // trail, applied with bounded concurrency so an 800-session end-now never fans
 // out unbounded. Returns the number of sessions ended.
+//
+// D3: paginated by document id — a single SESSIONS_QUERY_LIMIT-capped query
+// silently stranded live sessions past the first 2000 docs (multi-day slug
+// reuse). orderBy(documentId) + startAfter rides the automatic single-field
+// index on contest_slug (every index ends with __name__), so no composite
+// index is needed.
 async function endAllLiveSessions(contestSlug, now) {
-  const snapshot = await firestore
-    .collection(SESSION_COLLECTION)
-    .where("contest_slug", "==", contestSlug || "")
-    .limit(SESSIONS_QUERY_LIMIT)
-    .get();
-  const live = snapshot.docs.map((doc) => doc.data()).filter((doc) => doc.status !== "ended");
-  await mapWithConcurrency(live, 12, async (session) => {
-    await sessionRef(session.session_id).update({
-      status: "ended", ended_at: now, updated_at: now, ended_reason: "exam_ended_by_admin"
+  let endedCount = 0;
+  let cursor = null;
+  for (;;) {
+    let query = firestore
+      .collection(SESSION_COLLECTION)
+      .where("contest_slug", "==", contestSlug || "")
+      .orderBy(FieldPath.documentId())
+      .limit(SESSIONS_QUERY_LIMIT);
+    if (cursor !== null) query = query.startAfter(cursor);
+    const snapshot = await query.get();
+    const live = snapshot.docs.map((doc) => doc.data()).filter((doc) => doc.status !== "ended");
+    await mapWithConcurrency(live, 12, async (session) => {
+      await sessionRef(session.session_id).update({
+        status: "ended", ended_at: now, updated_at: now, ended_reason: "exam_ended_by_admin"
+      });
+      await releaseLiveSlot(session);
     });
-    await releaseLiveSlot(session);
-  });
-  return live.length;
+    endedCount += live.length;
+    if (snapshot.docs.length < SESSIONS_QUERY_LIMIT) break;
+    cursor = snapshot.docs[snapshot.docs.length - 1].id;
+  }
+  return endedCount;
 }
 
 // Normalize a ?room query param to the same sanitized form rooms are stored in,

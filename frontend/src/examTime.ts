@@ -34,6 +34,24 @@ export function formatRemaining(ms: number): string {
   return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+// D1 — which end_at does a Settings-form save actually persist? Mirrors the
+// backend adminSaveSettings rule (demo parity): once the exam-time endpoint has
+// adjusted the end (end_at_updated_at stamp) and the save keeps the SAME
+// start_at (same exam window), the stored end_at + stamp survive — a stale
+// form value can never revert a live extend/shorten/end-now. A changed
+// start_at is a new schedule: the submitted end_at applies and the stamp clears.
+export function resolveSavedEndAt(
+  existing: { start_at?: string; end_at?: string; end_at_updated_at?: string } | null | undefined,
+  submitted: { start_at: string; end_at: string }
+): { end_at: string; end_at_updated_at?: string } {
+  const sameWindowStart =
+    Boolean(existing?.start_at) && Date.parse(existing!.start_at!) === Date.parse(submitted.start_at);
+  if (sameWindowStart && existing?.end_at_updated_at) {
+    return { end_at: existing.end_at || "", end_at_updated_at: existing.end_at_updated_at };
+  }
+  return { end_at: submitted.end_at };
+}
+
 // Classify a newly-received end_at against the one already shown, so the UI can
 // announce "extended" / "shortened" exactly once per change. An unusable next
 // value is "unchanged" (keep what we have); a first usable value is "initial".
