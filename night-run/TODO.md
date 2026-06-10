@@ -29,17 +29,17 @@ Detailed TDD tasks: `docs/superpowers/plans/2026-06-09-own-editor-slice1.md`. Su
 - [x] S2 — Roster upload (flexible columns + designated unique-ID) + unique-ID-confirm login + room dropdown (+ "Other").
 - [x] S3 — Invigilator portal (NO signed-QR): room OTP/passcode distribution + **start-now/allow-all bypass** + basic room stats + selective alerts.
 - [x] S4 — Problem authoring: question bank + sample/hidden test cases + time/memory limits + scoring (replaces the placeholder problem).
-- [ ] S5 — Dynamic time + "end now" (admin).
-- [ ] S6 — Attendance stats (taken / not-taken / absentees).
-- [ ] S7 — IP-address report (IP-wise count of logged-in users).
+- [x] S5 — Dynamic time + "end now" (admin).
+- [x] S6 — Attendance stats (taken / not-taken / absentees).
+- [x] S7 — IP-address report (IP-wise count of logged-in users).
 
 ## DEFER — do NOT build tonight
 Server-signed-QR verification · OMR markers + local overlay detection (+ focus-correlation, fullscreen-exit challenge, alert screenshots, jump-to-chunk) · analytics (Slice 4).
 
 ## Final audits (after the build)
-- [ ] Code review — `~/arogara/code-review` (`general.md` + `/code-review` + `/security-review`).
-- [ ] Security audit — `/security-review` + `gitleaks` over the diff/secrets.
-- [ ] PII / privacy audit — `~/arogara/pii-audit/scan.sh <repo>`.
+- [x] Code review — `~/arogara/code-review` (`general.md` + `/code-review` + `/security-review`).
+- [x] Security audit — `/security-review` + `gitleaks` over the diff/secrets.
+- [x] PII / privacy audit — `~/arogara/pii-audit/scan.sh <repo>`.
 - [ ] Write the morning summary into `MORNING-NOTES.md` (done+evidence, judgment calls, blockers, what's left).
 
 ## Morning gates (NOT tonight — log, don't attempt unattended)

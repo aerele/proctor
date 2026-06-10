@@ -14,12 +14,16 @@ Read this first after compaction. Repo: /home/karthi/arogara/proctor, branch mas
 - **Audits**: full sweep DONE (night-run/AUDIT-REPORT.md: 0 blockers; all mechanical majors FIXED + re-review-verified — M2 keystroke disclosure, M5 roster clear deletes, M7, M8 CSV injection, M9-M11 a11y/errors, M12/M13 invigilator least-privilege). S3 delta-audit done (security clean).
 - **Deployed e2e (dev GCP aerele-proctor-dev)**: backend https://proctor-api-238846959672.asia-south1.run.app + frontend https://proctor-web-238846959672.asia-south1.run.app — full candidate flow incl LIVE Judge0 + keystroke forensics ('#api-probe' reconstructed byte-for-byte from GCS NDJSON). NOTE: deployed images predate S3-S7 — final redeploy pending.
 
-## IN FLIGHT at compaction
+## IN FLIGHT at compaction — RESOLVED: S5-S7 workflow COMPLETED (all 19 tasks green; suites 330/330 + 174/174). Ignore the resume instructions below.
+
+<details>OLD:
 - Workflow **waz7af0gl** (resume of wf_a5a43681-607, script s5-s7-final-builds-*.js): S7 IP-report remaining frontend tasks (admin tab + demo parity; backend tasks 1-2 already committed: 8181b83, 3cd4cc5) + final suites verify + final delta-review of S5-S7. All S5/S6 tasks replay from journal cache.
 - If it died again: check journal /home/karthi/.claude/projects/-home-karthi-arogara/d1d95247-a2f0-4d67-a73c-a24d64c7473f/subagents/workflows/wf_a5a43681-607/journal.jsonl, reset any uncommitted partial edits (git status), TaskStop the stale task id, re-invoke Workflow({scriptPath: ".../s5-s7-final-builds-wf_a5a43681-607.js", resumeFromRunId: "wf_a5a43681-607"}).
 
-## REMAINING (in order)
-1. S7 workflow completes → read its verify + delta-review findings; fix anything major (small focused agent).
+</details>
+
+## REMAINING (in order — updated 10:45)
+1. ~~S7 workflow~~ DONE. Delta-review: 4 minors D1-D4 + 3 nits filed in MORNING-NOTES — fix D1/D2 (focused agent) or defer to Karthi.
 2. **Final merged-stack demo-browser walkthrough** on :5173 (VITE_DEMO_MODE dev server should be running; restart: cd frontend && VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev). Walk: student (gate→details→roster→waiting room if gate on→workspace w/ authored problem→countdown) + /invigilator portal + admin tabs (Problems, attendance, IP report, exam time). Browser MCP on :9222; Monaco typing MUST use editor.trigger('keyboard','type',{text}) — CDP type_text does NOT reach Monaco. getDisplayMedia/clipboard stubs via initScript (see NIGHT-LOG ~00:15 + ~04:45 entries).
 3. **Redeploy BOTH images to aerele-proctor-dev** (everything S3-S7 + fixes): source .env.deploy.local; backend: gcloud builds submit backend --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/api:latest --async (poll: gcloud builds list), then gcloud run deploy proctor-api (same flags as NIGHT-LOG ~04:0x incl JUDGE0_* env). Frontend: npm --workspace frontend run build with VITE_API_BASE_URL + VITE_ADMIN_PASSWORD_HASH (sha256 of ADMIN_PASSWORD), builds submit frontend --async, gcloud run deploy proctor-web. Quick deployed smoke.
 4. Update MORNING-NOTES (final summary already mostly written §-by-§), TODO ticks, final commit.
