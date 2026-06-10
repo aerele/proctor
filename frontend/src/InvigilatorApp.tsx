@@ -3,7 +3,7 @@
 // gate (client-side verify, then the typed password rides x-invigilator-password
 // on every call; the backend also accepts the admin credential). NO signed-QR
 // ID verification here — that is DEFERRED by design; ID checks stay manual.
-import { AlertTriangle, Bell, DoorOpen, KeyRound, RefreshCw, ShieldCheck, Users } from "lucide-react";
+import { AlertTriangle, Bell, ChevronDown, ChevronUp, DoorOpen, KeyRound, RefreshCw, ShieldCheck, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
@@ -13,6 +13,8 @@ import {
   openRoom, releaseRoomCode, sha256Hex
 } from "./api";
 import { gateStatusLabel } from "./invigilator/gateLogic";
+import { alertExplanation, matchesStatusFilter } from "./invigilator/roomView";
+import type { StatusFilter } from "./invigilator/roomView";
 import type { EnforcementExemptions, InvigilatorAlert, InvigilatorRoomResponse, InvigilatorSessionRow, RoomGate } from "./types";
 
 const POLL_INTERVAL_MS = 5000;
@@ -48,6 +50,10 @@ export function InvigilatorApp() {
   const [data, setData] = useState<InvigilatorRoomResponse | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // F9.2: clicking a stat tile filters the student list; click again to clear.
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(null);
+  // F9.4: which room alert is expanded to its candidate-detail view.
+  const [expandedAlertId, setExpandedAlertId] = useState<string | null>(null);
 
   const saveIdentity = (nextRoom: string) => {
     window.localStorage.setItem(savedKey, JSON.stringify({ name: name.trim(), room: nextRoom }));
@@ -100,6 +106,8 @@ export function InvigilatorApp() {
     }
     setRoom(next);
     setData(null);
+    setStatusFilter(null);
+    setExpandedAlertId(null);
     saveIdentity(next);
   };
 
@@ -246,6 +254,11 @@ export function InvigilatorApp() {
 
   const roomLabel = room === UNASSIGNED_KEY ? UNASSIGNED_LABEL : room;
   const stats = data?.stats ?? null;
+  // F9.2: the student list below honours the clicked stat tile.
+  const sessions = data?.sessions ?? [];
+  const visibleSessions = sessions.filter((row) => matchesStatusFilter(row, statusFilter));
+  const toggleFilter = (filter: Exclude<StatusFilter, null>) =>
+    setStatusFilter((current) => (current === filter ? null : filter));
 
   return (
     <PortalShell>
@@ -264,6 +277,8 @@ export function InvigilatorApp() {
               setRoom("");
               setRoomChoice("");
               setData(null);
+              setStatusFilter(null);
+              setExpandedAlertId(null);
               saveIdentity("");
             }
           }}
@@ -274,33 +289,52 @@ export function InvigilatorApp() {
 
       {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
 
-      <div className="mt-5">
-        <GateCard
-          gate={data?.gate ?? null}
-          gateEnabled={gateEnabled}
-          busy={busy}
-          onRelease={() => void release(false)}
-          onRegenerate={() => void release(true)}
-          onStartNow={() => void startNow()}
-        />
-      </div>
+      {/* F9.1: the start-gate block only renders when the gate is actually in
+          use — when it is off there is nothing for the invigilator to do here. */}
+      {gateEnabled ? (
+        <div className="mt-5">
+          <GateCard
+            gate={data?.gate ?? null}
+            busy={busy}
+            onRelease={() => void release(false)}
+            onRegenerate={() => void release(true)}
+            onStartNow={() => void startNow()}
+          />
+        </div>
+      ) : null}
 
+      {/* F9.2: each counter is a toggleable filter for the student list below. */}
       <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-7">
-        <StatTile label="Recording" value={stats?.live ?? 0} tone="accent" />
-        <StatTile label="Disconnected" value={stats?.disconnected ?? 0} tone="danger" />
-        <StatTile label="Locked" value={stats?.locked ?? 0} tone="danger" />
-        <StatTile label="Waiting approval" value={stats?.pending_approval ?? 0} tone="warning" />
-        <StatTile label="Finished" value={stats?.finished ?? 0} />
-        <StatTile label="Started exam" value={stats?.started ?? 0} tone="accent" />
+        <StatTile label="Recording" value={stats?.live ?? 0} tone="accent"
+          active={statusFilter === "recording"} onClick={() => toggleFilter("recording")} />
+        <StatTile label="Disconnected" value={stats?.disconnected ?? 0} tone="danger"
+          active={statusFilter === "disconnected"} onClick={() => toggleFilter("disconnected")} />
+        <StatTile label="Locked" value={stats?.locked ?? 0} tone="danger"
+          active={statusFilter === "locked"} onClick={() => toggleFilter("locked")} />
+        <StatTile label="Waiting approval" value={stats?.pending_approval ?? 0} tone="warning"
+          active={statusFilter === "pending_approval"} onClick={() => toggleFilter("pending_approval")} />
+        <StatTile label="Finished" value={stats?.finished ?? 0}
+          active={statusFilter === "finished"} onClick={() => toggleFilter("finished")} />
+        <StatTile label="Started exam" value={stats?.started ?? 0} tone="accent"
+          active={statusFilter === "started"} onClick={() => toggleFilter("started")} />
         <StatTile label="Total" value={stats?.total ?? 0} />
       </div>
 
       <section className="mt-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
-        <div className="mb-3 flex items-center gap-2">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
           <Users size={18} />
           <h2 className="text-base font-semibold">Students in this room</h2>
+          {/* F9.2: the active tile filter, with an inline clear affordance. */}
+          {statusFilter ? (
+            <button
+              className="focus-ring ml-auto inline-flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-3 py-1 text-xs font-semibold text-accent"
+              onClick={() => setStatusFilter(null)}
+            >
+              Showing {visibleSessions.length} of {sessions.length} — clear filter
+            </button>
+          ) : null}
         </div>
-        {data && data.sessions.length ? (
+        {data && visibleSessions.length ? (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead>
@@ -314,10 +348,10 @@ export function InvigilatorApp() {
                 </tr>
               </thead>
               <tbody>
-                {data.sessions.map((row) => {
+                {visibleSessions.map((row) => {
                   const badge = statusBadge(row);
                   return (
-                    <tr key={row.session_id || row.hackerrank_username} className="border-b border-line/60">
+                    <tr key={row.hackerrank_username || row.name} className="border-b border-line/60">
                       <td className="py-2 pr-3 font-medium text-ink">{row.name || "—"}</td>
                       <td className="py-2 pr-3 text-muted">{row.hackerrank_username || "—"}</td>
                       <td className="py-2 pr-3 text-muted">{row.roll_number || "—"}</td>
@@ -350,7 +384,11 @@ export function InvigilatorApp() {
             </table>
           </div>
         ) : (
-          <p className="text-sm text-muted">{data ? "No sessions in this room yet." : "Loading…"}</p>
+          <p className="text-sm text-muted">
+            {!data ? "Loading…" : statusFilter && sessions.length
+              ? "No students match this filter."
+              : "No sessions in this room yet."}
+          </p>
         )}
       </section>
 
@@ -361,7 +399,17 @@ export function InvigilatorApp() {
         </div>
         {data && data.alerts.length ? (
           <div className="space-y-2">
-            {data.alerts.map((alert) => <AlertRow key={alert.id} alert={alert} />)}
+            {/* F9.4: click an alert to expand its candidate detail (joined from
+                this room's session rows — no extra fields leave the server). */}
+            {data.alerts.map((alert) => (
+              <AlertRow
+                key={alert.id}
+                alert={alert}
+                candidate={sessions.find((row) => row.hackerrank_username === alert.hackerrank_username) ?? null}
+                expanded={expandedAlertId === alert.id}
+                onToggle={() => setExpandedAlertId((current) => (current === alert.id ? null : alert.id))}
+              />
+            ))}
           </div>
         ) : (
           <p className="text-sm text-muted">{data ? "No open alerts for this room." : "Loading…"}</p>
@@ -375,15 +423,17 @@ function PortalShell(props: { children: ReactNode }) {
   return <main className="mx-auto min-h-screen w-full max-w-5xl px-4 pb-16 pt-6">{props.children}</main>;
 }
 
+// F9.1: only rendered when the room gate is ENABLED — a disabled gate shows
+// nothing at all (no explainer block) so invigilators are never distracted by
+// machinery that is not in use.
 function GateCard(props: {
   gate: RoomGate | null;
-  gateEnabled: boolean;
   busy: boolean;
   onRelease: () => void;
   onRegenerate: () => void;
   onStartNow: () => void;
 }) {
-  const { gate, gateEnabled, busy, onRelease, onRegenerate, onStartNow } = props;
+  const { gate, busy, onRelease, onRegenerate, onStartNow } = props;
   const badge = gateStatusLabel(gate);
   const tones: Record<string, string> = {
     idle: "border-line bg-white/60 text-muted",
@@ -399,48 +449,40 @@ function GateCard(props: {
         </div>
         <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${tones[badge.tone]}`}>{badge.label}</span>
       </div>
-      {!gateEnabled ? (
+      {gate && gate.mode === "otp" && gate.otp ? (
+        <p className="mt-4 text-center font-mono text-5xl font-bold tracking-[0.35em] text-ink">{gate.otp}</p>
+      ) : null}
+      {gate?.mode === "open" ? (
         <p className="mt-3 text-sm text-muted">
-          Room start codes are OFF for this contest — ask the admin to enable "Room start codes" in the console settings. Stats and alerts below still work.
+          Everyone in this room is admitted automatically — no code needed. Releasing a code re-arms the gate for late arrivals only.
         </p>
-      ) : (
-        <>
-          {gate && gate.mode === "otp" && gate.otp ? (
-            <p className="mt-4 text-center font-mono text-5xl font-bold tracking-[0.35em] text-ink">{gate.otp}</p>
-          ) : null}
-          {gate?.mode === "open" ? (
-            <p className="mt-3 text-sm text-muted">
-              Everyone in this room is admitted automatically — no code needed. Releasing a code re-arms the gate for late arrivals only.
-            </p>
-          ) : null}
-          <div className="mt-4 flex flex-wrap gap-3">
-            {!gate || gate.mode === "open" || !gate.otp ? (
-              <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={onRelease}>
-                <KeyRound size={16} /> Release room code
-              </button>
-            ) : (
-              <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={onRegenerate}>
-                <RefreshCw size={16} /> Regenerate code
-              </button>
-            )}
-            {gate?.mode !== "open" ? (
-              <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={onStartNow}>
-                <DoorOpen size={16} /> Start now — allow all
-              </button>
-            ) : null}
-          </div>
-          {gate?.released_by ? (
-            <p className="mt-3 text-xs text-muted">
-              Code released by {gate.released_by}{gate.released_at ? ` at ${new Date(gate.released_at).toLocaleTimeString()}` : ""}.
-            </p>
-          ) : null}
-          {gate?.opened_by ? (
-            <p className="mt-1 text-xs text-muted">
-              Room opened by {gate.opened_by}{gate.opened_at ? ` at ${new Date(gate.opened_at).toLocaleTimeString()}` : ""}.
-            </p>
-          ) : null}
-        </>
-      )}
+      ) : null}
+      <div className="mt-4 flex flex-wrap gap-3">
+        {!gate || gate.mode === "open" || !gate.otp ? (
+          <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={onRelease}>
+            <KeyRound size={16} /> Release room code
+          </button>
+        ) : (
+          <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={onRegenerate}>
+            <RefreshCw size={16} /> Regenerate code
+          </button>
+        )}
+        {gate?.mode !== "open" ? (
+          <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-accent px-4 text-sm font-semibold text-white disabled:opacity-50" disabled={busy} onClick={onStartNow}>
+            <DoorOpen size={16} /> Start now — allow all
+          </button>
+        ) : null}
+      </div>
+      {gate?.released_by ? (
+        <p className="mt-3 text-xs text-muted">
+          Code released by {gate.released_by}{gate.released_at ? ` at ${new Date(gate.released_at).toLocaleTimeString()}` : ""}.
+        </p>
+      ) : null}
+      {gate?.opened_by ? (
+        <p className="mt-1 text-xs text-muted">
+          Room opened by {gate.opened_by}{gate.opened_at ? ` at ${new Date(gate.opened_at).toLocaleTimeString()}` : ""}.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -464,13 +506,30 @@ function ExemptionToggle(props: { label: string; active: boolean; disabled: bool
   );
 }
 
-function StatTile(props: { label: string; value: number; tone?: "danger" | "warning" | "accent" }) {
+// F9.2: a tile with onClick is a toggleable filter for the student list; the
+// active tile is visually marked (accent border/fill + a "filtering" hint).
+function StatTile(props: { label: string; value: number; tone?: "danger" | "warning" | "accent"; active?: boolean; onClick?: () => void }) {
   const tone = props.tone === "danger" ? "text-danger" : props.tone === "warning" ? "text-warning" : props.tone === "accent" ? "text-accent" : "text-ink";
-  return (
-    <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+  const body = (
+    <>
       <p className="text-xs font-semibold uppercase tracking-wide text-muted">{props.label}</p>
       <p className={`mt-1 text-2xl font-semibold ${tone}`}>{props.value}</p>
-    </div>
+    </>
+  );
+  if (!props.onClick) {
+    return <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">{body}</div>;
+  }
+  return (
+    <button
+      className={`focus-ring rounded-lg border p-4 text-left shadow-subtle ${
+        props.active ? "border-accent bg-accent/10" : "border-line bg-panel"
+      }`}
+      title={props.active ? "Click to clear this filter" : `Show only: ${props.label.toLowerCase()}`}
+      onClick={props.onClick}
+    >
+      {body}
+      {props.active ? <p className="mt-1 text-[11px] font-semibold text-accent">filtering — click to clear</p> : null}
+    </button>
   );
 }
 
@@ -483,20 +542,55 @@ function statusBadge(row: InvigilatorSessionRow): { label: string; className: st
   return { label: row.status || "Unknown", className: "border-line bg-white/60 text-muted" };
 }
 
-function AlertRow(props: { alert: InvigilatorAlert }) {
-  const { alert } = props;
+// F9.4: a clickable alert row. Expanding shows candidate detail joined from the
+// room's own session rows (name / roll number / roster id — identity data the
+// dashboard already holds, never alert internals) plus the alert time and a
+// plain-language explanation of what the alert type means.
+function AlertRow(props: {
+  alert: InvigilatorAlert;
+  candidate: InvigilatorSessionRow | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const { alert, candidate, expanded, onToggle } = props;
   const tone = alert.severity === "critical"
     ? "border-danger/40 bg-danger/10 text-danger"
     : alert.severity === "warning"
       ? "border-warning/40 bg-warning/10 text-warning"
       : "border-line bg-white/60 text-muted";
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white/60 px-3 py-2 text-sm">
-      <AlertTriangle size={16} className={alert.severity === "critical" ? "text-danger" : "text-warning"} />
-      <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${tone}`}>{alert.severity}</span>
-      <span className="font-medium text-ink">{alert.title}</span>
-      <span className="text-muted">{alert.hackerrank_username}</span>
-      <span className="ml-auto text-xs text-muted">{new Date(alert.timestamp).toLocaleTimeString()}</span>
+    <div className={`rounded-md border bg-white/60 text-sm ${expanded ? "border-accent/50" : "border-line"}`}>
+      <button className="focus-ring flex w-full flex-wrap items-center gap-3 px-3 py-2 text-left" onClick={onToggle}>
+        <AlertTriangle size={16} className={alert.severity === "critical" ? "text-danger" : "text-warning"} />
+        <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${tone}`}>{alert.severity}</span>
+        <span className="font-medium text-ink">{alert.title}</span>
+        <span className="text-muted">{alert.hackerrank_username}</span>
+        <span className="ml-auto text-xs text-muted">{new Date(alert.timestamp).toLocaleTimeString()}</span>
+        {expanded ? <ChevronUp size={14} className="text-muted" /> : <ChevronDown size={14} className="text-muted" />}
+      </button>
+      {expanded ? (
+        <div className="border-t border-line/60 px-3 py-3">
+          <dl className="grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Candidate</dt>
+              <dd className="font-medium text-ink">{candidate?.name || alert.hackerrank_username || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Roll no.</dt>
+              <dd className="text-ink">{candidate?.roll_number || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Roster ID</dt>
+              <dd className="text-ink">{candidate?.roster_unique_id || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Time</dt>
+              <dd className="text-ink">{new Date(alert.timestamp).toLocaleString()}</dd>
+            </div>
+          </dl>
+          <p className="mt-2 text-sm leading-6 text-muted">{alertExplanation(alert.type)}</p>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -552,6 +552,11 @@ test("GET /api/invigilator/room: rows + alerts carry NO session_id; ip_changed a
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
+  // F9.3: ip_changed is hidden from invigilators by default — turn it ON so this
+  // test keeps exercising the least-privilege PROJECTION of a shown alert.
+  firestore.collection(process.env.SETTINGS_COLLECTION).doc("alert_settings").set({
+    proctor: { ip_changed: { enabled: true, severity: "warning", show_to_invigilator: true } }
+  });
   seedSession(firestore, "a1");
   // An ip_changed proctor alert whose detail embeds the candidate's IPs (exactly
   // what recordHeartbeat writes via upsertProctorAlert).
@@ -586,6 +591,106 @@ test("GET /api/invigilator/room: rows + alerts carry NO session_id; ip_changed a
   // sessions[] / alerts[] row (it may still legitimately appear in other places
   // it is NOT a credential, e.g. storage keys — but we removed those too).
   assert.equal(JSON.stringify({ sessions: res.body.sessions, alerts: res.body.alerts }).includes("\"a1\""), false);
+});
+
+// ---- F9.3: admin-configurable invigilator alert visibility -------------------
+
+test("alert-settings: show_to_invigilator defaults (critical types true, warning types false) + boolean round-trip", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  const adminHeaders = { "x-admin-password": "invig-admin-pass" };
+  const get = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings", headers: adminHeaders }));
+  assert.equal(get.statusCode, 200);
+  const p = get.body.proctor;
+  // Critical sure-shots are invigilator-visible by default…
+  assert.equal(p.recording_stopped.show_to_invigilator, true);
+  assert.equal(p.screen_share_stopped.show_to_invigilator, true);
+  assert.equal(p.recording_error.show_to_invigilator, true);
+  assert.equal(p.fullscreen_enforcement.show_to_invigilator, true);
+  // …warning-grade noise is admin-only by default.
+  assert.equal(p.ip_changed.show_to_invigilator, false);
+  assert.equal(p.tab_hidden.show_to_invigilator, false);
+  assert.equal(p.tab_away.show_to_invigilator, false);
+  assert.equal(p.disconnected.show_to_invigilator, false);
+  // A boolean override round-trips; a non-boolean falls back to the default.
+  const save = await call(makeReq({ method: "POST", path: "/api/admin/alert-settings", headers: adminHeaders,
+    body: { proctor: {
+      tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: true },
+      recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: "yes-please" }
+    } } }));
+  assert.equal(save.statusCode, 200);
+  assert.equal(save.body.proctor.tab_hidden.show_to_invigilator, true);
+  assert.equal(save.body.proctor.recording_stopped.show_to_invigilator, true, "non-boolean falls back to the default");
+  const reread = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings", headers: adminHeaders }));
+  assert.equal(reread.body.proctor.tab_hidden.show_to_invigilator, true);
+});
+
+test("GET /api/invigilator/room: alert feed filters by show_to_invigilator server-side", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "a1");
+  seedAlert(firestore, "crit1");                                                       // recording_stopped → shown by default
+  seedAlert(firestore, "warn1", { id: "warn1", type: "tab_hidden", severity: "warning",
+    title: "Tab hidden" });                                                            // warning → hidden by default
+  const first = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.body.alerts.map((a) => a.id), ["crit1"]);
+  // Admin flips the visibility: tab_hidden ON, recording_stopped OFF.
+  const save = await call(makeReq({ method: "POST", path: "/api/admin/alert-settings",
+    headers: { "x-admin-password": "invig-admin-pass" },
+    body: { proctor: {
+      tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: true },
+      recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: false }
+    } } }));
+  assert.equal(save.statusCode, 200);
+  const second = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.deepEqual(second.body.alerts.map((a) => a.id), ["warn1"]);
+  // The admin alert console is NOT affected by invigilator visibility.
+  const admin = await call(makeReq({ method: "GET", path: "/api/admin/alerts",
+    headers: { "x-admin-password": "invig-admin-pass" } }));
+  assert.deepEqual(admin.body.alerts.map((a) => a.id).sort(), ["crit1", "warn1"]);
+});
+
+test("GET /api/invigilator/room: catalog-unknown alert types fall back to severity (critical shown, else hidden)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "a1");
+  // Legacy / non-catalog types have no show_to_invigilator config.
+  seedAlert(firestore, "leg1", { id: "leg1", type: "invalid_share_surface", severity: "critical",
+    title: "Invalid share surface" });
+  seedAlert(firestore, "leg2", { id: "leg2", type: "some_future_type", severity: "warning",
+    title: "Future thing" });
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.alerts.map((a) => a.id), ["leg1"]);
+});
+
+// ---- F9.4: alert-detail join data (roster_unique_id on session rows) ---------
+
+test("GET /api/invigilator/room: session rows carry roster_unique_id; alert projection unchanged", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "a1", { roster_unique_id: "22CS042" });
+  seedSession(firestore, "a2", { username_norm: "bob", hackerrank_username: "Bob", name: "Bob B" }); // no roster id
+  seedAlert(firestore, "al1");
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.find((r) => r.name === "Alice A").roster_unique_id, "22CS042");
+  assert.equal(res.body.sessions.find((r) => r.name === "Bob B").roster_unique_id, "");
+  // Least-privilege stays: rows still carry no session_id/email/IPs…
+  for (const row of res.body.sessions) {
+    assert.ok(!("session_id" in row) && !("email" in row) && !("start_ip" in row) && !("current_ip" in row));
+  }
+  // …and the alert projection keys are EXACTLY as before (no new alert internals).
+  assert.deepEqual(Object.keys(res.body.alerts[0]).sort(),
+    ["hackerrank_username", "id", "severity", "timestamp", "title", "type"]);
 });
 
 test("GET /api/invigilator/room: room=_ selects blank-room sessions; room param required", async () => {

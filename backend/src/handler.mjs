@@ -2987,19 +2987,23 @@ const SURE_SHOT_EVENT_TYPES = {
 // minimum continuous "HackerRank not visible" span the monitoring tab-away
 // detector must observe before raising an alert. This is the source of truth for
 // the detector's --min-gap-seconds.
+// F9.3: show_to_invigilator gates each type's appearance on the INVIGILATOR room
+// dashboard's alert feed (server-side filter in invigilatorRoom; the admin
+// console always sees everything). Defaults: critical sure-shots visible,
+// warning-grade noise admin-only.
 const TAB_AWAY_DEFAULT_THRESHOLD_SECONDS = 12;
 const DEFAULT_PROCTOR_ALERT_SETTINGS = {
-  recording_stopped: { enabled: true, severity: "critical" },
-  screen_share_stopped: { enabled: true, severity: "critical" },
-  recording_error: { enabled: true, severity: "critical" },
+  recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
+  screen_share_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
+  recording_error: { enabled: true, severity: "critical", show_to_invigilator: true },
   // F5.3: the fullscreen enforcement ladder tripped (countdown expired / exit
   // limit exceeded). Disabling this hides the ALERT only — the block-mode lock
   // itself is policy, not alerting, and is governed by enforcement_mode.
-  fullscreen_enforcement: { enabled: true, severity: "critical" },
-  ip_changed: { enabled: true, severity: "warning" },
-  tab_hidden: { enabled: true, severity: "warning" },
-  tab_away: { enabled: true, severity: "warning", threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
-  disconnected: { enabled: true, severity: "warning" }
+  fullscreen_enforcement: { enabled: true, severity: "critical", show_to_invigilator: true },
+  ip_changed: { enabled: true, severity: "warning", show_to_invigilator: false },
+  tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: false },
+  tab_away: { enabled: true, severity: "warning", show_to_invigilator: false, threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
+  disconnected: { enabled: true, severity: "warning", show_to_invigilator: false }
 };
 
 // Read the stored alert-settings doc and merge it over the defaults so callers
@@ -3018,7 +3022,11 @@ function mergeAlertSettings(stored) {
     const override = stored && typeof stored === "object" ? stored[type] : undefined;
     const entry = {
       enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
-      severity: override && ALERT_SEVERITIES.includes(override.severity) ? override.severity : def.severity
+      severity: override && ALERT_SEVERITIES.includes(override.severity) ? override.severity : def.severity,
+      // F9.3: invigilator visibility — only an explicit boolean overrides the default.
+      show_to_invigilator: override && typeof override.show_to_invigilator === "boolean"
+        ? override.show_to_invigilator
+        : def.show_to_invigilator
     };
     // tab_away alone carries a numeric threshold_seconds (minimum continuous
     // absence the tab-away detector flags). Validate it's a positive finite
@@ -3040,6 +3048,16 @@ function alertTypeConfig(settings, type, fallbackSeverity) {
   const entry = settings?.proctor?.[type];
   if (entry) return entry;
   return { enabled: true, severity: fallbackSeverity };
+}
+
+// F9.3: does this STORED alert appear on the invigilator room dashboard?
+// Catalog types follow their show_to_invigilator config; catalog-UNKNOWN types
+// (legacy invalid_share_surface, future ingest types) fall back to severity —
+// critical shown, anything quieter stays admin-only.
+function isAlertShownToInvigilator(settings, alert) {
+  const entry = settings?.proctor?.[alert?.type];
+  if (entry) return entry.show_to_invigilator === true;
+  return alert?.severity === "critical";
 }
 
 // Recorder states that mean "not recording" for the heartbeat sure-shot.
@@ -3789,6 +3807,9 @@ async function invigilatorRoom(req) {
       name: doc.name || "",
       hackerrank_username: doc.hackerrank_username || "",
       roll_number: doc.roll_number || "",
+      // F9.4: the roster's unique id — alert-detail expansion joins on username
+      // and shows this alongside the roll number. Identity data, not a credential.
+      roster_unique_id: doc.roster_unique_id || "",
       status: doc.status || "",
       stale: doc.status === "active" ? isStaleSession(doc, nowMs) : false,
       exam_started_at: doc.exam_started_at || null,
@@ -3801,6 +3822,9 @@ async function invigilatorRoom(req) {
 
   // Same index-free pattern as adminAlerts: at most ONE equality filter
   // (contest_slug) pushed to Firestore; room/archive filtering in memory.
+  // F9.3: the feed additionally honours the per-type show_to_invigilator config —
+  // filtered SERVER-SIDE so hidden alert types never leave the backend.
+  const alertSettings = await getAlertSettings();
   let alertQuery = firestore.collection(ALERTS_COLLECTION);
   if (contestSlug) alertQuery = alertQuery.where("contest_slug", "==", contestSlug);
   const alertSnapshot = await alertQuery.limit(ALERTS_QUERY_LIMIT).get();
@@ -3808,6 +3832,7 @@ async function invigilatorRoom(req) {
     .map((doc) => doc.data())
     .filter((alert) => String(alert.room || "") === roomLabel)
     .filter((alert) => !alert.archived)
+    .filter((alert) => isAlertShownToInvigilator(alertSettings, alert))
     .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
     .slice(0, INVIGILATOR_ALERTS_LIMIT)
     .map((alert) => ({

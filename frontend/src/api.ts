@@ -1913,16 +1913,16 @@ function demoAlerts(): Alert[] {
 // DEFAULT_PROCTOR_ALERT_SETTINGS so the demo console renders the same toggle list.
 const DEFAULT_DEMO_ALERT_SETTINGS: AlertSettings = {
   proctor: {
-    recording_stopped: { enabled: true, severity: "critical" },
-    screen_share_stopped: { enabled: true, severity: "critical" },
-    recording_error: { enabled: true, severity: "critical" },
+    recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
+    screen_share_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
+    recording_error: { enabled: true, severity: "critical", show_to_invigilator: true },
     // F5.3: the fullscreen enforcement ladder tripped (alert display only —
     // the block-mode lock is policy, governed by enforcement_mode).
-    fullscreen_enforcement: { enabled: true, severity: "critical" },
-    ip_changed: { enabled: true, severity: "warning" },
-    tab_hidden: { enabled: true, severity: "warning" },
-    tab_away: { enabled: true, severity: "warning", threshold_seconds: 12 },
-    disconnected: { enabled: true, severity: "warning" }
+    fullscreen_enforcement: { enabled: true, severity: "critical", show_to_invigilator: true },
+    ip_changed: { enabled: true, severity: "warning", show_to_invigilator: false },
+    tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: false },
+    tab_away: { enabled: true, severity: "warning", show_to_invigilator: false, threshold_seconds: 12 },
+    disconnected: { enabled: true, severity: "warning", show_to_invigilator: false }
   }
 };
 
@@ -1934,7 +1934,11 @@ function mergeDemoAlertSettings(stored?: Partial<AlertSettings["proctor"]>): Ale
     const override = stored?.[type];
     const entry: ProctorAlertTypeConfig = {
       enabled: override && typeof override.enabled === "boolean" ? override.enabled : def.enabled,
-      severity: override && ["critical", "warning", "info"].includes(override.severity) ? override.severity : def.severity
+      severity: override && ["critical", "warning", "info"].includes(override.severity) ? override.severity : def.severity,
+      // F9.3 (mirrors backend): only an explicit boolean overrides the default.
+      show_to_invigilator: override && typeof override.show_to_invigilator === "boolean"
+        ? override.show_to_invigilator
+        : def.show_to_invigilator
     };
     // Mirror the backend: tab_away alone carries threshold_seconds. Validate it's
     // a positive finite number; otherwise fall back to the default (12).
@@ -1948,21 +1952,27 @@ function mergeDemoAlertSettings(stored?: Partial<AlertSettings["proctor"]>): Ale
   return { proctor };
 }
 
+// Read the persisted demo alert settings (full config, defaults merged). Used by
+// the admin settings tab AND the demo invigilator feed filter (F9.3).
+function readDemoAlertSettings(): AlertSettings {
+  const raw = window.localStorage.getItem(demoAlertSettingsKey);
+  let stored: Partial<AlertSettings["proctor"]> | undefined;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as AlertSettings;
+      stored = parsed?.proctor;
+    } catch {
+      stored = undefined;
+    }
+  }
+  return mergeDemoAlertSettings(stored);
+}
+
 export async function fetchAlertSettings(password: string): Promise<AlertSettings> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    const raw = window.localStorage.getItem(demoAlertSettingsKey);
-    let stored: Partial<AlertSettings["proctor"]> | undefined;
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as AlertSettings;
-        stored = parsed?.proctor;
-      } catch {
-        stored = undefined;
-      }
-    }
-    return mergeDemoAlertSettings(stored);
+    return readDemoAlertSettings();
   }
 
   return request<AlertSettings>("/api/admin/alert-settings", {
@@ -2723,10 +2733,13 @@ export async function fetchInvigilatorRoom(password: string, room: string): Prom
       .slice()
       .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
       .map((s) => ({
-        session_id: s.session_id,
+        // M13 parity: NO session_id on invigilator rows (it is the candidate's
+        // bearer token). Roll number / roster id mirror the session-card demo
+        // derivation (the demo roster's unique column IS the roll number).
         name: s.name,
         hackerrank_username: s.hackerrank_username,
-        roll_number: "",
+        roll_number: `R-${s.session_id.slice(-4).toUpperCase()}`,
+        roster_unique_id: `R-${s.session_id.slice(-4).toUpperCase()}`,
         status: s.status,
         stale: s.status === "active" && s.stale === true,
         exam_started_at: gate?.mode === "open" ? gate.opened_at : null,
@@ -2734,14 +2747,21 @@ export async function fetchInvigilatorRoom(password: string, room: string): Prom
         enforcement_exemptions: { ...s.enforcement_exemptions },
         created_at: s.created_at
       }));
+    // F9.3 parity: honour show_to_invigilator per type (catalog-unknown types
+    // fall back to severity — critical shown). M12/M13 parity: NO detail, NO
+    // session_id on the projected alert rows.
+    const alertSettings = readDemoAlertSettings();
     const alerts: InvigilatorAlert[] = readDemoAlerts()
       .filter((a) => String(a.room || "") === roomLabel && !a.archived)
+      .filter((a) => {
+        const config = alertSettings.proctor[a.type];
+        return config ? config.show_to_invigilator === true : a.severity === "critical";
+      })
       .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
       .slice(0, 100)
       .map((a) => ({
         id: a.id, type: a.type, severity: a.severity, timestamp: a.timestamp,
-        title: a.title, detail: String(a.detail || ""),
-        hackerrank_username: a.hackerrank_username, session_id: String(a.session_id || "")
+        title: a.title, hackerrank_username: a.hackerrank_username
       }));
     return {
       contest_slug: DEMO_CONTEST_SLUG,
