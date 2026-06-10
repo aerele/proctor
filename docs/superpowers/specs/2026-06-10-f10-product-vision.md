@@ -398,3 +398,12 @@ F9's stage spine survives; this section **supersedes F9 §5 where the entity mod
 3. **Typed access code.** Add a 6-character contest code + bare landing page so lab machines type a short code instead of a slug URL? *(yes/no)*
 4. **Export-zip retention (F9 Q3, still open).** Export zips in GCS: keep forever until manually deleted, or auto-delete after N days? *(forever / N days)*
 5. **ROADMAP 6.1.** WebSockets vs the current 5s polling — kill the idea or keep it on the backlog? *(kill/backlog)*
+---
+
+## 10. ANSWERS — Karthi, 2026-06-10 ~20:00 IST (voice). §9 is CLOSED.
+
+1. **Multi-problem: FULL build now.** "It has to be a full multi-problem template workspace — I'm going to use this immediately; compulsory." → S-I ships at full scope (workspace switcher + per-problem Run/Submit/budgets + scoring rollups).
+2. **Scores survive purge: YES.** Keep the per-enrollment final-score/selection snapshots through purge. **Addendum:** those kept scores must be VISIBLE in the UI in the relevant places — the People tab cross-round scorecard and any contest-history view show snapshot scores for purged contests (marked as from a purged/archived contest), not blank rows. → S-J + S-G acceptance criteria.
+3. **Typed contest access code: YES.** 6-char code + bare landing page. → joins S-D (candidate routing): code shown on the contest admin page, landing page resolves code → contest portal.
+4. **Export zips: auto-delete after 10 days.** The export UI must SAY "this zip will be deleted after 10 days" at creation/listing, and the retention sweep must actually delete expired zips (and anything else marked for delete). → S-G: export retention 10d via the same daily sweep; purge gate's "fresh export" logic unaffected (≤24h freshness ≪ 10d).
+5. **WebSockets: KILLED (pragmatic call delegated to us, taken now).** 5s polling stays: at our scale (a handful of admin/invigilator clients polling reads; candidates already on 15s heartbeats) polling is trivial for Cloud Run + Firestore, has no connection-state failure modes on flaky college networks, and Cloud Run charges per-request either way. Revisit only if a live-ops board with hundreds of concurrent viewers ever exists (§8.10).
