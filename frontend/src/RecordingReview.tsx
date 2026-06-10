@@ -24,6 +24,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
 import { describeRecordingContents } from "./admin/sessionDetail";
+import { candidateIdOf } from "./identity";
 import {
   CHUNK_SECONDS,
   buildPlaylist,
@@ -677,11 +678,11 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // fresh URL for the chunk at `posToKeep` so the caller can resume in place.
   const refreshUrls = useCallback(async (): Promise<string | null> => {
     if (refreshingRef.current || !activeSession) return null;
-    const username = activeSession.hackerrank_username;
+    const username = candidateIdOf(activeSession);
     if (!username) return null;
     refreshingRef.current = true;
     try {
-      const response = await fetchAdminSessions(String(username), password);
+      const response = await fetchAdminSessions(username, password);
       const fresh = response.sessions ?? [];
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
@@ -984,14 +985,14 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   const playheadPct = Math.max(0, Math.min(100, ((displayTime - span.start) / spanDuration) * 100));
   const playedPct = Math.max(0, Math.min(100, ((currentTestTime - span.start) / spanDuration) * 100));
 
-  // Filtered picker list (search box). Case-insensitive over username + name + room.
+  // Filtered picker list (search box). Case-insensitive over candidate ID + name + room.
   const filteredSessions = useMemo(() => {
     if (!recordingSessions) return [];
     const q = searchText.trim().toLowerCase();
     if (!q) return recordingSessions.slice(0, 100);
     return recordingSessions
       .filter((s) =>
-        `${s.hackerrank_username} ${s.name} ${s.room}`.toLowerCase().includes(q)
+        `${candidateIdOf(s)} ${s.name} ${s.room}`.toLowerCase().includes(q)
       )
       .slice(0, 100);
   }, [recordingSessions, searchText]);
@@ -1090,7 +1091,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
                   <input
                     className="focus-ring h-10 w-full rounded-md border border-line bg-white pl-9 pr-3 text-sm"
-                    placeholder="Search username, name, or room"
+                    placeholder="Search candidate ID, name, or room"
                     value={searchText}
                     onChange={(event) => setSearchText(event.target.value)}
                   />
@@ -1104,11 +1105,11 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     <button
                       key={s.session_id}
                       type="button"
-                      onClick={() => void loadUser(s.hackerrank_username)}
+                      onClick={() => void loadUser(candidateIdOf(s))}
                       className="focus-ring block w-full rounded-md border border-line bg-white/60 px-3 py-2 text-left hover:border-ink/40"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-sm font-semibold text-ink">{s.hackerrank_username}</span>
+                        <span className="truncate text-sm font-semibold text-ink">{candidateIdOf(s)}</span>
                         <span className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[10px] text-muted">
                           <Video size={10} /> {s.chunk_count}
                         </span>
@@ -1130,10 +1131,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
           ) : (
             <>
               <p className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-                The recordings index endpoint is not deployed yet. Enter a HackerRank username to load that student's recording directly.
+                The recordings index endpoint is not deployed yet. Enter a Candidate ID to load that student's recording directly.
               </p>
               <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">HackerRank username</span>
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Candidate ID</span>
                 <input
                   className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
                   value={manualUsername}
@@ -1210,7 +1211,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                 </div>
                 <p className="mt-2 text-xs text-muted">
                   {activeSession.name ? `${activeSession.name} · ` : ""}
-                  {activeSession.hackerrank_username}
+                  {candidateIdOf(activeSession)}
                   {activeSession.room ? ` · Room ${activeSession.room}` : ""}
                   {" · "}timeline labels are relative to the test start above ({formatClock(span.end)} long
                   {spanDuration >= 3600 ? ", h:mm:ss" : ", mm:ss"}).
