@@ -15,6 +15,13 @@
 // surfaces here only as a READ-ONLY synthesized contest (legacy:true) so the
 // future Contests tab shows today's exam without migration.
 import { randomInt } from "node:crypto";
+import { SUPPORTED_LANGUAGES } from "./problems.mjs";
+import {
+  normalizeProblemEntries,
+  normalizeTemplateCameraRecording,
+  normalizeTemplateEnforcement
+} from "./templates.mjs";
+import { contestProblemEntries } from "./contestProblems.mjs";
 
 export const CONTEST_STATUSES = ["draft", "open", "archived"];
 // F10 §7 row S-B: "unique_id" is deleted from the design before any code
@@ -106,6 +113,17 @@ export async function createContest(body) {
   const listed = body?.listed === undefined ? true : requireBoolean(body.listed, "listed");
   const window = normalizeWindow(body?.start_at, body?.end_at);
   const retentionDays = normalizeRetentionDays(body?.evidence_retention_days);
+  // S-I §1.3/§1.4: ordered problems[] + the snapshot-copied template defaults.
+  // Shape-validation only here — PUBLISHED-state checks (and the template
+  // resolution itself) live in the handler, which has the problem bank.
+  const problems = normalizeContestProblems(body?.problems);
+  const templateSlug = body?.template_slug ? String(body.template_slug) : null;
+  const cameraRecording = normalizeTemplateCameraRecording(body?.camera_recording);
+  const enforcement = normalizeTemplateEnforcement(body?.enforcement);
+  const languages = normalizeContestLanguages(body?.languages);
+  const roomGateEnabled = body?.room_gate_enabled === undefined
+    ? false
+    : requireBoolean(body.room_gate_enabled, "room_gate_enabled");
   const accessCode = await mintAccessCode();
   const legacy = await synthesizeLegacyContest();
   const now = new Date().toISOString();
@@ -128,7 +146,14 @@ export async function createContest(body) {
       start_at: window.start_at,
       end_at: window.end_at,
       end_at_updated_at: null, // S5 semantics move per-contest at S-C/S-D
-      room_gate_enabled: false,
+      // S-I: the contest OWNS these from the moment it exists — template edits
+      // after instantiation can never reach them (snapshot semantics, §1.4.1).
+      problems,
+      template_slug: templateSlug,
+      camera_recording: cameraRecording,
+      enforcement,
+      languages,
+      room_gate_enabled: roomGateEnabled,
       rooms: [],
       created_at: now,
       updated_at: now,
@@ -162,8 +187,16 @@ export async function updateContest(slugRaw, body) {
   if (body?.identity_mode !== undefined) throw httpError(400, "identity_mode is immutable");
   if (body?.access_code !== undefined) throw httpError(400, "access_code cannot be edited");
   if (body?.status !== undefined) throw httpError(400, "use /api/admin/contest-status to change status");
+  if (body?.template_slug !== undefined) throw httpError(400, "template_slug is display-only provenance and cannot be edited");
 
   const patch = {};
+  // S-I: problems[] edits (shape-validated; the open-contest confirm/submission
+  // rules run in the handler BEFORE this is called) + the snapshot fields.
+  if (body?.problems !== undefined) patch.problems = normalizeContestProblems(body.problems);
+  if (body?.camera_recording !== undefined) patch.camera_recording = normalizeTemplateCameraRecording(body.camera_recording);
+  if (body?.enforcement !== undefined) patch.enforcement = normalizeTemplateEnforcement(body.enforcement);
+  if (body?.languages !== undefined) patch.languages = normalizeContestLanguages(body.languages);
+  if (body?.room_gate_enabled !== undefined) patch.room_gate_enabled = requireBoolean(body.room_gate_enabled, "room_gate_enabled");
   if (body?.name !== undefined) {
     const name = String(body.name).trim();
     if (!name) throw httpError(400, "name is required");
@@ -195,6 +228,10 @@ export async function setContestStatus(slugRaw, statusRaw) {
     throw httpError(400, `status must be one of ${CONTEST_STATUSES.join(", ")}`);
   }
   const existing = await getRealContest(slugRaw);
+  // S-I publish gate (vision §2.7): a contest can only OPEN with ≥1 problem.
+  if (status === "open" && contestProblemEntries(existing).length === 0) {
+    throw httpError(400, "contest_has_no_problems");
+  }
   const item = { ...existing, status, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
   return item;
@@ -359,6 +396,30 @@ function normalizeIdentityLabel(raw) {
 function requireBoolean(value, field) {
   if (typeof value !== "boolean") throw httpError(400, `${field} must be a boolean`);
   return value;
+}
+
+// S-I: contests may legitimately hold ZERO problems while draft (the publish
+// gate blocks opening) — so unlike templates, an absent/empty list is [].
+function normalizeContestProblems(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw httpError(400, "problems must be an array");
+  if (!raw.length) return [];
+  const checked = normalizeProblemEntries(raw);
+  if (!checked.ok) throw httpError(400, checked.error);
+  return checked.entries;
+}
+
+// S-I: per-contest language allow-list (intersected with per-problem languages
+// at serve time). Absent -> all supported; explicit garbage -> 400.
+function normalizeContestLanguages(raw) {
+  if (raw === undefined || raw === null) return [...SUPPORTED_LANGUAGES];
+  if (!Array.isArray(raw)) throw httpError(400, "languages must be an array");
+  const languages = [...new Set(raw.map(String))];
+  if (!languages.length) throw httpError(400, "languages must be non-empty");
+  for (const language of languages) {
+    if (!SUPPORTED_LANGUAGES.includes(language)) throw httpError(400, `unsupported language: ${language}`);
+  }
+  return languages;
 }
 
 // F9 §2.1: clamp 1..30; non-integer garbage is a 400 (never silently defaulted —

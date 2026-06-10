@@ -4,8 +4,8 @@ import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { configureContestStore, createContest, listContests, setContestStatus, slugify, updateContest } from "./contests.mjs";
-import { configureTemplateStore, getTemplate, listTemplates, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
+import { configureContestStore, createContest, listContests, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
+import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
@@ -1697,14 +1697,132 @@ async function adminListContests(req) {
 async function adminCreateContest(req) {
   requireAdmin(req);
   const body = parseBody(req);
-  return { ok: true, contest: await createContest(body) };
+  let payload = body;
+  if (body.template_slug !== undefined && body.template_slug !== null && String(body.template_slug).trim() !== "") {
+    payload = await instantiateTemplatePayload(body);
+  } else if (body.problems !== undefined && Array.isArray(body.problems) && body.problems.length) {
+    // Direct problems[] (no template): same published-right-now rule.
+    const checked = normalizeProblemEntries(body.problems);
+    if (!checked.ok) return badRequest(checked.error);
+    await requirePublishedProblems(checked.entries, "problems_unavailable");
+  }
+  return { ok: true, contest: await createContest(payload) };
+}
+
+// S-I §1.4.1: snapshot-on-instantiate — copy the template's problems[] and
+// every defaults.* field onto the contest doc AS THE CONTEST'S OWN FIELDS.
+// Body values win over template defaults (the create form pre-fills, the admin
+// may edit before posting). duration_minutes only PREFILLS end_at; an explicit
+// end_at always wins. Template edits after this moment change nothing.
+async function instantiateTemplatePayload(body) {
+  const template = await getTemplate(body.template_slug);
+  if (!template) throw httpError(404, "template_not_found");
+  if (template.archived) throw httpError(400, "template_archived");
+
+  let entries = template.problems || [];
+  if (body.problems !== undefined) {
+    const checked = normalizeProblemEntries(body.problems);
+    if (!checked.ok) return badRequest(checked.error);
+    entries = checked.entries;
+  }
+  // §1.4.4: every entry must reference an existing PUBLISHED problem right now.
+  await requirePublishedProblems(entries, "template_problems_unavailable");
+
+  const defaults = template.defaults || {};
+  let endAt = body.end_at;
+  if ((endAt === undefined || endAt === null || endAt === "") && body.start_at) {
+    const startMs = Date.parse(String(body.start_at));
+    if (Number.isFinite(startMs)) {
+      endAt = new Date(startMs + (defaults.duration_minutes ?? 120) * 60_000).toISOString();
+    }
+  }
+  const pick = (bodyValue, templateValue) => (bodyValue !== undefined ? bodyValue : templateValue);
+  return {
+    name: body.name,
+    listed: body.listed,
+    start_at: body.start_at,
+    end_at: endAt,
+    problems: entries.map((entry) => ({ ...entry })), // the contest's own copy
+    template_slug: template.slug,                      // display-only provenance
+    identity_label: pick(body.identity_label, defaults.identity_label),
+    room_gate_enabled: pick(body.room_gate_enabled, defaults.room_gate_enabled),
+    camera_recording: pick(body.camera_recording, defaults.camera_recording),
+    enforcement: pick(body.enforcement, defaults.enforcement),
+    evidence_retention_days: pick(body.evidence_retention_days, defaults.evidence_retention_days),
+    languages: pick(body.languages, defaults.languages)
+  };
+}
+
+// Contest problems must be servable to candidates the moment the contest can
+// open: existing published bank/seed docs only. Reasons: draft|missing.
+async function requirePublishedProblems(entries, errorName) {
+  const unavailable = [];
+  for (const entry of entries) {
+    if (await getProblem(entry.problem_id)) continue;
+    const bank = await getBankProblem(entry.problem_id);
+    unavailable.push({ problem_id: entry.problem_id, reason: bank ? "draft" : "missing" });
+  }
+  if (unavailable.length) throw httpErrorWith(400, errorName, { problems: unavailable });
 }
 
 async function adminUpdateContest(req) {
   requireAdmin(req);
   const body = parseBody(req);
   requireFields(body, ["slug"]);
+  if (body.problems !== undefined) await enforceContestProblemsEditRules(String(body.slug), body);
   return { ok: true, contest: await updateContest(String(body.slug), body) };
+}
+
+// S-I §1.4.5 (veto-able defaults): contest problems[] edits are free while
+// draft; once OPEN —
+//   adding an entry            -> requires body.confirm === true
+//   removing an entry that has stored submissions in THIS contest -> 409
+//   changing an entry's points -> typed contest-slug confirmation (best scores
+//     are computed live, so the change applies retroactively)
+async function enforceContestProblemsEditRules(slug, body) {
+  const doc = await firestore.collection(CONTESTS_COLLECTION).doc(slug).get();
+  if (!doc.exists) throw httpError(404, "contest_not_found");
+  const existing = doc.data();
+
+  const checked = normalizeProblemEntries(Array.isArray(body.problems) && body.problems.length ? body.problems : []);
+  const entries = checked.ok ? checked.entries : [];
+  if (Array.isArray(body.problems) && body.problems.length && !checked.ok) return badRequest(checked.error);
+  await requirePublishedProblems(entries, "problems_unavailable");
+
+  if (existing.status !== "open") return; // draft/archived edits are free
+
+  const oldEntries = contestProblemEntries(existing);
+  const oldById = new Map(oldEntries.map((entry) => [entry.problem_id, entry]));
+  const newById = new Map(entries.map((entry) => [entry.problem_id, entry]));
+
+  const added = entries.filter((entry) => !oldById.has(entry.problem_id));
+  if (added.length && body.confirm !== true) {
+    throw httpErrorWith(409, "problem_add_requires_confirm", {
+      problems: added.map((entry) => entry.problem_id)
+    });
+  }
+
+  for (const entry of oldEntries) {
+    if (newById.has(entry.problem_id)) continue;
+    // Removal: blocked when this contest already stored submissions for it.
+    const snapshot = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), existing)
+      .where("problem_id", "==", entry.problem_id)
+      .limit(1)
+      .get();
+    if (snapshot.docs.length) {
+      throw httpErrorWith(409, "problem_has_submissions", { problem_id: entry.problem_id });
+    }
+  }
+
+  const pointsEdited = entries.filter((entry) =>
+    oldById.has(entry.problem_id)
+    && (oldById.get(entry.problem_id).points ?? null) !== (entry.points ?? null));
+  if (pointsEdited.length && body.confirm_points_edit !== existing.slug) {
+    throw httpErrorWith(409, "points_edit_confirmation_required", {
+      contest: existing.slug,
+      problems: pointsEdited.map((entry) => entry.problem_id)
+    });
+  }
 }
 
 async function adminContestStatus(req) {
