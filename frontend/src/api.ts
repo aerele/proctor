@@ -12,6 +12,10 @@ import type {
   ExamConfig,
   ExecRequest,
   HeartbeatResponse,
+  InvigilatorAlert,
+  InvigilatorOverviewResponse,
+  InvigilatorRoomResponse,
+  InvigilatorSessionRow,
   ProctorAlertTypeConfig,
   ProctorEvent,
   ProctorSettings,
@@ -26,6 +30,9 @@ import type {
   ReviewsResponse,
   ReviewVerdict,
   ReviewVerdictResponse,
+  RoomGate,
+  RoomGateActionResponse,
+  RoomGatePollResponse,
   RosterColumnMapping,
   RosterLookupResult,
   RosterStatus,
@@ -46,6 +53,7 @@ import type {
   UploadManifestItem,
   UploadUrlResponse
 } from "./types";
+import { roomKeyForLabel } from "./invigilator/gateLogic";
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
@@ -141,6 +149,7 @@ type DemoSession = {
   storage_prefix: string;
   blocked_by_session_id: string | null;
   start_ip: string;
+  exam_started_at?: string | null;
 };
 
 function readDemoSessions(): DemoSession[] {
@@ -343,6 +352,7 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       start_at: settings.start_at,
       end_at: settings.end_at,
       contest_url: settings.contest_url || "",
+      room_gate_enabled: settings.room_gate_enabled === true,
       rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
       // Passcodes are removed from the start/end flow, but we keep persisting any
       // value an older field still sends so the stored doc stays compatible.
@@ -1995,4 +2005,216 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
     return { verdict: "accepted", passed_count: 4, total: 4, submission_id: "demo" };
   }
   return request<SubmitResult>("/api/exec/submit", { method: "POST", body: JSON.stringify(req) });
+}
+
+// ---- S3: invigilator portal + room start gate -------------------------------
+
+export const invigilatorPassword = import.meta.env.VITE_INVIGILATOR_PASSWORD ?? "";
+// When set, the portal unlock compares sha256(typed) to this hash so the plain
+// password never ships in the bundle (mirrors VITE_ADMIN_PASSWORD_HASH).
+export const invigilatorPasswordHash = (import.meta.env.VITE_INVIGILATOR_PASSWORD_HASH ?? "").trim().toLowerCase();
+const demoRoomGatesKey = "aerele-proctor-demo-room-gates";
+
+function assertDemoInvigilator(password: string) {
+  if (invigilatorPassword && password === invigilatorPassword) return;
+  if (adminPassword && password === adminPassword) return;
+  throw new Error("Invalid invigilator password.");
+}
+
+function invigilatorHeaders(password: string) {
+  return { "x-invigilator-password": password };
+}
+
+type DemoRoomGateStore = Record<string, RoomGate>;
+
+function readDemoRoomGates(): DemoRoomGateStore {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(demoRoomGatesKey) || "{}");
+    return parsed && typeof parsed === "object" ? (parsed as DemoRoomGateStore) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDemoRoomGates(store: DemoRoomGateStore) {
+  window.localStorage.setItem(demoRoomGatesKey, JSON.stringify(store));
+}
+
+export async function fetchInvigilatorOverview(password: string): Promise<InvigilatorOverviewResponse> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoInvigilator(password);
+    const rooms = [
+      ...new Set(DEMO_ALL_SESSIONS.map((s) => String(s.room || "").trim()).filter(Boolean))
+    ].sort((a, b) => a.localeCompare(b));
+    return {
+      contest_slug: DEMO_CONTEST_SLUG,
+      room_gate_enabled: getDemoSettings()?.room_gate_enabled === true,
+      rooms,
+      has_unassigned: false
+    };
+  }
+  return request<InvigilatorOverviewResponse>("/api/invigilator/overview", {
+    method: "GET",
+    headers: invigilatorHeaders(password)
+  });
+}
+
+export async function fetchInvigilatorRoom(password: string, room: string): Promise<InvigilatorRoomResponse> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoInvigilator(password);
+    const roomKey = roomKeyForLabel(room);
+    const roomLabel = roomKey === "_" ? "" : room;
+    const docs = DEMO_ALL_SESSIONS.filter((s) => String(s.room || "") === roomLabel);
+    const gate = readDemoRoomGates()[roomKey] || null;
+    const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, started: 0, total: 0 };
+    for (const s of docs) {
+      stats.total += 1;
+      if (gate?.mode === "open") stats.started += 1; // demo approximation
+      if (s.status === "active") {
+        stats.live += 1;
+        if (s.stale === true) stats.disconnected += 1;
+      } else if (s.status === "locked") stats.locked += 1;
+      else if (s.status === "pending_approval") stats.pending_approval += 1;
+      else if (s.status === "ended") stats.finished += 1;
+    }
+    const sessions: InvigilatorSessionRow[] = docs
+      .slice()
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+      .map((s) => ({
+        session_id: s.session_id,
+        name: s.name,
+        hackerrank_username: s.hackerrank_username,
+        roll_number: "",
+        status: s.status,
+        stale: s.status === "active" && s.stale === true,
+        exam_started_at: gate?.mode === "open" ? gate.opened_at : null,
+        created_at: s.created_at
+      }));
+    const alerts: InvigilatorAlert[] = readDemoAlerts()
+      .filter((a) => String(a.room || "") === roomLabel && !a.archived)
+      .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+      .slice(0, 100)
+      .map((a) => ({
+        id: a.id, type: a.type, severity: a.severity, timestamp: a.timestamp,
+        title: a.title, detail: String(a.detail || ""),
+        hackerrank_username: a.hackerrank_username, session_id: String(a.session_id || "")
+      }));
+    return {
+      contest_slug: DEMO_CONTEST_SLUG,
+      room: roomLabel || null,
+      room_key: roomKey,
+      room_gate_enabled: getDemoSettings()?.room_gate_enabled === true,
+      stats, sessions, gate, alerts,
+      disconnected_staleness_ms: 45000
+    };
+  }
+  return request<InvigilatorRoomResponse>(`/api/invigilator/room?room=${encodeURIComponent(room)}`, {
+    method: "GET",
+    headers: invigilatorHeaders(password)
+  });
+}
+
+export async function releaseRoomCode(
+  password: string, room: string, invigilatorName: string, regenerate = false
+): Promise<RoomGateActionResponse> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoInvigilator(password);
+    if (getDemoSettings()?.room_gate_enabled !== true) throw new Error("room_gate_disabled");
+    const store = readDemoRoomGates();
+    const roomKey = roomKeyForLabel(room);
+    const existing = store[roomKey];
+    if (existing && existing.mode === "otp" && existing.otp && !regenerate) {
+      return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate: existing };
+    }
+    const now = new Date().toISOString();
+    const gate: RoomGate = {
+      room: roomKey === "_" ? "" : room,
+      room_key: roomKey,
+      mode: "otp",
+      otp: String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0"),
+      released_at: now,
+      released_by: invigilatorName,
+      opened_at: existing?.opened_at ?? null,
+      opened_by: existing?.opened_by ?? "",
+      updated_at: now
+    };
+    store[roomKey] = gate;
+    writeDemoRoomGates(store);
+    return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate };
+  }
+  return request<RoomGateActionResponse>("/api/invigilator/release-code", {
+    method: "POST",
+    headers: invigilatorHeaders(password),
+    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...(regenerate ? { regenerate: true } : {}) })
+  });
+}
+
+export async function openRoom(password: string, room: string, invigilatorName: string): Promise<RoomGateActionResponse> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoInvigilator(password);
+    if (getDemoSettings()?.room_gate_enabled !== true) throw new Error("room_gate_disabled");
+    const store = readDemoRoomGates();
+    const roomKey = roomKeyForLabel(room);
+    const existing = store[roomKey];
+    const now = new Date().toISOString();
+    const gate: RoomGate = {
+      room: roomKey === "_" ? "" : room,
+      room_key: roomKey,
+      mode: "open",
+      otp: existing?.otp ?? "",
+      released_at: existing?.released_at ?? null,
+      released_by: existing?.released_by ?? "",
+      opened_at: now,
+      opened_by: invigilatorName,
+      updated_at: now
+    };
+    store[roomKey] = gate;
+    writeDemoRoomGates(store);
+    return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate };
+  }
+  return request<RoomGateActionResponse>("/api/invigilator/open-room", {
+    method: "POST",
+    headers: invigilatorHeaders(password),
+    body: JSON.stringify({ room, invigilator_name: invigilatorName })
+  });
+}
+
+// Candidate-side gate poll/unlock. No code = status poll; with a code it
+// attempts the room OTP. Demo mode mirrors the backend against localStorage.
+export async function pollRoomGate(sessionId: string, code?: string): Promise<RoomGatePollResponse> {
+  if (demoMode) {
+    await wait(100);
+    const settings = getDemoSettings();
+    if (settings?.room_gate_enabled !== true) return { gate_enabled: false, exam_started: true };
+    const session = readDemoSessions().find((item) => item.session_id === sessionId);
+    if (!session) throw new Error("Session not found");
+    if (session.exam_started_at) {
+      return { gate_enabled: true, exam_started: true, exam_started_at: session.exam_started_at };
+    }
+    const gate = readDemoRoomGates()[roomKeyForLabel(session.room)];
+    const now = new Date().toISOString();
+    if (gate?.mode === "open") {
+      upsertDemoSession({ ...session, exam_started_at: now });
+      return { gate_enabled: true, exam_started: true, exam_started_at: now };
+    }
+    if (code !== undefined && code !== "") {
+      if (gate?.mode === "otp" && gate.otp === String(code).trim()) {
+        upsertDemoSession({ ...session, exam_started_at: now });
+        return { gate_enabled: true, exam_started: true, exam_started_at: now };
+      }
+      const error = new Error("invalid_code") as ApiError;
+      error.status = 403;
+      error.code = "invalid_code";
+      throw error;
+    }
+    return { gate_enabled: true, exam_started: false, room: session.room };
+  }
+  return request<RoomGatePollResponse>("/api/session/room-gate", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, ...(code ? { code } : {}) })
+  });
 }
