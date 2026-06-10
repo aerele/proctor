@@ -13,6 +13,11 @@ import type {
   EnforcementConfigPayload,
   EnforcementExemptions,
   EnforcementViolationResponse,
+  ContestCreateRequest,
+  ContestExamConfig,
+  ContestStatus,
+  ContestSummary,
+  ContestUpdateRequest,
   ExamConfig,
   ExamTimeRequest,
   ExamTimeResponse,
@@ -2774,6 +2779,421 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
     return { verdict: "accepted", passed_count: 4, total: 4, score: 100, max_points: 100, submission_id: "demo" };
   }
   return request<SubmitResult>("/api/exec/submit", { method: "POST", body: JSON.stringify(req) });
+}
+
+// ---- S-D: contests administration (Contests tab + selector + routing) -------
+// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5/§10.3.
+// Demo parity: a localStorage contests store seeded with one OPEN demo contest
+// whose access code is the fixed "DEMO42", plus the synthesized legacy row
+// derived from the demo settings doc (mirrors backend legacy synthesis).
+
+const demoContestsKey = "aerele-proctor-demo-contests-v1";
+export const DEMO_ACCESS_CODE = "DEMO42";
+const DEMO_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
+
+function randomDemoCode(length: number, alphabet = DEMO_CODE_ALPHABET): string {
+  let out = "";
+  for (let i = 0; i < length; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
+}
+
+function seedDemoContests(): ContestSummary[] {
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  return [{
+    slug: "demo-drive-r1",
+    name: "Demo Drive — Round 1",
+    status: "open",
+    legacy: false,
+    listed: true,
+    identity_label: "Roll Number",
+    access_code: DEMO_ACCESS_CODE,
+    invigilator_key: "demo-invigilator-key-001",
+    start_at: new Date(nowMs - 60 * 60_000).toISOString(),
+    end_at: new Date(nowMs + 6 * 60 * 60_000).toISOString(),
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: ["Lab 1", "Lab 2"],
+    room_gate_enabled: false,
+    template_slug: "demo-aptitude-r1",
+    created_at: now,
+    updated_at: now
+  }];
+}
+
+function readDemoContests(): ContestSummary[] {
+  const raw = window.localStorage.getItem(demoContestsKey);
+  if (raw) {
+    try {
+      return JSON.parse(raw) as ContestSummary[];
+    } catch {
+      // fall through to reseed
+    }
+  }
+  const seeded = seedDemoContests();
+  window.localStorage.setItem(demoContestsKey, JSON.stringify(seeded));
+  return seeded;
+}
+
+function writeDemoContests(contests: ContestSummary[]) {
+  window.localStorage.setItem(demoContestsKey, JSON.stringify(contests));
+}
+
+// Mirrors backend legacy synthesis: the demo settings doc surfaces as a
+// read-only legacy:true contest (slug from contest_url, like demo sessions).
+function demoLegacyContest(): ContestSummary | null {
+  const settings = getDemoSettings();
+  if (!settings) return null;
+  const slug = contestSlugFromUrl(settings.contest_url || "") || "legacy";
+  return {
+    slug,
+    name: slug,
+    status: "open",
+    legacy: true,
+    listed: true,
+    identity_label: "Candidate ID",
+    access_code: null,
+    invigilator_key: null,
+    start_at: settings.start_at || null,
+    end_at: settings.end_at || null,
+    problem_id: settings.problem_id || "",
+    rooms: settings.rooms ?? [],
+    room_gate_enabled: settings.room_gate_enabled === true,
+    template_slug: null,
+    created_at: null,
+    updated_at: settings.updated_at || null
+  };
+}
+
+function demoContestsList(): ContestSummary[] {
+  const real = readDemoContests();
+  const legacy = demoLegacyContest();
+  if (legacy && !real.some((contest) => contest.slug === legacy.slug)) {
+    return [...real, legacy];
+  }
+  return real;
+}
+
+function findDemoContest(slug: string): ContestSummary {
+  const hit = readDemoContests().find((contest) => contest.slug === slug);
+  if (!hit) throw demoApiError(404, "contest_not_found");
+  return hit;
+}
+
+function updateDemoContest(slug: string, patch: Partial<ContestSummary>): ContestSummary {
+  const contests = readDemoContests();
+  const index = contests.findIndex((contest) => contest.slug === slug);
+  if (index < 0) throw demoApiError(404, "contest_not_found");
+  const next = { ...contests[index], ...patch, updated_at: new Date().toISOString() };
+  contests[index] = next;
+  writeDemoContests(contests);
+  return next;
+}
+
+function demoSlugify(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "")
+    .replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+}
+
+export async function fetchContests(password: string, includeArchived = true): Promise<ContestSummary[]> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    return demoContestsList().filter((contest) => includeArchived || contest.status !== "archived");
+  }
+  const query = includeArchived ? "?include_archived=1" : "";
+  const response = await request<{ contests: ContestSummary[] }>(`/api/admin/contests${query}`, {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+  return response.contests;
+}
+
+export async function createContestApi(password: string, body: ContestCreateRequest): Promise<ContestSummary> {
+  if (demoMode) {
+    await wait(200);
+    assertDemoAdmin(password);
+    const name = body.name.trim();
+    if (!name) throw demoApiError(400, "name is required");
+    const baseSlug = demoSlugify(name);
+    if (!baseSlug) throw demoApiError(400, "name must contain letters or digits");
+    const contests = readDemoContests();
+    let slug = baseSlug;
+    for (let n = 2; contests.some((contest) => contest.slug === slug); n++) slug = `${baseSlug}-${n}`;
+    // Demo instantiate: the demo template's problems/defaults snapshot-copy in.
+    const template = body.template_slug ? demoTemplateBySlug(body.template_slug) : null;
+    const now = new Date().toISOString();
+    const item: ContestSummary = {
+      slug,
+      name,
+      status: "draft",
+      legacy: false,
+      listed: true,
+      identity_label: body.identity_label ?? template?.defaults.identity_label ?? "Candidate ID",
+      access_code: randomDemoCode(6),
+      invigilator_key: randomDemoCode(24, "abcdefghijklmnopqrstuvwxyz234567"),
+      start_at: body.start_at || null,
+      end_at: body.end_at || null,
+      problems: (body.problems ?? template?.problems ?? []).map((entry, order) => ({
+        problem_id: entry.problem_id, points: entry.points ?? null, order
+      })),
+      rooms: body.rooms ?? [],
+      room_gate_enabled: body.room_gate_enabled ?? template?.defaults.room_gate_enabled ?? false,
+      template_slug: template?.slug ?? null,
+      created_at: now,
+      updated_at: now
+    };
+    writeDemoContests([item, ...contests]);
+    return item;
+  }
+  const response = await request<{ contest: ContestSummary }>("/api/admin/contests", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+  return response.contest;
+}
+
+export async function updateContestApi(password: string, body: ContestUpdateRequest): Promise<ContestSummary> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const { slug, confirm: _c, confirm_points_edit: _p, ...patch } = body;
+    if (patch.start_at !== undefined || patch.end_at !== undefined) {
+      const existing = findDemoContest(slug);
+      const start = patch.start_at !== undefined ? patch.start_at : existing.start_at;
+      const end = patch.end_at !== undefined ? patch.end_at : existing.end_at;
+      if (start && end && Date.parse(start) >= Date.parse(end)) {
+        throw demoApiError(400, "Start time must be before end time.");
+      }
+    }
+    const normalized: Partial<ContestSummary> = {
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.identity_label !== undefined ? { identity_label: patch.identity_label } : {}),
+      ...(patch.listed !== undefined ? { listed: patch.listed } : {}),
+      ...(patch.start_at !== undefined ? { start_at: patch.start_at || null } : {}),
+      ...(patch.end_at !== undefined ? { end_at: patch.end_at || null } : {}),
+      ...(patch.rooms !== undefined ? { rooms: patch.rooms.map((room) => room.trim()).filter(Boolean) } : {}),
+      ...(patch.room_gate_enabled !== undefined ? { room_gate_enabled: patch.room_gate_enabled } : {}),
+      ...(patch.problems !== undefined
+        ? { problems: patch.problems.map((entry, order) => ({ problem_id: entry.problem_id, points: entry.points ?? null, order })) }
+        : {})
+    };
+    return updateDemoContest(slug, normalized);
+  }
+  const response = await request<{ contest: ContestSummary }>("/api/admin/contest-update", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+  return response.contest;
+}
+
+export async function setContestStatusApi(password: string, slug: string, status: ContestStatus): Promise<ContestSummary> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const contest = findDemoContest(slug);
+    if (status === "open" && !(contest.problems ?? []).length) {
+      throw demoApiError(400, "contest_has_no_problems");
+    }
+    return updateDemoContest(slug, { status });
+  }
+  const response = await request<{ contest: ContestSummary }>("/api/admin/contest-status", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ slug, status })
+  });
+  return response.contest;
+}
+
+export async function regenerateContestSecretApi(
+  password: string, slug: string, field: "access_code" | "invigilator_key"
+): Promise<ContestSummary> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    findDemoContest(slug);
+    return updateDemoContest(slug, field === "access_code"
+      ? { access_code: randomDemoCode(6) }
+      : { invigilator_key: randomDemoCode(24, "abcdefghijklmnopqrstuvwxyz234567") });
+  }
+  const response = await request<{ contest: ContestSummary }>("/api/admin/contest-regenerate", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ slug, field })
+  });
+  return response.contest;
+}
+
+// S-D: the legacy S5 exam-time card semantics, per contest.
+export async function adjustContestExamTime(password: string, slug: string, body: ExamTimeRequest): Promise<ExamTimeResponse> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const contest = findDemoContest(slug);
+    if (!contest.start_at || !contest.end_at) throw demoApiError(400, "Contest schedule is not configured yet.");
+    const now = new Date().toISOString();
+    let newEndMs: number;
+    if (body.end_now === true) {
+      newEndMs = Date.parse(now);
+    } else if (body.end_at) {
+      newEndMs = Date.parse(body.end_at);
+      if (!Number.isFinite(newEndMs)) throw demoApiError(400, "end_at must be a valid ISO 8601 date");
+    } else {
+      const delta = Number(body.extend_minutes);
+      if (!Number.isFinite(delta) || delta === 0) throw demoApiError(400, "extend_minutes must be a non-zero number");
+      newEndMs = Date.parse(contest.end_at) + delta * 60_000;
+    }
+    if (newEndMs <= Date.parse(contest.start_at)) throw demoApiError(400, "End time must be after the start time.");
+    const newEndAt = new Date(newEndMs).toISOString();
+    updateDemoContest(slug, { end_at: newEndAt, end_at_updated_at: now });
+    let endedCount = 0;
+    if (body.end_now === true) {
+      for (const session of readDemoSessions()) {
+        if (session.contest_slug === slug && session.status !== "ended") {
+          upsertDemoSession({ ...session, status: "ended", blocked_by_session_id: null });
+          endedCount += 1;
+        }
+      }
+    }
+    return { ok: true, start_at: contest.start_at, end_at: newEndAt, server_now: now, ended_count: endedCount };
+  }
+  return request<ExamTimeResponse>("/api/admin/contest-exam-time", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ slug, ...body })
+  });
+}
+
+// S-D (vision §10.3): PUBLIC access-code -> contest resolver for the landing
+// page. Throws ApiError 400 invalid_code / 404 code_not_found (and 429 when
+// rate-limited server-side) — the landing page renders the message inline.
+export async function resolveAccessCodeApi(code: string): Promise<{ slug: string; name: string }> {
+  if (demoMode) {
+    await wait(150);
+    const cleaned = code.trim().toUpperCase();
+    if (!/^[A-Z2-9]{6}$/.test(cleaned)) throw demoApiError(400, "invalid_code");
+    const hit = demoContestsList().find((contest) => contest.status === "open" && contest.access_code === cleaned);
+    if (!hit) throw demoApiError(404, "code_not_found");
+    return { slug: hit.slug, name: hit.name };
+  }
+  return request<{ slug: string; name: string }>("/api/access-code", {
+    method: "POST",
+    body: JSON.stringify({ code })
+  });
+}
+
+// S-D: per-contest pre-session config. UNLIKE the legacy fetchExamConfig this
+// THROWS on failure — the candidate app must distinguish "unknown/closed
+// contest" (-> access-code landing) from a transient fetch error.
+export async function fetchContestExamConfig(slug: string): Promise<ContestExamConfig> {
+  if (demoMode) {
+    await wait(120);
+    const contest = demoContestsList().find((item) => item.slug === slug);
+    if (!contest) throw demoApiError(400, "unknown_contest");
+    if (contest.status !== "open") throw demoApiError(403, "contest_not_open");
+    if (contest.legacy) {
+      const roster = getDemoRoster();
+      return {
+        contest_slug: contest.slug,
+        contest_name: contest.name,
+        identity_label: contest.identity_label,
+        roster_required: Boolean(roster),
+        unique_id_label: roster?.unique_id_column ?? "",
+        rooms: getDemoSettings()?.rooms ?? [],
+        room_gate_enabled: contest.room_gate_enabled,
+        enforcement: demoEnforcement(),
+        camera_recording: demoCameraRecording(),
+        start_at: contest.start_at,
+        end_at: contest.end_at,
+        server_now: new Date().toISOString()
+      };
+    }
+    return {
+      contest_slug: contest.slug,
+      contest_name: contest.name,
+      identity_label: contest.identity_label,
+      roster_required: Boolean(getDemoPersonRoster(contest.slug)),
+      unique_id_label: contest.identity_label,
+      rooms: contest.rooms,
+      room_gate_enabled: contest.room_gate_enabled,
+      enforcement: demoEnforcement(),
+      camera_recording: demoCameraRecording(),
+      start_at: contest.start_at,
+      end_at: contest.end_at,
+      server_now: new Date().toISOString()
+    };
+  }
+  return request<ContestExamConfig>(`/api/exam-config?contest=${encodeURIComponent(slug)}`, { method: "GET" });
+}
+
+// ---- S-D: templates list (the create-from-template picker) -------------------
+// Full Templates tab CRUD is the S-I frontend wave; the Contests tab only
+// needs the LIST to instantiate from.
+
+export type ContestTemplateSummary = {
+  slug: string;
+  name: string;
+  archived: boolean;
+  preset: boolean;
+  problem_count: number;
+  total_points: number;
+  updated_at: string;
+};
+
+type DemoTemplate = {
+  slug: string;
+  name: string;
+  archived: boolean;
+  preset: boolean;
+  problems: Array<{ problem_id: string; points: number | null; order: number }>;
+  defaults: { identity_label: string; room_gate_enabled: boolean; duration_minutes: number };
+};
+
+const DEMO_TEMPLATES: DemoTemplate[] = [
+  {
+    slug: "demo-aptitude-r1",
+    name: "Demo Aptitude — Round 1",
+    archived: false,
+    preset: false,
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    defaults: { identity_label: "Roll Number", room_gate_enabled: true, duration_minutes: 120 }
+  },
+  {
+    slug: "system-check",
+    name: "System check",
+    archived: false,
+    preset: true,
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    defaults: { identity_label: "Candidate ID", room_gate_enabled: false, duration_minutes: 30 }
+  }
+];
+
+function demoTemplateBySlug(slug: string): DemoTemplate {
+  const hit = DEMO_TEMPLATES.find((template) => template.slug === slug);
+  if (!hit) throw demoApiError(404, "template_not_found");
+  return hit;
+}
+
+export async function fetchTemplates(password: string): Promise<ContestTemplateSummary[]> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    return DEMO_TEMPLATES.map((template) => ({
+      slug: template.slug,
+      name: template.name,
+      archived: template.archived,
+      preset: template.preset,
+      problem_count: template.problems.length,
+      total_points: 100 * template.problems.length,
+      updated_at: ""
+    }));
+  }
+  const response = await request<{ templates: ContestTemplateSummary[] }>("/api/admin/templates", {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+  return response.templates;
 }
 
 // ---- S3: invigilator portal + room start gate -------------------------------

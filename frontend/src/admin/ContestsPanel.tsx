@@ -1,0 +1,552 @@
+// frontend/src/admin/ContestsPanel.tsx
+// S-D: the Contests tab (vision §5 A2) + contest detail (A3 skeleton) —
+// list/create/detail with window editing (per-contest exam-time), ordered
+// problems editing (S-I §1.4.5 guard-aware), rooms + room-gate, status
+// actions, access code + invigilator key display/copy/regenerate, and the
+// per-contest roster section (passed in from App.tsx so S-C's panel is REUSED,
+// not duplicated). Self-contained section, ProblemBank conventions.
+import { ArrowDown, ArrowUp, Copy, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  adjustContestExamTime,
+  createContestApi,
+  fetchContests,
+  fetchProblems,
+  fetchTemplates,
+  regenerateContestSecretApi,
+  setContestStatusApi,
+  updateContestApi,
+  type ApiError,
+  type ContestTemplateSummary
+} from "../api";
+import {
+  candidateUrlFor,
+  contestProblemsCount,
+  contestStatusTone,
+  contestWindowLabel,
+  invigilatorUrlFor,
+  sortContestsForList
+} from "./contestAdmin";
+import type { ContestStatus, ContestSummary, ProblemSummary } from "../types";
+
+const STATUS_CHIP_CLASSES: Record<ReturnType<typeof contestStatusTone>, string> = {
+  open: "bg-accent/15 text-accent border-accent/30",
+  draft: "bg-neutral-100 text-muted border-line",
+  archived: "bg-neutral-200 text-muted border-line opacity-70"
+};
+
+function StatusChip({ status }: { status: ContestStatus }) {
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${STATUS_CHIP_CLASSES[contestStatusTone(status)]}`}>
+      {status}
+    </span>
+  );
+}
+
+function LegacyBadge() {
+  return (
+    <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+      legacy
+    </span>
+  );
+}
+
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="focus-ring inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium text-ink hover:border-ink/40"
+      onClick={() => {
+        void navigator.clipboard?.writeText(value).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+      title={`Copy ${label}`}
+    >
+      <Copy size={12} /> {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+function isoToLocalInput(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function localInputToIso(value: string) {
+  if (!value) return "";
+  return new Date(value).toISOString();
+}
+
+type ProblemRow = { problem_id: string; points: string };
+
+function problemRowsOf(contest: ContestSummary): ProblemRow[] {
+  return (contest.problems ?? []).map((entry) => ({
+    problem_id: entry.problem_id,
+    points: entry.points === null || entry.points === undefined ? "" : String(entry.points)
+  }));
+}
+
+export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
+  password: string;
+  /** App.tsx supplies the EXISTING S-C roster section for the given slug. */
+  renderRoster: (contestSlug: string) => ReactNode;
+  /** Fired after any mutation so the global selector list stays fresh. */
+  onContestsChanged?: (contests: ContestSummary[]) => void;
+}) {
+  const [contests, setContests] = useState<ContestSummary[] | null>(null);
+  const [templates, setTemplates] = useState<ContestTemplateSummary[]>([]);
+  const [bank, setBank] = useState<ProblemSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [detailSlug, setDetailSlug] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // Create-form state.
+  const [newName, setNewName] = useState("");
+  const [newTemplate, setNewTemplate] = useState("");
+  const [newStartAt, setNewStartAt] = useState("");
+  const [newEndAt, setNewEndAt] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [list, templateList, problems] = await Promise.all([
+        fetchContests(password, true),
+        fetchTemplates(password).catch(() => [] as ContestTemplateSummary[]),
+        fetchProblems(password).catch(() => [] as ProblemSummary[])
+      ]);
+      setContests(list);
+      setTemplates(templateList.filter((template) => !template.archived));
+      setBank(problems);
+      onContestsChanged?.(list);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const sorted = useMemo(() => sortContestsForList(contests ?? []), [contests]);
+  const detail = sorted.find((contest) => contest.slug === detailSlug) ?? null;
+  const origin = window.location.origin;
+
+  const runMutation = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await fn();
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createNow = () => runMutation(async () => {
+    const created = await createContestApi(password, {
+      name: newName,
+      ...(newTemplate ? { template_slug: newTemplate } : {}),
+      ...(newStartAt ? { start_at: localInputToIso(newStartAt) } : {}),
+      ...(newEndAt ? { end_at: localInputToIso(newEndAt) } : {})
+    });
+    setMessage(`Contest "${created.name}" created as ${created.slug} (draft). Open it when it is ready for candidates.`);
+    setCreating(false);
+    setNewName("");
+    setNewTemplate("");
+    setNewStartAt("");
+    setNewEndAt("");
+    setDetailSlug(created.slug);
+  });
+
+  return (
+    <div className="space-y-5">
+      <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold">Contests</h1>
+            <p className="mt-1 text-sm text-muted">Each contest is one administered round: its own window, roster, rooms and links. Create from a template or blank.</p>
+          </div>
+          <div className="flex gap-2">
+            <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-line px-3 text-sm font-medium" onClick={() => void load()} disabled={loading}>
+              <RefreshCw size={14} /> Refresh
+            </button>
+            <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-3 text-sm font-medium text-white" onClick={() => setCreating((value) => !value)}>
+              <Plus size={14} /> New contest
+            </button>
+          </div>
+        </div>
+
+        {creating ? (
+          <div className="mb-4 rounded-md border border-accent/30 bg-accent/5 p-4">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Contest name</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" value={newName} placeholder="KEC June 2026 — Round 1" onChange={(event) => setNewName(event.target.value)} />
+                {newName.trim() ? <span className="mt-1 block text-xs text-muted">slug preview: <code>{newName.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "")}</code></span> : null}
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Template</span>
+                <select className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" value={newTemplate} onChange={(event) => setNewTemplate(event.target.value)}>
+                  <option value="">Blank contest (no problems yet)</option>
+                  {templates.map((template) => (
+                    <option key={template.slug} value={template.slug}>
+                      {template.name} ({template.problem_count} problem{template.problem_count === 1 ? "" : "s"}{template.preset ? ", preset" : ""})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Start time (optional now, required to open)</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={newStartAt} onChange={(event) => setNewStartAt(event.target.value)} />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">End time (template duration prefills when blank)</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={newEndAt} onChange={(event) => setNewEndAt(event.target.value)} />
+              </label>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={createNow} disabled={busy || !newName.trim()}>
+                Create draft
+              </button>
+              <button className="focus-ring inline-flex h-9 items-center rounded-md border border-line px-4 text-sm font-medium" onClick={() => setCreating(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {error ? <div className="mb-3 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
+        {message ? <div className="mb-3 rounded-md border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{message}</div> : null}
+
+        {contests === null ? (
+          <p className="text-sm text-muted">{loading ? "Loading contests…" : "No contests loaded."}</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
+                  <th className="py-2 pr-3">Contest</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Window</th>
+                  <th className="py-2 pr-3">Problems</th>
+                  <th className="py-2 pr-3">Candidate link</th>
+                  <th className="py-2 pr-3">Access code</th>
+                  <th className="py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((contest) => (
+                  <tr key={contest.slug} className="border-b border-line/60 align-top">
+                    <td className="py-2 pr-3">
+                      <div className="font-medium text-ink">{contest.name}</div>
+                      <div className="font-mono text-xs text-muted">{contest.slug}</div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StatusChip status={contest.status} />
+                        {contest.legacy ? <LegacyBadge /> : null}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3 text-xs text-muted">{contestWindowLabel(contest.start_at, contest.end_at)}</td>
+                    <td className="py-2 pr-3">{contestProblemsCount(contest)}</td>
+                    <td className="py-2 pr-3">
+                      <div className="flex items-center gap-1.5">
+                        <code className="max-w-[16rem] truncate text-xs">{candidateUrlFor(origin, contest.slug)}</code>
+                        <CopyButton value={candidateUrlFor(origin, contest.slug)} label="candidate link" />
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      {contest.access_code ? (
+                        <div className="flex items-center gap-1.5">
+                          <code className="text-sm font-semibold tracking-widest">{contest.access_code}</code>
+                          <CopyButton value={contest.access_code} label="access code" />
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted">—</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-right">
+                      <button className="focus-ring inline-flex h-8 items-center rounded-md border border-line bg-white px-3 text-xs font-medium text-ink hover:border-ink/40" onClick={() => setDetailSlug(contest.slug === detailSlug ? "" : contest.slug)}>
+                        {contest.slug === detailSlug ? "Close" : "Detail"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!sorted.length ? (
+                  <tr><td colSpan={7} className="py-4 text-sm text-muted">No contests yet — create the first one above.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {detail ? (
+        <ContestDetail
+          key={detail.slug}
+          password={password}
+          contest={detail}
+          bank={bank}
+          busy={busy}
+          runMutation={runMutation}
+          renderRoster={renderRoster}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ContestDetail({ password, contest, bank, busy, runMutation, renderRoster }: {
+  password: string;
+  contest: ContestSummary;
+  bank: ProblemSummary[];
+  busy: boolean;
+  runMutation: (fn: () => Promise<void>) => Promise<void>;
+  renderRoster: (contestSlug: string) => ReactNode;
+}) {
+  const origin = window.location.origin;
+  const [startInput, setStartInput] = useState(() => isoToLocalInput(contest.start_at));
+  const [endInput, setEndInput] = useState(() => isoToLocalInput(contest.end_at));
+  const [roomsText, setRoomsText] = useState(() => (contest.rooms ?? []).join(", "));
+  const [gateEnabled, setGateEnabled] = useState(contest.room_gate_enabled);
+  const [problemRows, setProblemRows] = useState<ProblemRow[]>(() => problemRowsOf(contest));
+  const [addProblemId, setAddProblemId] = useState("");
+  const [endNowArmed, setEndNowArmed] = useState(false);
+
+  const candidateUrl = candidateUrlFor(origin, contest.slug);
+  const invigilatorUrl = invigilatorUrlFor(origin, contest.slug, contest.invigilator_key);
+  const isLegacy = contest.legacy;
+
+  // S-I §1.4.5 guard-aware problems save: open-contest ADDs need confirm:true,
+  // points edits need the typed contest slug; removal of a problem with stored
+  // submissions stays a hard 409 the admin sees verbatim.
+  const saveProblems = () => runMutation(async () => {
+    const problems = problemRows.map((row) => ({
+      problem_id: row.problem_id,
+      points: row.points.trim() === "" ? null : Number(row.points)
+    }));
+    const attempt = async (extra: { confirm?: boolean; confirm_points_edit?: string }) =>
+      updateContestApi(password, { slug: contest.slug, problems, ...extra });
+    try {
+      await attempt({});
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      if (apiError.code === "problem_add_requires_confirm") {
+        if (!window.confirm("This contest is OPEN. Add the new problem(s) for every candidate now?")) throw cause;
+        await attempt({ confirm: true });
+        return;
+      }
+      if (apiError.code === "points_edit_confirmation_required") {
+        const typed = window.prompt(`Points edits apply retroactively (best scores are computed live). Type the contest slug "${contest.slug}" to confirm:`);
+        if (typed !== contest.slug) throw cause;
+        await attempt({ confirm: true, confirm_points_edit: typed });
+        return;
+      }
+      throw cause;
+    }
+  });
+
+  const moveRow = (index: number, delta: number) => {
+    setProblemRows((rows) => {
+      const next = [...rows];
+      const target = index + delta;
+      if (target < 0 || target >= next.length) return rows;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const bankChoices = bank.filter((problem) => !problemRows.some((row) => row.problem_id === problem.id));
+
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-2 text-xl font-semibold text-ink">
+            {contest.name}
+            <StatusChip status={contest.status} />
+            {isLegacy ? <LegacyBadge /> : null}
+          </h2>
+          <p className="mt-1 font-mono text-xs text-muted">{contest.slug}{contest.template_slug ? ` · from template ${contest.template_slug}` : ""}</p>
+        </div>
+        {!isLegacy ? (
+          <div className="flex gap-2">
+            {contest.status === "draft" ? (
+              <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await setContestStatusApi(password, contest.slug, "open"); })}>
+                Open contest
+              </button>
+            ) : null}
+            {contest.status === "open" ? (
+              <button className="focus-ring inline-flex h-9 items-center rounded-md border border-danger/40 px-4 text-sm font-medium text-danger disabled:opacity-50" disabled={busy} onClick={() => { if (window.confirm("Archive this contest? Candidates can no longer start or resume.")) void runMutation(async () => { await setContestStatusApi(password, contest.slug, "archived"); }); }}>
+                Archive
+              </button>
+            ) : null}
+            {contest.status === "archived" ? (
+              <button className="focus-ring inline-flex h-9 items-center rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await setContestStatusApi(password, contest.slug, "open"); })}>
+                Reopen
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {isLegacy ? (
+        <p className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          This is the legacy exam synthesized from the global Settings — it has no contest document, so links/codes/edits are not available here. It keeps running exactly as configured on the Settings tab.
+        </p>
+      ) : (
+        <>
+          {/* Links + codes (vision §2.7: URLs are derived). */}
+          <div className="mb-4 grid gap-3 lg:grid-cols-2">
+            <div className="rounded-md border border-line bg-white/60 p-4">
+              <h3 className="text-sm font-semibold text-ink">Candidate access</h3>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                <code className="max-w-full truncate text-xs">{candidateUrl}</code>
+                <CopyButton value={candidateUrl} label="candidate link" />
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-xs uppercase tracking-wide text-muted">Test code</span>
+                <code className="text-lg font-semibold tracking-[0.3em]">{contest.access_code}</code>
+                {contest.access_code ? <CopyButton value={contest.access_code} label="access code" /> : null}
+                <button className="focus-ring inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium" disabled={busy} onClick={() => { if (window.confirm("Regenerate the test code? The old code stops working immediately.")) void runMutation(async () => { await regenerateContestSecretApi(password, contest.slug, "access_code"); }); }}>
+                  <RefreshCw size={12} /> Regenerate
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-muted">Candidates open the link directly, or type the code on the landing page at {origin}/.</p>
+            </div>
+            <div className="rounded-md border border-line bg-white/60 p-4">
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink"><KeyRound size={14} /> Invigilator access</h3>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                <code className="max-w-full truncate text-xs">{invigilatorUrl}</code>
+                <CopyButton value={invigilatorUrl} label="invigilator link" />
+                <button className="focus-ring inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium" disabled={busy} onClick={() => { if (window.confirm("Regenerate the invigilator key? Every distributed invigilator link stops working immediately.")) void runMutation(async () => { await regenerateContestSecretApi(password, contest.slug, "invigilator_key"); }); }}>
+                  <RefreshCw size={12} /> Regenerate key
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-muted">The link authenticates room invigilators for THIS contest only. Share it with hall staff; regenerate if it leaks.</p>
+            </div>
+          </div>
+
+          {/* Window editing (per-contest exam-time semantics, S5 moved per-contest). */}
+          <div className="mb-4 rounded-md border border-line bg-white/60 p-4">
+            <h3 className="text-sm font-semibold text-ink">Exam window</h3>
+            <div className="mt-2 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Start</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={startInput} onChange={(event) => setStartInput(event.target.value)} />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">End</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={endInput} onChange={(event) => setEndInput(event.target.value)} />
+              </label>
+              <button className="focus-ring inline-flex h-10 items-center self-end rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await updateContestApi(password, { slug: contest.slug, start_at: startInput ? localInputToIso(startInput) : null, end_at: endInput ? localInputToIso(endInput) : null }); })}>
+                Save window
+              </button>
+            </div>
+            {contest.start_at && contest.end_at ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted">Live controls:</span>
+                {[15, 30].map((minutes) => (
+                  <button key={minutes} className="focus-ring inline-flex h-8 items-center rounded-md border border-line bg-white px-3 text-xs font-medium disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await adjustContestExamTime(password, contest.slug, { extend_minutes: minutes }); })}>
+                    +{minutes} min
+                  </button>
+                ))}
+                {endNowArmed ? (
+                  <>
+                    <button className="focus-ring inline-flex h-8 items-center rounded-md bg-danger px-3 text-xs font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => { setEndNowArmed(false); void runMutation(async () => { await adjustContestExamTime(password, contest.slug, { end_now: true }); }); }}>
+                      Confirm end now
+                    </button>
+                    <button className="focus-ring inline-flex h-8 items-center rounded-md border border-line px-3 text-xs font-medium" onClick={() => setEndNowArmed(false)}>Cancel</button>
+                  </>
+                ) : (
+                  <button className="focus-ring inline-flex h-8 items-center rounded-md border border-danger/40 px-3 text-xs font-medium text-danger disabled:opacity-50" disabled={busy} onClick={() => setEndNowArmed(true)}>
+                    End now…
+                  </button>
+                )}
+                {contest.end_at_updated_at ? <span className="text-xs text-muted">end time last adjusted {new Date(contest.end_at_updated_at).toLocaleString()}</span> : null}
+              </div>
+            ) : (
+              <p className="mt-2 text-xs text-muted">Set both start and end to unlock the live extend / end-now controls (and to open the contest).</p>
+            )}
+          </div>
+
+          {/* Ordered problems snapshot (S-I): reorder/remove/add + points. */}
+          <div className="mb-4 rounded-md border border-line bg-white/60 p-4">
+            <h3 className="text-sm font-semibold text-ink">Problems (ordered)</h3>
+            {contest.status === "open" ? (
+              <p className="mt-1 text-xs text-amber-700">This contest is OPEN: adding asks for confirmation, removing is blocked once a problem has submissions, and points edits need a typed confirmation.</p>
+            ) : null}
+            <ul className="mt-2 space-y-2">
+              {problemRows.map((row, index) => (
+                <li key={row.problem_id} className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-white px-3 py-2">
+                  <span className="w-6 text-xs text-muted">#{index + 1}</span>
+                  <code className="flex-1 text-sm">{row.problem_id}</code>
+                  <label className="flex items-center gap-1 text-xs text-muted">
+                    points
+                    <input className="focus-ring h-8 w-20 rounded-md border border-line bg-white px-2 text-sm" type="number" placeholder="bank" value={row.points} onChange={(event) => setProblemRows((rows) => rows.map((r, i) => (i === index ? { ...r, points: event.target.value } : r)))} />
+                  </label>
+                  <button className="focus-ring rounded-md border border-line bg-white p-1.5 disabled:opacity-40" title="Move up" disabled={index === 0} onClick={() => moveRow(index, -1)}><ArrowUp size={13} /></button>
+                  <button className="focus-ring rounded-md border border-line bg-white p-1.5 disabled:opacity-40" title="Move down" disabled={index === problemRows.length - 1} onClick={() => moveRow(index, 1)}><ArrowDown size={13} /></button>
+                  <button className="focus-ring rounded-md border border-danger/40 bg-white p-1.5 text-danger" title="Remove" onClick={() => setProblemRows((rows) => rows.filter((_, i) => i !== index))}><Trash2 size={13} /></button>
+                </li>
+              ))}
+              {!problemRows.length ? <li className="text-sm text-muted">No problems yet — a contest needs at least one to open.</li> : null}
+            </ul>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <select className="focus-ring h-9 rounded-md border border-line bg-white px-3 text-sm" value={addProblemId} onChange={(event) => setAddProblemId(event.target.value)}>
+                <option value="">Add a problem from the bank…</option>
+                {bankChoices.map((problem) => (
+                  <option key={problem.id} value={problem.id}>{problem.id} — {problem.title}{problem.status !== "published" ? " (draft — publish first)" : ""}</option>
+                ))}
+              </select>
+              <button className="focus-ring inline-flex h-9 items-center gap-1 rounded-md border border-line bg-white px-3 text-sm font-medium disabled:opacity-50" disabled={!addProblemId} onClick={() => { setProblemRows((rows) => [...rows, { problem_id: addProblemId, points: "" }]); setAddProblemId(""); }}>
+                <Plus size={14} /> Add
+              </button>
+              <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={saveProblems}>
+                Save problems
+              </button>
+            </div>
+          </div>
+
+          {/* Rooms + room gate (per-contest, vision §2.12). */}
+          <div className="mb-4 rounded-md border border-line bg-white/60 p-4">
+            <h3 className="text-sm font-semibold text-ink">Rooms & start gate</h3>
+            <div className="mt-2 grid gap-3 md:grid-cols-[1fr_auto]">
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Rooms (comma-separated)</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" value={roomsText} placeholder="Lab 1, Lab 2" onChange={(event) => setRoomsText(event.target.value)} />
+              </label>
+              <button className="focus-ring inline-flex h-10 items-center self-end rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await updateContestApi(password, { slug: contest.slug, rooms: roomsText.split(",").map((room) => room.trim()).filter(Boolean), room_gate_enabled: gateEnabled }); })}>
+                Save rooms & gate
+              </button>
+            </div>
+            <label className="mt-3 flex items-start gap-3 text-sm leading-6 text-muted">
+              <input className="mt-1 h-4 w-4 accent-accent" type="checkbox" checked={gateEnabled} onChange={(event) => setGateEnabled(event.target.checked)} />
+              <span><span className="font-medium text-ink">Room start codes (invigilator gate)</span> — candidates wait after recording starts until their room invigilator releases a 6-digit code (or presses Start now) from the per-contest invigilator link above.</span>
+            </label>
+          </div>
+
+          {/* Roster — REUSE of the S-C section, scoped to this contest. */}
+          {renderRoster(contest.slug)}
+        </>
+      )}
+    </section>
+  );
+}
