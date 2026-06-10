@@ -308,3 +308,138 @@ test("buildIpReport: ip_changed_sessions counts docs with ip_change_count > 0", 
   ]);
   assert.equal(report.ip_changed_sessions, 2);
 });
+
+// =====================================================================
+// getClientIp hardening — Cloud Run appends the REAL client IP as the LAST
+// x-forwarded-for value; earlier entries are client-supplied and spoofable.
+// =====================================================================
+
+function seedSettings(firestore) {
+  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+    start_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+    end_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+    contest_url: "https://www.hackerrank.com/contests/ipreport-contest",
+    updated_at: new Date().toISOString()
+  });
+}
+
+test("getClientIp: multi-hop x-forwarded-for → the LAST hop is stored, not the spoofable first", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSettings(firestore);
+
+  const res = await call(makeReq({
+    method: "POST",
+    path: "/api/session/start",
+    headers: { "x-forwarded-for": "1.2.3.4, 9.9.9.9" },
+    body: {
+      hackerrank_username: "Spoofy",
+      name: "Spoofy Example",
+      roll_number: "R-9",
+      email: "spoofy@example.com",
+      consent_accepted: true
+    }
+  }));
+  assert.equal(res.statusCode, 200);
+  const stored = firestore._collections.get(process.env.SESSION_COLLECTION).get(res.body.session_id);
+  assert.equal(stored.start_ip, "9.9.9.9", "the proxy-appended last hop is the trusted client IP");
+  assert.equal(stored.current_ip, "9.9.9.9");
+});
+
+// =====================================================================
+// GET /api/admin/ip-report
+// =====================================================================
+
+// Seed session docs DIRECTLY (the endpoint only reads them); ids = session_id.
+function seedSession(firestore, doc) {
+  firestore.collection(process.env.SESSION_COLLECTION).doc(doc.session_id).set(doc);
+}
+
+function seedReportPopulation(firestore) {
+  seedSession(firestore, sessionDoc({ session_id: "al1", username_norm: "alice", hackerrank_username: "Alice", current_ip: "10.1.1.1", status: "active", room: "Lab A-1", contest_slug: "c1" }));
+  seedSession(firestore, sessionDoc({ session_id: "bo1", username_norm: "bob", hackerrank_username: "Bob", current_ip: "10.1.1.1", status: "locked", room: "Lab A-1", contest_slug: "c1" }));
+  seedSession(firestore, sessionDoc({ session_id: "ca1", username_norm: "carol", hackerrank_username: "Carol", current_ip: "10.1.1.1", status: "ended", room: "Lab B-2", contest_slug: "c1" }));
+  seedSession(firestore, sessionDoc({ session_id: "da1", username_norm: "dave", hackerrank_username: "Dave", current_ip: "10.2.2.2", status: "active", room: "Lab B-2", contest_slug: "c2" }));
+  // Legacy doc with no IP fields → groups under "unknown".
+  seedSession(firestore, sessionDoc({ session_id: "le1", username_norm: "legacy", hackerrank_username: "Legacy", current_ip: "", start_ip: "", status: "active", room: "Lab A-1", contest_slug: "c1" }));
+}
+
+test("ip-report: rejects a missing/wrong admin password", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  const noAuth = await call(makeReq({ method: "GET", path: "/api/admin/ip-report" }));
+  assert.equal(noAuth.statusCode, 401);
+  const badAuth = await call(makeReq({ method: "GET", path: "/api/admin/ip-report", headers: { "x-admin-password": "wrong" } }));
+  assert.equal(badAuth.statusCode, 401);
+});
+
+test("ip-report: default scope=live excludes ended sessions; contest filter applies", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedReportPopulation(firestore);
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/ip-report",
+    headers: ADMIN_HEADERS, query: { contest_slug: "c1" }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.scope, "live");
+  assert.equal(res.body.contest_slug, "c1");
+  // carol (ended) excluded; dave (contest c2) excluded; alice+bob+legacy remain.
+  assert.equal(res.body.total_sessions, 3);
+  assert.equal(res.body.distinct_ips, 2);
+  const cluster = res.body.ips[0];
+  assert.equal(cluster.ip, "10.1.1.1");
+  assert.equal(cluster.users, 2);
+  assert.equal(cluster.active, 1);
+  assert.equal(cluster.locked, 1);
+  assert.equal(cluster.ended, 0);
+  assert.equal(res.body.ips[1].ip, "unknown");
+});
+
+test("ip-report: scope=all includes ended sessions", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedReportPopulation(firestore);
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/ip-report",
+    headers: ADMIN_HEADERS, query: { contest_slug: "c1", scope: "all" }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.scope, "all");
+  assert.equal(res.body.total_sessions, 4);
+  const cluster = res.body.ips.find((entry) => entry.ip === "10.1.1.1");
+  assert.equal(cluster.sessions, 3);
+  assert.equal(cluster.users, 3);
+  assert.equal(cluster.ended, 1);
+  assert.deepEqual(cluster.rooms, ["Lab A-1", "Lab B-2"]);
+});
+
+test("ip-report: room filter narrows the population", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedReportPopulation(firestore);
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/ip-report",
+    headers: ADMIN_HEADERS, query: { contest_slug: "c1", room: "Lab A-1" }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.room, "Lab A-1");
+  // alice (active), bob (locked), legacy (active) are the live Lab A-1 docs;
+  // carol is Lab B-2 (and ended), dave is contest c2.
+  assert.equal(res.body.total_sessions, 3);
+});
+
+test("ip-report: invalid scope → 400", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/ip-report",
+    headers: ADMIN_HEADERS, query: { scope: "bogus" }
+  }));
+  assert.equal(res.statusCode, 400);
+  assert.match(String(res.body.error), /scope must be live or all/);
+});
