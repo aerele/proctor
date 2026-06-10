@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
@@ -11,7 +11,7 @@ import { topBarVisible } from "./shell/examShell";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { useExamShell } from "./shell/useExamShell";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
@@ -1390,6 +1390,14 @@ function AdminApp() {
   const [rooms, setRooms] = useState<string[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  // S5: exam-time card state. examEndAt/examSkewMs refresh from every stats
+  // response (incl. the 5 s auto-poll), so another admin's change shows live.
+  // endNowArmed = the two-click confirm for "End exam now".
+  const [examEndAt, setExamEndAt] = useState("");
+  const [examSkewMs, setExamSkewMs] = useState(0);
+  const [examTimeBusy, setExamTimeBusy] = useState(false);
+  const [endNowArmed, setEndNowArmed] = useState(false);
+  const [examTimeInput, setExamTimeInput] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [actionMessage, setActionMessage] = useState("");
   const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
@@ -1439,11 +1447,44 @@ function AdminApp() {
       const active = filters ?? alertFilters;
       const response = await fetchAdminStats(password, active.contest_slug, active.room);
       setStats(response.stats);
+      captureExamTime(response);
       if (response.rooms) setRooms(response.rooms);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setStatsLoading(false);
+    }
+  };
+
+  // S5: capture the exam end time + clock skew from a stats response. Skew is
+  // computed at receipt time (server_now vs local now) — recomputing later
+  // against a stale stamp would drift.
+  const captureExamTime = (response: AdminStatsResponse) => {
+    if (response.end_at === undefined) return; // backend without S5 yet
+    setExamEndAt(response.end_at);
+    setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
+  };
+
+  // S5: apply an exam-time change; outcomes surface through the existing
+  // actionMessage banner, and stats reload so counts reflect an end-now.
+  const runExamTime = async (body: ExamTimeRequest) => {
+    setExamTimeBusy(true);
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await adjustExamTime(password, body);
+      setExamEndAt(response.end_at);
+      setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
+      setEndNowArmed(false);
+      setExamTimeInput("");
+      setActionMessage(body.end_now
+        ? `Exam ended — ${response.ended_count} live session(s) force-ended. Students see the end within ~15 seconds.`
+        : `Exam end time set to ${new Date(response.end_at).toLocaleString()}. Students see it within ~15 seconds.`);
+      await loadStats();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExamTimeBusy(false);
     }
   };
 
@@ -1528,6 +1569,7 @@ function AdminApp() {
         const response = await fetchAdminStats(password, alertFilters.contest_slug, alertFilters.room);
         if (cancelled) return;
         setStats(response.stats);
+        captureExamTime(response);
         if (response.rooms) setRooms(response.rooms);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -1556,6 +1598,7 @@ function AdminApp() {
           const response = await fetchAdminStats(password, alertFilters.contest_slug, alertFilters.room);
           if (cancelled) return;
           setStats(response.stats);
+          captureExamTime(response);
           if (response.rooms) setRooms(response.rooms);
         } else {
           const response = await fetchAlerts(password, alertFilters);
@@ -2012,19 +2055,31 @@ function AdminApp() {
       {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
 
       {view === "stats" ? (
-        <StatsDashboard
-          stats={stats}
-          loading={statsLoading}
-          onRefresh={() => loadStats()}
-          rooms={rooms}
-          room={alertFilters.room ?? ""}
-          onRoomChange={(room) => {
-            const next = { ...alertFilters, room: room || undefined };
-            setAlertFilters(next);
-            void loadStats(next);
-          }}
-          onDrill={drillToSessions}
-        />
+        <>
+          <ExamTimeCard
+            endAt={examEndAt}
+            skewMs={examSkewMs}
+            busy={examTimeBusy}
+            endNowArmed={endNowArmed}
+            onArmEndNow={setEndNowArmed}
+            absoluteInput={examTimeInput}
+            onAbsoluteInputChange={setExamTimeInput}
+            onAdjust={(body) => void runExamTime(body)}
+          />
+          <StatsDashboard
+            stats={stats}
+            loading={statsLoading}
+            onRefresh={() => loadStats()}
+            rooms={rooms}
+            room={alertFilters.room ?? ""}
+            onRoomChange={(room) => {
+              const next = { ...alertFilters, room: room || undefined };
+              setAlertFilters(next);
+              void loadStats(next);
+            }}
+            onDrill={drillToSessions}
+          />
+        </>
       ) : null}
 
       {view === "sessions" ? (
@@ -2737,6 +2792,68 @@ function ContestFilterBanner({ contestSlug, onApply, onClear }: { contestSlug: s
         Apply
       </button>
     </form>
+  );
+}
+
+// S5: live exam-time control on the Live stats view. Remaining time is computed
+// against the SERVER clock (skew captured when the stats/exam-time response
+// arrived) so the admin display agrees with the students'. The 1 s ticker only
+// re-renders this card. "End exam now" is a deliberate two-click confirm.
+function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteInput, onAbsoluteInputChange, onAdjust }: {
+  endAt: string;
+  skewMs: number;
+  busy: boolean;
+  endNowArmed: boolean;
+  onArmEndNow: (armed: boolean) => void;
+  absoluteInput: string;
+  onAbsoluteInputChange: (value: string) => void;
+  onAdjust: (body: ExamTimeRequest) => void;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const left = remainingMs(endAt, Date.now(), skewMs);
+  const over = left !== null && left <= 0;
+  const buttonClass = "focus-ring inline-flex h-10 items-center justify-center rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50";
+  return (
+    <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-ink">Exam time</h2>
+          {endAt ? (
+            <p className="mt-1 text-sm text-muted">
+              Ends {new Date(endAt).toLocaleString()} ·{" "}
+              <span className={`font-mono font-semibold ${over ? "text-danger" : "text-ink"}`}>
+                {over ? "time is up" : `${formatRemaining(left ?? 0)} left`}
+              </span>
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-muted">No schedule configured yet — set the gate in Settings.</p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: 15 })}>+15 min</button>
+          <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: 5 })}>+5 min</button>
+          <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: -5 })}>−5 min</button>
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">New end time</span>
+            <input className="focus-ring mt-1 h-10 rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={absoluteInput} onChange={(event) => onAbsoluteInputChange(event.target.value)} />
+          </label>
+          <button className={buttonClass} disabled={busy || !absoluteInput} onClick={() => onAdjust({ end_at: localInputToIso(absoluteInput) })}>Set</button>
+          {endNowArmed ? (
+            <>
+              <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md bg-danger px-3 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => onAdjust({ end_now: true })}>Confirm: end for everyone</button>
+              <button className={buttonClass} disabled={busy} onClick={() => onArmEndNow(false)}>Cancel</button>
+            </>
+          ) : (
+            <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md border border-danger/40 px-3 text-sm font-medium text-danger disabled:opacity-50" disabled={busy || !endAt} onClick={() => onArmEndNow(true)}>End exam now…</button>
+          )}
+        </div>
+      </div>
+      <p className="mt-3 text-xs text-muted">Changes reach students within ~15 seconds via their heartbeat — no reload needed. "End exam now" also force-ends every live session in the contest.</p>
+    </section>
   );
 }
 
