@@ -88,5 +88,18 @@ Karthi reviewed the DEPLOYED admin panel (stale image, predates S2-S7). Do BEFOR
 4. **Multi-test support — ACTIVATED** (was BACKLOG item 2, deferred; Karthi says start now): multiple contests instead of the single settings doc. Each contest gets a NAME; the slug is derived from the name. The contest URL field is obsolete (no HackerRank) — remove it as part of F8.2. Per-test settings (incl. the 2-links/2-timings idea from the earlier note), select/activate from a list, per-test scoping of sessions/alerts/roster/problems/reports (contest_slug plumbing already exists everywhere).
 5. **Execute the rest of the written-but-unexecuted backlog** — sweep TODO lists for actionable items (e.g. BACKLOG 4: contest-eval adapter + why-no-alerts investigation) and do what can be done without Karthi.
 
+## 2026-06-10 feedback round 4 (Karthi voice, TG ~11:55) — invigilator portal + identity/data-model rethink [F9]
+Invigilator portal UX (small, build with the post-F6 wave):
+1. **Hide the room-start-gate block when gate is disabled** — only show it when it's actually in use; don't confuse invigilators.
+2. **Clickable status counters** — clicking a status stat on top filters the student list below to that status.
+3. **Admin-configurable invigilator alerts** — which alert types show on the invigilator room dashboard must be configurable from the admin board.
+4. **Alert click → details** — clicking a room alert shows more candidate detail (roll number etc.) within invigilator least-privilege limits.
+
+Identity + data-model RETHINK (big — design-first, Karthi offered a discussion round):
+5. **Unique-column identity**: admin designates which roster column is the unique column (e.g. roll number); that value becomes the internal identity (may internally still be called username but NEVER shown as "username" in UI); the configured column LABEL drives every frontend prompt ("Enter your roll number"); uniqueness enforced on that column per contest; cross-contest collisions (same roll number, different colleges/tests) must be impossible by scoping (composite key with contest). S2's unique_id + unique_id_label groundwork exists — this makes it THE identity and kills username-as-concept.
+6. **Multi-college, no data bleed**: simultaneous AND sequential college runs with proper settings/filters everywhere (multi-test F8.4 covers the model; this is the acceptance bar).
+7. **Per-contest data lifecycle in the admin UI** (today an AI agent pokes the database directly — replace that): download a contest's DB data (scores, sessions, attendance — the light data) as files, then clear/delete it; support re-upload/relocate. Video/evidence files handled separately: retention ~3-4 days after selection, then purge (GCS lifecycle).
+8. **Process**: complete rethink with proper methods BEFORE building ("not something random"); consolidated design doc; Karthi available for a discussion round if needed.
+
 ## LAST GOAL (after everything else) — recording encoding optimization [F7]
 Research-first, then DISCUSS with Karthi before building: best encoding/codec + settings for screen recordings where most of the frame is static (small incremental updates). Evaluate size vs quality vs CPU on candidate laptops (weak CPUs), browser MediaRecorder support (VP9/AV1/H.264 profiles, keyframe interval, bitrate modes), and what the review pipeline/video worker can ingest. Deliverable: comparison + recommendation, NOT an unilateral implementation.
