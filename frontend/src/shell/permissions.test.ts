@@ -9,6 +9,7 @@ import {
   initialPermissionChecklist, PERMISSION_META, PERMISSION_ORDER,
   permissionsReady, allPermissionsGranted, permissionsAttempted, permissionRetryable,
   permissionStatusLine, screenStatusFromErrorKind, screenShareFailureMessage,
+  skipEntryClipboardRead,
   type PermissionChecklist, type PermissionKey, type PermissionStatus
 } from "./permissions";
 
@@ -114,6 +115,21 @@ describe("screenStatusFromErrorKind", () => {
     expect(screenStatusFromErrorKind("share_cancelled")).toBe("denied");
     expect(screenStatusFromErrorKind("invalid_surface")).toBe("denied");
     expect(screenStatusFromErrorKind("unknown")).toBe("denied");
+  });
+});
+
+// F5.1 wave-3 residual: a stage-1 clipboard denial/dismissal leaves the browser
+// permission re-promptable, so the recording-start entry snapshot's readText()
+// would pop a dialog AFTER fullscreen — exactly the mid-exam prompt F5.1 kills.
+describe("skipEntryClipboardRead", () => {
+  it("a recorded stage-1 denial skips the entry re-read (no post-fullscreen prompt)", () => {
+    expect(skipEntryClipboardRead("denied")).toBe(true);
+  });
+  it("granted reads silently; unavailable/pending/requesting keep the existing failure path", () => {
+    expect(skipEntryClipboardRead("granted")).toBe(false);
+    expect(skipEntryClipboardRead("unavailable")).toBe(false);
+    expect(skipEntryClipboardRead("pending")).toBe(false);
+    expect(skipEntryClipboardRead("requesting")).toBe(false);
   });
 });
 

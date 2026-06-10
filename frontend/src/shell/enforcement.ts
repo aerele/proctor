@@ -218,6 +218,17 @@ export function enforcementRemainingSeconds(state: EnforcementState, nowMs: numb
   return Math.max(0, Math.ceil((state.deadlineMs - nowMs) / 1000));
 }
 
+// Wave-3 fix: the alert_hold banner used to claim "Time expired" even when the
+// hold was reached through the EXIT LIMIT — word it by the violation that
+// tripped. null (legacy persisted state with no violation) keeps the time
+// wording, the pre-fix default.
+export function alertHoldMessage(violation: ViolationPhase | null): string {
+  const cause = violation === "exit_limit"
+    ? "You exited fullscreen too many times"
+    : "Time expired";
+  return `${cause} — your proctor has been alerted. Complete both steps below to continue, or wait for the invigilator.`;
+}
+
 // ---- Persistence (per session) ----------------------------------------------
 //
 // Mirrors examShell's top-bar persistence: a reload mid-block must re-engage

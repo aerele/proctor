@@ -33,13 +33,35 @@ describe("switchAwayReducer — episode debounce", () => {
     expect(episode).toBe(null);
   });
 
-  it("repeated away signals inside the rolling window collapse into ONE episode", () => {
+  it("repeated away/back excursions inside the rolling window collapse into ONE episode", () => {
     let state = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
+    state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 5_000 }).state;
     state = switchAwayReducer(state, { kind: "away", nowMs: T0 + 10_000 }).state;
+    state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 20_000 }).state;
     const third = switchAwayReducer(state, { kind: "away", nowMs: T0 + 25_000 });
     expect(third.episode).toBe(null);
     expect(third.state.count).toBe(3);
     expect(third.state.episodeStartMs).toBe(T0);
+  });
+
+  // Wave-3 fix: ONE tab switch fires BOTH window_blur and visibility_change
+  // (hidden). The pair must count as ONE excursion — double-counting meant the
+  // backend's frequent-switch trigger (3) tripped on just 2 real switches.
+  it("a blur+hidden pair from a single tab switch counts ONE excursion (count stays 1)", () => {
+    let state = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state; // window_blur
+    state = switchAwayReducer(state, { kind: "away", nowMs: T0 + 20 }).state; // visibility hidden
+    expect(state.count).toBe(1);
+    expect(state.episodeStartMs).toBe(T0);
+  });
+
+  it("an away AFTER a return marker is a NEW excursion (count 2); the raw signal pairs stay deduped", () => {
+    let state = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
+    state = switchAwayReducer(state, { kind: "away", nowMs: T0 + 20 }).state;
+    state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 5_000 }).state; // visible
+    state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 5_020 }).state; // focus
+    state = switchAwayReducer(state, { kind: "away", nowMs: T0 + 10_000 }).state;
+    state = switchAwayReducer(state, { kind: "away", nowMs: T0 + 10_020 }).state;
+    expect(state.count).toBe(2);
   });
 
   it("an away signal AFTER the window closes the previous episode and opens a new one", () => {
@@ -53,6 +75,7 @@ describe("switchAwayReducer — episode debounce", () => {
 
   it("tick past the window closes the episode with count + duration", () => {
     let state = switchAwayReducer(initialSwitchAwayState, { kind: "away", nowMs: T0 }).state;
+    state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 4_000 }).state;
     state = switchAwayReducer(state, { kind: "away", nowMs: T0 + 8_000 }).state;
     state = switchAwayReducer(state, { kind: "back", nowMs: T0 + 12_000 }).state;
     const closed = switchAwayReducer(state, { kind: "tick", nowMs: T0 + 8_000 + SWITCH_AWAY_WINDOW_MS + 1 });

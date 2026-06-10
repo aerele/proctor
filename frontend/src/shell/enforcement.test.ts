@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import {
   FULLSCREEN_ACK_PHRASE,
   REPORT_RETRY_MS,
+  alertHoldMessage,
   initialEnforcementState,
   enforcementReducer,
   enforcementOverlayVisible,
@@ -323,5 +324,27 @@ describe("overlay visibility + countdown helpers", () => {
     expect(enforcementRemainingSeconds(blocking, T0 + 19_100)).toBe(1);
     expect(enforcementRemainingSeconds(blocking, T0 + 25_000)).toBe(0);
     expect(enforcementRemainingSeconds(initialEnforcementState, T0)).toBe(null);
+  });
+});
+
+// Wave-3 fix: the alert_hold banner used to claim "Time expired" even when the
+// hold was reached through the EXIT LIMIT — the copy must name the violation
+// that actually tripped.
+describe("alertHoldMessage", () => {
+  it("countdown expiry reads as time expired", () => {
+    expect(alertHoldMessage("countdown_expired")).toMatch(/^Time expired/);
+  });
+  it("exit-limit holds name the exit limit, not time", () => {
+    expect(alertHoldMessage("exit_limit")).toMatch(/exit/i);
+    expect(alertHoldMessage("exit_limit")).not.toMatch(/time expired/i);
+  });
+  it("an unknown/null violation (legacy persisted state) keeps the time wording", () => {
+    expect(alertHoldMessage(null)).toMatch(/^Time expired/);
+  });
+  it("every variant tells the candidate the proctor was alerted and how to continue", () => {
+    for (const violation of ["countdown_expired", "exit_limit", null] as const) {
+      expect(alertHoldMessage(violation)).toMatch(/proctor has been alerted/);
+      expect(alertHoldMessage(violation)).toMatch(/both steps/i);
+    }
   });
 });

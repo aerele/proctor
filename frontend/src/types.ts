@@ -432,7 +432,7 @@ export type Alert = {
   id: string;
   source: AlertSource;
   /**
-   * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected
+   * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected | fullscreen_enforcement
    *   (legacy, no longer raised but may still appear in stored data: invalid_share_surface)
    * contest-eval: peer_copy_cluster | recurring_pair | web_paste | first_attempt_solve | tough_first_attempt
    *   (legacy alias, no longer emitted: fast_solve)
@@ -505,7 +505,11 @@ export type ProctorAlertType =
   | "ip_changed"
   | "tab_hidden"
   | "tab_away"
-  | "disconnected";
+  | "disconnected"
+  // F5.3: the critical alert the enforcement ladder raises on a violation
+  // (countdown expiry / exit limit) — in the backend catalog since wave 2,
+  // missing here until wave 3.
+  | "fullscreen_enforcement";
 
 export type ProctorAlertTypeConfig = {
   enabled: boolean;

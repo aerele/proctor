@@ -13,10 +13,11 @@ import { CodingWorkspace } from "./coding/CodingWorkspace";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
 import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
+import { enforcementSettingsFromForm } from "./enforcementSettings";
 import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
-import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
+import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, skipEntryClipboardRead, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
@@ -400,6 +401,7 @@ function StudentApp() {
   const enforcementOverlay = enforcement.overlayVisible ? (
     <EnforcementOverlay
       phase={enforcement.phase}
+      violation={enforcement.violation}
       remainingSeconds={enforcement.remainingSeconds}
       exitCount={enforcement.exitCount}
       ackOk={enforcement.ackOk}
@@ -1030,6 +1032,12 @@ function StudentApp() {
         setStatus("ended");
         window.localStorage.removeItem(sessionStorageKey);
       }
+      // Wave-3 walkthrough residue: a release back to ACTIVE must not carry a
+      // red error line from the lock episode into the running view — the
+      // stale message sat above the workspace until the next state change.
+      // start()/resumeRecording() clear these themselves; this is the
+      // blocked-screen path (Check again / unlock code).
+      if (serverStatus === "active") setStartError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -1064,42 +1072,63 @@ function StudentApp() {
       detail: { message: "Tab/focus review active. Shared-screen recording and focus changes are logged." }
     });
 
-    try {
-      if (!navigator.clipboard?.readText) {
-        throw new Error("Clipboard read is not supported by this browser.");
-      }
-      const text = await navigator.clipboard.readText();
-      setClipboardText(text);
-      setClipboardAudit(text ? "Clipboard captured and uploaded." : "Clipboard is empty; empty value uploaded.");
-      await uploadReviewFile(activeSessionId, "clipboard", [{
-        type: "initial_clipboard_snapshot",
-        timestamp: new Date().toISOString(),
-        text,
-        text_length: text.length,
-        visibility_state: document.visibilityState
-      }]);
-      addEvent({
-        type: "clipboard_review_uploaded",
-        timestamp: new Date().toISOString(),
-        visibility_state: document.visibilityState,
-        detail: { text_length: text.length }
-      });
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
+    // F5.1 wave-3 residual fix: a stage-1 clipboard denial/dismissal leaves the
+    // browser permission re-promptable, so the entry re-read below would pop a
+    // dialog AFTER fullscreen. Skip the read entirely — the stage-1
+    // setup_clipboard_permission_failed event already recorded the denial.
+    if (skipEntryClipboardRead(permissions.clipboard)) {
       setClipboardText("");
-      setClipboardAudit(`Clipboard could not be read: ${message}`);
+      setClipboardAudit("Clipboard was blocked during setup, so it was not re-read (no browser prompt mid-exam). The denial is noted for the proctor.");
       await uploadReviewFile(activeSessionId, "clipboard", [{
-        type: "initial_clipboard_snapshot_failed",
+        type: "clipboard_skipped_setup_denied",
         timestamp: new Date().toISOString(),
-        reason: message,
+        reason: "stage-1 clipboard permission denied or dismissed",
         visibility_state: document.visibilityState
       }]);
       addEvent({
-        type: "clipboard_review_failed",
+        type: "clipboard_skipped_setup_denied",
         timestamp: new Date().toISOString(),
         visibility_state: document.visibilityState,
-        detail: { reason: message }
+        detail: { reason: "stage-1 clipboard permission denied or dismissed" }
       });
+    } else {
+      try {
+        if (!navigator.clipboard?.readText) {
+          throw new Error("Clipboard read is not supported by this browser.");
+        }
+        const text = await navigator.clipboard.readText();
+        setClipboardText(text);
+        setClipboardAudit(text ? "Clipboard captured and uploaded." : "Clipboard is empty; empty value uploaded.");
+        await uploadReviewFile(activeSessionId, "clipboard", [{
+          type: "initial_clipboard_snapshot",
+          timestamp: new Date().toISOString(),
+          text,
+          text_length: text.length,
+          visibility_state: document.visibilityState
+        }]);
+        addEvent({
+          type: "clipboard_review_uploaded",
+          timestamp: new Date().toISOString(),
+          visibility_state: document.visibilityState,
+          detail: { text_length: text.length }
+        });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setClipboardText("");
+        setClipboardAudit(`Clipboard could not be read: ${message}`);
+        await uploadReviewFile(activeSessionId, "clipboard", [{
+          type: "initial_clipboard_snapshot_failed",
+          timestamp: new Date().toISOString(),
+          reason: message,
+          visibility_state: document.visibilityState
+        }]);
+        addEvent({
+          type: "clipboard_review_failed",
+          timestamp: new Date().toISOString(),
+          visibility_state: document.visibilityState,
+          detail: { reason: message }
+        });
+      }
     }
 
     const cookieRecord = {
@@ -1736,6 +1765,11 @@ function AdminApp() {
   const [cameraRecEnabled, setCameraRecEnabled] = useState(true);
   const [cameraFpsText, setCameraFpsText] = useState("10");
   const [cameraWidthText, setCameraWidthText] = useState("640");
+  // Wave-3: the F5.3 enforcement knobs get the same TEXT-state treatment —
+  // clearing "Fullscreen exit limit" used to save 0 (lock on the FIRST exit)
+  // silently; enforcementSettingsFromForm maps blank/invalid to 20 s / 2 exits.
+  const [reentrySecondsText, setReentrySecondsText] = useState("20");
+  const [exitLimitText, setExitLimitText] = useState("2");
   // Review roster (multi-reviewer workflow): pasted usernames + the coverage
   // summary. `rosterUnavailable` flags a 404 (endpoint not deployed yet).
   const [rosterText, setRosterText] = useState("");
@@ -2099,12 +2133,12 @@ function AdminApp() {
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
         room_gate_enabled: Boolean(response.room_gate_enabled),
-        fullscreen_reentry_seconds: response.fullscreen_reentry_seconds ?? 20,
-        fullscreen_exit_limit: response.fullscreen_exit_limit ?? 2,
         enforcement_mode: response.enforcement_mode ?? "block",
         problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
+      setReentrySecondsText(String(response.fullscreen_reentry_seconds ?? 20));
+      setExitLimitText(String(response.fullscreen_exit_limit ?? 2));
       setRoomsText((response.rooms ?? []).join(", "));
       const camera = normalizeCameraRecording(response.camera_recording);
       setCameraRecEnabled(camera.enabled);
@@ -2128,8 +2162,10 @@ function AdminApp() {
         end_at: localInputToIso(settings.end_at),
         contest_url: settings.contest_url,
         room_gate_enabled: settings.room_gate_enabled === true,
-        fullscreen_reentry_seconds: settings.fullscreen_reentry_seconds,
-        fullscreen_exit_limit: settings.fullscreen_exit_limit,
+        // Wave-3: blank/invalid text falls back to the defaults (20 s / 2
+        // exits, never 0) — clearing the exit-limit field must not silently
+        // persist the harshest setting (lock on the FIRST exit).
+        ...enforcementSettingsFromForm({ reentrySeconds: reentrySecondsText, exitLimit: exitLimitText }),
         enforcement_mode: settings.enforcement_mode,
         problem_id: settings.problem_id,
         // F10.1: blank/invalid fps/width text falls back to the defaults here
@@ -2143,12 +2179,12 @@ function AdminApp() {
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
         room_gate_enabled: Boolean(response.room_gate_enabled),
-        fullscreen_reentry_seconds: response.fullscreen_reentry_seconds ?? 20,
-        fullscreen_exit_limit: response.fullscreen_exit_limit ?? 2,
         enforcement_mode: response.enforcement_mode ?? "block",
         problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
+      setReentrySecondsText(String(response.fullscreen_reentry_seconds ?? 20));
+      setExitLimitText(String(response.fullscreen_exit_limit ?? 2));
       setRoomsText((response.rooms ?? []).join(", "));
       const savedCamera = normalizeCameraRecording(response.camera_recording);
       setCameraRecEnabled(savedCamera.enabled);
@@ -2711,19 +2747,20 @@ function AdminApp() {
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
           <Field label="Active problem ID" value={settings.problem_id ?? ""} onChange={(value) => setSettings({ ...settings, problem_id: value })} />
           <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
-          {/* F5.3: fullscreen enforcement knobs. Invalid values fall back to the
-              defaults SERVER-SIDE (20 / 2 / block) — the form mirrors that. */}
+          {/* F5.3: fullscreen enforcement knobs. TEXT state (wave-3) so a
+              cleared field stays blank while typing; blank/invalid saves the
+              DEFAULTS (20 / 2), never 0 — the server normalizes again. */}
           <Field
-            label="Fullscreen re-entry countdown (seconds)"
+            label="Fullscreen re-entry countdown (seconds, blank = 20)"
             type="number"
-            value={String(settings.fullscreen_reentry_seconds ?? 20)}
-            onChange={(value) => setSettings({ ...settings, fullscreen_reentry_seconds: Number(value) })}
+            value={reentrySecondsText}
+            onChange={setReentrySecondsText}
           />
           <Field
-            label="Fullscreen exit limit (exits beyond this lock)"
+            label="Fullscreen exit limit (exits beyond this lock, blank = 2)"
             type="number"
-            value={String(settings.fullscreen_exit_limit ?? 2)}
-            onChange={(value) => setSettings({ ...settings, fullscreen_exit_limit: Number(value) })}
+            value={exitLimitText}
+            onChange={setExitLimitText}
           />
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">Enforcement mode</span>

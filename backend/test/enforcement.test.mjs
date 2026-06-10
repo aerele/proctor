@@ -464,6 +464,30 @@ test("unlock-gate attempt cap: capped session stays capped even with the right c
   assert.equal(capped.statusCode, 429);
 });
 
+test("successful unlock RESETS unlock_attempt_count — a re-lock starts with fresh attempts (wave-3 fix)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  await lockViaViolation(firestore, "u-7");
+  const code = await mintUnlockCode();
+  // One wrong attempt away from the permanent cap when the proctor reads the
+  // right code: the unlock must clear the counter, not carry 19 forward.
+  sessionDoc(firestore, "u-7").unlock_attempt_count = 19;
+  const ok = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
+    body: { session_id: "u-7", code } }));
+  assert.equal(ok.statusCode, 200);
+  assert.equal(sessionDoc(firestore, "u-7").unlock_attempt_count, 0);
+  // Re-locked later the same exam: a single typo must NOT 429 the candidate.
+  const relock = await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: "u-7", phase: "countdown_expired" } }));
+  assert.equal(relock.body.locked, true);
+  const wrong = code === "000000" ? "000001" : "000000";
+  const res = await call(makeReq({ method: "POST", path: "/api/session/unlock-gate",
+    body: { session_id: "u-7", code: wrong } }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.error, "invalid_code");
+});
+
 test("unlock-gate with NO unlock code minted → 403 no_unlock_code WITHOUT burning an attempt", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
@@ -719,6 +743,27 @@ test("a FREQUENT episode (3+ switches) alerts even when short; a short single sw
   assert.equal(alertsIn(firestore).filter((a) => a.type === "tab_away").length, 0);
   await postEpisode("sw-2", { count: 3, duration_ms: 2_000 });
   assert.equal(alertsIn(firestore).filter((a) => a.type === "tab_away").length, 1);
+});
+
+test("tab_away dedupe keys off SERVER time, never the client-supplied event timestamp (wave-3 fix)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "sw-5");
+  // Two long episodes whose SPOOFED client timestamps sit days apart: with
+  // client-keyed dedupe each minted its own alert (and a PINNED timestamp
+  // could collapse every future episode into one, silencing the feed).
+  // Server-minute keying folds this same-instant pair into ONE alert whose id
+  // carries the server minute, not the spoofed 2020 stamps.
+  const res = await call(makeReq({ method: "POST", path: "/api/events",
+    body: { session_id: "sw-5", events: [
+      { type: "switch_away_episode", timestamp: "2020-01-01T00:00:00.000Z", detail: { count: 1, duration_ms: 13_000 } },
+      { type: "switch_away_episode", timestamp: "2020-01-02T00:00:00.000Z", detail: { count: 1, duration_ms: 14_000 } }
+    ] } }));
+  assert.equal(res.statusCode, 200);
+  const alerts = alertsIn(firestore).filter((a) => a.type === "tab_away");
+  assert.equal(alerts.length, 1);
+  assert.ok(!alerts[0].id.includes("2020-01"), `dedupe key must not echo the client timestamp (got ${alerts[0].id})`);
 });
 
 test("the tab_away threshold_seconds setting governs the duration trigger", async () => {
