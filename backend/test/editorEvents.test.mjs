@@ -194,6 +194,40 @@ test("POST /api/editor-events accepts a batch and writes NDJSON to GCS under the
   assert.equal(storage._saved.get(keys[0]).trim().split("\n").length, 2);
 });
 
+test("POST /api/editor-events: batches stay problem-homogeneous — each NDJSON object carries ITS batch's problem_id (S-I §3.5)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", storage_prefix: "sessions/alice/s1/"
+  });
+  // Two batches for two problems — including the new problem_switched marker.
+  await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: "p-one", events: [
+      { type: "editor_insert", timestamp: "t1", detail: {} }
+    ] } }));
+  await call(makeReq({ method: "POST", path: "/api/editor-events",
+    body: { session_id: "s1", problem_id: "p-two", events: [
+      { type: "problem_switched", timestamp: "t2", detail: { from_problem_id: "p-one", to_problem_id: "p-two" } },
+      { type: "editor_insert", timestamp: "t3", detail: {} }
+    ] } }));
+
+  const keys = [...storage._saved.keys()].sort();
+  assert.equal(keys.length, 2); // one object per batch — never merged
+  const batchProblemIds = keys.map((key) => {
+    const lines = storage._saved.get(key).trim().split("\n").map((line) => JSON.parse(line));
+    const ids = new Set(lines.map((line) => line.problem_id));
+    assert.equal(ids.size, 1, "every line in a batch must carry the same problem_id");
+    return [...ids][0];
+  });
+  assert.deepEqual(batchProblemIds.sort(), ["p-one", "p-two"]);
+  // The switch marker rode the INCOMING problem's batch with its detail intact.
+  const switchLine = [...storage._saved.values()].flatMap((body) => body.trim().split("\n"))
+    .map((line) => JSON.parse(line)).find((line) => line.type === "problem_switched");
+  assert.deepEqual(switchLine.detail, { from_problem_id: "p-one", to_problem_id: "p-two" });
+  assert.equal(switchLine.problem_id, "p-two");
+});
+
 test("POST /api/editor-events rejects an unknown/ended session (ownership gate)", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();

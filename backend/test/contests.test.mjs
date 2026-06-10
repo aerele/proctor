@@ -302,7 +302,7 @@ test("legacy: no settings doc → no synthesized entry", async () => {
 test("legacy: synthesized from settings.contest_slug, flagged legacy:true, identity_mode legacy_username", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026" });
+  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026", problem_id: "sum-two" });
   const res = await call(listReq());
   assert.equal(res.body.contests.length, 1);
   const legacy = res.body.contests[0];
@@ -314,6 +314,10 @@ test("legacy: synthesized from settings.contest_slug, flagged legacy:true, ident
   assert.equal(legacy.access_code, null);
   assert.equal(legacy.start_at, "2026-06-10T03:30:00.000Z");
   assert.equal(legacy.end_at, "2026-06-10T06:30:00.000Z");
+  // S-I: the settings' single-problem assignment rides the synthesized doc so
+  // the §1.3 shim reads it like any other contest.
+  assert.equal(legacy.problem_id, "sum-two");
+  assert.equal(legacy.template_slug, null);
   // Synthesis never writes: the contests collection stays empty.
   assert.equal((firestore._collections.get("ct_contests") || new Map()).size, 0);
 });

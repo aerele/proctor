@@ -453,6 +453,113 @@ test("resume payload carries the PUBLIC problem view — never hiddenTests; null
   assert.equal(bare.body.problem, null);
 });
 
+// ---- S-I §3.4: multi-problem start/resume payload -------------------------------
+
+test("resume for a REAL-contest session serves the contest's ordered problems[] + summary + budget (S-I §3.4)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() })); // rev-str, 80 pts
+  firestore.collection("proctor_contests").doc("kec-r1").set({
+    slug: "kec-r1", status: "open",
+    problems: [
+      { problem_id: "sum-two", points: 40, order: 1 },
+      { problem_id: "rev-str", points: null, order: 0 }
+    ]
+  });
+  firestore.collection("problems_sessions").doc("ms1").set({
+    session_id: "ms1", status: "active", username_norm: "alice",
+    contest_slug: "kec-r1", storage_prefix: "contests/kec-r1/sessions/alice/ms1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ms1" } }));
+  assert.equal(res.statusCode, 200);
+  // Ordered problems[] with EFFECTIVE points + order; never hiddenTests/status.
+  assert.equal(res.body.problems.length, 2);
+  assert.deepEqual(res.body.problems.map((p) => p.id), ["rev-str", "sum-two"]);
+  assert.deepEqual(res.body.problems.map((p) => p.order), [0, 1]);
+  assert.equal(res.body.problems[0].points, 80);  // bank points (null override)
+  assert.equal(res.body.problems[1].points, 40);  // entry override beats the seed's 100
+  assert.equal(res.body.problems[0].hiddenTests, undefined);
+  assert.equal(res.body.problems[0].status, undefined);
+  // One-release compatibility alias: problems[0] WITHOUT the order key.
+  assert.equal(res.body.problem.id, "rev-str");
+  assert.equal(res.body.problem.order, undefined);
+  // Budget + empty summary for a fresh session.
+  assert.equal(res.body.submit_budget, 50);
+  assert.deepEqual(res.body.submissions_summary, {});
+});
+
+test("resume restores submissions_summary from stored submissions (chips/totals survive a reload)", async () => {
+  const { firestore } = freshClients();
+  firestore.collection("proctor_contests").doc("kec-r1").set({
+    slug: "kec-r1", status: "open", problems: [{ problem_id: "sum-two", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("ms2").set({
+    session_id: "ms2", status: "active", username_norm: "alice", contest_slug: "kec-r1",
+    storage_prefix: "contests/kec-r1/sessions/alice/ms2/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+  // Two stored submissions for THIS session; one for another session (ignored).
+  firestore.collection("problems_submissions").doc("a").set({
+    session_id: "ms2", problem_id: "sum-two", score: 40, max_points: 100,
+    verdict: "wrong_answer", created_at: "2026-06-10T04:10:00.000Z"
+  });
+  firestore.collection("problems_submissions").doc("b").set({
+    session_id: "ms2", problem_id: "sum-two", score: 100, max_points: 100,
+    verdict: "accepted", created_at: "2026-06-10T04:20:00.000Z"
+  });
+  firestore.collection("problems_submissions").doc("c").set({
+    session_id: "other", problem_id: "sum-two", score: 10, max_points: 100,
+    verdict: "wrong_answer", created_at: "2026-06-10T04:30:00.000Z"
+  });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ms2" } }));
+  assert.equal(res.statusCode, 200);
+  const cell = res.body.submissions_summary["sum-two"];
+  assert.equal(cell.best_score, 100);
+  assert.equal(cell.attempts, 2);
+  assert.equal(cell.best_verdict, "accepted");
+  assert.equal(cell.last_submitted_at, "2026-06-10T04:20:00.000Z");
+});
+
+test("legacy canary: a settings-assigned session keeps the EXACT problem shape; problems[] mirrors it with order 0", async () => {
+  const { firestore } = freshClients();
+  firestore.collection("problems_sessions").doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
+  });
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
+  // The alias is BYTE-IDENTICAL to the pre-S-I public problem view.
+  assert.deepEqual(Object.keys(res.body.problem).sort(),
+    ["cpuTimeLimit", "id", "languages", "memoryLimit", "points", "sampleTests", "statement", "title"]);
+  assert.equal(res.body.problem.points, 80);
+  // problems[] carries the same problem once, with order 0 added.
+  assert.equal(res.body.problems.length, 1);
+  assert.equal(res.body.problems[0].id, "rev-str");
+  assert.equal(res.body.problems[0].order, 0);
+  assert.equal(res.body.submit_budget, 50);
+});
+
+test("contest languages intersect per-problem languages at serve time (S-I §1.1 defaults)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ languages: ["python", "cpp"] }) }));
+  firestore.collection("proctor_contests").doc("lang-c").set({
+    slug: "lang-c", status: "open", languages: ["python", "java"],
+    problems: [{ problem_id: "rev-str", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("ls1").set({
+    session_id: "ls1", status: "active", username_norm: "alice", contest_slug: "lang-c",
+    storage_prefix: "contests/lang-c/sessions/alice/ls1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ls1" } }));
+  assert.deepEqual(res.body.problems[0].languages, ["python"]);
+});
+
 test("a problem UNPUBLISHED after assignment degrades to problem: null (no dead payloads)", async () => {
   const { firestore } = freshClients();
   firestore.collection("problems_sessions").doc("s1").set({
