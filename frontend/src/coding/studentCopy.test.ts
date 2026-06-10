@@ -9,12 +9,15 @@
 // both flows.
 import { describe, it, expect } from "vitest";
 import {
+  consentDisclosure,
   endTestConfirmation,
   formStageIntro,
   integrityNotices,
   tabAuditMessage,
   testRules
 } from "../studentCopy";
+
+const KEYSTROKE_DISCLOSURE = "keystroke timing, is recorded";
 
 const allCandidateStrings = (ownEditor: boolean): string[] => [
   ...testRules(ownEditor).flatMap((rule) => [rule.title, rule.body]),
@@ -69,6 +72,19 @@ describe("own-editor copy (ownEditor=true)", () => {
       "Submitted code may be checked for similarity, unusual structure, and copied code patterns."
     );
   });
+
+  // M2 (PII disclosure): Slice 1 records every keystroke (full text + timing) to
+  // GCS. The candidate must see this disclosed in the own-editor rules.
+  it("rules: discloses that editor keystrokes (text + timing) are recorded", () => {
+    const rule = testRules(true).find((r) => r.title === "No copy / paste or outside help");
+    expect(rule?.body).toContain("coding editor");
+    expect(rule?.body).toContain(KEYSTROKE_DISCLOSURE);
+  });
+
+  it("consent sentence discloses editor keystroke recording", () => {
+    expect(consentDisclosure(true)).toContain("coding editor");
+    expect(consentDisclosure(true)).toContain(KEYSTROKE_DISCLOSURE);
+  });
 });
 
 describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", () => {
@@ -117,5 +133,18 @@ describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", 
   it("both variants expose the same six rule cards (titles aside, same order/count)", () => {
     expect(testRules(false)).toHaveLength(6);
     expect(testRules(true)).toHaveLength(6);
+  });
+
+  // M2: there is no own editor in the HackerRank fallback, so the keystroke
+  // disclosure must NOT appear in any legacy candidate-facing string.
+  it("never claims editor keystroke recording where there is no own editor", () => {
+    const legacyStrings = [
+      ...testRules(false).flatMap((r) => [r.title, r.body]),
+      consentDisclosure(false)
+    ];
+    for (const s of legacyStrings) {
+      expect(s).not.toContain(KEYSTROKE_DISCLOSURE);
+      expect(s.toLowerCase()).not.toContain("coding editor");
+    }
   });
 });

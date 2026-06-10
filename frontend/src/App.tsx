@@ -1020,7 +1020,7 @@ function StudentApp() {
                       onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
                     />
                     <span>
-                      I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
+                      {studentCopy.consentDisclosure(hasProblem)}
                     </span>
                   </label>
                 </>
@@ -1116,7 +1116,7 @@ function StudentApp() {
               so we show a compact preview of what monitoring will capture instead.
               Recording stage: the live panels take over. */}
           {isFormStage ? (
-            <WhatIsRecordedPanel />
+            <WhatIsRecordedPanel hasProblem={hasProblem} />
           ) : (
             <>
               <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
@@ -2450,11 +2450,16 @@ function ContestEvalAlertTypesSection() {
   );
 }
 
-// Escape one CSV field per RFC-4180: wrap in quotes and double any embedded quote
-// when it contains a comma, quote, or newline. Keeps usernames with odd chars safe.
-function csvField(value: string): string {
-  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
+// Escape one CSV field per RFC-4180 AND neutralize spreadsheet formula injection.
+// A candidate-controlled cell (name/username) starting with = + - @ — or a leading
+// tab / carriage return that some apps strip before re-checking — executes as a
+// formula when the export is opened in Excel/Sheets. Prefix any such cell with a
+// single quote (') so the spreadsheet treats it as literal text, THEN apply the
+// RFC-4180 quoting (wrap in quotes + double embedded quotes for comma/quote/CR/LF).
+export function csvField(value: string): string {
+  const neutralized = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  if (/[",\n\r]/.test(neutralized)) return `"${neutralized.replace(/"/g, '""')}"`;
+  return neutralized;
 }
 
 // Build the reviews CSV: header `username,reviewer_name,verdict`, one row per
@@ -3560,12 +3565,18 @@ function RulesPanel({ hasProblem }: { hasProblem: boolean }) {
 // What the proctoring captures — shown in the form-stage sidebar so the candidate
 // knows exactly what is recorded before they consent and start. Replaces the
 // empty live panels (camera/health/evidence) that have nothing to show yet.
-function WhatIsRecordedPanel() {
+function WhatIsRecordedPanel({ hasProblem }: { hasProblem: boolean }) {
   const items: Array<{ icon: React.ReactNode; label: string; detail: string }> = [
     { icon: <MonitorUp size={16} />, label: "Your entire screen", detail: "Recorded continuously and uploaded in short segments throughout the test." },
     { icon: <Camera size={16} />, label: "Camera (if available)", detail: "A small self-view; keep your face visible. Skipped if no camera is present." },
     { icon: <Mic size={16} />, label: "Microphone (if available)", detail: "Audio is captured alongside the screen when a microphone is present." },
     { icon: <Copy size={16} />, label: "Clipboard & paste activity", detail: "Copy/cut/paste inside the session is part of the integrity record." },
+    // Own-editor only: Slice 1 records every keystroke (full text + timing) in
+    // the coding workspace. The HackerRank fallback has no own editor, so this
+    // line is omitted there.
+    ...(hasProblem
+      ? [{ icon: <KeyRound size={16} />, label: "Editor keystrokes", detail: "Everything you type in the coding editor, including keystroke timing, is recorded." }]
+      : []),
     { icon: <Activity size={16} />, label: "Focus & network signals", detail: "Tab switches, hidden states, refreshes, exits, and IP changes are logged." }
   ];
   return (

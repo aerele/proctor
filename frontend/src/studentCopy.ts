@@ -35,7 +35,9 @@ export function testRules(ownEditor: boolean): TestRuleCopy[] {
     },
     {
       title: "No copy / paste or outside help",
-      body: "Clipboard and paste activity is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
+      body: ownEditor
+        ? "Clipboard and paste activity is recorded. Everything you type in the coding editor, including keystroke timing, is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
+        : "Clipboard and paste activity is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
     },
     {
       title: "Keep your camera visible",
@@ -50,6 +52,17 @@ export function testRules(ownEditor: boolean): TestRuleCopy[] {
         : "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
     }
   ];
+}
+
+// Consent-checkbox sentence (form stage). The own-editor variant discloses that
+// editor keystrokes (full text + timing) are recorded, since Slice 1 captures
+// every keystroke in the coding workspace; the HackerRank fallback has no own
+// editor, so it must NOT claim keystroke capture.
+export function consentDisclosure(ownEditor: boolean): string {
+  const editorClause = ownEditor
+    ? " Everything I type in the coding editor, including keystroke timing, is recorded."
+    : "";
+  return `I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment.${editorClause} I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.`;
 }
 
 // EndTestPanel confirmation copy (shown when the candidate presses End test).
