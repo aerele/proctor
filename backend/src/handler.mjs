@@ -3,7 +3,7 @@ import { Firestore, FieldValue } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
-import { getProblem, LANGUAGE_IDS } from "./problems.mjs";
+import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 
 let firestore = new Firestore();
 let storage = new Storage();
@@ -84,6 +84,8 @@ const JUDGE0_MODE = process.env.JUDGE0_MODE || "rapidapi";
 const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY;
 const JUDGE0_AUTH_TOKEN = process.env.JUDGE0_AUTH_TOKEN;
 const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_submissions";
+const PROBLEMS_COLLECTION = process.env.PROBLEMS_COLLECTION || "proctor_problems";
+const PROBLEMS_QUERY_LIMIT = 500;
 const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
 const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
 // S2 roster (compulsory roster login). One ACTIVE roster, global (like the
@@ -160,6 +162,10 @@ const DISCONNECTED_STALENESS_MS = Number(process.env.DISCONNECTED_STALENESS_MS |
 // number of room labels can never bloat a stats/alerts response.
 const ROOMS_LIST_LIMIT = 200;
 
+// S4: wire the problem bank to THIS module's Firestore handle. A getter (not
+// the instance) so __setClientsForTest fakes propagate to problem reads too.
+configureProblemStore({ getFirestore: () => firestore, collection: PROBLEMS_COLLECTION });
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -205,6 +211,10 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/room-gate") return send(res, 200, await sessionRoomGate(req));
     if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
     if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
+    if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
+    if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
+    if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
+    if (req.method === "POST" && path === "/api/admin/problem-delete") return send(res, 200, await adminDeleteProblem(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
     if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
@@ -1157,6 +1167,73 @@ async function adminSaveSettings(req) {
 
   await settingsRef().set(item);
   return publicSettings(item);
+}
+
+// ---- S4: problem bank (admin authoring) ------------------------------------
+
+function problemRef(id) {
+  return firestore.collection(PROBLEMS_COLLECTION).doc(id);
+}
+
+async function adminListProblems(req) {
+  requireAdmin(req);
+  const snapshot = await firestore.collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
+  const problems = snapshot.docs
+    .map((doc) => doc.data())
+    .map((p) => ({
+      id: p.id,
+      title: p.title || "",
+      status: p.status || "draft",
+      points: p.points ?? 100,
+      scoring: p.scoring || "per_test",
+      languages: p.languages || [],
+      sample_count: (p.sampleTests || []).length,
+      hidden_count: (p.hiddenTests || []).length,
+      updated_at: p.updated_at || ""
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return { problems };
+}
+
+async function adminGetProblem(req) {
+  requireAdmin(req);
+  const id = String(req.query?.id || "");
+  if (!isValidProblemId(id)) return badRequest("invalid id");
+  const doc = await problemRef(id).get();
+  if (!doc.exists) throw httpError(404, "Problem not found");
+  // Full doc INCLUDING hiddenTests — admin-only surface.
+  return { problem: doc.data() };
+}
+
+async function adminSaveProblem(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const checked = validateProblemInput(body);
+  if (!checked.ok) return badRequest(checked.error);
+  const existing = await problemRef(checked.problem.id).get();
+  const now = new Date().toISOString();
+  const item = {
+    ...checked.problem,
+    created_at: existing.exists ? (existing.data().created_at || now) : now,
+    updated_at: now
+  };
+  await problemRef(item.id).set(item);
+  return { ok: true, problem: item };
+}
+
+async function adminDeleteProblem(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const id = String(body.id || "");
+  if (!isValidProblemId(id)) return badRequest("invalid id");
+  await problemRef(id).delete();
+  // If the deleted problem was the assigned contest problem, clear the
+  // assignment so start/resume stop advertising a dead id (link-flow fallback).
+  const settings = await getSettings();
+  if (settings?.problem_id === id) {
+    await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
+  }
+  return { ok: true };
 }
 
 // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
