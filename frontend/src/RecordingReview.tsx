@@ -214,9 +214,15 @@ type Props = {
   // Global contest filter (App.tsx alertFilters.contest_slug). When set, the
   // recording-sessions picker is scoped to that contest. Empty/undefined = all.
   contestSlug?: string;
+  // F6.3: state-based deep link from the admin Sessions detail card — load this
+  // candidate's recording on mount, preferring this exact session over the
+  // default newest-first pick. One-shot: consumed via onDeepLinkConsumed so a
+  // later manual visit to the tab starts blank as before.
+  deepLink?: { username: string; sessionId?: string } | null;
+  onDeepLinkConsumed?: () => void;
 };
 
-export function RecordingReview({ password, contestSlug }: Props) {
+export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkConsumed }: Props) {
   // Picker: the lightweight recording-sessions list (null until loaded; an empty
   // array means "endpoint not deployed" → manual username entry).
   const [recordingSessions, setRecordingSessions] = useState<RecordingSession[] | null>(null);
@@ -386,8 +392,10 @@ export function RecordingReview({ password, contestSlug }: Props) {
   // ---- Load a chosen user's sessions (with signed evidence). --------------
   // `silentIfEmpty` (review mode) suppresses the "No sessions found" banner so
   // ReviewModePanel can show its own "No recording found — score anyway" state.
+  // `preferSessionId` (F6.3 deep link) selects that exact session when it is
+  // among the loaded ones; otherwise the default newest-first pick applies.
   const loadUser = useCallback(
-    async (username: string, silentIfEmpty = false) => {
+    async (username: string, silentIfEmpty = false, preferSessionId?: string) => {
       const trimmed = username.trim();
       if (!trimmed) return;
       setLoadingUser(true);
@@ -402,18 +410,22 @@ export function RecordingReview({ password, contestSlug }: Props) {
         const newest = [...loaded].sort((a, b) =>
           String(b.created_at || "").localeCompare(String(a.created_at || ""))
         )[0];
-        setSelectedSessionId(newest ? String(newest.session_id) : "");
-        setTestStartInput(isoToLocalInput(newest?.created_at));
+        const preferred = preferSessionId
+          ? loaded.find((s) => String(s.session_id) === preferSessionId)
+          : undefined;
+        const target = preferred ?? newest;
+        setSelectedSessionId(target ? String(target.session_id) : "");
+        setTestStartInput(isoToLocalInput(target?.created_at));
         setCurrentPos(0);
         setCurrentTestTime(0);
         setPlaying(false);
         if (!loaded.length && !silentIfEmpty) setError(`No sessions found for "${trimmed}".`);
 
-        // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the newest
+        // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the chosen
         // session's contest so the markers line up with that test; a 404 (or
         // null) just means no markers — never blocks the recording view.
         try {
-          const events = await fetchSubmissionEvents(password, trimmed, newest?.contest_slug || undefined);
+          const events = await fetchSubmissionEvents(password, trimmed, target?.contest_slug || undefined);
           setSubmissionEvents(events ?? []);
         } catch {
           setSubmissionEvents([]);
@@ -428,6 +440,17 @@ export function RecordingReview({ password, contestSlug }: Props) {
     },
     [password]
   );
+
+  // F6.3: consume the deep link from the Sessions detail card — load that
+  // candidate (preferring the exact session) in Browse mode, then tell the
+  // parent it was consumed so the link stays one-shot.
+  useEffect(() => {
+    if (!deepLink) return;
+    setMode("browse");
+    void loadUser(deepLink.username, false, deepLink.sessionId);
+    onDeepLinkConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLink]);
 
   // ---- REVIEW MODE actions ----------------------------------------------
   // Refresh this reviewer's own completed-verdict list (header count + re-watch

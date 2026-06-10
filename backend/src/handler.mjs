@@ -224,6 +224,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
     if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
+    if (req.method === "GET" && path === "/api/admin/session-detail") return send(res, 200, await adminSessionDetail(req));
     if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
@@ -1719,6 +1720,44 @@ async function adminSessionsList(req) {
       status: doc.status || ""
     }));
   return { sessions };
+}
+
+// Session detail (admin) — F6.3: ONE session doc for the Sessions detail card,
+// projected to the least-privilege fields the card actually shows: identity
+// (incl. the roster id the candidate verified against), status, the IP block
+// (start/current + mid-exam change count), and the doc's own activity counters
+// (events/heartbeats/chunks — all already maintained on the doc, zero extra
+// reads). Deliberately NO email, NO storage_prefix/keys, NO evidence/signed
+// URLs (the recordings view resolves those itself when the admin jumps there).
+async function adminSessionDetail(req) {
+  requireAdmin(req);
+  const sessionId = String(req.query?.session_id || "");
+  if (!sessionId) return badRequest("session_id required");
+  const session = await getSessionOrNull(sessionId);
+  if (!session) throw httpError(404, "Session not found");
+  return {
+    session: {
+      session_id: session.session_id,
+      hackerrank_username: session.hackerrank_username || "",
+      name: session.name || "",
+      roll_number: session.roll_number || "",
+      roster_unique_id: session.roster_unique_id || "",
+      room: session.room || "",
+      contest_slug: session.contest_slug || "",
+      status: session.status || "",
+      created_at: session.created_at || "",
+      updated_at: session.updated_at || "",
+      blocked_by_session_id: session.blocked_by_session_id || null,
+      start_ip: session.start_ip || "",
+      current_ip: session.current_ip || session.start_ip || "",
+      ip_change_count: Number(session.ip_change_count || 0),
+      chunk_count: Number(session.chunk_count || 0),
+      event_count: Number(session.event_count || 0),
+      clipboard_event_count: Number(session.clipboard_event_count || 0),
+      focus_event_count: Number(session.focus_event_count || 0),
+      heartbeat_count: Number(session.heartbeat_count || 0)
+    }
+  };
 }
 
 // ---- Submission-time markers (poller-sourced) -----------------------------

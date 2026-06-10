@@ -107,7 +107,8 @@ export type JoinableAlert = {
 
 // Same normalization the api layer applies to usernames (api.ts) — sessions-list
 // rows carry the raw hackerrank_username, alerts often only username_norm.
-function normalizeJoinUsername(value: string): string {
+// Exported so other admin joins (sessionDetail.ts) share the one definition.
+export function normalizeJoinUsername(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "_").slice(0, 120);
 }
 

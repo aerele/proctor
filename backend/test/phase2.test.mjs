@@ -1118,6 +1118,77 @@ test("sessions-list: requires admin password", async () => {
 });
 
 // =====================================================================
+// Session detail — GET /api/admin/session-detail (F6.3 detail card). ONE
+// session doc projected to the least-privilege fields the admin card shows:
+// identity (incl. roster id), status, IPs, and the doc's own counters. No
+// email, no storage internals, no evidence/signed URLs.
+// =====================================================================
+
+function sessionDetail(query = {}, headers = ADMIN_HEADERS) {
+  return call(makeReq({ method: "GET", path: "/api/admin/session-detail", headers, query }));
+}
+
+test("session-detail: returns the least-privilege projection for one session", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage, { hackerrank_username: "alice" });
+  await recordChunk(started.body.session_id, 0);
+  await recordChunk(started.body.session_id, 1);
+
+  const res = await sessionDetail({ session_id: started.body.session_id });
+  assert.equal(res.statusCode, 200);
+  const detail = res.body.session;
+  assert.equal(detail.session_id, started.body.session_id);
+  assert.equal(detail.hackerrank_username, "alice");
+  assert.equal(detail.name, "Alice Example");
+  assert.equal(detail.roll_number, "R-1");
+  assert.equal(detail.status, "active");
+  assert.equal(detail.chunk_count, 2);
+  // The card's IP block: start/current IP + mid-exam change count.
+  assert.equal(typeof detail.start_ip, "string");
+  assert.equal(typeof detail.current_ip, "string");
+  assert.equal(detail.ip_change_count, 0);
+  // Doc counters the card surfaces as cheap activity stats.
+  for (const field of ["event_count", "clipboard_event_count", "focus_event_count", "heartbeat_count"]) {
+    assert.equal(typeof detail[field], "number", `expected numeric ${field}`);
+  }
+  for (const field of ["roster_unique_id", "room", "contest_slug", "created_at", "updated_at", "blocked_by_session_id"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(detail, field), `expected field ${field}`);
+  }
+  // Least-privilege: NO email, NO storage internals, NO evidence/signed URLs.
+  for (const field of ["email", "storage_prefix", "evidence", "merged_video_key"]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(detail, field), false, `must not expose ${field}`);
+  }
+});
+
+test("session-detail: 404 for an unknown session_id", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetail({ session_id: "no-such-session" });
+  assert.equal(res.statusCode, 404);
+});
+
+test("session-detail: 400 when session_id is missing", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetail({});
+  assert.equal(res.statusCode, 400);
+});
+
+test("session-detail: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetail({ session_id: "x" }, {});
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
 // Submission-time markers — POST /api/submission-events + GET /api/admin/submission-events
 // =====================================================================
 

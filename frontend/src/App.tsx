@@ -1,9 +1,10 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
-import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
+import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, validSessionActionsFor } from "./admin/alertActions";
+import { alertsForSession, approxRecordingSeconds, formatApproxDuration } from "./admin/sessionDetail";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
@@ -14,7 +15,7 @@ import { topBarVisible } from "./shell/examShell";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { useExamShell } from "./shell/useExamShell";
 import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ExamConfig, ExamTimeRequest, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
@@ -1424,6 +1425,16 @@ function AdminApp() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsStatusFilter, setSessionsStatusFilter] = useState<SessionsStatusFilter>("");
   const [sessionsUnavailable, setSessionsUnavailable] = useState(false);
+  // F6.3: the session whose detail card is open (a snapshot of the clicked row;
+  // the render prefers the fresh sessionsList match so the card tracks reloads).
+  const [detailSession, setDetailSession] = useState<RecordingSession | null>(null);
+  // F6.3 state-based deep link Sessions → Recordings: load this candidate (and
+  // prefer this exact session) when the Recordings tab mounts; one-shot (the
+  // RecordingReview consumes it and we clear it).
+  const [recordingDeepLink, setRecordingDeepLink] = useState<{ username: string; sessionId?: string } | null>(null);
+  // F6.3 one-shot client-side candidate filter for the alerts console ("View
+  // alerts" on the detail card). "" = off; cleared via the chip in the console.
+  const [alertCandidateFilter, setAlertCandidateFilter] = useState("");
 
   // S7: IP report state — the report payload, scope (live = non-ended only),
   // loading flag, and the 404-degrade marker (endpoint not deployed yet).
@@ -1872,6 +1883,38 @@ function AdminApp() {
     }
   };
 
+  // ---- F6.3 Session detail card ------------------------------------------
+  // Open the card for a clicked Sessions row. Alerts are lazily loaded the
+  // first time a card opens so its "Alerts" stat can join the live alert list
+  // (the alerts tab may never have been visited yet).
+  const openSessionDetail = (session: RecordingSession) => {
+    setDetailSession(session);
+    if (!alertsLoaded && !alertsLoading) void loadAlerts();
+  };
+
+  // Run a session action from the detail card, then refresh the Sessions list
+  // (and stats/alerts via runAction) so the row + card reflect the new status.
+  const runDetailAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+    await runAction(action, opts);
+    await loadSessions();
+  };
+
+  // "View recording" — jump to the Recordings tab pre-scoped to this candidate
+  // and session (state-based deep link; RecordingReview consumes + clears it).
+  const jumpToRecording = (session: RecordingSession) => {
+    setRecordingDeepLink({ username: session.hackerrank_username, sessionId: session.session_id });
+    setDetailSession(null);
+    setView("recordings");
+  };
+
+  // "View alerts" — jump to the Alerts tab filtered to this candidate (no
+  // server-side username filter exists, so it's a one-shot client-side filter).
+  const jumpToAlerts = (session: RecordingSession) => {
+    setAlertCandidateFilter(session.hackerrank_username);
+    setDetailSession(null);
+    setView("alerts");
+  };
+
   const loadAlertSettings = async () => {
     setAlertSettingsLoading(true);
     setError("");
@@ -2158,22 +2201,40 @@ function AdminApp() {
       ) : null}
 
       {view === "sessions" ? (
-        <SessionsView
-          sessions={sessionsList}
-          loading={sessionsLoading}
-          unavailable={sessionsUnavailable}
-          statusFilter={sessionsStatusFilter}
-          onStatusFilterChange={(status) => {
-            // The status filter is SERVER-side now: update the state AND reload the
-            // list with the new status passed explicitly (the state is still stale
-            // this tick), so the list re-matches the server-classified counts.
-            setSessionsStatusFilter(status);
-            void loadSessions(undefined, status);
-          }}
-          contestSlug={alertFilters.contest_slug ?? ""}
-          onRefresh={() => loadSessions()}
-          onApprove={(session) => void approveSession(session)}
-        />
+        <>
+          <SessionsView
+            sessions={sessionsList}
+            loading={sessionsLoading}
+            unavailable={sessionsUnavailable}
+            statusFilter={sessionsStatusFilter}
+            onStatusFilterChange={(status) => {
+              // The status filter is SERVER-side now: update the state AND reload the
+              // list with the new status passed explicitly (the state is still stale
+              // this tick), so the list re-matches the server-classified counts.
+              setSessionsStatusFilter(status);
+              void loadSessions(undefined, status);
+            }}
+            contestSlug={alertFilters.contest_slug ?? ""}
+            onRefresh={() => loadSessions()}
+            onApprove={(session) => void approveSession(session)}
+            onOpenDetail={openSessionDetail}
+          />
+          {/* F6.3: the detail card prefers the FRESH sessionsList row (reloads
+              after an action update it); the click-time snapshot is the fallback
+              when a status-filtered reload dropped the row from the list. */}
+          {detailSession ? (
+            <SessionDetailCard
+              password={password}
+              session={sessionsList?.find((s) => s.session_id === detailSession.session_id) ?? detailSession}
+              alerts={alerts}
+              alertsLoaded={alertsLoaded}
+              onClose={() => setDetailSession(null)}
+              onAction={runDetailAction}
+              onViewRecording={jumpToRecording}
+              onViewAlerts={jumpToAlerts}
+            />
+          ) : null}
+        </>
       ) : null}
 
       {view === "attendance" ? (
@@ -2203,6 +2264,8 @@ function AdminApp() {
           loaded={alertsLoaded}
           filters={alertFilters}
           rooms={rooms}
+          candidateFilter={alertCandidateFilter}
+          onClearCandidateFilter={() => setAlertCandidateFilter("")}
           selected={selected}
           onToggleSelected={toggleSelected}
           onSelectAll={(ids) => setSelected((current) => addAllToSelection(current, ids))}
@@ -2315,7 +2378,14 @@ function AdminApp() {
       </>
       ) : null}
 
-      {view === "recordings" ? <RecordingReview password={password} contestSlug={alertFilters.contest_slug} /> : null}
+      {view === "recordings" ? (
+        <RecordingReview
+          password={password}
+          contestSlug={alertFilters.contest_slug}
+          deepLink={recordingDeepLink}
+          onDeepLinkConsumed={() => setRecordingDeepLink(null)}
+        />
+      ) : null}
     </Shell>
   );
 }
@@ -3013,7 +3083,7 @@ const SESSIONS_STATUS_OPTIONS: Array<{ value: SessionsStatusFilter; label: strin
 // When filtered to pending_approval, each row shows an Approve quick action (A4) —
 // which now reaches zero-chunk pending_approval sessions. Opened by clicking a stat
 // card on the Live stats dashboard.
-function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFilterChange, contestSlug, onRefresh, onApprove }: {
+function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFilterChange, contestSlug, onRefresh, onApprove, onOpenDetail }: {
   sessions: RecordingSession[] | null;
   loading: boolean;
   unavailable: boolean;
@@ -3022,6 +3092,8 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
   contestSlug: string;
   onRefresh: () => void;
   onApprove: (session: RecordingSession) => void;
+  /** F6.3: clicking a row opens the session detail card. */
+  onOpenDetail: (session: RecordingSession) => void;
 }) {
   // The server already returns the rows status-filtered (classified to match the
   // stat-card counts), so render them directly — no client-side re-filtering.
@@ -3036,7 +3108,7 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
             <div>
               <h1 className="text-2xl font-semibold">Sessions</h1>
               <p className="mt-1 text-sm text-muted">
-                Drill into sessions by status{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}. Click a stat card on Live stats to jump straight to a status.
+                Drill into sessions by status{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}. Click a stat card on Live stats to jump straight to a status, or click a row for the full detail card.
               </p>
             </div>
           </div>
@@ -3087,7 +3159,14 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
             </thead>
             <tbody>
               {rows.map((s) => (
-                <tr key={s.session_id} className="border-b border-line/60 last:border-0">
+                // F6.3: the whole row opens the detail card (cursor + hover make
+                // it discoverable); the Approve quick action stops propagation.
+                <tr
+                  key={s.session_id}
+                  onClick={() => onOpenDetail(s)}
+                  title="Open session detail"
+                  className="cursor-pointer border-b border-line/60 last:border-0 hover:bg-ink/5"
+                >
                   <td className="px-4 py-3">
                     <div className="font-semibold text-ink">{s.hackerrank_username}</div>
                     {s.name ? <div className="text-xs text-muted">{s.name}</div> : null}
@@ -3103,7 +3182,10 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
                     <td className="px-4 py-3">
                       <button
                         type="button"
-                        onClick={() => onApprove(s)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onApprove(s);
+                        }}
                         disabled={s.status !== "pending_approval"}
                         className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
                       >
@@ -3118,6 +3200,213 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
         </div>
       )}
     </section>
+  );
+}
+
+// F6.3 SESSION DETAIL CARD — the drill-down behind a clicked Sessions row, as a
+// modal overlay. Three data sources, layered cheapest-first:
+//   1. the list row itself (identity/status/chunks — already fetched);
+//   2. GET /api/admin/session-detail (roster id, IP block, doc activity
+//      counters) — null (404) degrades to the row fields, never an error;
+//   3. the already-fetched alerts list (client-side join) + the existing
+//      submission-events endpoint for this candidate+contest.
+// Actions render ONLY the status-valid set (validSessionActionsFor — same table
+// as the alerts console); an ended session is view-only. The status shown
+// prefers the refetched detail so it stays truthful even when a status-filtered
+// list reload dropped the row.
+function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, onAction, onViewRecording, onViewAlerts }: {
+  password: string;
+  session: RecordingSession;
+  alerts: Alert[];
+  alertsLoaded: boolean;
+  onClose: () => void;
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => Promise<void>;
+  onViewRecording: (session: RecordingSession) => void;
+  onViewAlerts: (session: RecordingSession) => void;
+}) {
+  const [detail, setDetail] = useState<SessionCardDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [submissions, setSubmissions] = useState<SubmissionEvent[] | null>(null);
+  // Bumped after an action so the detail refetches even when the (possibly
+  // filtered-out) list row no longer changes underneath us.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  // Load the least-privilege backend detail; a null (endpoint not deployed)
+  // leaves `detail` empty and the card renders from the list row alone.
+  useEffect(() => {
+    let cancelled = false;
+    setDetailLoading(true);
+    void (async () => {
+      try {
+        const next = await fetchSessionCardDetail(password, session.session_id);
+        if (!cancelled) setDetail(next);
+      } catch {
+        // Non-fatal: the card still shows the list-row fields.
+      } finally {
+        if (!cancelled) setDetailLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [password, session.session_id, session.status, refreshNonce]);
+
+  // Submission-time markers for this candidate+contest (existing endpoint; the
+  // recordings timeline uses the same source). null = still loading / none.
+  useEffect(() => {
+    let cancelled = false;
+    setSubmissions(null);
+    void (async () => {
+      try {
+        const events = await fetchSubmissionEvents(password, session.hackerrank_username, session.contest_slug || undefined);
+        if (!cancelled) setSubmissions(events ?? []);
+      } catch {
+        if (!cancelled) setSubmissions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [password, session.hackerrank_username, session.contest_slug]);
+
+  // The truthful status: the refetched detail wins over the click-time row.
+  const status = detail?.status || session.status;
+  const chunkCount = detail?.chunk_count ?? session.chunk_count;
+  const actions = validSessionActionsFor(status);
+  const sessionAlerts = useMemo(() => alertsForSession(alerts, session), [alerts, session]);
+  const sortedSubmissions = useMemo(
+    () => (submissions ? [...submissions].sort((a, b) => a.submitted_at.localeCompare(b.submitted_at)) : []),
+    [submissions]
+  );
+  const rosterId = detail?.roster_unique_id || detail?.roll_number || "";
+
+  const runCardAction = (action: SessionAction) => {
+    void (async () => {
+      await onAction(action, { sessionId: session.session_id });
+      setRefreshNonce((n) => n + 1);
+    })();
+  };
+
+  return (
+    // Modal overlay: click-outside or the X closes; clicks inside don't bubble out.
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Session detail for ${session.hackerrank_username}`}
+      className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-ink/40 p-4 sm:p-10"
+      onClick={onClose}
+    >
+      <section
+        className="w-full max-w-3xl rounded-lg border border-line bg-panel p-5 shadow-subtle"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-xl font-semibold">{session.hackerrank_username}</h2>
+              <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{status}</span>
+              {detailLoading ? <RefreshCw size={14} className="animate-spin text-muted" /> : null}
+            </div>
+            {session.name ? <p className="mt-1 text-sm text-muted">{session.name}</p> : null}
+            <p className="mt-1 font-mono text-xs text-muted">{session.session_id}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close session detail"
+            className="focus-ring rounded-md border border-line p-2 text-ink hover:border-ink/40"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* INFO — identity + where/when + the IP block. */}
+        <div className="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+          <AlertField label="Roster ID" value={rosterId || "—"} mono />
+          <AlertField label="Room" value={session.room || "—"} />
+          <AlertField label="Contest" value={session.contest_slug || "—"} mono />
+          <AlertField label="Started" value={session.created_at ? new Date(session.created_at).toLocaleString() : "—"} />
+          <AlertField label="Start IP" value={detail?.start_ip || "—"} mono />
+          <AlertField label="Current IP" value={detail?.current_ip || "—"} mono />
+        </div>
+        {detail && detail.ip_change_count > 0 ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle size={14} /> IP changed {detail.ip_change_count} time{detail.ip_change_count === 1 ? "" : "s"} mid-exam.
+          </p>
+        ) : null}
+
+        {/* STATS — recording, alerts join, submissions, doc activity counters. */}
+        <div className="mt-4 flex flex-wrap gap-3 text-sm">
+          <Metric icon={<Video size={16} />} label="Chunks" value={String(chunkCount)} />
+          <Metric icon={<Clock size={16} />} label="Recorded" value={formatApproxDuration(approxRecordingSeconds(chunkCount))} />
+          <Metric icon={<Bell size={16} />} label="Alerts" value={alertsLoaded ? String(sessionAlerts.length) : "…"} />
+          <Metric icon={<CheckCircle2 size={16} />} label="Submissions" value={submissions === null ? "…" : String(sortedSubmissions.length)} />
+          {detail ? <Metric icon={<Activity size={16} />} label="Events" value={`${detail.event_count} (${detail.clipboard_event_count} clipboard · ${detail.focus_event_count} focus)`} /> : null}
+        </div>
+
+        {/* SUBMISSION TIMES — newest-last, capped so a heavy solver stays tidy. */}
+        {sortedSubmissions.length ? (
+          <div className="mt-4 rounded-md border border-line bg-white/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Submissions</p>
+            <ul className="mt-2 space-y-1 text-xs">
+              {sortedSubmissions.slice(0, 8).map((event) => (
+                <li key={event.submission_id} className="flex flex-wrap items-center gap-2">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${event.valid ? "bg-accent" : "bg-danger"}`} aria-hidden />
+                  <time className="font-mono text-muted" dateTime={event.submitted_at}>{new Date(event.submitted_at).toLocaleString()}</time>
+                  {event.challenge_name ? <span className="font-medium text-ink">{event.challenge_name}</span> : null}
+                  {event.status ? <span className="text-muted">{event.status}</span> : null}
+                </li>
+              ))}
+            </ul>
+            {sortedSubmissions.length > 8 ? (
+              <p className="mt-2 text-xs text-muted">+{sortedSubmissions.length - 8} more — see the recording timeline markers.</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* ACTIONS + LINKS — only the status-valid session actions render
+            (ended → none, view-only); links jump to the scoped tabs. */}
+        <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-line pt-4">
+          {actions.length ? (
+            <ActionGroup label={`Session — ${status}`}>
+              {actions.map((action) => (
+                <SessionActionButton
+                  key={action}
+                  action={action}
+                  targetLabel={session.hackerrank_username}
+                  onRun={runCardAction}
+                />
+              ))}
+            </ActionGroup>
+          ) : (
+            <span className="text-xs text-muted">
+              {status === "ended" ? "This session has ended — view-only." : "No session actions apply to this status."}
+            </span>
+          )}
+          <div className="ml-auto flex flex-wrap gap-2">
+            <ActionTooltip tip={chunkCount > 0 ? "Open the Recordings tab with this candidate's recording loaded and this session selected." : "No recorded chunks yet — there is nothing to play for this session."}>
+              <button
+                type="button"
+                onClick={() => onViewRecording(session)}
+                disabled={chunkCount === 0}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+              >
+                <Film size={14} /> View recording
+              </button>
+            </ActionTooltip>
+            <ActionTooltip tip="Open the Live alerts tab filtered to this candidate's alerts.">
+              <button
+                type="button"
+                onClick={() => onViewAlerts(session)}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+              >
+                <Bell size={14} /> View alerts{alertsLoaded ? ` (${sessionAlerts.length})` : ""}
+              </button>
+            </ActionTooltip>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -3570,7 +3859,7 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, selected, onToggleSelected, onSelectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
+function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
   alerts: Alert[];
   /** F6.4 status-join data; null = sessions-list unavailable → full action set. */
   sessions: RecordingSession[] | null;
@@ -3578,6 +3867,10 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, sele
   loaded: boolean;
   filters: AlertFilters;
   rooms: string[];
+  /** F6.3: one-shot client-side candidate filter ("View alerts" on the session
+   * detail card). "" = off. Cleared via the chip rendered with the filters. */
+  candidateFilter: string;
+  onClearCandidateFilter: () => void;
   selected: Set<string>;
   onToggleSelected: (key: string) => void;
   onSelectAll: (ids: string[]) => void;
@@ -3588,12 +3881,21 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, sele
   onArchive: (ids: string[], action?: "archive" | "unarchive") => void;
   onApproveArchive: (alert: Alert, targetSessionId?: string) => void;
 }) {
+  // F6.3: the rendered list — the candidate filter is CLIENT-side (the alerts
+  // API has no username filter), matched on normalized usernames the same way
+  // the status join works. Everything below (metrics, select-all scope, rows)
+  // operates on this visible list.
+  const visibleAlerts = useMemo(() => {
+    if (!candidateFilter) return alerts;
+    const norm = normalizeJoinUsername(candidateFilter);
+    return alerts.filter((alert) => (alert.username_norm || normalizeJoinUsername(alert.hackerrank_username)) === norm);
+  }, [alerts, candidateFilter]);
   // Unique candidate usernames in the current (selected) alert set, for bulk actions.
   const selectedUsernames = useMemo(() => usernamesForSelection(alerts, selected), [alerts, selected]);
   // F6.2: ids of the CURRENTLY FILTERED list — the scope of "Select all". The
   // selected Set may also hold off-screen ids (selection survives refresh and
   // filter changes); bulk archive acts on ALL selected ids, not just visible ones.
-  const visibleIds = useMemo(() => alerts.map((alert) => alert.id), [alerts]);
+  const visibleIds = useMemo(() => visibleAlerts.map((alert) => alert.id), [visibleAlerts]);
   const allSelected = isAllSelected(selected, visibleIds);
   // F6.4: bulk buttons show only the UNION of actions valid for the selected
   // candidates' live sessions (no join data → full set, same fallback as rows).
@@ -3634,6 +3936,15 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, sele
           <RoomFilter rooms={rooms} value={filters.room ?? ""} onChange={(room) => onFiltersChange({ ...filters, room: room || undefined })} />
           {/* A1: the contest filter is now the GLOBAL banner below the nav; the
               per-console contest input was removed to avoid two sources of truth. */}
+          {/* F6.3: one-shot candidate filter chip (set by the session detail card). */}
+          {candidateFilter ? (
+            <span className="mb-2 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent">
+              Candidate: <span className="font-mono">{candidateFilter}</span>
+              <button type="button" onClick={onClearCandidateFilter} aria-label="Clear candidate filter" className="focus-ring rounded-full hover:text-ink">
+                <X size={12} />
+              </button>
+            </span>
+          ) : null}
           <label className="mb-2 flex items-center gap-2 text-sm">
             <input
               className="h-4 w-4 accent-accent"
@@ -3646,14 +3957,14 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, sele
         </div>
 
         <div className="mt-4 flex flex-wrap gap-3 text-sm">
-          <Metric icon={<Bell size={16} />} label="Total" value={String(alerts.length)} />
-          <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(alerts.filter((alert) => alert.severity === "critical").length)} />
-          <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(alerts.filter((alert) => alert.severity === "warning").length)} />
+          <Metric icon={<Bell size={16} />} label="Total" value={String(visibleAlerts.length)} />
+          <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(visibleAlerts.filter((alert) => alert.severity === "critical").length)} />
+          <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(visibleAlerts.filter((alert) => alert.severity === "warning").length)} />
         </div>
 
         {/* F6.1-2 selection bar: select-all over the CURRENTLY FILTERED list,
             selected count, clear, and bulk archive/unarchive on ALL selected ids. */}
-        {alerts.length || selected.size ? (
+        {visibleAlerts.length || selected.size ? (
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
             <label className="flex items-center gap-2 text-sm font-medium">
               <input
@@ -3662,7 +3973,7 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, sele
                 checked={allSelected}
                 onChange={() => (allSelected ? onClearSelection() : onSelectAll(visibleIds))}
               />
-              Select all ({alerts.length})
+              Select all ({visibleAlerts.length})
             </label>
             <span className="text-sm font-medium">{selected.size} selected</span>
             {selected.size ? (
@@ -3705,10 +4016,14 @@ function AlertsConsole({ alerts, sessions, loading, loaded, filters, rooms, sele
       <section className="space-y-3">
         {!loaded && loading ? (
           <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">Loading alerts…</div>
-        ) : alerts.length === 0 ? (
-          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive.</div>
+        ) : visibleAlerts.length === 0 ? (
+          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">
+            {candidateFilter
+              ? <>No alerts for candidate <span className="font-mono">{candidateFilter}</span> under the current filters. Clear the candidate chip above to see everyone.</>
+              : "No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive."}
+          </div>
         ) : (
-          alerts.map((alert) => (
+          visibleAlerts.map((alert) => (
             <AlertRow
               key={alert.id}
               alert={alert}

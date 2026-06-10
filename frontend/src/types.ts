@@ -173,6 +173,37 @@ export type RecordingSessionsResponse = {
   sessions: RecordingSession[];
 };
 
+// F6.3 — GET /api/admin/session-detail?session_id=: ONE session doc projected
+// to the least-privilege fields the Sessions detail card shows (identity incl.
+// roster id, status, the IP block, and the doc's own activity counters). No
+// email, no storage internals, no evidence/signed URLs. ("Card" in the name —
+// SessionDetail below is the older batch session-details CSV row.)
+export type SessionCardDetail = {
+  session_id: string;
+  hackerrank_username: string;
+  name: string;
+  roll_number: string;
+  roster_unique_id: string;
+  room: string;
+  contest_slug: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  blocked_by_session_id: string | null;
+  start_ip: string;
+  current_ip: string;
+  ip_change_count: number;
+  chunk_count: number;
+  event_count: number;
+  clipboard_event_count: number;
+  focus_event_count: number;
+  heartbeat_count: number;
+};
+
+export type SessionCardDetailResponse = {
+  session: SessionCardDetail;
+};
+
 // S7 — GET /api/admin/ip-report: IP-wise count of logged-in users (the
 // proxy-detection signal surface). One IpReportEntry per client IP, biggest
 // clusters first; candidate rows are a bounded newest-first sample.
