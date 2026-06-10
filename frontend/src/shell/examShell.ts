@@ -71,8 +71,9 @@ export function fullscreenGateVisible(input: {
 }
 
 // Spec §7.4: the one-line close-up hint under the bar — survives from the
-// deleted StudentStepBanner. ownEditor mirrors App.tsx's OWN_EDITOR; only the
-// in-exam hint is surface-specific (own-editor copy must not say HackerRank).
+// deleted StudentStepBanner. ownEditor mirrors the server-driven problem flag
+// (S4: Boolean(sessionConfig?.problem) in App.tsx); only the in-exam hint is
+// surface-specific (own-editor copy must not say HackerRank).
 export function stageHint(input: StageInput & { ownEditor: boolean }): string {
   const stage = deriveStage(input);
   const { gate, status, ownEditor } = input;

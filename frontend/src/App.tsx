@@ -13,27 +13,15 @@ import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, Ale
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import type { ApiError } from "./api";
 
-// Slice 1: the single config-driven problem solved in our own Monaco editor.
-// When a problem is configured, the CodingWorkspace IS the coding surface
-// (design: own editor replaces HackerRank) — the contest_url "Start test" link
-// is NOT rendered. The link UI survives ONLY as the fallback for deployments
-// with no configured problem (set this to null to get the legacy link flow).
-type Slice1Problem = {
-  id: string;
-  title: string;
-  statement: string;
-  languages: readonly ("python" | "cpp" | "java" | "javascript")[];
-};
-const SLICE1_PROBLEM: Slice1Problem | null = {
-  id: "sum-two", title: "Sum of Two Numbers",
-  statement: "Read two integers a and b on one line separated by a space. Print a + b.",
-  languages: ["python","cpp","java","javascript"]
-};
-
-// Candidate-facing copy is surface-specific: with the own-editor problem
-// configured, no student string may direct the candidate to HackerRank (see
-// studentCopy.ts). Admin text and the "HackerRank username" field keep the name.
-const OWN_EDITOR = SLICE1_PROBLEM !== null;
+// S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
+// start/resume response (admin assigns settings.problem_id → public view; see
+// docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md). No problem
+// assigned → the legacy contest_url link flow renders instead.
+//
+// Candidate-facing copy is surface-specific (studentCopy.ts): with a problem
+// assigned, no student string may direct the candidate to HackerRank. The copy
+// keys off Boolean(sessionConfig?.problem) per session — before a session
+// exists the client cannot know, so pre-session copy uses the legacy variant.
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -53,8 +41,6 @@ const initialForm: StudentForm = {
   consent_accepted: false,
   roster_unique_id: ""
 };
-
-const integrityNotices = studentCopy.integrityNotices(OWN_EDITOR);
 
 const checkpointMessages = [
   "Confirm immediately that you are present and working alone.",
@@ -125,6 +111,10 @@ function StudentApp() {
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupError, setLookupError] = useState("");
   const [rosterMatch, setRosterMatch] = useState<RosterLookupResult | null>(null);
+  // S4: the assigned problem rides in on the start/resume response. hasProblem
+  // drives every own-editor-vs-HackerRank copy fork (studentCopy.ts, stageHint).
+  const activeProblem = sessionConfig?.problem ?? null;
+  const hasProblem = activeProblem !== null;
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -172,7 +162,7 @@ function StudentApp() {
       identity={identity}
       elapsedSeconds={elapsedSeconds}
       examReleased={true}
-      ownEditor={OWN_EDITOR}
+      ownEditor={hasProblem}
     />
   );
   // The fixed bar needs page top padding only while it is actually rendered.
@@ -262,6 +252,9 @@ function StudentApp() {
 
   useEffect(() => {
     if (status !== "recording") return;
+    // Computed when recording starts — sessionConfig (and its problem) is
+    // already set by then, so the notices match the active surface.
+    const integrityNotices = studentCopy.integrityNotices(Boolean(sessionConfig?.problem));
     let noticeIndex = Math.floor(Math.random() * integrityNotices.length);
     const addNotice = () => {
       const text = integrityNotices[noticeIndex % integrityNotices.length];
@@ -434,7 +427,9 @@ function StudentApp() {
     setStartIp(session.start_ip || "unavailable");
     setCurrentIp(session.start_ip || "unavailable");
     setIpChanged(false);
-    await collectEntryReviewEvidence(session.session_id);
+    // ownEditor comes from the response itself — the sessionConfig state set
+    // moments ago has not re-rendered into this closure yet.
+    await collectEntryReviewEvidence(session.session_id, Boolean(session.problem));
 
     const recorder = createProctorRecorder({
       sessionId: session.session_id,
@@ -670,7 +665,7 @@ function StudentApp() {
     }
   };
 
-  const collectEntryReviewEvidence = async (activeSessionId: string) => {
+  const collectEntryReviewEvidence = async (activeSessionId: string, ownEditor: boolean) => {
     const now = new Date().toISOString();
     const tabRecord = {
       type: "browser_tab_audit",
@@ -681,7 +676,7 @@ function StudentApp() {
       status: "screen_and_focus_review_active",
       explanation: "Candidate-facing UI shows tab/focus review as active. Browser tab inventory requires a managed browser extension; full-screen recording and focus events are used in this web-only build."
     };
-    setTabAudit(studentCopy.tabAuditMessage(OWN_EDITOR));
+    setTabAudit(studentCopy.tabAuditMessage(ownEditor));
     await uploadReviewFile(activeSessionId, "tabs", [tabRecord]);
     addEvent({
       type: "tabs_review_uploaded",
@@ -903,7 +898,7 @@ function StudentApp() {
       {/* Pre-start: the rules are the headline, not a sidebar afterthought. The
           candidate reads exactly what is required and what is recorded before the
           form, so the rules are unmissable. */}
-      {isFormStage ? <PreStartRules /> : null}
+      {isFormStage ? <PreStartRules hasProblem={hasProblem} /> : null}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -911,12 +906,12 @@ function StudentApp() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
               <h1 className="mt-2 text-2xl font-semibold text-ink">
-                {isFormStage ? "Register and start recording" : SLICE1_PROBLEM ? "Proctored coding test" : "HackerRank companion recording"}
+                {isFormStage ? "Register and start recording" : activeProblem ? "Proctored coding test" : "HackerRank companion recording"}
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
                 {isFormStage
-                  ? studentCopy.formStageIntro(OWN_EDITOR)
-                  : SLICE1_PROBLEM
+                  ? studentCopy.formStageIntro(hasProblem)
+                  : activeProblem
                     ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
                     : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
               </p>
@@ -1020,10 +1015,10 @@ function StudentApp() {
                 <PictureInPicture2 size={16} /> Camera pop-out
               </button>
             ) : null}
-            {/* Legacy external-contest fallback: shown ONLY when no Slice-1
-                problem is configured. With a problem configured the own-editor
+            {/* Legacy external-contest fallback: shown ONLY when no SERVER
+                problem is assigned. With a problem assigned the own-editor
                 CodingWorkspace below replaces this link entirely. */}
-            {!SLICE1_PROBLEM && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error ? (
+            {!activeProblem && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error ? (
               <a
                 className="focus-ring inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white"
                 href={contestUrl}
@@ -1043,6 +1038,7 @@ function StudentApp() {
           {endRequested && status === "recording" ? (
             <EndTestPanel
               assuranceAccepted={assuranceAccepted}
+              hasProblem={hasProblem}
               onAssuranceChange={setAssuranceAccepted}
               onCancel={() => setEndRequested(false)}
               onEnd={stop}
@@ -1062,20 +1058,19 @@ function StudentApp() {
               <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
               <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
-              <RulesPanel />
+              <RulesPanel hasProblem={hasProblem} />
             </>
           )}
         </aside>
       </div>
 
-      {/* Slice 1: own coding workspace (Monaco + Run/Submit), live only while
+      {/* S4: own coding workspace (Monaco + Run/Submit), live only while
           recording so every editor event is tied to an actively recorded
-          session. When a problem is configured this REPLACES the contest_url
-          Start-test surface (own editor replaces HackerRank); the link renders
-          only when SLICE1_PROBLEM is null. */}
-      {SLICE1_PROBLEM && sessionId && status === "recording" && (
+          session. The problem comes from the server (settings.problem_id);
+          when assigned it REPLACES the contest_url Start-test surface. */}
+      {activeProblem && sessionId && status === "recording" && (
         <div className="mt-5">
-          <CodingWorkspace sessionId={sessionId} problem={SLICE1_PROBLEM} />
+          <CodingWorkspace sessionId={sessionId} problem={activeProblem} />
         </div>
       )}
 
@@ -1141,11 +1136,11 @@ function BlockedScreen({ tone, icon, title, lines, onRefresh, error }: { tone: "
   );
 }
 
-function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }: { assuranceAccepted: boolean; onAssuranceChange: (value: boolean) => void; onCancel: () => void; onEnd: () => void }) {
+function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCancel, onEnd }: { assuranceAccepted: boolean; hasProblem: boolean; onAssuranceChange: (value: boolean) => void; onCancel: () => void; onEnd: () => void }) {
   return (
     <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4">
       <p className="text-sm font-semibold text-danger">End test confirmation</p>
-      <p className="mt-1 text-sm leading-6 text-ink">{studentCopy.endTestConfirmation(OWN_EDITOR)}</p>
+      <p className="mt-1 text-sm leading-6 text-ink">{studentCopy.endTestConfirmation(hasProblem)}</p>
       <label className="mt-4 flex gap-3 rounded-md border border-line bg-white/70 p-3 text-sm leading-6 text-muted">
         <input className="mt-1 h-4 w-4 accent-danger" type="checkbox" checked={assuranceAccepted} onChange={(event) => onAssuranceChange(event.target.checked)} />
         <span>I assure that I worked independently, did not copy, did not use AI/external help, and submitted only my own solution.</span>
@@ -3349,7 +3344,9 @@ function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit
 // (pre-start) and the compact RulesPanel reminder (during recording) both read
 // this so the rules never drift between the two surfaces. The TEXT lives in
 // studentCopy.testRules (own-editor vs HackerRank variants, unit-tested); this
-// zips it with one icon per rule, in the same fixed order.
+// zips it with one icon per rule, in the same fixed order. ownEditor is
+// server-driven per session (S4: Boolean(sessionConfig?.problem)), so the
+// rules are a function of it instead of a module constant.
 const TEST_RULE_ICONS: React.ReactNode[] = [
   <MonitorUp size={18} />,   // Share your ENTIRE SCREEN
   <Video size={18} />,       // Keep recording running
@@ -3358,12 +3355,16 @@ const TEST_RULE_ICONS: React.ReactNode[] = [
   <Camera size={18} />,      // Keep your camera visible
   <ClipboardCheck size={18} /> // End the test here when done
 ];
-const TEST_RULES: Array<{ icon: React.ReactNode; title: string; body: string }> =
-  studentCopy.testRules(OWN_EDITOR).map((rule, index) => ({ icon: TEST_RULE_ICONS[index], ...rule }));
+const testRulesWithIcons = (ownEditor: boolean): Array<{ icon: React.ReactNode; title: string; body: string }> =>
+  studentCopy.testRules(ownEditor).map((rule, index) => ({ icon: TEST_RULE_ICONS[index], ...rule }));
 
 // PROMINENT pre-start rules — the candidate reads this before the form. This is
 // the headline of the page at the form stage, not a sidebar afterthought.
-function PreStartRules() {
+// hasProblem is always false pre-session today (the problem arrives with the
+// start response), so this renders the legacy-variant rules; the prop keeps the
+// wiring honest if a pre-session problem signal is ever added.
+function PreStartRules({ hasProblem }: { hasProblem: boolean }) {
+  const rules = testRulesWithIcons(hasProblem);
   return (
     <section className="mb-5 rounded-lg border border-warning/40 bg-warning/5 p-6 shadow-subtle">
       <div className="flex items-start gap-3">
@@ -3376,7 +3377,7 @@ function PreStartRules() {
         </div>
       </div>
       <ol className="mt-5 grid gap-3 sm:grid-cols-2">
-        {TEST_RULES.map((rule, index) => (
+        {rules.map((rule, index) => (
           <li key={rule.title} className="flex gap-3 rounded-lg border border-line bg-panel p-4">
             <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink/5 text-accent">{rule.icon}</span>
             <div>
@@ -3395,7 +3396,8 @@ function PreStartRules() {
 
 // Compact rules reminder kept in the sidebar DURING recording so the candidate
 // can re-check the rules at a glance without losing the live panels.
-function RulesPanel() {
+function RulesPanel({ hasProblem }: { hasProblem: boolean }) {
+  const rules = testRulesWithIcons(hasProblem);
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-2">
@@ -3403,7 +3405,7 @@ function RulesPanel() {
         <h2 className="font-semibold">Rules reminder</h2>
       </div>
       <ul className="space-y-2.5 text-sm leading-6 text-muted">
-        {TEST_RULES.map((rule) => (
+        {rules.map((rule) => (
           <li key={rule.title} className="flex gap-2">
             <CheckCircle2 size={16} className="mt-1 shrink-0 text-accent" />
             <span><span className="font-medium text-ink">{rule.title}.</span> {rule.body}</span>
