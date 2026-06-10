@@ -7,15 +7,50 @@
 // red stage-1 bar stays readable over it. While an anomaly episode is active
 // the AnomalyPanel owns re-entry instead (ExamShellChrome suppresses this gate).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function FullscreenGate({ onEnter }: { onEnter: () => Promise<void> }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const enterButtonRef = useRef<HTMLButtonElement>(null);
 
   // Same browser floor as the recorder (getDisplayMedia): latest Chrome/Edge on
   // a laptop/desktop. No Fullscreen API => dead-end copy, no button (spec §3.10).
   const supported = typeof document.documentElement.requestFullscreen === "function";
+
+  // M10 — this is a real modal: on mount, move focus into the gate (the Enter
+  // button when present, otherwise the dialog itself for the dead-end copy) so
+  // the candidate can't tab into the app behind it.
+  useEffect(() => {
+    (enterButtonRef.current ?? dialogRef.current)?.focus();
+  }, []);
+
+  // M10 — focus trap: keep Tab / Shift+Tab cycling within the dialog so the
+  // (still-mounted) background form is unreachable while the gate is up.
+  const onTrapKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "Tab") return;
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    const items = focusables ? Array.from(focusables) : [];
+    if (items.length === 0) {
+      // Dead-end copy (no actionable controls): pin focus to the dialog.
+      e.preventDefault();
+      dialogRef.current?.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !dialogRef.current?.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !dialogRef.current?.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   const enter = async () => {
     setBusy(true);
@@ -31,16 +66,25 @@ export function FullscreenGate({ onEnter }: { onEnter: () => Promise<void> }) {
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink px-6 text-center text-white">
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="fullscreen-gate-title"
+      tabIndex={-1}
+      onKeyDown={onTrapKeyDown}
+      className="focus:outline-none fixed inset-0 z-40 flex items-center justify-center bg-ink px-6 text-center text-white"
+    >
       <div className="max-w-md">
         <img src="/aerele-logo.png" alt="Aerele" className="mx-auto h-12 w-12 rounded-md" />
-        <h1 className="mt-5 text-2xl font-semibold">This is a proctored exam</h1>
+        <h1 id="fullscreen-gate-title" className="mt-5 text-2xl font-semibold">This is a proctored exam</h1>
         {supported ? (
           <>
             <p className="mt-3 text-sm leading-6 text-white/70">
               The exam runs in fullscreen from start to finish. Enter fullscreen to begin.
             </p>
             <button
+              ref={enterButtonRef}
               className="focus-ring mt-6 rounded-md bg-white px-6 py-3 text-base font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-50"
               disabled={busy}
               onClick={() => void enter()}

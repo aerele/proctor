@@ -26,7 +26,7 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
   if (!preconditions.recording) pending.push("Recording must be running — use the Try again / Resume button on this page to restart your screen share.");
 
   return (
-    <div className="mb-5 rounded-lg border-2 border-danger bg-danger/10 p-5">
+    <div role="alert" aria-live="assertive" className="mb-5 rounded-lg border-2 border-danger bg-danger/10 p-5">
       <div className="flex items-start gap-3">
         <AlertTriangle size={24} className="mt-0.5 shrink-0 text-danger" />
         <div className="min-w-0 flex-1">
