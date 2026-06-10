@@ -91,3 +91,21 @@ This is the first thing to read in the morning. Three sections, kept current thr
 - 8/8 plan tasks (5b7c38f…da8c99b): roster store w/ versioned replace, public exam-config + masked lookup, server-side roster gate on session start (identity override + roster_verified stamp), pure CSV/TSV parser (10 vitest), api client + demo parity, admin rooms+roster UI, student identity-confirm + room dropdown, demo browser verification (done by the workflow's own final task on :5173).
 - Suites: backend 249/249, frontend 117/117 + tsc + build.
 - Review minors being fixed in the S3 workflow's first step: exact-norm check after sanitized-doc-id lookup; version-prefixed entry ids (re-upload window); mapped-blank-cell → ignore typed for name/email/roll. **Morning call:** hackerrank_username KEEPS the typed fallback when roster cell is blank (session key; blank would strand the candidate) — veto if you want strict.
+
+---
+## AUDIT (front-loaded morning gate) — full report: night-run/AUDIT-REPORT.md
+**0 blockers / 11 major / 18 minor / 14 nit** over acdba86..84b1c24 (S3-late + S4 get a delta-audit). gitleaks clean (Judge0 key only in gitignored files, verified untracked). PII scanner clean except the items below.
+
+### ⚠️ PUSH GATE — M1 done in tree, HISTORY scrub still needed by YOU before push
+65 contest-eval verdict files with REAL student usernames + cheating verdicts were accidentally committed at acdba86 (my run-prep commit swept all of night-run/ in). I removed them from the tree (commit 6640247) + gitignored, but they REMAIN in history at acdba86. Before pushing, run ONE of:
+- `git filter-repo --path night-run/archive-2026-06-05-sshgate-v12/verdict-queue/ --invert-paths` (cleanest; rewrites tonight's commits — all unpushed so safe), OR
+- keep the repo PRIVATE and accept the history. 
+Do NOT push until this is decided. (I did not rewrite history autonomously — it would disrupt the in-flight S3/S4 lanes sharing this repo, and it's your call.)
+
+### DESIGN-CALL majors for you to decide (NOT auto-fixed — need your judgment)
+- **M3 — public /api/roster/lookup is enumerable (bulk PII harvest of up to 5000 students).** The S2 spec itself accepted this for self-serve UX. Options: Cloud Armor/LB path rate-limit, coarse per-IP Firestore counter, a weak 2nd factor (name initial), collapse the two 404 codes. Pick the mitigation.
+- **M4 — unauthenticated session start + enumerable unique-id ⇒ impersonation + live-slot pre-emption.** No per-candidate secret since the passcode was removed. Fix needs a per-candidate token (e.g. short-lived token issued by roster lookup) — an auth-design decision. Note this interacts with S3's room-OTP gate (recording runs while waiting; OTP gates exec) which already raises the bar.
+- **M6 — initial clipboard snapshot captures PRE-session clipboard content** (App.tsx ~693). Either stop capturing the entry clipboard or disclose it. Privacy call.
+
+### Mechanical majors — QUEUED to auto-fix once S3 frees handler.mjs/App.tsx (no design call)
+M2 disclose keystroke capture in consent/rules/what-is-recorded copy · M5 make "clear roster" actually delete entry docs · M7 store validated language not raw body.language · M8 CSV formula-injection guard on admin exports · M9 surface Run/Submit API errors to the candidate · M10 FullscreenGate real modal (focus trap) · M11 AnomalyPanel role=alert/aria-live.
