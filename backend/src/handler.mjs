@@ -771,15 +771,24 @@ async function recordEvents(req) {
   return { ok: true, storage_key: eventKey };
 }
 
-// ---- Per-session exec rate limiting (security review) ----------------------
+// ---- Per-session exec rate limiting (security review + S-I §3.1) ------------
 // The metered Judge0 key must not be drainable by a looping/scripted session
 // token. In-memory, module-level state — fine for the current SINGLE-INSTANCE
 // Cloud Run deploy; with N instances each enforces its own window, so the
 // effective limit is up to N× looser. Move to Firestore/Redis if we scale out.
 // Entries are only created for sessions that passed the ownership gate (real
 // session tokens), and the idle sweep below bounds the Map regardless.
+//
+// S-I: cooldowns are PER (session, problem) — submitting problem A never
+// blocks problem B — and a per-session IN-FLIGHT guard serializes exec calls
+// so the per-problem windows can't multiply concurrent engine batches.
+// Worst-case engine cost per session ≈ 1 concurrent batch + 1 submit/20s per
+// problem (≤20 problems) — bounded.
 const EXEC_LIMITER_PRUNE_MS = 60 * 60 * 1000;
-const execLimiter = new Map(); // session_id -> { lastRunMs, lastSubmitMs, submitCounts: Map(problem_id -> n), lastSeenMs }
+const EXEC_IN_FLIGHT_RETRY_SECONDS = 2;
+// session_id -> { problems: Map(problem_id -> { lastRunMs, lastSubmitMs, submitCount }),
+//                 inFlight, lastSeenMs }
+const execLimiter = new Map();
 
 function execLimiterEntry(sessionId) {
   const nowMs = _execClock();
@@ -792,11 +801,29 @@ function execLimiterEntry(sessionId) {
   }
   let entry = execLimiter.get(sessionId);
   if (!entry) {
-    entry = { lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCounts: new Map(), lastSeenMs: nowMs };
+    entry = { problems: new Map(), inFlight: false, lastSeenMs: nowMs };
     execLimiter.set(sessionId, entry);
   }
   entry.lastSeenMs = nowMs;
   return entry;
+}
+
+// Read-only view for the CHECK phase: no record is created for an id that may
+// still fail validation, so a scripted session can't grow the per-problem map
+// with garbage ids between sweeps. Records materialize at STAMP time only.
+const EMPTY_PROBLEM_LIMITS = Object.freeze({ lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCount: 0 });
+
+function problemLimiterView(entry, problemId) {
+  return entry.problems.get(problemId) || EMPTY_PROBLEM_LIMITS;
+}
+
+function problemLimiterRecord(entry, problemId) {
+  let record = entry.problems.get(problemId);
+  if (!record) {
+    record = { lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCount: 0 };
+    entry.problems.set(problemId, record);
+  }
+  return record;
 }
 
 // 429 carrying the machine-readable retry hint the api() catch block forwards
@@ -836,25 +863,59 @@ function judgeUnavailable() {
 // into the exec queue (validation fully passed), so a validation-rejected
 // request (400) never consumes a slot — and a queue-full rejection RESTORES
 // the slot (server busy, not the candidate's fault).
-function checkExecRunLimit(sessionId) {
+//
+// S-I §3.1: both checks take problemId — the windows apply per (session,
+// problem). The IN-FLIGHT guard (any problem, run or submit) rejects first so
+// per-problem windows can't stack concurrent engine batches for one session.
+function checkExecRunLimit(sessionId, problemId) {
   const entry = execLimiterEntry(sessionId);
-  const waitMs = EXEC_RUN_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastRunMs);
+  if (entry.inFlight) throw rateLimited(EXEC_IN_FLIGHT_RETRY_SECONDS);
+  const limits = problemLimiterView(entry, problemId);
+  const waitMs = EXEC_RUN_COOLDOWN_SECONDS * 1000 - (_execClock() - limits.lastRunMs);
   if (waitMs > 0) throw rateLimited(Math.ceil(waitMs / 1000));
   return entry;
 }
 
 function checkExecSubmitLimit(sessionId, problemId) {
   const entry = execLimiterEntry(sessionId);
-  const waitMs = EXEC_SUBMIT_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastSubmitMs);
+  if (entry.inFlight) throw rateLimited(EXEC_IN_FLIGHT_RETRY_SECONDS);
+  const limits = problemLimiterView(entry, problemId);
+  const waitMs = EXEC_SUBMIT_COOLDOWN_SECONDS * 1000 - (_execClock() - limits.lastSubmitMs);
   if (waitMs > 0) throw rateLimited(Math.ceil(waitMs / 1000));
-  // Hard per-session+problem budget on STORED submissions. Only a successful
-  // store increments the count, so invalid problem ids can never grow the map.
-  // The budget resets only when the idle sweep prunes the whole entry — report
-  // that horizon as the retry hint.
-  if ((entry.submitCounts.get(problemId) || 0) >= EXEC_MAX_SUBMISSIONS_PER_SESSION) {
+  // Hard per-(session, problem) budget on STORED submissions. Only a
+  // successful store increments the count, so invalid problem ids can never
+  // grow the map. The budget resets only when the idle sweep prunes the whole
+  // entry — report that horizon as the retry hint.
+  if (limits.submitCount >= EXEC_MAX_SUBMISSIONS_PER_SESSION) {
     throw rateLimited(Math.ceil(EXEC_LIMITER_PRUNE_MS / 1000));
   }
   return entry;
+}
+
+// ---- S-I §3.2: contest membership for exec ----------------------------------
+// Scope comes from the SESSION (no client `contest` param). A session bound to
+// a REAL contest doc may exec ONLY that contest's problems[], scored with the
+// entry's effective points. Every legacy shape — contest_slug "", the
+// synthesized legacy contest, or a slug with no doc — takes today's path
+// bit-for-bit: bank read only, bank/seed points (the legacy canary).
+async function contestForSession(session) {
+  const slug = String(session?.contest_slug || "");
+  if (!slug) return null;
+  const doc = await firestore.collection(CONTESTS_COLLECTION).doc(slug).get();
+  return doc.exists ? doc.data() : null;
+}
+
+async function resolveExecProblem(session, problemIdRaw) {
+  const contest = await contestForSession(session);
+  if (contest) {
+    const entry = contestProblemEntries(contest).find((item) => item.problem_id === problemIdRaw);
+    if (!entry) throw httpError(400, "problem_not_in_contest");
+    const problem = await getProblem(entry.problem_id);
+    if (!problem) return null; // unpublished mid-exam — guard makes this near-impossible
+    // Merged effective-points view: scoreSubmission stays untouched (§1.3).
+    return { ...problem, points: effectivePoints(entry, problem) };
+  }
+  return getProblem(problemIdRaw);
 }
 
 async function execRun(req) {
@@ -864,8 +925,9 @@ async function execRun(req) {
   const session = requireWritableSession(await getSession(sessionId));
   await requireExamStarted(session); // S3 room gate
   // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
-  const limiter = checkExecRunLimit(sessionId);
-  const problem = await getProblem(String(body.problem_id || ""));
+  const limiter = checkExecRunLimit(sessionId, String(body.problem_id || ""));
+  // S-I §3.2: contest-membership-aware problem resolution (legacy = bank read).
+  const problem = await resolveExecProblem(session, String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -882,10 +944,13 @@ async function execRun(req) {
   // Start the cooldown at ENQUEUE time, once validation has fully passed — a
   // validation-rejected request never consumes the slot, and consuming it on
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued runs
-  // while one is parked in the lane.
-  const prevLastRunMs = limiter.lastRunMs;
+  // while one is parked in the lane. The in-flight flag is taken at the same
+  // point and cleared in finally (S-I §3.1 serialization guard).
+  const record = problemLimiterRecord(limiter, problem.id);
+  const prevLastRunMs = record.lastRunMs;
   const runStampMs = _execClock();
-  limiter.lastRunMs = runStampMs;
+  record.lastRunMs = runStampMs;
+  limiter.inFlight = true;
   let results;
   try {
     // The exec-queue lanes gate the engine phases (design §11 item 2): the
@@ -899,11 +964,13 @@ async function execRun(req) {
     // ANY failure here is the SERVER's side, never the candidate's: give the
     // cooldown slot back before mapping the error — but ONLY if the limiter
     // still holds the stamp THIS request wrote. A slow failing request must
-    // never clobber the newer stamp a later request legitimately recorded.
-    if (limiter.lastRunMs === runStampMs) limiter.lastRunMs = prevLastRunMs;
+    // never clobber a newer stamp another request legitimately recorded.
+    if (record.lastRunMs === runStampMs) record.lastRunMs = prevLastRunMs;
     if (error?.name === "QueueFullError") throw queueFull();
     if (typeof error?.status === "number") throw judgeUnavailable();
     throw error; // genuine programming error -> bare 500
+  } finally {
+    limiter.inFlight = false;
   }
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
@@ -919,7 +986,8 @@ async function execSubmit(req) {
   // The cap is keyed on the raw problem_id string; only stored submissions
   // increment it, so invalid ids can never grow the per-session count map.
   const limiter = checkExecSubmitLimit(sessionId, String(body.problem_id || ""));
-  const problem = await getProblem(String(body.problem_id || ""));
+  // S-I §3.2: contest-membership-aware problem resolution (legacy = bank read).
+  const problem = await resolveExecProblem(session, String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -937,10 +1005,13 @@ async function execSubmit(req) {
   // Start the cooldown at ENQUEUE time, once validation has fully passed — a
   // validation-rejected request never consumes the slot, and consuming it on
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued
-  // submits while one is parked in the lane.
-  const prevLastSubmitMs = limiter.lastSubmitMs;
+  // submits while one is parked in the lane. The in-flight flag is taken at
+  // the same point and cleared in finally (S-I §3.1 serialization guard).
+  const record = problemLimiterRecord(limiter, problem.id);
+  const prevLastSubmitMs = record.lastSubmitMs;
   const submitStampMs = _execClock();
-  limiter.lastSubmitMs = submitStampMs;
+  record.lastSubmitMs = submitStampMs;
+  limiter.inFlight = true;
   let results;
   try {
     // The submit lane (its own lane, so a submit storm never starves the
@@ -954,11 +1025,13 @@ async function execSubmit(req) {
     // ANY failure here is the SERVER's side, never the candidate's: give the
     // cooldown slot back before mapping the error — but ONLY if the limiter
     // still holds the stamp THIS request wrote. A slow failing request must
-    // never clobber the newer stamp a later request legitimately recorded.
-    if (limiter.lastSubmitMs === submitStampMs) limiter.lastSubmitMs = prevLastSubmitMs;
+    // never clobber a newer stamp another request legitimately recorded.
+    if (record.lastSubmitMs === submitStampMs) record.lastSubmitMs = prevLastSubmitMs;
     if (error?.name === "QueueFullError") throw queueFull();
     if (typeof error?.status === "number") throw judgeUnavailable();
     throw error; // genuine programming error -> bare 500
+  } finally {
+    limiter.inFlight = false;
   }
   const passedCount = results.filter((r) => r.passed).length;
   // Verdict rule: a judging_timeout is an INFRA failure (poll budget exhausted),
@@ -991,7 +1064,16 @@ async function execSubmit(req) {
       // LANGUAGE_IDS), never the raw client body.language — a body shaped to
       // coerce to a valid key (e.g. ["python"]) must not land verbatim.
       session_id: sessionId, problem_id: problem.id, language,
+      // S-I §3.3: identity denorm at write time — immutable facts copied from
+      // the session so the scoreboard rollup needs NO joins. person_id /
+      // candidate_id stay null until S-C/S-E stamp them onto sessions.
+      contest_slug: session.contest_slug || "",
+      username_norm: session.username_norm || "",
+      person_id: session.person_id ?? null,
+      candidate_id: session.candidate_id ?? null,
       source_code: source, verdict, passed_count: passedCount, total: results.length,
+      // max_points is the EFFECTIVE points (contest entry override applied) —
+      // the rollup needs no contest join.
       tests, score, max_points: maxPoints, scoring: problem.scoring || "per_test",
       created_at: createdAt
     });
@@ -1004,9 +1086,9 @@ async function execSubmit(req) {
     return { verdict, passed_count: passedCount, total: results.length, stored: false };
   }
 
-  // Count the STORED submission against the per-session+problem budget
+  // Count the STORED submission against the per-(session, problem) budget
   // (problem.id === the validated problem_id string the cap was checked with).
-  limiter.submitCounts.set(problem.id, (limiter.submitCounts.get(problem.id) || 0) + 1);
+  record.submitCount += 1;
 
   // §9 lock: candidates see ONLY pass/fail counts on hidden tests. The stored
   // doc keeps the per-test detail for admin-side analysis; the response doesn't.

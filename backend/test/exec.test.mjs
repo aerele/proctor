@@ -580,7 +580,7 @@ test("exec queue wiring: run-lane overflow -> immediate 429 queue_full; queued r
   advanceClock(3600_000); // fresh cooldown horizon for the sessions below
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  for (const id of ["qf-a", "qf-b", "qf-c"]) {
+  for (const id of ["qf-a", "qf-b", "qf-c", "qf-d"]) {
     firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({ session_id: id, status: "active" });
   }
   const gate = deferred();
@@ -612,8 +612,10 @@ test("exec queue wiring: run-lane overflow -> immediate 429 queue_full; queued r
   assert.equal(cSettled, true, "queue-full rejection must not wait for a lane slot");
 
   // The submit lane is INDEPENDENT: a submit is accepted (parks/dispatches in
-  // its own lane) even while the run lane is saturated.
-  const pSubmit = call(execReq("/api/exec/submit", "qf-a"));
+  // its own lane) even while the run lane is saturated. A FOURTH session is
+  // used — qf-a still has its run in flight, and the S-I per-session
+  // serialization guard would 429 a same-session submit.
+  const pSubmit = call(execReq("/api/exec/submit", "qf-d"));
 
   gate.resolve();
   const [resA, resB, resC, resSubmit] = await Promise.all([pA, pB, pC, pSubmit]);
@@ -763,15 +765,16 @@ test("exec wiring: the run-lane slot is released after the submit phase — a se
   __setJudge0AdapterForTest(null);
 });
 
-// ---- Cooldown restore race ---------------------------------------------------
-// Request A consumes the cooldown slot, parks in the engine for LONGER than the
-// cooldown, and then fails. By that time a newer request B has legitimately
-// consumed the slot again (its own stamp). A's restore-on-failure must be
-// CONDITIONAL — restore only if the limiter still holds the value A wrote — so
-// it never clobbers B's newer stamp (which would let a third request C slip
-// past B's still-running cooldown).
+// ---- S-I §3.1: per-session serialization guard --------------------------------
+// With per-PROBLEM cooldowns, one session could otherwise stack a concurrent
+// engine batch per problem. The in-flight flag serializes exec calls (run or
+// submit, ANY problem): a second call while one is in flight gets 429
+// rate_limited with retry_after_seconds 2. The conditional compare-and-restore
+// on the cooldown stamp stays in the code as defense for the tiny window
+// between the limiter check and the stamp (the guard makes the old
+// deterministic restore-race unreachable through the public API).
 
-test("exec run cooldown restore race: a failed slow run must NOT clobber a newer run's cooldown stamp", async () => {
+test("exec serialization guard: a second exec call while one is in flight -> 429 retry 2s; failure restore still frees the slot", async () => {
   advanceClock(3600_000);
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
@@ -784,73 +787,162 @@ test("exec run cooldown restore race: a failed slow run must NOT clobber a newer
     return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
   } });
 
-  // A consumes the run cooldown at t0 and parks in the engine.
+  // A consumes the run cooldown at t0 and parks in the engine (in flight).
   const pA = call(execReq("/api/exec/run", "race-run"));
   await tick(); await tick();
   assert.equal(batches, 1);
 
-  // 6 s later — past the 5 s run cooldown — B legitimately runs and writes its
-  // OWN cooldown stamp (t0+6s).
+  // 6 s later — past the 5 s run cooldown, so ONLY the in-flight guard can
+  // reject — a second run for the SAME session is serialized away.
   advanceClock(6_000);
   const resB = await call(execReq("/api/exec/run", "race-run"));
-  assert.equal(resB.statusCode, 200);
-  assert.equal(batches, 2);
+  assert.equal(resB.statusCode, 429);
+  assert.equal(resB.body.error, "rate_limited");
+  assert.equal(resB.body.retry_after_seconds, 2);
+  assert.equal(batches, 1); // never reached the engine
 
-  // NOW A's engine call fails. A's restore must observe that its stamp was
-  // already replaced by B's newer one and leave the limiter alone.
+  // A submit for the same session is serialized too (any problem, any lane).
+  const resBSub = await call(execReq("/api/exec/submit", "race-run"));
+  assert.equal(resBSub.statusCode, 429);
+  assert.equal(resBSub.body.retry_after_seconds, 2);
+
+  // A fails server-side: its stamp is restored AND the in-flight flag clears,
+  // so the session is immediately runnable again (clock unmoved).
   hangA.reject(Object.assign(new Error("judge0 fetch failed: 503"), { status: 503, retryable: false }));
   const resA = await pA;
   assert.equal(resA.statusCode, 503);
 
-  // 1 s after B's stamp: still inside B's 5 s cooldown — C must be rejected.
-  // (A clobbering restore would have reset the stamp and let C sail through.)
-  advanceClock(1_000);
   const resC = await call(execReq("/api/exec/run", "race-run"));
-  assert.equal(resC.statusCode, 429);
-  assert.equal(resC.body.error, "rate_limited");
-  assert.equal(batches, 2); // C never reached the engine
+  assert.equal(resC.statusCode, 200);
+  assert.equal(batches, 2);
 
-  // After B's cooldown fully elapses the session runs again normally.
-  advanceClock(5_000);
+  // After a SUCCESSFUL call completes, the flag is clear as well — only the
+  // normal cooldown applies (still 429, but with the cooldown's hint, not 2 s).
   const resD = await call(execReq("/api/exec/run", "race-run"));
-  assert.equal(resD.statusCode, 200);
+  assert.equal(resD.statusCode, 429);
+  assert.ok(resD.body.retry_after_seconds >= 4);
   __setJudge0AdapterForTest(null);
 });
 
-test("exec submit cooldown restore race: a failed slow submit must NOT clobber a newer submit's cooldown stamp", async () => {
+// ---- S-I §3.1: per-(session, problem) cooldowns --------------------------------
+// Submitting problem A never blocks problem B for the same session; only a
+// repeat on the SAME problem inside its window is rejected. (The old
+// same-session restore-race is unreachable now — the serialization guard
+// above rejects any concurrent same-session call; the conditional restore is
+// covered by the engine-failure tests.)
+
+// A second published problem so one session can exec two problems. Stored in
+// the DEFAULT problems collection this module instance reads.
+function seedSecondProblem(firestore) {
+  firestore.collection("proctor_problems").doc("echo-one").set({
+    id: "echo-one", title: "Echo", statement: "Echo the line.",
+    languages: ["python"], cpuTimeLimit: 2, memoryLimit: 64000,
+    points: 80, scoring: "per_test", status: "published",
+    sampleTests: [{ input: "hi\n", expected: "hi" }],
+    hiddenTests: [{ input: "a\n", expected: "a" }, { input: "b\n", expected: "b" }]
+  });
+}
+const execProblemReq = (path, sessionId, problemId) => makeReq({ method: "POST", path,
+  body: { session_id: sessionId, problem_id: problemId, language: "python", source_code: "x" } });
+
+test("per-problem cooldowns: submit B right after submit A passes; resubmitting A inside 20s 429s (S-I §3.1)", async () => {
   advanceClock(3600_000);
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  firestore.collection(process.env.SESSION_COLLECTION).doc("race-sub").set({ session_id: "race-sub", status: "active" });
-  const hangA = deferred();
-  let batches = 0;
-  __setJudge0AdapterForTest({ runBatch: async (items) => {
-    batches++;
-    if (batches === 1) await hangA.promise;
-    return items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 }));
-  } });
+  seedSecondProblem(firestore);
+  firestore.collection(process.env.SESSION_COLLECTION).doc("pp-sub").set({ session_id: "pp-sub", status: "active" });
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
 
-  // A consumes the submit cooldown at t0 and parks in the engine.
-  const pA = call(execReq("/api/exec/submit", "race-sub"));
-  await tick(); await tick();
-  assert.equal(batches, 1);
+  let res = await call(execProblemReq("/api/exec/submit", "pp-sub", "sum-two"));
+  assert.equal(res.statusCode, 200);
 
-  // 21 s later — past the 20 s submit cooldown — B submits and re-stamps.
-  advanceClock(21_000);
-  const resB = await call(execReq("/api/exec/submit", "race-sub"));
-  assert.equal(resB.statusCode, 200);
-
-  // A fails late; its conditional restore must leave B's newer stamp intact.
-  hangA.reject(Object.assign(new Error("judge0 fetch failed: 503"), { status: 503, retryable: false }));
-  const resA = await pA;
-  assert.equal(resA.statusCode, 503);
-
-  // 1 s after B's stamp: still inside B's 20 s cooldown — C must be 429.
+  // 1 s later: problem B is FREE — A's window never blocks B.
   advanceClock(1_000);
-  const resC = await call(execReq("/api/exec/submit", "race-sub"));
-  assert.equal(resC.statusCode, 429);
-  assert.equal(resC.body.error, "rate_limited");
-  assert.equal(batches, 2); // C never reached the engine
+  res = await call(execProblemReq("/api/exec/submit", "pp-sub", "echo-one"));
+  assert.equal(res.statusCode, 200);
+
+  // …but problem A itself is still inside its own 20 s window.
+  advanceClock(1_000);
+  res = await call(execProblemReq("/api/exec/submit", "pp-sub", "sum-two"));
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.error, "rate_limited");
+
+  // Runs are per-problem too.
+  res = await call(execProblemReq("/api/exec/run", "pp-sub", "sum-two"));
+  assert.equal(res.statusCode, 200);
+  res = await call(execProblemReq("/api/exec/run", "pp-sub", "echo-one"));
+  assert.equal(res.statusCode, 200);
+  res = await call(execProblemReq("/api/exec/run", "pp-sub", "sum-two"));
+  assert.equal(res.statusCode, 429);
+  __setJudge0AdapterForTest(null);
+});
+
+// ---- S-I §3.2/§3.3: contest membership + effective points + denorm -------------
+
+test("exec membership: a session bound to a REAL contest may exec only that contest's problems; effective points apply", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSecondProblem(firestore);
+  // Real contest doc: sum-two only, with a 40-point override (seed default 100).
+  firestore.collection("proctor_contests").doc("kec-r1").set({
+    slug: "kec-r1", status: "open",
+    problems: [{ problem_id: "sum-two", points: 40, order: 0 }]
+  });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("mem-1").set({
+    session_id: "mem-1", status: "active", username_norm: "alice", contest_slug: "kec-r1"
+  });
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+
+  // echo-one is PUBLISHED but not in this contest -> 400 problem_not_in_contest.
+  let res = await call(execProblemReq("/api/exec/run", "mem-1", "echo-one"));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "problem_not_in_contest");
+  res = await call(execProblemReq("/api/exec/submit", "mem-1", "echo-one"));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "problem_not_in_contest");
+
+  // The contest problem submits fine and scores with the EFFECTIVE points.
+  res = await call(execProblemReq("/api/exec/submit", "mem-1", "sum-two"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.score, 40);       // 4/4 hidden on a 40-point entry
+  assert.equal(res.body.max_points, 40);  // entry override, not the bank's 100
+
+  // §3.3 denorm: identity facts ride the stored doc (no joins for the rollup).
+  const stored = [...firestore._collections.get(process.env.SUBMISSIONS_COLLECTION).values()].at(-1);
+  assert.equal(stored.contest_slug, "kec-r1");
+  assert.equal(stored.username_norm, "alice");
+  assert.equal(stored.person_id, null);    // S-C/S-E stamp these later
+  assert.equal(stored.candidate_id, null);
+  assert.equal(stored.max_points, 40);
+  __setJudge0AdapterForTest(null);
+});
+
+test("legacy canary: contest_slug with NO real doc (synthesized legacy) keeps today's bank-only path", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSecondProblem(firestore);
+  // No contest doc for this slug — the legacy deployment shape (slug derived
+  // from contest_url). Membership must NOT be enforced; bank/seed points apply.
+  firestore.collection(process.env.SESSION_COLLECTION).doc("leg-1").set({
+    session_id: "leg-1", status: "active", username_norm: "bob", contest_slug: "kec-aerele-2026"
+  });
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+
+  let res = await call(execProblemReq("/api/exec/run", "leg-1", "echo-one"));
+  assert.equal(res.statusCode, 200);
+  advanceClock(6_000);
+  res = await call(execProblemReq("/api/exec/submit", "leg-1", "sum-two"));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.max_points, 100); // the seed's own points — no override
+  // The denorm fields still ride the stored doc (S-C joins use them later).
+  const stored = [...firestore._collections.get(process.env.SUBMISSIONS_COLLECTION).values()].at(-1);
+  assert.equal(stored.contest_slug, "kec-aerele-2026");
+  assert.equal(stored.username_norm, "bob");
   __setJudge0AdapterForTest(null);
 });
 
