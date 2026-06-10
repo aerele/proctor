@@ -136,6 +136,9 @@ const execQueue = makeExecQueue({
 });
 const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+// S3 invigilator portal: a SEPARATE shared password so invigilators never hold
+// the admin credential. Closed-by-default when unset (mirrors ALERTS_INGEST_API_KEY).
+const INVIGILATOR_PASSWORD = process.env.INVIGILATOR_PASSWORD;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
@@ -216,6 +219,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/review-verdict") return send(res, 200, await adminReviewVerdict(req));
     if (req.method === "GET" && path === "/api/admin/review-mine") return send(res, 200, await adminReviewMine(req));
     if (req.method === "GET" && path === "/api/admin/reviews") return send(res, 200, await adminReviews(req));
+    if (req.method === "GET" && path === "/api/invigilator/overview") return send(res, 200, await invigilatorOverview(req));
 
     return send(res, 404, { error: "Not found" });
   } catch (error) {
@@ -394,6 +398,8 @@ function startResponse(session, settings) {
     blocked_by_session_id: session.blocked_by_session_id || null,
     start_ip: session.start_ip || session.current_ip || "",
     contest_url: settings?.contest_url || "",
+    // S3: tells the candidate client whether to hold at the room-code screen.
+    room_gate_enabled: Boolean(settings?.room_gate_enabled),
     upload_config: uploadConfig,
     heartbeat_interval_seconds: 15
   };
@@ -1128,6 +1134,8 @@ async function adminSaveSettings(req) {
     end_at: endAt.toISOString(),
     contest_url: contestUrl,
     contest_slug: contestSlugFromUrl(contestUrl),
+    // S3: opt-in room start gate (invigilator OTP / start-now). Default false.
+    room_gate_enabled: body.room_gate_enabled === true,
     passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
     passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
     end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
@@ -2701,6 +2709,32 @@ async function adminAlertAction(req) {
   return { ok: true, action, archived, updated, missing };
 }
 
+// ---- S3: invigilator portal + room start gate -------------------------------
+//
+// Room-scoped console (NO signed-QR verification — deferred by design). Auth =
+// requireInvigilator. Scope is ALWAYS the active contest from the settings doc;
+// invigilators never pick a contest. Least privilege: these endpoints expose NO
+// emails, NO IP addresses, NO signed media URLs.
+
+// GET /api/invigilator/overview — room-picker bootstrap: distinct room labels
+// (same helper the admin dropdowns use), whether blank-room sessions exist
+// (the "_" pseudo-room), and whether the room start gate is enabled.
+async function invigilatorOverview(req) {
+  requireInvigilator(req);
+  const settings = await getSettings();
+  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  let query = firestore.collection(SESSION_COLLECTION);
+  if (contestSlug) query = query.where("contest_slug", "==", contestSlug);
+  const snapshot = await query.limit(SESSIONS_QUERY_LIMIT).get();
+  const docs = snapshot.docs.map((doc) => doc.data());
+  return {
+    contest_slug: contestSlug || null,
+    room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    rooms: distinctRooms(docs),
+    has_unassigned: docs.some((doc) => !String(doc.room || "").trim())
+  };
+}
+
 // ---- Proctor alert settings (admin) ----------------------------------------
 //
 // GET returns the full per-type config (defaults merged with stored overrides)
@@ -2876,6 +2910,28 @@ function requireAdmin(req) {
   }
 }
 
+// S3: invigilator auth — x-invigilator-password vs INVIGILATOR_PASSWORD. The
+// ADMIN credential is accepted too, in EITHER header, so an admin can open the
+// portal (the portal client always sends x-invigilator-password). Comparisons
+// are timing-safe (match requireApiKey's discipline). Closed-by-default: with
+// INVIGILATOR_PASSWORD unset the invigilator path always rejects — only the
+// admin fallback can pass.
+let warnedMissingInvigilatorPassword = false;
+
+function requireInvigilator(req) {
+  const invig = req.get?.("x-invigilator-password") || req.headers?.["x-invigilator-password"] || "";
+  const admin = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
+  if (ADMIN_PASSWORD && (safeEqual(admin, ADMIN_PASSWORD) || safeEqual(invig, ADMIN_PASSWORD))) return;
+  if (!INVIGILATOR_PASSWORD) {
+    if (!warnedMissingInvigilatorPassword) {
+      console.warn("INVIGILATOR_PASSWORD is not set; rejecting invigilator-password requests.");
+      warnedMissingInvigilatorPassword = true;
+    }
+    throw httpError(401, "Unauthorized");
+  }
+  if (!safeEqual(invig, INVIGILATOR_PASSWORD)) throw httpError(401, "Unauthorized");
+}
+
 let warnedMissingApiKey = false;
 
 function requireApiKey(req) {
@@ -2913,6 +2969,7 @@ function publicSettings(settings) {
     // recompute on read so an older settings doc (no stored slug) still reports
     // the right value. This is the slug all sure-shot alerts/sessions join on.
     contest_slug: settings?.contest_slug || contestSlugFromUrl(settings?.contest_url),
+    room_gate_enabled: Boolean(settings?.room_gate_enabled),
     // S2: admin-configured room labels (student dropdown; later the invigilator
     // portal). Sanitized + deduped on read as well as on save.
     rooms: normalizeRooms(settings?.rooms),
@@ -3006,7 +3063,7 @@ function httpError(statusCode, message) {
 function setCors(res) {
   res.set("access-control-allow-origin", PUBLIC_APP_ORIGIN);
   res.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  res.set("access-control-allow-headers", "content-type,x-admin-password,x-api-key");
+  res.set("access-control-allow-headers", "content-type,x-admin-password,x-api-key,x-invigilator-password");
 }
 
 function send(res, statusCode, body) {
