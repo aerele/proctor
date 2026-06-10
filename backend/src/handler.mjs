@@ -4,7 +4,8 @@ import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { configureContestStore, createContest, listContests, setContestStatus, updateContest } from "./contests.mjs";
+import { configureContestStore, createContest, listContests, resolveContest, setContestStatus, updateContest } from "./contests.mjs";
+import { configureIdentityStore, getContestRosterSummary, saveContestRoster } from "./identity.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -187,6 +188,29 @@ configureContestStore({
   settingsId: SETTINGS_ID
 });
 
+// S-C: the identity core (proctor_colleges / proctor_persons /
+// proctor_enrollments + the per-contest roster pipeline). Same getter pattern.
+// Only identity_mode:"person" contests ever route into it — the legacy global
+// roster path below stays bit-for-bit.
+const COLLEGES_COLLECTION = process.env.COLLEGES_COLLECTION || "proctor_colleges";
+const PERSONS_COLLECTION = process.env.PERSONS_COLLECTION || "proctor_persons";
+const ENROLLMENTS_COLLECTION = process.env.ENROLLMENTS_COLLECTION || "proctor_enrollments";
+const ADMIN_AUDIT_COLLECTION = process.env.ADMIN_AUDIT_COLLECTION || "proctor_admin_audit";
+configureIdentityStore({
+  getFirestore: () => firestore,
+  collections: {
+    colleges: COLLEGES_COLLECTION,
+    persons: PERSONS_COLLECTION,
+    enrollments: ENROLLMENTS_COLLECTION,
+    audit: ADMIN_AUDIT_COLLECTION,
+    roster: ROSTER_COLLECTION,
+    sessions: SESSION_COLLECTION,
+    alerts: ALERTS_COLLECTION,
+    settings: SETTINGS_COLLECTION,
+    contests: CONTESTS_COLLECTION
+  }
+});
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -297,6 +321,10 @@ export const api = async (req, res) => {
       // Rate-limit rejections (429, exec limiter) carry a machine-readable
       // retry hint inside the same JSON error shape as every other error.
       if (error.retry_after_seconds !== undefined) body.retry_after_seconds = error.retry_after_seconds;
+      // S-C: structured reject payloads (duplicate_unique_ids row lists,
+      // college_required rows, college_choices for the ambiguity picker) ride
+      // the same JSON error shape; `error`/`detail` always win the spread.
+      if (error.payload && typeof error.payload === "object") Object.assign(body, error.payload, { error: message, detail: message });
       return send(res, statusCode, body);
     }
     return send(res, 500, { error: "Internal server error" });
@@ -1525,6 +1553,18 @@ function normalizeRooms(value) {
 async function adminSaveRoster(req) {
   requireAdmin(req);
   const body = parseBody(req);
+  // S-C: an upload that names a contest goes down the PERSON-layer pipeline
+  // (compulsory college column, canonicalization gate, dup hard-reject, person
+  // upsert, enrollment minting — identity.mjs). Only real identity_mode:
+  // "person" contests qualify; the synthesized legacy contest (and any absent
+  // contest param) keeps today's global-roster path below BIT-FOR-BIT.
+  const personContest = await resolvePersonContestParam(body.contest);
+  if (personContest) {
+    return saveContestRoster(personContest, body, {
+      ip: getClientIp(req),
+      userAgent: req.get?.("user-agent") || req.headers?.["user-agent"] || ""
+    });
+  }
   if (body.clear === true) {
     // M5: a clear must PURGE the roster PII, not merely flip the meta flag.
     // Delete the CURRENT version's entry docs (each holds name/email/roll/etc.).
@@ -1615,9 +1655,27 @@ async function adminSaveRoster(req) {
   return { ok: true, configured: true, count: entries.length, skipped };
 }
 
+// Resolve an OPTIONAL contest param to a real person-mode contest doc, or
+// null when the param is absent (legacy path). A param that names anything
+// other than a real person contest is a hard 400 — uploads must never silently
+// fall back to the global roster when the admin asked for a contest.
+async function resolvePersonContestParam(contestParam) {
+  if (contestParam === undefined || contestParam === null || String(contestParam).trim() === "") {
+    return null;
+  }
+  const contest = await resolveContest(String(contestParam).trim(), { requireOpen: false });
+  if (contest.legacy || contest.identity_mode !== "person") {
+    throw httpError(400, "per_contest_roster_requires_person_contest");
+  }
+  return contest;
+}
+
 // GET /api/admin/roster — meta summary ONLY (never the rows).
 async function adminGetRoster(req) {
   requireAdmin(req);
+  // S-C: ?contest= reads that contest's roster meta (roster_meta::{slug}).
+  const personContest = await resolvePersonContestParam(req.query?.contest);
+  if (personContest) return getContestRosterSummary(personContest);
   const meta = await getRosterMeta();
   if (!meta) return { configured: false };
   return {
