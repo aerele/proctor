@@ -79,6 +79,8 @@ const EXEMPT_GETS = {
   "/api/admin/contests": "the contest list — inherently cross-contest",
   "/api/admin/problems": "global problem bank (assignment is per-contest, content is not)",
   "/api/admin/problem": "global problem bank",
+  "/api/admin/templates": "global template library (S-I §1.1) — blueprints, not contest data; contests SNAPSHOT from them",
+  "/api/admin/template": "global template library (S-I §1.1)",
   "/api/admin/alert-settings": "GLOBAL alert-type config (F8 decision 5)",
   "/api/admin/sessions": "username search across contests BY DESIGN (F9 D10); person norms are contest-distinct so person data cannot collide",
   "/api/admin/session-detail": "keyed by unguessable session_id (the bearer token)",

@@ -3,9 +3,12 @@ import { Firestore, FieldValue, FieldPath } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
-import { configureProblemStore, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { ALL_CONTESTS, configureContestStore, createContest, listContests, resolveContest, scopedQuery, setContestStatus, updateContest } from "./contests.mjs";
+import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
+import { ALL_CONTESTS, configureContestStore, createContest, listContests, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { configureIdentityStore, findContestRosterEntries, getContestRosterMeta, getContestRosterSummary, identityNorm, listColleges, saveContestRoster } from "./identity.mjs";
+import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
+import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
+import { computeSessionSummary } from "./scoreboard.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -211,6 +214,11 @@ configureIdentityStore({
   }
 });
 
+// S-I §1.1: the proctor_templates collection (same getter pattern). The
+// system-check seed preset lives in code; a doc with the same slug shadows it.
+const TEMPLATES_COLLECTION = process.env.TEMPLATES_COLLECTION || "proctor_templates";
+configureTemplateStore({ getFirestore: () => firestore, collection: TEMPLATES_COLLECTION });
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -269,6 +277,12 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/contests") return send(res, 200, await adminCreateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-update") return send(res, 200, await adminUpdateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-status") return send(res, 200, await adminContestStatus(req));
+    if (req.method === "GET" && path === "/api/admin/templates") return send(res, 200, await adminListTemplates(req));
+    if (req.method === "GET" && path === "/api/admin/template") return send(res, 200, await adminGetTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/templates") return send(res, 200, await adminCreateTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-update") return send(res, 200, await adminUpdateTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-archive") return send(res, 200, await adminArchiveTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-clone") return send(res, 200, await adminCloneTemplate(req));
     if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
     if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
     if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
@@ -325,6 +339,11 @@ export const api = async (req, res) => {
       // college_required rows, college_choices for the ambiguity picker) ride
       // the same JSON error shape; `error`/`detail` always win the spread.
       if (error.payload && typeof error.payload === "object") Object.assign(body, error.payload, { error: message, detail: message });
+      // S-I guard errors carry structured context (referencing contest/template
+      // slugs, unavailable problem ids) — merged into the same JSON error shape.
+      // Server-controlled fields only (httpErrorWith call sites), never client
+      // echo; `error`/`detail` still always win the spread.
+      if (error.extra && typeof error.extra === "object") Object.assign(body, error.extra, { error: message, detail: message });
       return send(res, statusCode, body);
     }
     return send(res, 500, { error: "Internal server error" });
@@ -667,7 +686,9 @@ async function startPersonSession(req, body, contest) {
 // The person-mode contest a stored session belongs to, or null → the response
 // stays settings-driven (legacy sessions keep today's payload bit-for-bit).
 // Only person-path docs (they carry candidate_id) ever resolve a contest here.
-async function contestForSession(session) {
+// NOT the same as contestForSession (S-I §3.2) below, which resolves ANY real
+// contest doc for exec membership + the problems[] payload.
+async function personContestForSession(session) {
   if (!session?.contest_slug || session.candidate_id === undefined) return null;
   try {
     const contest = await resolveContest(session.contest_slug, { requireOpen: false });
@@ -708,7 +729,7 @@ async function resumeSession(req) {
     if (!matches) throw httpError(404, "Session not found");
   }
   const settings = await getSettings();
-  const contest = await contestForSession(session);
+  const contest = await personContestForSession(session);
   return startResponse(session, settings || {}, contest);
 }
 
@@ -719,7 +740,20 @@ async function resumeSession(req) {
 // from the contest doc instead of the legacy settings doc (contest = null keeps
 // every legacy payload bit-for-bit; the added candidate_id/identity_label keys
 // are read-side additions the S-A frontend already accepts).
+// S-I §3.4: serves the ORDERED problems[] (real contest doc when the session
+// belongs to one — person-mode or not — else the legacy settings shim), the
+// per-problem submissions summary (resume restores chips/totals) and the
+// submit budget. `problem` stays as a one-release compatibility alias =
+// problems[0] minus `order` (bit-for-bit with the pre-S-I shape for cached
+// bundles).
 async function startResponse(session, settings, contest = null) {
+  const problemSource = contest || await contestForSession(session) || settings;
+  const problems = await contestProblemsPublic(problemSource);
+  let problemAlias = null;
+  if (problems.length) {
+    const { order: _order, ...alias } = problems[0];
+    problemAlias = alias;
+  }
   return {
     session_id: session.session_id,
     status: session.status,
@@ -741,9 +775,13 @@ async function startResponse(session, settings, contest = null) {
     enforcement: enforcementConfig(settings),
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     locked_reason: session.locked_reason || null,
-    // Person contests get their problem list at S-I (contest problems[]); the
-    // legacy settings problem_id must never leak into them.
-    problem: contest ? null : await activeProblemPublic(settings),
+    // S-I: person/real contests serve their OWN problems[] (the legacy
+    // settings problem_id never leaks into them — problemSource above);
+    // `problem` is the one-release alias, problems[] the real payload.
+    problem: problemAlias,
+    problems,
+    submissions_summary: await sessionSubmissionsSummary(session.session_id),
+    submit_budget: EXEC_MAX_SUBMISSIONS_PER_SESSION,
     // F10.1: the camera-recording knobs ride the same upload_config object the
     // screen constraints use, so the recorder reads ONE authoritative config.
     upload_config: { ...uploadConfig, camera: cameraRecordingConfig(settings) },
@@ -756,25 +794,50 @@ async function startResponse(session, settings, contest = null) {
   };
 }
 
-// The candidate-facing view of the assigned contest problem: statement, samples
-// (non-secret — /api/exec/run echoes them anyway), limits, points. NEVER
-// hiddenTests, never the lifecycle status. null when nothing is assigned or the
-// assignment is no longer published (degrade to the link-flow fallback).
-async function activeProblemPublic(settings) {
-  const problemId = String(settings?.problem_id || "");
-  if (!problemId) return null;
-  const problem = await getProblem(problemId);
-  if (!problem) return null;
-  return {
-    id: problem.id,
-    title: problem.title,
-    statement: problem.statement,
-    languages: problem.languages || [],
-    points: problem.points ?? 100,
-    cpuTimeLimit: problem.cpuTimeLimit,
-    memoryLimit: problem.memoryLimit,
-    sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected }))
-  };
+// The candidate-facing view of a contest's problems (S-I §3.4): the shim's
+// ordered entries mapped to the public per-problem view — statement, samples
+// (non-secret — /api/exec/run echoes them anyway), limits, EFFECTIVE points,
+// plus `order`. NEVER hiddenTests, never the lifecycle status. Unpublished/
+// missing entries are skipped (the guard prevents; degrade gracefully).
+async function contestProblemsPublic(contestOrSettings) {
+  const contestLanguages = Array.isArray(contestOrSettings?.languages) && contestOrSettings.languages.length
+    ? contestOrSettings.languages
+    : null;
+  const problems = [];
+  for (const entry of contestProblemEntries(contestOrSettings)) {
+    const problem = await getProblem(entry.problem_id);
+    if (!problem) continue;
+    // §1.1: the contest's language allow-list intersects each problem's own
+    // languages at serve time; an empty intersection degrades to the
+    // problem's list (never serve a problem with zero languages).
+    const ownLanguages = problem.languages || [];
+    const intersected = contestLanguages
+      ? ownLanguages.filter((language) => contestLanguages.includes(language))
+      : ownLanguages;
+    problems.push({
+      id: problem.id,
+      title: problem.title,
+      statement: problem.statement,
+      languages: intersected.length ? intersected : ownLanguages,
+      points: effectivePoints(entry, problem),
+      cpuTimeLimit: problem.cpuTimeLimit,
+      memoryLimit: problem.memoryLimit,
+      sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected })),
+      order: entry.order
+    });
+  }
+  return problems;
+}
+
+// This session's stored submissions -> per-problem summary (≤50×n docs, fine).
+const SESSION_SUBMISSIONS_QUERY_LIMIT = 2000;
+async function sessionSubmissionsSummary(sessionId) {
+  const snapshot = await firestore
+    .collection(SUBMISSIONS_COLLECTION)
+    .where("session_id", "==", String(sessionId))
+    .limit(SESSION_SUBMISSIONS_QUERY_LIMIT)
+    .get();
+  return computeSessionSummary(snapshot.docs.map((doc) => doc.data()));
 }
 
 // Find the session that currently holds the live slot for (username, contest):
@@ -1026,15 +1089,24 @@ async function recordEvents(req) {
   return { ok: true, storage_key: eventKey };
 }
 
-// ---- Per-session exec rate limiting (security review) ----------------------
+// ---- Per-session exec rate limiting (security review + S-I §3.1) ------------
 // The metered Judge0 key must not be drainable by a looping/scripted session
 // token. In-memory, module-level state — fine for the current SINGLE-INSTANCE
 // Cloud Run deploy; with N instances each enforces its own window, so the
 // effective limit is up to N× looser. Move to Firestore/Redis if we scale out.
 // Entries are only created for sessions that passed the ownership gate (real
 // session tokens), and the idle sweep below bounds the Map regardless.
+//
+// S-I: cooldowns are PER (session, problem) — submitting problem A never
+// blocks problem B — and a per-session IN-FLIGHT guard serializes exec calls
+// so the per-problem windows can't multiply concurrent engine batches.
+// Worst-case engine cost per session ≈ 1 concurrent batch + 1 submit/20s per
+// problem (≤20 problems) — bounded.
 const EXEC_LIMITER_PRUNE_MS = 60 * 60 * 1000;
-const execLimiter = new Map(); // session_id -> { lastRunMs, lastSubmitMs, submitCounts: Map(problem_id -> n), lastSeenMs }
+const EXEC_IN_FLIGHT_RETRY_SECONDS = 2;
+// session_id -> { problems: Map(problem_id -> { lastRunMs, lastSubmitMs, submitCount }),
+//                 inFlight, lastSeenMs }
+const execLimiter = new Map();
 
 function execLimiterEntry(sessionId) {
   const nowMs = _execClock();
@@ -1047,11 +1119,29 @@ function execLimiterEntry(sessionId) {
   }
   let entry = execLimiter.get(sessionId);
   if (!entry) {
-    entry = { lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCounts: new Map(), lastSeenMs: nowMs };
+    entry = { problems: new Map(), inFlight: false, lastSeenMs: nowMs };
     execLimiter.set(sessionId, entry);
   }
   entry.lastSeenMs = nowMs;
   return entry;
+}
+
+// Read-only view for the CHECK phase: no record is created for an id that may
+// still fail validation, so a scripted session can't grow the per-problem map
+// with garbage ids between sweeps. Records materialize at STAMP time only.
+const EMPTY_PROBLEM_LIMITS = Object.freeze({ lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCount: 0 });
+
+function problemLimiterView(entry, problemId) {
+  return entry.problems.get(problemId) || EMPTY_PROBLEM_LIMITS;
+}
+
+function problemLimiterRecord(entry, problemId) {
+  let record = entry.problems.get(problemId);
+  if (!record) {
+    record = { lastRunMs: -Infinity, lastSubmitMs: -Infinity, submitCount: 0 };
+    entry.problems.set(problemId, record);
+  }
+  return record;
 }
 
 // 429 carrying the machine-readable retry hint the api() catch block forwards
@@ -1091,25 +1181,59 @@ function judgeUnavailable() {
 // into the exec queue (validation fully passed), so a validation-rejected
 // request (400) never consumes a slot — and a queue-full rejection RESTORES
 // the slot (server busy, not the candidate's fault).
-function checkExecRunLimit(sessionId) {
+//
+// S-I §3.1: both checks take problemId — the windows apply per (session,
+// problem). The IN-FLIGHT guard (any problem, run or submit) rejects first so
+// per-problem windows can't stack concurrent engine batches for one session.
+function checkExecRunLimit(sessionId, problemId) {
   const entry = execLimiterEntry(sessionId);
-  const waitMs = EXEC_RUN_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastRunMs);
+  if (entry.inFlight) throw rateLimited(EXEC_IN_FLIGHT_RETRY_SECONDS);
+  const limits = problemLimiterView(entry, problemId);
+  const waitMs = EXEC_RUN_COOLDOWN_SECONDS * 1000 - (_execClock() - limits.lastRunMs);
   if (waitMs > 0) throw rateLimited(Math.ceil(waitMs / 1000));
   return entry;
 }
 
 function checkExecSubmitLimit(sessionId, problemId) {
   const entry = execLimiterEntry(sessionId);
-  const waitMs = EXEC_SUBMIT_COOLDOWN_SECONDS * 1000 - (_execClock() - entry.lastSubmitMs);
+  if (entry.inFlight) throw rateLimited(EXEC_IN_FLIGHT_RETRY_SECONDS);
+  const limits = problemLimiterView(entry, problemId);
+  const waitMs = EXEC_SUBMIT_COOLDOWN_SECONDS * 1000 - (_execClock() - limits.lastSubmitMs);
   if (waitMs > 0) throw rateLimited(Math.ceil(waitMs / 1000));
-  // Hard per-session+problem budget on STORED submissions. Only a successful
-  // store increments the count, so invalid problem ids can never grow the map.
-  // The budget resets only when the idle sweep prunes the whole entry — report
-  // that horizon as the retry hint.
-  if ((entry.submitCounts.get(problemId) || 0) >= EXEC_MAX_SUBMISSIONS_PER_SESSION) {
+  // Hard per-(session, problem) budget on STORED submissions. Only a
+  // successful store increments the count, so invalid problem ids can never
+  // grow the map. The budget resets only when the idle sweep prunes the whole
+  // entry — report that horizon as the retry hint.
+  if (limits.submitCount >= EXEC_MAX_SUBMISSIONS_PER_SESSION) {
     throw rateLimited(Math.ceil(EXEC_LIMITER_PRUNE_MS / 1000));
   }
   return entry;
+}
+
+// ---- S-I §3.2: contest membership for exec ----------------------------------
+// Scope comes from the SESSION (no client `contest` param). A session bound to
+// a REAL contest doc may exec ONLY that contest's problems[], scored with the
+// entry's effective points. Every legacy shape — contest_slug "", the
+// synthesized legacy contest, or a slug with no doc — takes today's path
+// bit-for-bit: bank read only, bank/seed points (the legacy canary).
+async function contestForSession(session) {
+  const slug = String(session?.contest_slug || "");
+  if (!slug) return null;
+  const doc = await firestore.collection(CONTESTS_COLLECTION).doc(slug).get();
+  return doc.exists ? doc.data() : null;
+}
+
+async function resolveExecProblem(session, problemIdRaw) {
+  const contest = await contestForSession(session);
+  if (contest) {
+    const entry = contestProblemEntries(contest).find((item) => item.problem_id === problemIdRaw);
+    if (!entry) throw httpError(400, "problem_not_in_contest");
+    const problem = await getProblem(entry.problem_id);
+    if (!problem) return null; // unpublished mid-exam — guard makes this near-impossible
+    // Merged effective-points view: scoreSubmission stays untouched (§1.3).
+    return { ...problem, points: effectivePoints(entry, problem) };
+  }
+  return getProblem(problemIdRaw);
 }
 
 async function execRun(req) {
@@ -1119,8 +1243,9 @@ async function execRun(req) {
   const session = requireWritableSession(await getSession(sessionId));
   await requireExamStarted(session); // S3 room gate
   // Rate-limit check BEFORE any judge0 work (metered key — see the limiter).
-  const limiter = checkExecRunLimit(sessionId);
-  const problem = await getProblem(String(body.problem_id || ""));
+  const limiter = checkExecRunLimit(sessionId, String(body.problem_id || ""));
+  // S-I §3.2: contest-membership-aware problem resolution (legacy = bank read).
+  const problem = await resolveExecProblem(session, String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -1137,10 +1262,13 @@ async function execRun(req) {
   // Start the cooldown at ENQUEUE time, once validation has fully passed — a
   // validation-rejected request never consumes the slot, and consuming it on
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued runs
-  // while one is parked in the lane.
-  const prevLastRunMs = limiter.lastRunMs;
+  // while one is parked in the lane. The in-flight flag is taken at the same
+  // point and cleared in finally (S-I §3.1 serialization guard).
+  const record = problemLimiterRecord(limiter, problem.id);
+  const prevLastRunMs = record.lastRunMs;
   const runStampMs = _execClock();
-  limiter.lastRunMs = runStampMs;
+  record.lastRunMs = runStampMs;
+  limiter.inFlight = true;
   let results;
   try {
     // The exec-queue lanes gate the engine phases (design §11 item 2): the
@@ -1154,11 +1282,13 @@ async function execRun(req) {
     // ANY failure here is the SERVER's side, never the candidate's: give the
     // cooldown slot back before mapping the error — but ONLY if the limiter
     // still holds the stamp THIS request wrote. A slow failing request must
-    // never clobber the newer stamp a later request legitimately recorded.
-    if (limiter.lastRunMs === runStampMs) limiter.lastRunMs = prevLastRunMs;
+    // never clobber a newer stamp another request legitimately recorded.
+    if (record.lastRunMs === runStampMs) record.lastRunMs = prevLastRunMs;
     if (error?.name === "QueueFullError") throw queueFull();
     if (typeof error?.status === "number") throw judgeUnavailable();
     throw error; // genuine programming error -> bare 500
+  } finally {
+    limiter.inFlight = false;
   }
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
@@ -1174,7 +1304,8 @@ async function execSubmit(req) {
   // The cap is keyed on the raw problem_id string; only stored submissions
   // increment it, so invalid ids can never grow the per-session count map.
   const limiter = checkExecSubmitLimit(sessionId, String(body.problem_id || ""));
-  const problem = await getProblem(String(body.problem_id || ""));
+  // S-I §3.2: contest-membership-aware problem resolution (legacy = bank read).
+  const problem = await resolveExecProblem(session, String(body.problem_id || ""));
   if (!problem) return badRequest("unknown problem_id");
   // Own-key check first: a prototype key like "constructor" must not pass the
   // truthiness test and reach the executor (security review).
@@ -1192,10 +1323,13 @@ async function execSubmit(req) {
   // Start the cooldown at ENQUEUE time, once validation has fully passed — a
   // validation-rejected request never consumes the slot, and consuming it on
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued
-  // submits while one is parked in the lane.
-  const prevLastSubmitMs = limiter.lastSubmitMs;
+  // submits while one is parked in the lane. The in-flight flag is taken at
+  // the same point and cleared in finally (S-I §3.1 serialization guard).
+  const record = problemLimiterRecord(limiter, problem.id);
+  const prevLastSubmitMs = record.lastSubmitMs;
   const submitStampMs = _execClock();
-  limiter.lastSubmitMs = submitStampMs;
+  record.lastSubmitMs = submitStampMs;
+  limiter.inFlight = true;
   let results;
   try {
     // The submit lane (its own lane, so a submit storm never starves the
@@ -1209,11 +1343,13 @@ async function execSubmit(req) {
     // ANY failure here is the SERVER's side, never the candidate's: give the
     // cooldown slot back before mapping the error — but ONLY if the limiter
     // still holds the stamp THIS request wrote. A slow failing request must
-    // never clobber the newer stamp a later request legitimately recorded.
-    if (limiter.lastSubmitMs === submitStampMs) limiter.lastSubmitMs = prevLastSubmitMs;
+    // never clobber a newer stamp another request legitimately recorded.
+    if (record.lastSubmitMs === submitStampMs) record.lastSubmitMs = prevLastSubmitMs;
     if (error?.name === "QueueFullError") throw queueFull();
     if (typeof error?.status === "number") throw judgeUnavailable();
     throw error; // genuine programming error -> bare 500
+  } finally {
+    limiter.inFlight = false;
   }
   const passedCount = results.filter((r) => r.passed).length;
   // Verdict rule: a judging_timeout is an INFRA failure (poll budget exhausted),
@@ -1248,12 +1384,15 @@ async function execSubmit(req) {
       session_id: sessionId, problem_id: problem.id, language,
       // S-C (F9 D7 + vision §2.11): denormalized identity on every NEW doc at
       // submit time — export/purge/results select by contest_slug directly;
-      // OLD docs keep resolving via the session_id join.
+      // OLD docs keep resolving via the session_id join. Doubles as the S-I
+      // §3.3 write-time denorm so the scoreboard rollup needs NO joins.
       contest_slug: session.contest_slug || "",
       username_norm: session.username_norm || "",
       candidate_id: candidateOf(session).id,
       person_id: session.person_id ?? null,
       source_code: source, verdict, passed_count: passedCount, total: results.length,
+      // max_points is the EFFECTIVE points (contest entry override applied) —
+      // the rollup needs no contest join.
       tests, score, max_points: maxPoints, scoring: problem.scoring || "per_test",
       created_at: createdAt
     });
@@ -1266,9 +1405,9 @@ async function execSubmit(req) {
     return { verdict, passed_count: passedCount, total: results.length, stored: false };
   }
 
-  // Count the STORED submission against the per-session+problem budget
+  // Count the STORED submission against the per-(session, problem) budget
   // (problem.id === the validated problem_id string the cap was checked with).
-  limiter.submitCounts.set(problem.id, (limiter.submitCounts.get(problem.id) || 0) + 1);
+  record.submitCount += 1;
 
   // §9 lock: candidates see ONLY pass/fail counts on hidden tests. The stored
   // doc keeps the per-test detail for admin-side analysis; the response doesn't.
@@ -1665,6 +1804,7 @@ async function adminListProblems(req) {
       points: p.points ?? 100,
       scoring: p.scoring || "per_test",
       languages: p.languages || [],
+      tags: Array.isArray(p.tags) ? p.tags : [], // S-I §1.2 (legacy docs → [])
       sample_count: (p.sampleTests || []).length,
       hidden_count: (p.hiddenTests || []).length,
       updated_at: p.updated_at || ""
@@ -1679,9 +1819,40 @@ async function adminGetProblem(req) {
   if (!isValidProblemId(id)) return badRequest("invalid id");
   const doc = await problemRef(id).get();
   if (!doc.exists) throw httpError(404, "Problem not found");
+  // S-I §5.3: surface what references this problem so the editor can render
+  // the "Referenced by" line and pre-warn before delete/unpublish.
+  const refs = findProblemReferences(id, await problemReferenceUniverse());
   // Full doc INCLUDING hiddenTests — admin-only surface.
-  return { problem: doc.data() };
+  return {
+    problem: doc.data(),
+    references: {
+      contests: refs.contests.map((contest) => contest.slug),
+      templates: refs.templates.map((template) => template.slug)
+    }
+  };
 }
+
+// ---- S-I §1.4.3: live-reference guard ----------------------------------------
+// Problem CONTENT stays live on contests (exec/start read the bank at serve
+// time), so destructive bank edits must be guarded:
+//   delete while referenced                  -> 409 problem_referenced
+//   unpublish while CONTEST-referenced       -> 409 problem_referenced
+//     (template-only references allow it — instantiation re-validates)
+//   hiddenTests edit while an OPEN contest references it -> typed confirm
+//     (body.confirm_live_edit === the problem id), else 409.
+
+// Bounded pre-fetch for findProblemReferences: real contest docs (limit 500;
+// archived filtered by the pure function) + templates with seeds merged. The
+// synthesized LEGACY contest is deliberately absent — its settings doc keeps
+// the original silent-clear branch below instead of a 409.
+async function problemReferenceUniverse() {
+  const [contestSnapshot, templates] = await Promise.all([
+    firestore.collection(CONTESTS_COLLECTION).limit(CONTESTS_REFERENCE_LIMIT).get(),
+    listTemplates()
+  ]);
+  return { contests: contestSnapshot.docs.map((doc) => doc.data()), templates };
+}
+const CONTESTS_REFERENCE_LIMIT = 500;
 
 async function adminSaveProblem(req) {
   requireAdmin(req);
@@ -1689,6 +1860,28 @@ async function adminSaveProblem(req) {
   const checked = validateProblemInput(body);
   if (!checked.ok) return badRequest(checked.error);
   const existing = await problemRef(checked.problem.id).get();
+  // Guard comparisons run against doc-or-seed (a draft doc shadowing a
+  // published seed IS an unpublish); created_at preservation stays doc-only.
+  const current = existing.exists ? existing.data() : await getBankProblem(checked.problem.id);
+  if (current) {
+    const unpublishing = current.status === "published" && checked.problem.status === "draft";
+    const hiddenChanged = JSON.stringify(current.hiddenTests || []) !== JSON.stringify(checked.problem.hiddenTests);
+    if (unpublishing || hiddenChanged) {
+      const refs = findProblemReferences(checked.problem.id, await problemReferenceUniverse());
+      if (unpublishing && refs.contests.length) {
+        throw httpErrorWith(409, "problem_referenced", {
+          contests: refs.contests.map((contest) => contest.slug),
+          templates: refs.templates.map((template) => template.slug)
+        });
+      }
+      const openContests = refs.contests.filter((contest) => contest.status === "open");
+      if (hiddenChanged && openContests.length && body.confirm_live_edit !== checked.problem.id) {
+        throw httpErrorWith(409, "live_edit_confirmation_required", {
+          contests: openContests.map((contest) => contest.slug)
+        });
+      }
+    }
+  }
   const now = new Date().toISOString();
   const item = {
     ...checked.problem,
@@ -1704,14 +1897,190 @@ async function adminDeleteProblem(req) {
   const body = parseBody(req);
   const id = String(body.id || "");
   if (!isValidProblemId(id)) return badRequest("invalid id");
+  // S-I §1.4.3: references found -> 409, NO silent clearing of contest or
+  // template assignments. (Replaces the old delete-clears-assignment rule.)
+  const refs = findProblemReferences(id, await problemReferenceUniverse());
+  if (refs.contests.length || refs.templates.length) {
+    throw httpErrorWith(409, "problem_referenced", {
+      contests: refs.contests.map((contest) => contest.slug),
+      templates: refs.templates.map((template) => template.slug)
+    });
+  }
   await problemRef(id).delete();
-  // If the deleted problem was the assigned contest problem, clear the
-  // assignment so start/resume stop advertising a dead id (link-flow fallback).
+  // LEGACY contest path only (spec §1.4.3): the SETTINGS doc assignment is
+  // still silently cleared so legacy start/resume stop advertising a dead id.
   const settings = await getSettings();
   if (settings?.problem_id === id) {
     await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
   }
   return { ok: true };
+}
+
+// ---- S-I §1.1/§2: proctor templates (admin CRUD) -----------------------------
+// Thin glue over src/templates.mjs (validation + seed shadowing live there).
+// Slug rules are the contest rules verbatim (slugify + -2 suffix, atomic
+// .create() decides ownership); SEED slugs are skipped at create so a new
+// template can never silently shadow the system-check preset.
+
+function templateRef(slug) {
+  return firestore.collection(TEMPLATES_COLLECTION).doc(slug);
+}
+
+const TEMPLATE_SLUG_COLLISION_LIMIT = 50;
+
+// Every template problem entry must reference an EXISTING bank problem at save
+// time. Drafts are fine in a template (spec §1.1) — instantiation re-validates
+// published — so this reads through getBankProblem, never getProblem.
+async function requireKnownProblems(entries) {
+  const unknown = [];
+  for (const entry of entries) {
+    if (!(await getBankProblem(entry.problem_id))) unknown.push(entry.problem_id);
+  }
+  if (unknown.length) throw httpErrorWith(400, "unknown_problems", { problems: unknown });
+}
+
+async function createTemplateDoc(template) {
+  const baseSlug = slugify(template.name);
+  if (!baseSlug) throw httpError(400, "name must contain letters or digits");
+  const now = new Date().toISOString();
+  for (let n = 1; n <= TEMPLATE_SLUG_COLLISION_LIMIT; n++) {
+    const slug = n === 1 ? baseSlug : `${baseSlug}-${n}`;
+    if (Object.hasOwn(SEED_TEMPLATES, slug)) continue; // presets keep their slug
+    const item = { slug, ...template, archived: false, created_at: now, updated_at: now };
+    try {
+      await templateRef(slug).create(item);
+      return item;
+    } catch (error) {
+      if (isAlreadyExists(error)) continue;
+      throw error;
+    }
+  }
+  throw httpError(409, "slug_collision_limit");
+}
+
+// points per bank problem id for the list totals: one bounded collection read;
+// per-id getBankProblem fallback catches seed problems (e.g. sum-two).
+async function bankProblemPoints() {
+  const points = new Map();
+  const snapshot = await firestore.collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
+  for (const doc of snapshot.docs) {
+    const p = doc.data();
+    points.set(p.id, p.points ?? 100);
+  }
+  return {
+    async effectiveFor(entry) {
+      if (entry.points !== null && entry.points !== undefined) return entry.points;
+      if (points.has(entry.problem_id)) return points.get(entry.problem_id);
+      const fallback = await getBankProblem(entry.problem_id);
+      const value = fallback ? (fallback.points ?? 100) : 0; // dangling ref counts 0
+      points.set(entry.problem_id, value);
+      return value;
+    }
+  };
+}
+
+async function adminListTemplates(req) {
+  requireAdmin(req);
+  const [templates, bank] = await Promise.all([listTemplates(), bankProblemPoints()]);
+  const rows = [];
+  for (const template of templates) {
+    const entries = template.problems || [];
+    let totalPoints = 0;
+    for (const entry of entries) totalPoints += await bank.effectiveFor(entry);
+    rows.push({
+      slug: template.slug,
+      name: template.name,
+      archived: Boolean(template.archived),
+      preset: Boolean(template.preset),
+      problem_count: entries.length,
+      total_points: totalPoints,
+      updated_at: template.updated_at || ""
+    });
+  }
+  return { templates: rows };
+}
+
+async function adminGetTemplate(req) {
+  requireAdmin(req);
+  const template = await getTemplate(req.query?.slug);
+  if (!template) throw httpError(404, "template_not_found");
+  return { template };
+}
+
+async function adminCreateTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const checked = validateTemplateInput(body);
+  if (!checked.ok) return badRequest(checked.error);
+  await requireKnownProblems(checked.template.problems);
+  return { ok: true, template: await createTemplateDoc(checked.template) };
+}
+
+// Partial update. THE rule (same as contests): a rename NEVER re-slugs — the
+// slug is referenced from contest provenance the moment one instantiates.
+// Updating a seed slug MATERIALIZES a shadow doc (customize-the-preset flow).
+async function adminUpdateTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  const merged = {
+    name: body.name !== undefined ? body.name : existing.name,
+    description: body.description !== undefined ? body.description : existing.description,
+    problems: body.problems !== undefined ? body.problems : existing.problems,
+    defaults: {
+      ...existing.defaults,
+      ...(body.defaults && typeof body.defaults === "object" && !Array.isArray(body.defaults) ? body.defaults : {})
+    }
+  };
+  const checked = validateTemplateInput(merged);
+  if (!checked.ok) return badRequest(checked.error);
+  if (body.problems !== undefined) await requireKnownProblems(checked.template.problems);
+  const now = new Date().toISOString();
+  const item = {
+    slug: existing.slug,
+    ...checked.template,
+    archived: Boolean(existing.archived),
+    created_at: existing.created_at || now,
+    updated_at: now
+  };
+  await templateRef(item.slug).set(item);
+  return { ok: true, template: item };
+}
+
+// Archived templates disappear from the instantiate picker but stay listed
+// behind the UI toggle. Archiving a seed materializes its shadow doc too.
+async function adminArchiveTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  if (typeof body.archived !== "boolean") return badRequest("archived must be a boolean");
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  const now = new Date().toISOString();
+  const { preset: _preset, ...rest } = existing;
+  const item = { ...rest, archived: body.archived, created_at: existing.created_at || now, updated_at: now };
+  await templateRef(item.slug).set(item);
+  return { ok: true, template: item };
+}
+
+// Clone verb = the §1.4 snapshot copy onto a NEW template doc: deep copy of
+// problems + defaults, fresh slug from the (default "Copy of …") name, fresh
+// timestamps, archived reset.
+async function adminCloneTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  const name = (String(body.name ?? "").trim() || `Copy of ${existing.name}`).slice(0, TEMPLATE_BOUNDS.NAME_MAX);
+  const copy = structuredCloneTemplate(existing);
+  const checked = validateTemplateInput({
+    name, description: copy.description, problems: copy.problems, defaults: copy.defaults
+  });
+  if (!checked.ok) return badRequest(checked.error);
+  return { ok: true, template: await createTemplateDoc(checked.template) };
 }
 
 // ---- S-B: contests (F9 §2 / F10 §2.7) — SHIPS DARK ---------------------------
@@ -1729,14 +2098,132 @@ async function adminListContests(req) {
 async function adminCreateContest(req) {
   requireAdmin(req);
   const body = parseBody(req);
-  return { ok: true, contest: await createContest(body) };
+  let payload = body;
+  if (body.template_slug !== undefined && body.template_slug !== null && String(body.template_slug).trim() !== "") {
+    payload = await instantiateTemplatePayload(body);
+  } else if (body.problems !== undefined && Array.isArray(body.problems) && body.problems.length) {
+    // Direct problems[] (no template): same published-right-now rule.
+    const checked = normalizeProblemEntries(body.problems);
+    if (!checked.ok) return badRequest(checked.error);
+    await requirePublishedProblems(checked.entries, "problems_unavailable");
+  }
+  return { ok: true, contest: await createContest(payload) };
+}
+
+// S-I §1.4.1: snapshot-on-instantiate — copy the template's problems[] and
+// every defaults.* field onto the contest doc AS THE CONTEST'S OWN FIELDS.
+// Body values win over template defaults (the create form pre-fills, the admin
+// may edit before posting). duration_minutes only PREFILLS end_at; an explicit
+// end_at always wins. Template edits after this moment change nothing.
+async function instantiateTemplatePayload(body) {
+  const template = await getTemplate(body.template_slug);
+  if (!template) throw httpError(404, "template_not_found");
+  if (template.archived) throw httpError(400, "template_archived");
+
+  let entries = template.problems || [];
+  if (body.problems !== undefined) {
+    const checked = normalizeProblemEntries(body.problems);
+    if (!checked.ok) return badRequest(checked.error);
+    entries = checked.entries;
+  }
+  // §1.4.4: every entry must reference an existing PUBLISHED problem right now.
+  await requirePublishedProblems(entries, "template_problems_unavailable");
+
+  const defaults = template.defaults || {};
+  let endAt = body.end_at;
+  if ((endAt === undefined || endAt === null || endAt === "") && body.start_at) {
+    const startMs = Date.parse(String(body.start_at));
+    if (Number.isFinite(startMs)) {
+      endAt = new Date(startMs + (defaults.duration_minutes ?? 120) * 60_000).toISOString();
+    }
+  }
+  const pick = (bodyValue, templateValue) => (bodyValue !== undefined ? bodyValue : templateValue);
+  return {
+    name: body.name,
+    listed: body.listed,
+    start_at: body.start_at,
+    end_at: endAt,
+    problems: entries.map((entry) => ({ ...entry })), // the contest's own copy
+    template_slug: template.slug,                      // display-only provenance
+    identity_label: pick(body.identity_label, defaults.identity_label),
+    room_gate_enabled: pick(body.room_gate_enabled, defaults.room_gate_enabled),
+    camera_recording: pick(body.camera_recording, defaults.camera_recording),
+    enforcement: pick(body.enforcement, defaults.enforcement),
+    evidence_retention_days: pick(body.evidence_retention_days, defaults.evidence_retention_days),
+    languages: pick(body.languages, defaults.languages)
+  };
+}
+
+// Contest problems must be servable to candidates the moment the contest can
+// open: existing published bank/seed docs only. Reasons: draft|missing.
+async function requirePublishedProblems(entries, errorName) {
+  const unavailable = [];
+  for (const entry of entries) {
+    if (await getProblem(entry.problem_id)) continue;
+    const bank = await getBankProblem(entry.problem_id);
+    unavailable.push({ problem_id: entry.problem_id, reason: bank ? "draft" : "missing" });
+  }
+  if (unavailable.length) throw httpErrorWith(400, errorName, { problems: unavailable });
 }
 
 async function adminUpdateContest(req) {
   requireAdmin(req);
   const body = parseBody(req);
   requireFields(body, ["slug"]);
+  if (body.problems !== undefined) await enforceContestProblemsEditRules(String(body.slug), body);
   return { ok: true, contest: await updateContest(String(body.slug), body) };
+}
+
+// S-I §1.4.5 (veto-able defaults): contest problems[] edits are free while
+// draft; once OPEN —
+//   adding an entry            -> requires body.confirm === true
+//   removing an entry that has stored submissions in THIS contest -> 409
+//   changing an entry's points -> typed contest-slug confirmation (best scores
+//     are computed live, so the change applies retroactively)
+async function enforceContestProblemsEditRules(slug, body) {
+  const doc = await firestore.collection(CONTESTS_COLLECTION).doc(slug).get();
+  if (!doc.exists) throw httpError(404, "contest_not_found");
+  const existing = doc.data();
+
+  const checked = normalizeProblemEntries(Array.isArray(body.problems) && body.problems.length ? body.problems : []);
+  const entries = checked.ok ? checked.entries : [];
+  if (Array.isArray(body.problems) && body.problems.length && !checked.ok) return badRequest(checked.error);
+  await requirePublishedProblems(entries, "problems_unavailable");
+
+  if (existing.status !== "open") return; // draft/archived edits are free
+
+  const oldEntries = contestProblemEntries(existing);
+  const oldById = new Map(oldEntries.map((entry) => [entry.problem_id, entry]));
+  const newById = new Map(entries.map((entry) => [entry.problem_id, entry]));
+
+  const added = entries.filter((entry) => !oldById.has(entry.problem_id));
+  if (added.length && body.confirm !== true) {
+    throw httpErrorWith(409, "problem_add_requires_confirm", {
+      problems: added.map((entry) => entry.problem_id)
+    });
+  }
+
+  for (const entry of oldEntries) {
+    if (newById.has(entry.problem_id)) continue;
+    // Removal: blocked when this contest already stored submissions for it.
+    const snapshot = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), existing)
+      .where("problem_id", "==", entry.problem_id)
+      .limit(1)
+      .get();
+    if (snapshot.docs.length) {
+      throw httpErrorWith(409, "problem_has_submissions", { problem_id: entry.problem_id });
+    }
+  }
+
+  const pointsEdited = entries.filter((entry) =>
+    oldById.has(entry.problem_id)
+    && (oldById.get(entry.problem_id).points ?? null) !== (entry.points ?? null));
+  if (pointsEdited.length && body.confirm_points_edit !== existing.slug) {
+    throw httpErrorWith(409, "points_edit_confirmation_required", {
+      contest: existing.slug,
+      problems: pointsEdited.map((entry) => entry.problem_id)
+    });
+  }
 }
 
 async function adminContestStatus(req) {
@@ -5108,6 +5595,15 @@ function httpError(statusCode, message, payload) {
   // S-C: optional structured payload merged into the JSON error body by the
   // api() catch (college_choices picker, duplicate row lists, ...).
   if (payload) error.payload = payload;
+  return error;
+}
+
+// httpError carrying structured machine-readable context (S-I guard payloads).
+// `extra` is merged into the JSON error body by the api() catch — only ever
+// server-built objects (slug lists, problem-id lists), never raw client input.
+function httpErrorWith(statusCode, message, extra) {
+  const error = httpError(statusCode, message);
+  error.extra = extra;
   return error;
 }
 

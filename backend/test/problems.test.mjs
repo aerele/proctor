@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  configureProblemStore, getProblem, isValidProblemId,
+  configureProblemStore, getBankProblem, getProblem, isValidProblemId,
   scoreSubmission, validateProblemInput, LANGUAGE_IDS
 } from "../src/problems.mjs";
 
@@ -90,6 +90,27 @@ test("validateProblemInput: rejections carry specific errors", () => {
   assert.match(validateProblemInput(validInput({ sampleTests: [{ input: "x" }] })).error, /sampleTests\[0\]/);
 });
 
+// ---- tags (S-I §1.2, vision §2.5) --------------------------------------------
+
+test("validateProblemInput: tags trimmed, lowercased, deduped; default []", () => {
+  const r = validateProblemInput(validInput({ tags: ["  Arrays ", "dp", "DP", "arrays"] }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.problem.tags, ["arrays", "dp"]);
+  const none = validateProblemInput(validInput({ tags: undefined }));
+  assert.deepEqual(none.problem.tags, []);
+});
+
+test("validateProblemInput: tag bounds — charset, length 1..30, max 10", () => {
+  assert.match(validateProblemInput(validInput({ tags: ["Bad Tag!"] })).error || "", /tags/);
+  assert.match(validateProblemInput(validInput({ tags: ["x".repeat(31)] })).error || "", /tags/);
+  assert.match(validateProblemInput(validInput({ tags: [""] })).error || "", /tags/);
+  assert.match(validateProblemInput(validInput({ tags: "graphs" })).error || "", /tags/);
+  const eleven = Array.from({ length: 11 }, (_, i) => `tag-${i}`);
+  assert.match(validateProblemInput(validInput({ tags: eleven })).error || "", /tags/);
+  const ten = Array.from({ length: 10 }, (_, i) => `tag-${i}`);
+  assert.equal(validateProblemInput(validInput({ tags: ten })).ok, true);
+});
+
 // ---- scoreSubmission --------------------------------------------------------
 
 test("scoreSubmission: per_test is proportional and floored", () => {
@@ -142,4 +163,23 @@ test("getProblem (store): published bank doc served; draft hidden; bank shadows 
   assert.equal((await getProblem("sum-two")).id, "sum-two");
   // invalid id never reaches the store (would throw on a real doc path)
   assert.equal(await getProblem("a/b"), null);
+});
+
+// ---- getBankProblem (S-I): doc-or-seed, ANY status — admin/guard read only ---
+
+test("getBankProblem: returns drafts and published docs alike; seed fallback; null on miss", async () => {
+  const draft = { ...validInput(), id: "drafty", status: "draft" };
+  configureProblemStore({
+    getFirestore: () => makeFakeProblemFirestore({ "bank/drafty": draft }),
+    collection: "bank"
+  });
+  // a DRAFT bank doc IS visible here (unlike getProblem) — guard/template
+  // existence checks must see drafts.
+  assert.equal((await getBankProblem("drafty")).status, "draft");
+  // seed fallback (any status) still answers
+  assert.equal((await getBankProblem("sum-two")).id, "sum-two");
+  // misses and invalid ids are null, same shape rules as getProblem
+  assert.equal(await getBankProblem("ghost"), null);
+  assert.equal(await getBankProblem("a/b"), null);
+  assert.equal(await getBankProblem("constructor"), null);
 });

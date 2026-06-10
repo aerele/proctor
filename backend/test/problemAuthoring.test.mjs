@@ -228,6 +228,24 @@ test("create -> get -> list roundtrip; list carries summaries WITHOUT test conte
   assert.equal(row.sampleTests, undefined);
 });
 
+test("tags ride the authoring roundtrip and the list summary (S-I §1.2)", async () => {
+  const { firestore } = freshClients();
+  const created = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ tags: ["Strings", "two-pointers"] }) }));
+  assert.equal(created.statusCode, 200);
+  assert.deepEqual(created.body.problem.tags, ["strings", "two-pointers"]);
+
+  // a legacy doc stored before tags existed summarizes as [] (never undefined)
+  firestore.collection("problems_bank").doc("old-one").set({
+    id: "old-one", title: "Old", status: "draft", sampleTests: [], hiddenTests: []
+  });
+
+  const list = await call(makeReq({ method: "GET", path: "/api/admin/problems", headers: ADMIN }));
+  const bySlug = Object.fromEntries(list.body.problems.map((p) => [p.id, p]));
+  assert.deepEqual(bySlug["rev-str"].tags, ["strings", "two-pointers"]);
+  assert.deepEqual(bySlug["old-one"].tags, []);
+});
+
 test("upsert preserves created_at and refreshes updated_at", async () => {
   const { firestore } = freshClients();
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
@@ -267,6 +285,118 @@ test("delete removes the doc and clears a matching active problem_id from settin
   assert.equal(res.statusCode, 200);
   assert.equal(firestore._collections.get("problems_bank").has("rev-str"), false);
   assert.equal(firestore._collections.get("problems_settings").get("active").problem_id, "");
+});
+
+// ---- S-I §1.4.3: live-reference guard ----------------------------------------
+// Deleting/unpublishing a referenced problem 409s with the referencing slugs;
+// silent assignment-clearing survives ONLY for the legacy settings doc. Hidden-
+// test edits on a problem referenced by an OPEN contest demand a typed confirm.
+
+function seedContest(firestore, slug, status, problems) {
+  firestore.collection("proctor_contests").doc(slug).set({ slug, status, problems });
+}
+function seedTemplateDoc(firestore, slug, problems, archived = false) {
+  firestore.collection("proctor_templates").doc(slug).set({ slug, name: slug, archived, problems });
+}
+
+test("guard: delete of a contest/template-referenced problem -> 409 problem_referenced with slugs; doc survives", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  seedContest(firestore, "kec-r1", "open", [{ problem_id: "rev-str", points: null, order: 0 }]);
+  seedTemplateDoc(firestore, "apt-tpl", [{ problem_id: "rev-str", points: null, order: 0 }]);
+
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/problem-delete", headers: ADMIN, body: { id: "rev-str" } }));
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.error, "problem_referenced");
+  assert.deepEqual(res.body.contests, ["kec-r1"]);
+  assert.deepEqual(res.body.templates, ["apt-tpl"]);
+  assert.equal(firestore._collections.get("problems_bank").has("rev-str"), true); // nothing deleted
+});
+
+test("guard: archived contests/templates do NOT block deletion; the legacy settings clear still happens", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  seedContest(firestore, "old-contest", "archived", [{ problem_id: "rev-str" }]);
+  seedTemplateDoc(firestore, "old-tpl", [{ problem_id: "rev-str" }], true);
+  firestore.collection("problems_settings").doc("active").set({
+    start_at: "2026-01-01T00:00:00.000Z", end_at: "2027-01-01T00:00:00.000Z", problem_id: "rev-str"
+  });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/problem-delete", headers: ADMIN, body: { id: "rev-str" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(firestore._collections.get("problems_bank").has("rev-str"), false);
+  // The LEGACY contest path keeps its silent clearing branch (spec §1.4.3).
+  assert.equal(firestore._collections.get("problems_settings").get("active").problem_id, "");
+});
+
+test("guard: unpublish while contest-referenced -> 409; while ONLY template-referenced -> allowed", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() })); // published
+  seedContest(firestore, "kec-r1", "draft", [{ problem_id: "rev-str" }]);
+
+  const blocked = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ status: "draft" }) }));
+  assert.equal(blocked.statusCode, 409);
+  assert.equal(blocked.body.error, "problem_referenced");
+  assert.deepEqual(blocked.body.contests, ["kec-r1"]);
+  // Still published — the save was rejected wholesale.
+  assert.equal(firestore._collections.get("problems_bank").get("rev-str").status, "published");
+
+  // Drop the contest ref; a template ref alone does not block an unpublish
+  // (instantiation re-validates published).
+  firestore.collection("proctor_contests").doc("kec-r1").delete();
+  seedTemplateDoc(firestore, "apt-tpl", [{ problem_id: "rev-str" }]);
+  const allowed = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ status: "draft" }) }));
+  assert.equal(allowed.statusCode, 200);
+  assert.equal(allowed.body.problem.status, "draft");
+});
+
+test("guard: hiddenTests edit on a problem referenced by an OPEN contest needs the typed confirm", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  seedContest(firestore, "kec-live", "open", [{ problem_id: "rev-str" }]);
+
+  const newHidden = [{ input: "abc\n", expected: "cba" }, { input: "zz\n", expected: "zz" }];
+  // Changed hidden tests, no confirmation -> 409 with the open-contest list.
+  const blocked = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ hiddenTests: newHidden }) }));
+  assert.equal(blocked.statusCode, 409);
+  assert.equal(blocked.body.error, "live_edit_confirmation_required");
+  assert.deepEqual(blocked.body.contests, ["kec-live"]);
+
+  // Wrong confirmation string -> still 409.
+  const wrong = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ hiddenTests: newHidden, confirm_live_edit: "nope" }) }));
+  assert.equal(wrong.statusCode, 409);
+
+  // confirm_live_edit === the problem id -> the edit lands.
+  const confirmed = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ hiddenTests: newHidden, confirm_live_edit: "rev-str" }) }));
+  assert.equal(confirmed.statusCode, 200);
+  assert.equal(confirmed.body.problem.hiddenTests.length, 2);
+
+  // A title-only edit (hidden tests unchanged) never demands the confirm.
+  const titleOnly = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ hiddenTests: newHidden, title: "Reverse v3" }) }));
+  assert.equal(titleOnly.statusCode, 200);
+
+  // Hidden-test edits while referenced only by a DRAFT contest sail through.
+  seedContest(firestore, "kec-live", "draft", [{ problem_id: "rev-str" }]);
+  const draftRef = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ hiddenTests: [{ input: "q\n", expected: "q" }] }) }));
+  assert.equal(draftRef.statusCode, 200);
+});
+
+test("guard: adminGetProblem reports its references (contests + templates)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  seedContest(firestore, "kec-r1", "open", [{ problem_id: "rev-str" }]);
+  seedTemplateDoc(firestore, "apt-tpl", [{ problem_id: "rev-str" }]);
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/problem", headers: ADMIN, query: { id: "rev-str" } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.references, { contests: ["kec-r1"], templates: ["apt-tpl"] });
 });
 
 // ---- Task 3: settings problem_id + public problem in start/resume -----------
@@ -321,6 +451,113 @@ test("resume payload carries the PUBLIC problem view — never hiddenTests; null
   firestore.collection("problems_settings").doc("active").set({ ...GATE });
   const bare = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
   assert.equal(bare.body.problem, null);
+});
+
+// ---- S-I §3.4: multi-problem start/resume payload -------------------------------
+
+test("resume for a REAL-contest session serves the contest's ordered problems[] + summary + budget (S-I §3.4)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() })); // rev-str, 80 pts
+  firestore.collection("proctor_contests").doc("kec-r1").set({
+    slug: "kec-r1", status: "open",
+    problems: [
+      { problem_id: "sum-two", points: 40, order: 1 },
+      { problem_id: "rev-str", points: null, order: 0 }
+    ]
+  });
+  firestore.collection("problems_sessions").doc("ms1").set({
+    session_id: "ms1", status: "active", username_norm: "alice",
+    contest_slug: "kec-r1", storage_prefix: "contests/kec-r1/sessions/alice/ms1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ms1" } }));
+  assert.equal(res.statusCode, 200);
+  // Ordered problems[] with EFFECTIVE points + order; never hiddenTests/status.
+  assert.equal(res.body.problems.length, 2);
+  assert.deepEqual(res.body.problems.map((p) => p.id), ["rev-str", "sum-two"]);
+  assert.deepEqual(res.body.problems.map((p) => p.order), [0, 1]);
+  assert.equal(res.body.problems[0].points, 80);  // bank points (null override)
+  assert.equal(res.body.problems[1].points, 40);  // entry override beats the seed's 100
+  assert.equal(res.body.problems[0].hiddenTests, undefined);
+  assert.equal(res.body.problems[0].status, undefined);
+  // One-release compatibility alias: problems[0] WITHOUT the order key.
+  assert.equal(res.body.problem.id, "rev-str");
+  assert.equal(res.body.problem.order, undefined);
+  // Budget + empty summary for a fresh session.
+  assert.equal(res.body.submit_budget, 50);
+  assert.deepEqual(res.body.submissions_summary, {});
+});
+
+test("resume restores submissions_summary from stored submissions (chips/totals survive a reload)", async () => {
+  const { firestore } = freshClients();
+  firestore.collection("proctor_contests").doc("kec-r1").set({
+    slug: "kec-r1", status: "open", problems: [{ problem_id: "sum-two", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("ms2").set({
+    session_id: "ms2", status: "active", username_norm: "alice", contest_slug: "kec-r1",
+    storage_prefix: "contests/kec-r1/sessions/alice/ms2/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+  // Two stored submissions for THIS session; one for another session (ignored).
+  firestore.collection("problems_submissions").doc("a").set({
+    session_id: "ms2", problem_id: "sum-two", score: 40, max_points: 100,
+    verdict: "wrong_answer", created_at: "2026-06-10T04:10:00.000Z"
+  });
+  firestore.collection("problems_submissions").doc("b").set({
+    session_id: "ms2", problem_id: "sum-two", score: 100, max_points: 100,
+    verdict: "accepted", created_at: "2026-06-10T04:20:00.000Z"
+  });
+  firestore.collection("problems_submissions").doc("c").set({
+    session_id: "other", problem_id: "sum-two", score: 10, max_points: 100,
+    verdict: "wrong_answer", created_at: "2026-06-10T04:30:00.000Z"
+  });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ms2" } }));
+  assert.equal(res.statusCode, 200);
+  const cell = res.body.submissions_summary["sum-two"];
+  assert.equal(cell.best_score, 100);
+  assert.equal(cell.attempts, 2);
+  assert.equal(cell.best_verdict, "accepted");
+  assert.equal(cell.last_submitted_at, "2026-06-10T04:20:00.000Z");
+});
+
+test("legacy canary: a settings-assigned session keeps the EXACT problem shape; problems[] mirrors it with order 0", async () => {
+  const { firestore } = freshClients();
+  firestore.collection("problems_sessions").doc("s1").set({
+    session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
+  });
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
+  // The alias is BYTE-IDENTICAL to the pre-S-I public problem view.
+  assert.deepEqual(Object.keys(res.body.problem).sort(),
+    ["cpuTimeLimit", "id", "languages", "memoryLimit", "points", "sampleTests", "statement", "title"]);
+  assert.equal(res.body.problem.points, 80);
+  // problems[] carries the same problem once, with order 0 added.
+  assert.equal(res.body.problems.length, 1);
+  assert.equal(res.body.problems[0].id, "rev-str");
+  assert.equal(res.body.problems[0].order, 0);
+  assert.equal(res.body.submit_budget, 50);
+});
+
+test("contest languages intersect per-problem languages at serve time (S-I §1.1 defaults)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ languages: ["python", "cpp"] }) }));
+  firestore.collection("proctor_contests").doc("lang-c").set({
+    slug: "lang-c", status: "open", languages: ["python", "java"],
+    problems: [{ problem_id: "rev-str", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("ls1").set({
+    session_id: "ls1", status: "active", username_norm: "alice", contest_slug: "lang-c",
+    storage_prefix: "contests/lang-c/sessions/alice/ls1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ls1" } }));
+  assert.deepEqual(res.body.problems[0].languages, ["python"]);
 });
 
 test("a problem UNPUBLISHED after assignment degrades to problem: null (no dead payloads)", async () => {

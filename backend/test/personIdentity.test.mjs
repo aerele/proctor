@@ -132,7 +132,9 @@ function freshClients() {
 }
 
 async function createOpenContest(name, { window: withWindow = true } = {}) {
-  let res = await call(makeReq({ method: "POST", path: "/api/admin/contests", headers: ADMIN_HEADERS, body: { name } }));
+  // S-I publish gate: a contest cannot open with zero problems, so every
+  // open-contest fixture carries the published seed problem.
+  let res = await call(makeReq({ method: "POST", path: "/api/admin/contests", headers: ADMIN_HEADERS, body: { name, problems: [{ problem_id: "sum-two" }] } }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   const contest = res.body.contest;
   if (withWindow) {
@@ -192,7 +194,11 @@ test("person contest + roster: username_norm = person_id, candidate_id = roster 
   assert.equal(res.body.candidate_id, "21 CS 001");
   assert.equal(res.body.identity_label, "Candidate ID");
   assert.equal(res.body.contest_slug, contest.slug);
-  assert.equal(res.body.problem, null); // no problem assignment until S-I
+  // S-I (landed at merge): person contests serve their OWN problems[]; the
+  // fixture carries the seed problem, and `problem` is the problems[0] alias.
+  assert.equal(res.body.problem?.id, "sum-two");
+  assert.equal(res.body.problems.length, 1);
+  assert.equal(res.body.problems[0].id, "sum-two");
   assert.equal(res.body.room_gate_enabled, false);
 
   const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
@@ -336,7 +342,10 @@ test("person start response carries the CONTEST window end_at, not the legacy se
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   const contestDoc = firestore._collections.get("pi_contests").get(contest.slug);
   assert.equal(res.body.end_at, contestDoc.end_at);
-  assert.equal(res.body.problem, null);
+  // S-I (landed at merge): the person contest serves ITS problems[], never the
+  // legacy settings problem_id — the alias must be the contest's own problem.
+  assert.equal(res.body.problem?.id, "sum-two");
+  assert.equal(res.body.problems.some((p) => p.id === "legacy-problem"), false);
   assert.equal(res.body.contest_url, ""); // contest_url is dead for person contests
   assert.equal(res.body.room_gate_enabled, false); // contest doc, not settings
 });
