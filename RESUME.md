@@ -27,3 +27,6 @@ We are now on the **own-editor stretch goal** and have just FINISHED BRAINSTORMI
 
 ## REPO STATE
 Working tree clean after the local commits below. `master` HEAD will be the own-editor design+plan commit. Frontend = React/Vite/TS/Tailwind; backend = GCP Cloud Function `backend/src/handler.mjs` + `node:test`; Firestore + GCS. Demo mode: `VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev`.
+
+## 2026-06-10 night-run state
+Authoritative resume anchor: `night-run/RESUME-ANCHOR.md` (post-compaction entry point).
