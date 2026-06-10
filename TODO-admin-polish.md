@@ -59,3 +59,12 @@ NOTE: F3 (roster + ID-confirm login + fullscreen-first + unique top bar) and F4 
 - `session-details` altNorm derives the de-`@` form ONLY when the raw input starts with `@` (so a real `_alice` username is not conflated with `alice`); degenerate `_` input returns found:false without querying.
 - A3 "missing chunks" = recording-gap count + duration (time-gap model), labeled "Recording gaps".
 - Demo mode: both stat cards and the Sessions list derive from ONE shared `DEMO_ALL_SESSIONS`; "disconnected" is a deterministic per-row `stale` flag (no wall-clock drift).
+
+## 2026-06-10 morning live-test feedback (Karthi voice, TG ~10:33) — exam-shell UX/enforcement rework [F5]
+Fix AFTER the night-run tasks close. From live testing the deployed proctor:
+1. **Permission order**: clipboard/camera/screen-share prompts kick the candidate OUT of fullscreen. Rework onboarding: request ALL permissions + screen share FIRST, THEN enter fullscreen (gate order swap in the S1 shell).
+2. **Integrity checkpoint popups** ("attendance check"): pops mid-test, candidates are focused — likely useless. Investigate what it actually records (frontend + backend); if it's click-only with no signal value, remove it. Discuss first.
+3. **Fullscreen exit = HARD BLOCK, not "status bar hidden"**: full-screen takeover that (a) forces re-entering fullscreen, (b) requires TYPING an acknowledgement ("I will not exit full screen after this") to resume, (c) countdown — if not back in fullscreen within N seconds (default 20, admin-configurable) the test is DISABLED. The current soft anomaly-panel + hidden-bar treatment is too weak.
+4. **Switch-away**: long/frequent switch-aways → backend notification to proctor (review video, then decide) instead of auto-blocking with no reason; avoid repeated spurious blocks when something environmental retriggers it.
+5. **Per-session enforcement override**: admin/invigilator can disable a specific anomaly enforcement for ONE user session (legit environment problems).
+6. **Escalation ladder**: L1 = typed-warning acknowledgement (self-serve); L2 = locked, requires a code from the room proctor (ties into S3 invigilator portal). Optionally "get approval before block" mode.
