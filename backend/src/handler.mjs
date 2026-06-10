@@ -3443,7 +3443,21 @@ async function adminAlerts(req) {
   // AT MOST ONE equality filter to Firestore — the most selective, contest_slug —
   // and filter the remaining fields in memory. ALERTS_QUERY_LIMIT bounds the scan.
   let query = firestore.collection(ALERTS_COLLECTION);
-  if (contestSlug) query = query.where("contest_slug", "==", String(contestSlug));
+  if (contestSlug) {
+    query = query.where("contest_slug", "==", String(contestSlug));
+  } else {
+    // Zero-alerts bug (2026-06-10 investigation, root cause #1): without an
+    // orderBy, Firestore fills the limit() window in DOC-ID order, so a
+    // bulk-archived pile whose ids sort first (contest-eval:first_attempt_solve:*)
+    // crowds every live alert out of the scan BEFORE the in-memory archived
+    // filter runs. Order newest-first so the window always holds the most
+    // recent docs. The archived filter STAYS in memory: legacy docs omit the
+    // field, so an `archived == false` equality would drop live legacy alerts.
+    // Single-field orderBy rides the automatic index; combining it with the
+    // contest_slug equality filter above WOULD need a composite index, so the
+    // contest-scoped branch keeps the bare (index-free) scan.
+    query = query.orderBy("timestamp", "desc");
+  }
 
   const snapshot = await query.limit(ALERTS_QUERY_LIMIT).get();
   const alerts = snapshot.docs
@@ -4153,7 +4167,14 @@ async function invigilatorRoom(req) {
   // filtered SERVER-SIDE so hidden alert types never leave the backend.
   const alertSettings = await getAlertSettings();
   let alertQuery = firestore.collection(ALERTS_COLLECTION);
-  if (contestSlug) alertQuery = alertQuery.where("contest_slug", "==", contestSlug);
+  if (contestSlug) {
+    alertQuery = alertQuery.where("contest_slug", "==", contestSlug);
+  } else {
+    // Same zero-alerts scan-window fix as adminAlerts: newest-first so an
+    // archived doc-id-sorted pile cannot crowd live alerts out of the window
+    // (archived filter stays in memory — legacy docs omit the field).
+    alertQuery = alertQuery.orderBy("timestamp", "desc");
+  }
   const alertSnapshot = await alertQuery.limit(ALERTS_QUERY_LIMIT).get();
   const alerts = alertSnapshot.docs
     .map((doc) => doc.data())
