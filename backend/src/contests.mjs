@@ -14,7 +14,7 @@
 // legacy exam keeps running off the SETTINGS_ID="active" doc bit-for-bit; it
 // surfaces here only as a READ-ONLY synthesized contest (legacy:true) so the
 // future Contests tab shows today's exam without migration.
-import { randomInt } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { SUPPORTED_LANGUAGES } from "./problems.mjs";
 import {
   normalizeProblemEntries,
@@ -43,6 +43,16 @@ const SLUG_COLLISION_LIMIT = 50;
 export const ACCESS_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
 const ACCESS_CODE_LENGTH = 6;
 const ACCESS_CODE_MINT_ATTEMPTS = 20;
+const ACCESS_CODE_PATTERN = new RegExp(`^[${ACCESS_CODE_ALPHABET}]{${ACCESS_CODE_LENGTH}}$`);
+
+// S-D: per-contest invigilator portal token (vision §2.7) — 18 random bytes,
+// base64url (24 chars, URL/doc-id safe). Minted at create, regenerate-able;
+// the GLOBAL invigilator password is demoted to Aerele-staff fallback.
+const CONTESTS_ROOMS_LIMIT = 50; // mirrors handler CONFIGURED_ROOMS_LIMIT
+
+function mintInvigilatorKey() {
+  return randomBytes(18).toString("base64url");
+}
 
 // Cross-contest reads must OPT IN with this sentinel — scopedQuery never
 // defaults to unscoped (F9 §2.3.2). A Symbol so no JSON payload can forge it.
@@ -124,6 +134,7 @@ export async function createContest(body) {
   const roomGateEnabled = body?.room_gate_enabled === undefined
     ? false
     : requireBoolean(body.room_gate_enabled, "room_gate_enabled");
+  const rooms = normalizeContestRooms(body?.rooms);
   const accessCode = await mintAccessCode();
   const legacy = await synthesizeLegacyContest();
   const now = new Date().toISOString();
@@ -148,6 +159,7 @@ export async function createContest(body) {
       identity_mode: "person",
       identity_label: identityLabel,
       access_code: accessCode,
+      invigilator_key: mintInvigilatorKey(),
       start_at: window.start_at,
       end_at: window.end_at,
       end_at_updated_at: null, // S5 semantics move per-contest at S-C/S-D
@@ -159,7 +171,7 @@ export async function createContest(body) {
       enforcement,
       languages,
       room_gate_enabled: roomGateEnabled,
-      rooms: [],
+      rooms,
       created_at: now,
       updated_at: now,
       // Lifecycle block placeholders (F9 §3) — S-G/S-H fill these in.
@@ -205,6 +217,9 @@ export async function updateContest(slugRaw, body) {
   const existing = await getRealContest(slugRaw);
   if (body?.identity_mode !== undefined) throw httpError(400, "identity_mode is immutable");
   if (body?.access_code !== undefined) throw httpError(400, "access_code cannot be edited");
+  // S-D: secrets are mint-only — /api/admin/contest-regenerate is the ONLY
+  // writer, so an admin typo can never plant a guessable key.
+  if (body?.invigilator_key !== undefined) throw httpError(400, "invigilator_key cannot be edited");
   if (body?.status !== undefined) throw httpError(400, "use /api/admin/contest-status to change status");
   if (body?.template_slug !== undefined) throw httpError(400, "template_slug is display-only provenance and cannot be edited");
 
@@ -216,6 +231,9 @@ export async function updateContest(slugRaw, body) {
   if (body?.enforcement !== undefined) patch.enforcement = normalizeTemplateEnforcement(body.enforcement);
   if (body?.languages !== undefined) patch.languages = normalizeContestLanguages(body.languages);
   if (body?.room_gate_enabled !== undefined) patch.room_gate_enabled = requireBoolean(body.room_gate_enabled, "room_gate_enabled");
+  // S-D: per-contest rooms list (vision §2.12) — same sanitize/dedupe rules as
+  // the legacy settings rooms editor.
+  if (body?.rooms !== undefined) patch.rooms = normalizeContestRooms(body.rooms);
   if (body?.name !== undefined) {
     const name = String(body.name).trim();
     if (!name) throw httpError(400, "name is required");
@@ -254,6 +272,82 @@ export async function setContestStatus(slugRaw, statusRaw) {
   const item = { ...existing, status, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
   return item;
+}
+
+// S-D: regenerate one of the contest's two distribution secrets. The old value
+// dies instantly — printed handouts/links go stale by design (that is the
+// point of regenerating). Legacy contest -> 404 via getRealContest.
+export async function regenerateContestSecret(slugRaw, fieldRaw) {
+  const field = String(fieldRaw ?? "");
+  if (field !== "access_code" && field !== "invigilator_key") {
+    throw httpError(400, "field must be access_code or invigilator_key");
+  }
+  const existing = await getRealContest(slugRaw);
+  const patch = field === "access_code"
+    ? { access_code: await mintAccessCode() }
+    : { invigilator_key: mintInvigilatorKey() };
+  const item = { ...existing, ...patch, updated_at: new Date().toISOString() };
+  await contestRef(item.slug).set(item);
+  return item;
+}
+
+// S-D (vision §10.3): the PUBLIC access-code resolver behind the landing page.
+// Codes only resolve OPEN contests — a draft/archived code is indistinguishable
+// from an unknown one (no contest enumeration via lifecycle state). Normalizes
+// case so lab machines can type lowercase.
+export async function resolveAccessCode(codeRaw) {
+  const code = String(codeRaw ?? "").trim().toUpperCase();
+  if (!ACCESS_CODE_PATTERN.test(code)) throw httpError(400, "invalid_code");
+  const snapshot = await contestsCol().where("access_code", "==", code).limit(2).get();
+  const match = snapshot.docs.map((doc) => doc.data()).find((contest) => contest.status === "open");
+  if (!match) throw httpError(404, "code_not_found");
+  return { slug: match.slug, name: match.name || match.slug };
+}
+
+// S-D: per-contest exam-time (S5 semantics moved onto the contest doc) —
+// mirrors the legacy /api/admin/exam-time contract field-for-field: exactly
+// one of end_at | extend_minutes | end_now, schedule must already be set,
+// the end must stay after the start, end_at_updated_at stamps the edit.
+// The HANDLER ends live sessions on end_now (it owns the session collection).
+export async function applyContestExamTime(slugRaw, body) {
+  const provided = ["end_at", "extend_minutes", "end_now"].filter(
+    (key) => body?.[key] !== undefined && body[key] !== null && body[key] !== ""
+  );
+  if (provided.length !== 1) throw httpError(400, "Provide exactly one of end_at, extend_minutes, end_now");
+  const field = provided[0];
+
+  const existing = await getRealContest(slugRaw);
+  if (!existing.start_at || !existing.end_at) {
+    throw httpError(400, "Contest schedule is not configured yet.");
+  }
+  const startMs = Date.parse(existing.start_at);
+  const currentEndMs = Date.parse(existing.end_at);
+  const now = new Date().toISOString();
+
+  let newEndMs;
+  if (field === "end_now") {
+    if (body.end_now !== true) throw httpError(400, "end_now must be true");
+    newEndMs = Date.parse(now);
+  } else if (field === "end_at") {
+    newEndMs = Date.parse(String(body.end_at));
+    if (!Number.isFinite(newEndMs)) throw httpError(400, "end_at must be a valid ISO 8601 date");
+  } else {
+    const delta = Number(body.extend_minutes);
+    if (!Number.isFinite(delta) || delta === 0) throw httpError(400, "extend_minutes must be a non-zero number");
+    if (!Number.isFinite(currentEndMs)) throw httpError(400, "Stored end time is invalid; set an absolute end_at instead.");
+    newEndMs = currentEndMs + delta * 60_000;
+  }
+  if (!Number.isFinite(startMs) || newEndMs <= startMs) {
+    throw httpError(400, "End time must be after the start time.");
+  }
+  const item = {
+    ...existing,
+    end_at: new Date(newEndMs).toISOString(),
+    end_at_updated_at: now,
+    updated_at: now
+  };
+  await contestRef(item.slug).set(item);
+  return { contest: item, field, now };
 }
 
 // A REAL contest doc or 404. The synthesized legacy contest deliberately falls
@@ -311,6 +405,7 @@ export async function synthesizeLegacyContest() {
     identity_mode: "legacy_username",
     identity_label: IDENTITY_LABEL_DEFAULT,
     access_code: null,
+    invigilator_key: null,
     start_at: settings.start_at || null,
     end_at: settings.end_at || null,
     end_at_updated_at: settings.end_at_updated_at || null,
@@ -443,6 +538,25 @@ function normalizeContestLanguages(raw) {
     if (!SUPPORTED_LANGUAGES.includes(language)) throw httpError(400, `unsupported language: ${language}`);
   }
   return languages;
+}
+
+// S-D rooms: mirrors handler.mjs sanitizeRoom + normalizeRooms (trim, strip
+// non [a-zA-Z0-9 ._-], 80-char cap, case-insensitive dedupe, 50-room cap) so a
+// contest-doc room label always equals the form sessions store it in. Absent
+// -> [] (a contest may run without configured rooms); non-array garbage -> 400.
+function normalizeContestRooms(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw httpError(400, "rooms must be an array");
+  const seen = new Set();
+  const out = [];
+  for (const item of raw) {
+    const room = String(item).trim().replace(/[^a-zA-Z0-9 ._-]/g, "").slice(0, 80);
+    if (!room || seen.has(room.toLowerCase())) continue;
+    seen.add(room.toLowerCase());
+    out.push(room);
+    if (out.length >= CONTESTS_ROOMS_LIMIT) break;
+  }
+  return out;
 }
 
 // F9 §2.1: clamp 1..30; non-integer garbage is a 400 (never silently defaulted —

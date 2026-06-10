@@ -4,7 +4,7 @@ import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { ALL_CONTESTS, configureContestStore, createContest, listContests, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
+import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { configureIdentityStore, findContestRosterEntries, getContestRosterMeta, getContestRosterSummary, identityNorm, listColleges, saveContestRoster } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
@@ -263,7 +263,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/exec/run") return send(res, 200, await execRun(req));
     if (req.method === "POST" && path === "/api/exec/submit") return send(res, 200, await execSubmit(req));
     if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
-    if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig());
+    if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig(req));
+    if (req.method === "POST" && path === "/api/access-code") return send(res, 200, await publicAccessCode(req));
     if (req.method === "POST" && path === "/api/roster/lookup") return send(res, 200, await rosterLookup(req));
     if (req.method === "GET" && path === "/api/admin/roster") return send(res, 200, await adminGetRoster(req));
     if (req.method === "POST" && path === "/api/admin/roster") return send(res, 200, await adminSaveRoster(req));
@@ -281,6 +282,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/contests") return send(res, 200, await adminCreateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-update") return send(res, 200, await adminUpdateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-status") return send(res, 200, await adminContestStatus(req));
+    if (req.method === "POST" && path === "/api/admin/contest-regenerate") return send(res, 200, await adminContestRegenerate(req));
+    if (req.method === "POST" && path === "/api/admin/contest-exam-time") return send(res, 200, await adminContestExamTime(req));
     if (req.method === "GET" && path === "/api/admin/templates") return send(res, 200, await adminListTemplates(req));
     if (req.method === "GET" && path === "/api/admin/template") return send(res, 200, await adminGetTemplate(req));
     if (req.method === "POST" && path === "/api/admin/templates") return send(res, 200, await adminCreateTemplate(req));
@@ -2244,6 +2247,31 @@ async function adminContestStatus(req) {
   return { ok: true, contest: await setContestStatus(String(body.slug), String(body.status)) };
 }
 
+// S-D: POST /api/admin/contest-regenerate {slug, field} — mint a fresh
+// access_code or invigilator_key (vision §2.7: both are regenerate-able).
+async function adminContestRegenerate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug", "field"]);
+  return { ok: true, contest: await regenerateContestSecret(String(body.slug), String(body.field)) };
+}
+
+// S-D: POST /api/admin/contest-exam-time {slug, end_at|extend_minutes|end_now}
+// — the legacy S5 exam-time card, per contest. contests.mjs owns the doc write;
+// end_now additionally ends every live session in THIS contest's scope (same
+// paginated sweep as the legacy endpoint).
+async function adminContestExamTime(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  const { contest, field, now } = await applyContestExamTime(String(body.slug), body);
+  let endedCount = 0;
+  if (field === "end_now") {
+    endedCount = await endAllLiveSessions(contest.slug, now);
+  }
+  return { ok: true, start_at: contest.start_at, end_at: contest.end_at, server_now: now, ended_count: endedCount };
+}
+
 // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
 
 function rosterMetaRef() {
@@ -2441,14 +2469,13 @@ async function adminGetRoster(req) {
 // exists). Returns only non-sensitive config: whether the roster gate is on,
 // what to call the unique-ID field, and the room labels. Fail-open client-side
 // is safe because /api/session/start re-enforces the roster gate regardless.
-async function publicExamConfig() {
+async function publicExamConfig(req) {
+  // S-D: ?contest= switches this pre-session endpoint to the CONTEST-owned
+  // config (vision C1/C4). Without the param, today's settings-driven payload
+  // stays bit-for-bit — the legacy deployment keeps working unchanged.
+  const contestParam = String(req?.query?.contest ?? "").trim();
+  if (contestParam) return contestExamConfig(contestParam);
   const [settings, meta] = await Promise.all([getSettings(), getRosterMeta()]);
-  // DEFERRED to S-D (wave-4): this pre-session endpoint stays GLOBAL-settings
-  // driven — no candidate is routed to a person contest before S-D defines the
-  // contest-aware exam-config contract (?contest= param + identity_label +
-  // college picker bootstrap). Every SESSION-BOUND surface (start/resume,
-  // heartbeat, violation, events reconcile, exec gate, room-gate poll) is
-  // already contest-sourced via enforcementConfigFor/cameraRecordingConfigFor.
   return {
     roster_required: Boolean(meta),
     unique_id_label: meta?.unique_id_column || "",
@@ -2461,6 +2488,87 @@ async function publicExamConfig() {
     // camera is recorded or live-monitored only.
     camera_recording: cameraRecordingConfig(settings)
   };
+}
+
+// S-D: per-contest exam-config — 400 unknown_contest / 403 contest_not_open
+// (the candidate app turns either into the access-code landing page). Person
+// contests serve their OWN snapshot fields; the synthesized legacy contest
+// serves the settings-driven values under the same contest-shaped envelope.
+async function contestExamConfig(slug) {
+  const contest = await resolveContest(slug, { requireOpen: true });
+  const envelope = {
+    contest_slug: contest.slug,
+    contest_name: contest.name || contest.slug,
+    identity_label: contest.identity_label || "Candidate ID",
+    start_at: contest.start_at || null,
+    end_at: contest.end_at || null,
+    server_now: new Date().toISOString()
+  };
+  if (contest.legacy) {
+    const [settings, meta] = await Promise.all([getSettings(), getRosterMeta()]);
+    return {
+      ...envelope,
+      roster_required: Boolean(meta),
+      unique_id_label: meta?.unique_id_column || "",
+      rooms: normalizeRooms(settings?.rooms),
+      room_gate_enabled: Boolean(settings?.room_gate_enabled),
+      enforcement: enforcementConfig(settings),
+      camera_recording: cameraRecordingConfig(settings)
+    };
+  }
+  const meta = await getContestRosterMeta(contest);
+  return {
+    ...envelope,
+    roster_required: Boolean(meta),
+    // The label-driven identity prompt (F9 §1.5): person contests label the
+    // unique-id field from the CONTEST doc, never a roster column name.
+    unique_id_label: envelope.identity_label,
+    rooms: normalizeRooms(contest.rooms),
+    room_gate_enabled: Boolean(contest.room_gate_enabled),
+    enforcement: enforcementConfigFor(contest, null),
+    camera_recording: cameraRecordingConfigFor(contest, null)
+  };
+}
+
+// ---- S-D: PUBLIC access-code resolver (vision §10.3) -------------------------
+// POST /api/access-code {code} -> {slug, name}. Per-IP fixed-window rate limit
+// (in-memory, single-instance — same documented limitation as the exec
+// limiter); EVERY attempt counts, valid or not, so the 34^6 space cannot be
+// enumerated faster than the cap regardless of response shape.
+const ACCESS_CODE_RATE_LIMIT = 10;
+const ACCESS_CODE_RATE_WINDOW_MS = 60_000;
+const ACCESS_CODE_RATE_MAP_LIMIT = 10_000;
+let _accessCodeClock = () => Date.now();
+export function __setAccessCodeClockForTest(fn) {
+  _accessCodeClock = fn || (() => Date.now());
+}
+const accessCodeAttempts = new Map(); // ip -> { count, windowStartMs }
+
+function checkAccessCodeRateLimit(ip) {
+  const nowMs = _accessCodeClock();
+  // Bounded memory: when the map grows past the cap, sweep expired windows
+  // (an attacker rotating spoofed IPs cannot grow it unboundedly between sweeps).
+  if (accessCodeAttempts.size >= ACCESS_CODE_RATE_MAP_LIMIT) {
+    for (const [key, entry] of accessCodeAttempts) {
+      if (nowMs - entry.windowStartMs >= ACCESS_CODE_RATE_WINDOW_MS) accessCodeAttempts.delete(key);
+    }
+  }
+  let entry = accessCodeAttempts.get(ip);
+  if (!entry || nowMs - entry.windowStartMs >= ACCESS_CODE_RATE_WINDOW_MS) {
+    entry = { count: 0, windowStartMs: nowMs };
+    accessCodeAttempts.set(ip, entry);
+  }
+  entry.count += 1;
+  if (entry.count > ACCESS_CODE_RATE_LIMIT) {
+    throw rateLimited(Math.max(1, Math.ceil((entry.windowStartMs + ACCESS_CODE_RATE_WINDOW_MS - nowMs) / 1000)));
+  }
+}
+
+async function publicAccessCode(req) {
+  checkAccessCodeRateLimit(getClientIp(req));
+  const body = parseBody(req);
+  const resolved = await resolveAccessCode(body?.code);
+  return { ok: true, ...resolved };
 }
 
 // The ACTIVE-version roster entry for a unique id, or null. Entries from a
@@ -4525,17 +4633,24 @@ async function adminAlertAction(req) {
 // (same helper the admin dropdowns use), whether blank-room sessions exist
 // (the "_" pseudo-room), and whether the room start gate is enabled.
 async function invigilatorOverview(req) {
-  requireInvigilator(req);
-  const settings = await getSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), await contestScopeOf(contestSlug))
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
+  const settings = contest ? null : await getSettings();
+  const contestSlug = invigilatorContestSlug(contest, settings);
+  const scope = contest || await contestScopeOf(contestSlug);
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const docs = snapshot.docs.map((doc) => doc.data());
+  // Contest mode: the CONFIGURED rooms (contest doc) union the rooms sessions
+  // actually carry — invigilators can pick their room before any session exists.
+  const rooms = contest
+    ? [...new Set([...normalizeRooms(contest.rooms), ...distinctRooms(docs)])].sort((a, b) => a.localeCompare(b))
+    : distinctRooms(docs);
   return {
     contest_slug: contestSlug || null,
-    room_gate_enabled: Boolean(settings?.room_gate_enabled),
-    rooms: distinctRooms(docs),
+    room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
+    rooms,
     has_unassigned: docs.some((doc) => !String(doc.room || "").trim())
   };
 }
@@ -4600,11 +4715,12 @@ async function requireGateEnabledSettings() {
 // regenerate:true for a fresh one. Calling this on an OPEN room re-arms the
 // OTP gate (late arrivals) — already-released candidates keep exam_started_at.
 async function invigilatorReleaseCode(req) {
-  requireInvigilator(req);
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
   const body = parseBody(req);
   requireFields(body, ["room"]);
-  const settings = await requireGateEnabledSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const settings = await requireGateEnabledFor(contest);
+  const contestSlug = invigilatorContestSlug(contest, settings);
   const roomKey = gateRoomKey(body.room);
   const existing = await getRoomGate(contestSlug, roomKey);
   if (existing && existing.mode === "otp" && existing.otp && body.regenerate !== true) {
@@ -4635,11 +4751,12 @@ async function invigilatorReleaseCode(req) {
 // so every waiting candidate's next gate poll admits them without a code. This
 // is the room-scoped parallel of the admin's master switch (room_gate_enabled).
 async function invigilatorOpenRoom(req) {
-  requireInvigilator(req);
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
   const body = parseBody(req);
   requireFields(body, ["room"]);
-  const settings = await requireGateEnabledSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const settings = await requireGateEnabledFor(contest);
+  const contestSlug = invigilatorContestSlug(contest, settings);
   const roomKey = gateRoomKey(body.room);
   const existing = await getRoomGate(contestSlug, roomKey);
   const now = new Date().toISOString();
@@ -4673,11 +4790,12 @@ async function invigilatorOpenRoom(req) {
 // start gate off) this is the room proctor's ONLY code path, and an unlock
 // code must always be mintable.
 async function invigilatorUnlockCode(req) {
-  requireInvigilator(req);
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
   const body = parseBody(req);
   requireFields(body, ["room"]);
-  const settings = await getSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const settings = contest ? null : await getSettings();
+  const contestSlug = invigilatorContestSlug(contest, settings);
   const roomKey = gateRoomKey(body.room);
   const existing = await getRoomGate(contestSlug, roomKey);
   if (existing && existing.unlock_otp && body.regenerate !== true) {
@@ -4714,18 +4832,19 @@ async function invigilatorUnlockCode(req) {
 // locked_reason) stay admin-only — an invigilator must not undo a deliberate
 // admin lock. Independent of the room start gate.
 async function invigilatorUnlock(req) {
-  requireInvigilator(req);
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
   const body = parseBody(req);
   requireFields(body, ["room", "username"]);
-  const settings = await getSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const settings = contest ? null : await getSettings();
+  const contestSlug = invigilatorContestSlug(contest, settings);
   const roomKey = gateRoomKey(body.room);
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
   const usernameNorm = normalizeUsername(body.username);
 
   const snapshot = await scopedQuery(
     firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
-    await contestScopeOf(contestSlug)
+    contest || await contestScopeOf(contestSlug)
   ).limit(50).get();
   const locked = snapshot.docs
     .map((doc) => doc.data())
@@ -4761,18 +4880,19 @@ async function invigilatorUnlock(req) {
 // Deliberately NOT behind requireGateEnabledSettings — exemptions are an
 // enforcement tool, independent of the room start gate.
 async function invigilatorExempt(req) {
-  requireInvigilator(req);
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
   const body = parseBody(req);
   requireFields(body, ["room", "username", "exemptions"]);
-  const settings = await getSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  const settings = contest ? null : await getSettings();
+  const contestSlug = invigilatorContestSlug(contest, settings);
   const roomKey = gateRoomKey(body.room);
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
   const usernameNorm = normalizeUsername(body.username);
 
   const snapshot = await scopedQuery(
     firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
-    await contestScopeOf(contestSlug)
+    contest || await contestScopeOf(contestSlug)
   ).limit(50).get();
   const live = snapshot.docs
     .map((doc) => doc.data())
@@ -5093,14 +5213,15 @@ async function requireExamStarted(session, settings) {
 // with NO room. Least privilege: rows carry NO email and NO IPs; alerts carry
 // NO video/download fields — invigilators read presence, not recordings.
 async function invigilatorRoom(req) {
-  requireInvigilator(req);
+  const contest = await invigilatorContestOf(req);
+  requireInvigilatorFor(req, contest);
   const roomParam = req.query?.room;
   if (roomParam === undefined || roomParam === null || roomParam === "") {
     return badRequest("room is required");
   }
-  const settings = await getSettings();
-  const contestSlug = settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
-  const contestScope = await contestScopeOf(contestSlug);
+  const settings = contest ? null : await getSettings();
+  const contestSlug = invigilatorContestSlug(contest, settings);
+  const contestScope = contest || await contestScopeOf(contestSlug);
   const roomKey = gateRoomKey(roomParam);
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(roomParam);
 
@@ -5193,7 +5314,7 @@ async function invigilatorRoom(req) {
     contest_slug: contestSlug || null,
     room: roomLabel || null,
     room_key: roomKey,
-    room_gate_enabled: Boolean(settings?.room_gate_enabled),
+    room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
     stats,
     sessions,
     gate,
@@ -5386,9 +5507,21 @@ function requireAdmin(req) {
 let warnedMissingInvigilatorPassword = false;
 
 function requireInvigilator(req) {
+  requireInvigilatorFor(req, null);
+}
+
+// S-D (vision §2.7/I1): per-contest invigilator token auth. The portal sends
+// whatever credential it has in x-invigilator-password; it is accepted when it
+// is (a) the admin password, (b) THE NAMED CONTEST's invigilator_key, or
+// (c) the global INVIGILATOR_PASSWORD (demoted to Aerele-staff fallback).
+// A contest key never authenticates another contest (the compare runs against
+// the resolved contest only) and never authenticates the legacy no-param
+// portal. All compares are timing-safe via safeEqual.
+function requireInvigilatorFor(req, contest) {
   const invig = req.get?.("x-invigilator-password") || req.headers?.["x-invigilator-password"] || "";
   const admin = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
   if (ADMIN_PASSWORD && (safeEqual(admin, ADMIN_PASSWORD) || safeEqual(invig, ADMIN_PASSWORD))) return;
+  if (contest && !contest.legacy && contest.invigilator_key && safeEqual(invig, contest.invigilator_key)) return;
   if (!INVIGILATOR_PASSWORD) {
     if (!warnedMissingInvigilatorPassword) {
       console.warn("INVIGILATOR_PASSWORD is not set; rejecting invigilator-password requests.");
@@ -5397,6 +5530,37 @@ function requireInvigilator(req) {
     throw httpError(401, "Unauthorized");
   }
   if (!safeEqual(invig, INVIGILATOR_PASSWORD)) throw httpError(401, "Unauthorized");
+}
+
+// S-D: the OPTIONAL ?contest=/body.contest param on invigilator endpoints.
+// Absent -> null (the legacy settings-driven portal, bit-for-bit). Present ->
+// the resolved contest doc (or 400 unknown_contest). requireOpen:false —
+// invigilators set rooms up before the window opens and stay on after close.
+async function invigilatorContestOf(req) {
+  let slug = String(req.query?.contest ?? "").trim();
+  if (!slug) slug = String(parseBody(req)?.contest ?? "").trim();
+  if (!slug) return null;
+  return await resolveContest(slug, { requireOpen: false });
+}
+
+// The contest_slug value gate docs / session scoping use for this portal view:
+// contest-mode -> the contest's slug ("" for an empty-slug legacy deployment,
+// matching what its sessions were stamped with); legacy-mode -> the settings
+// derivation used since S3.
+function invigilatorContestSlug(contest, settings) {
+  if (contest) return contest.legacy_empty_slug ? "" : contest.slug;
+  return settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+}
+
+// Contest-mode gate-enable check (the contest OWNS room_gate_enabled, S-I
+// snapshot field); legacy mode keeps requireGateEnabledSettings. Returns the
+// settings doc only in legacy mode (contest mode never needs it).
+async function requireGateEnabledFor(contest) {
+  if (contest) {
+    if (!contest.room_gate_enabled) badRequest("room_gate_disabled");
+    return null;
+  }
+  return await requireGateEnabledSettings();
 }
 
 let warnedMissingApiKey = false;
