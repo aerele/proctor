@@ -10,6 +10,9 @@ import type {
   BeaconKind,
   CaptureState,
   EditorEvent,
+  EnforcementConfigPayload,
+  EnforcementExemptions,
+  EnforcementViolationResponse,
   ExamConfig,
   ExamTimeRequest,
   ExamTimeResponse,
@@ -174,6 +177,10 @@ type DemoSession = {
   blocked_by_session_id: string | null;
   start_ip: string;
   exam_started_at?: string | null;
+  // F5.3/F5.5: enforcement lock reason + per-session exemptions (demo parity
+  // for the violation→lock→code-unlock flow and the exemption toggles).
+  locked_reason?: string | null;
+  enforcement_exemptions?: EnforcementExemptions;
 };
 
 function readDemoSessions(): DemoSession[] {
@@ -217,6 +224,30 @@ function contestSlugFromUrl(contestUrl?: string) {
   }
 }
 
+// F5.3 demo parity: the same NaN-guarded normalization the backend's
+// enforcementConfig applies (defaults 20 / 2 / "block").
+function enforcementIntOr(raw: unknown, fallback: number, minimum: number): number {
+  const num = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(num) && Number.isInteger(num) && num >= minimum ? num : fallback;
+}
+
+function normalizeEnforcementSettings(settings: Partial<ProctorSettings> | null | undefined) {
+  return {
+    fullscreen_reentry_seconds: enforcementIntOr(settings?.fullscreen_reentry_seconds, 20, 1),
+    fullscreen_exit_limit: enforcementIntOr(settings?.fullscreen_exit_limit, 2, 0),
+    enforcement_mode: (settings?.enforcement_mode === "alert_first" ? "alert_first" : "block") as "block" | "alert_first"
+  };
+}
+
+function demoEnforcement(): EnforcementConfigPayload {
+  const normalized = normalizeEnforcementSettings(getDemoSettings());
+  return {
+    fullscreen_reentry_seconds: normalized.fullscreen_reentry_seconds,
+    fullscreen_exit_limit: normalized.fullscreen_exit_limit,
+    mode: normalized.enforcement_mode
+  };
+}
+
 function demoSessionResponse(session: DemoSession, contestUrl: string): SessionStartResponse {
   return {
     session_id: session.session_id,
@@ -232,6 +263,10 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
     // S3: mirror the backend startResponse — the candidate client needs the
     // gate flag to know whether to hold at the room-code screen (demo parity).
     room_gate_enabled: getDemoSettings()?.room_gate_enabled === true,
+    // F5.3/F5.5: enforcement knobs + exemptions + lock reason (backend parity).
+    enforcement: demoEnforcement(),
+    enforcement_exemptions: session.enforcement_exemptions ?? {},
+    locked_reason: session.locked_reason ?? null,
     // S4: server-driven problem assigned to the session (null when unassigned).
     problem: demoActiveProblem(),
     upload_config: {
@@ -361,6 +396,8 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
     return settings
       ? {
           ...settings,
+          // F5.3: GET always reports normalized enforcement values (backend parity).
+          ...normalizeEnforcementSettings(settings),
           passcode: "",
           end_code: "",
           passcode_set: Boolean(settings.passcode),
@@ -368,7 +405,7 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
           end_code_set: Boolean(settings.end_code),
           end_code_preview: maskPasscode(settings.end_code)
         }
-      : { start_at: "", end_at: "", passcode_set: false, end_code_set: false };
+      : { start_at: "", end_at: "", ...normalizeEnforcementSettings(null), passcode_set: false, end_code_set: false };
   }
 
   return request<ProctorSettings>("/api/admin/settings", {
@@ -398,6 +435,14 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       ...resolveSavedEndAt(getDemoSettings(), { start_at: settings.start_at, end_at: settings.end_at }),
       contest_url: settings.contest_url || "",
       room_gate_enabled: settings.room_gate_enabled === true,
+      // F5.3: persist the enforcement knobs through the same NaN-guarded
+      // normalization the backend applies (defaults 20 / 2 / "block"); an
+      // absent field preserves the stored value (backend parity).
+      ...normalizeEnforcementSettings({
+        fullscreen_reentry_seconds: settings.fullscreen_reentry_seconds ?? getDemoSettings()?.fullscreen_reentry_seconds,
+        fullscreen_exit_limit: settings.fullscreen_exit_limit ?? getDemoSettings()?.fullscreen_exit_limit,
+        enforcement_mode: settings.enforcement_mode ?? getDemoSettings()?.enforcement_mode
+      }),
       problem_id: settings.problem_id || "",
       rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
       // Passcodes are removed from the start/end flow, but we keep persisting any
@@ -517,7 +562,19 @@ export async function heartbeat(params: {
     }
     // S5: mirror the real heartbeat — carry the current demo end time so the
     // student countdown updates live when the demo admin changes it.
-    return { ok: true, status: session?.status ?? "active", start_ip: "demo.local", current_ip: "demo.local", ip_changed: false, newly_changed: false, end_at: getDemoSettings()?.end_at || "", server_now: new Date().toISOString() };
+    // F5.3/F5.5: ditto for enforcement config + per-session exemptions.
+    return {
+      ok: true,
+      status: session?.status ?? "active",
+      start_ip: "demo.local",
+      current_ip: "demo.local",
+      ip_changed: false,
+      newly_changed: false,
+      end_at: getDemoSettings()?.end_at || "",
+      enforcement: demoEnforcement(),
+      enforcement_exemptions: session?.enforcement_exemptions ?? {},
+      server_now: new Date().toISOString()
+    };
   }
   return request<HeartbeatResponse>("/api/heartbeat", {
     method: "POST",
@@ -752,7 +809,12 @@ export async function fetchSessionCardDetail(password: string, sessionId: string
       heartbeat_count: row.chunk_count * 2,
       // F6.6: varied per-source capture states (null for pending_approval —
       // those sessions never sent a composite heartbeat).
-      capture_state: demoCaptureStateFor(row)
+      capture_state: demoCaptureStateFor(row),
+      // F5.3/F5.5: the demo locked row reads as an ENFORCEMENT lock so the
+      // admin can see the locked-by-enforcement state; exemption toggles
+      // reflect the in-memory row (mutated by the exempt action).
+      locked_reason: row.status === "locked" ? "fullscreen_enforcement" : null,
+      enforcement_exemptions: { ...row.enforcement_exemptions }
     };
   }
 
@@ -795,6 +857,9 @@ type DemoAdminSessionRow = {
   // derive as disconnected, falsy/omitted on every other row. A flag (not
   // wall-clock math) so the demo counts never drift as the page stays open.
   stale?: boolean;
+  // F5.5: per-session exemption toggles (mutated in place like status —
+  // in-memory only, resets on reload).
+  enforcement_exemptions?: EnforcementExemptions;
 };
 
 const DEMO_CONTEST_SLUG = "mcet-june-2026"; // the slug DEMO_RECORDING_SESSIONS uses
@@ -1482,9 +1547,19 @@ function applyDemoAdminPopulationAction(body: SessionActionRequest): Array<Recor
     if (body.action === "approve" || body.action === "unlock" || body.action === "bypass") row.status = "active";
     else if (body.action === "lock") row.status = "locked";
     else if (body.action === "end") row.status = "ended";
+    // F5.5: per-session exemption toggles (merge semantics, backend parity).
+    else if (body.action === "exempt") row.enforcement_exemptions = { ...row.enforcement_exemptions, ...sanitizeDemoExemptions(body.exemptions) };
     updated.push({ ...row });
   }
   return updated;
+}
+
+// F5.5 demo parity with the backend's sanitizeExemptions: known keys, booleans only.
+function sanitizeDemoExemptions(input: EnforcementExemptions | undefined): EnforcementExemptions {
+  const out: EnforcementExemptions = {};
+  if (input && typeof input.fullscreen === "boolean") out.fullscreen = input.fullscreen;
+  if (input && typeof input.switch_away === "boolean") out.switch_away = input.switch_away;
+  return out;
 }
 
 // Mirror the backend applySessionAction semantics against the demo store so the
@@ -1520,8 +1595,13 @@ function applyDemoSessionAction(body: SessionActionRequest): Array<Record<string
       upsertDemoSession({ ...target, status: "locked" });
       updated.push({ ...target, status: "locked" });
     } else if (body.action === "unlock") {
-      upsertDemoSession({ ...target, status: "active" });
-      updated.push({ ...target, status: "active" });
+      // F5.3 parity: an admin unlock clears the enforcement lock reason.
+      upsertDemoSession({ ...target, status: "active", locked_reason: null });
+      updated.push({ ...target, status: "active", locked_reason: null });
+    } else if (body.action === "exempt") {
+      const merged = { ...sanitizeDemoExemptions(target.enforcement_exemptions), ...sanitizeDemoExemptions(body.exemptions) };
+      upsertDemoSession({ ...target, enforcement_exemptions: merged });
+      updated.push({ ...target, enforcement_exemptions: merged });
     } else if (body.action === "bypass") {
       upsertDemoSession({ ...target, status: "active", blocked_by_session_id: null });
       updated.push({ ...target, status: "active", blocked_by_session_id: null });
@@ -1836,6 +1916,9 @@ const DEFAULT_DEMO_ALERT_SETTINGS: AlertSettings = {
     recording_stopped: { enabled: true, severity: "critical" },
     screen_share_stopped: { enabled: true, severity: "critical" },
     recording_error: { enabled: true, severity: "critical" },
+    // F5.3: the fullscreen enforcement ladder tripped (alert display only —
+    // the block-mode lock is policy, governed by enforcement_mode).
+    fullscreen_enforcement: { enabled: true, severity: "critical" },
     ip_changed: { enabled: true, severity: "warning" },
     tab_hidden: { enabled: true, severity: "warning" },
     tab_away: { enabled: true, severity: "warning", threshold_seconds: 12 },
@@ -2405,7 +2488,8 @@ export async function fetchExamConfig(): Promise<ExamConfig> {
     return {
       roster_required: Boolean(roster),
       unique_id_label: roster?.unique_id_column ?? "",
-      rooms: getDemoSettings()?.rooms ?? []
+      rooms: getDemoSettings()?.rooms ?? [],
+      enforcement: demoEnforcement()
     };
   }
   try {
@@ -2646,6 +2730,8 @@ export async function fetchInvigilatorRoom(password: string, room: string): Prom
         status: s.status,
         stale: s.status === "active" && s.stale === true,
         exam_started_at: gate?.mode === "open" ? gate.opened_at : null,
+        // F5.5: drives the room dashboard's per-student exemption toggles.
+        enforcement_exemptions: { ...s.enforcement_exemptions },
         created_at: s.created_at
       }));
     const alerts: InvigilatorAlert[] = readDemoAlerts()
@@ -2739,6 +2825,37 @@ export async function openRoom(password: string, room: string, invigilatorName: 
   });
 }
 
+// F5.5: per-student enforcement exemption from the invigilator room dashboard.
+// Least privilege: addressed by room + username (never session_id). Demo mode
+// mutates the shared admin population row in place (same pattern as the demo
+// session actions), so the next 5 s poll reflects the toggle.
+export async function invigilatorExempt(
+  password: string,
+  room: string,
+  username: string,
+  exemptions: EnforcementExemptions
+): Promise<{ ok: boolean; username: string; enforcement_exemptions: EnforcementExemptions }> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoInvigilator(password);
+    const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
+    const usernameNorm = normalizeUsername(username);
+    const live = DEMO_ALL_SESSIONS
+      .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status !== "ended")
+      .filter((row) => String(row.room || "") === roomLabel)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    if (!live.length) throw demoApiError(404, "no_live_session_in_room");
+    const row = live[0];
+    row.enforcement_exemptions = { ...sanitizeDemoExemptions(row.enforcement_exemptions), ...sanitizeDemoExemptions(exemptions) };
+    return { ok: true, username: row.hackerrank_username, enforcement_exemptions: { ...row.enforcement_exemptions } };
+  }
+  return request<{ ok: boolean; username: string; enforcement_exemptions: EnforcementExemptions }>("/api/invigilator/exempt", {
+    method: "POST",
+    headers: invigilatorHeaders(password),
+    body: JSON.stringify({ room, username, exemptions })
+  });
+}
+
 // Candidate-side gate poll/unlock. No code = status poll; with a code it
 // attempts the room OTP. Demo mode mirrors the backend against localStorage.
 export async function pollRoomGate(sessionId: string, code?: string): Promise<RoomGatePollResponse> {
@@ -2772,6 +2889,57 @@ export async function pollRoomGate(sessionId: string, code?: string): Promise<Ro
   return request<RoomGatePollResponse>("/api/session/room-gate", {
     method: "POST",
     body: JSON.stringify({ session_id: sessionId, ...(code ? { code } : {}) })
+  });
+}
+
+// F5.3: the candidate client reports a tripped enforcement ladder (countdown
+// expired / exit limit exceeded). The SERVER decides lock vs alert-only from
+// its own settings. Demo mode mirrors the backend against localStorage.
+export async function reportEnforcementViolation(
+  sessionId: string,
+  phase: "countdown_expired" | "exit_limit",
+  exitCount: number
+): Promise<EnforcementViolationResponse> {
+  if (demoMode) {
+    await wait(120);
+    const session = readDemoSessions().find((item) => item.session_id === sessionId);
+    if (!session) throw demoApiError(404, "Session not found");
+    if (session.enforcement_exemptions?.fullscreen === true) {
+      return { ok: true, locked: false, exempt: true };
+    }
+    if (demoEnforcement().mode === "alert_first") {
+      return { ok: true, locked: false, mode: "alert_first" };
+    }
+    upsertDemoSession({ ...session, status: "locked", locked_reason: "fullscreen_enforcement" });
+    return { ok: true, locked: true, locked_reason: "fullscreen_enforcement", mode: "block" };
+  }
+  return request<EnforcementViolationResponse>("/api/session/enforcement-violation", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, phase, exit_count: exitCount })
+  });
+}
+
+// F5.6 L2 release: candidate-side unlock of an ENFORCEMENT lock with the
+// room's release-code OTP (the code on the invigilator's board). Throws
+// ApiError invalid_code / not_enforcement_locked / too_many_attempts.
+export async function unlockEnforcementGate(sessionId: string, code: string): Promise<{ ok: boolean; status: string }> {
+  if (demoMode) {
+    await wait(150);
+    const session = readDemoSessions().find((item) => item.session_id === sessionId);
+    if (!session) throw demoApiError(404, "Session not found");
+    if (session.status !== "locked" || session.locked_reason !== "fullscreen_enforcement") {
+      throw demoApiError(403, "not_enforcement_locked");
+    }
+    const gate = readDemoRoomGates()[roomKeyForLabel(session.room)];
+    if (gate?.otp && gate.otp === String(code).trim()) {
+      upsertDemoSession({ ...session, status: "active", locked_reason: null });
+      return { ok: true, status: "active" };
+    }
+    throw demoApiError(403, "invalid_code");
+  }
+  return request<{ ok: boolean; status: string }>("/api/session/unlock-gate", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, code })
   });
 }
 

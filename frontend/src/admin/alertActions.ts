@@ -59,6 +59,16 @@ export const SESSION_ACTION_INFO: Record<SessionAction, SessionActionInfo> = {
     label: "End",
     tooltip: "End this session permanently — the candidate cannot continue this attempt.",
     destructive: true
+  },
+  // F5.5: carries a payload (exemptions) — surfaced as dedicated TOGGLES on the
+  // session detail card and the invigilator room dashboard, never as a plain
+  // action button here (hence absent from SESSION_ACTION_ORDER and
+  // validSessionActionsFor).
+  exempt: {
+    action: "exempt",
+    label: "Exempt",
+    tooltip: "Exempt this session from a specific anomaly enforcement (fullscreen hard-block / switch-away alerts) — for legitimate environment problems.",
+    destructive: false
   }
 };
 

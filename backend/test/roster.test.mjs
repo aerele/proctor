@@ -300,7 +300,11 @@ test("GET /api/exam-config: roster off + no rooms -> all-empty config", async ()
   freshClients();
   const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body, { roster_required: false, unique_id_label: "", rooms: [] });
+  assert.deepEqual(res.body, {
+    roster_required: false, unique_id_label: "", rooms: [],
+    // F5.3: enforcement defaults always ride the public config.
+    enforcement: { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" }
+  });
 });
 
 test("GET /api/exam-config reflects the roster label + configured rooms", async () => {
@@ -308,7 +312,10 @@ test("GET /api/exam-config reflects the roster label + configured rooms", async 
   seedOpenWindow(firestore, { rooms: ["Lab A-1", "Lab B-2"] });
   await uploadSampleRoster();
   const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
-  assert.deepEqual(res.body, { roster_required: true, unique_id_label: "Roll No", rooms: ["Lab A-1", "Lab B-2"] });
+  assert.deepEqual(res.body, {
+    roster_required: true, unique_id_label: "Roll No", rooms: ["Lab A-1", "Lab B-2"],
+    enforcement: { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" }
+  });
 });
 
 test("POST /api/roster/lookup returns ONLY confirmation-safe fields (masked email, no extra columns)", async () => {

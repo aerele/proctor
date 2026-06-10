@@ -1,6 +1,6 @@
 import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
 import type { ApiError } from "./api";
-import type { ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
+import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 type RecorderOptions = {
   sessionId: string;
@@ -25,6 +25,9 @@ type RecorderOptions = {
   // the host updates its countdown so a proctor's live time change propagates
   // within one heartbeat interval (no reload).
   onExamTimeChange?: (info: { endAt: string; serverNow: string }) => void;
+  // F5.3/F5.5: every heartbeat echoes the enforcement config + this session's
+  // exemptions, so an admin/invigilator exemption applies live (no reload).
+  onEnforcementChange?: (info: { enforcement?: EnforcementConfigPayload; exemptions?: EnforcementExemptions }) => void;
 };
 
 type RecorderControls = {
@@ -393,6 +396,10 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         // S5: surface the current exam end time on every heartbeat.
         if (response.end_at) {
           options.onExamTimeChange?.({ endAt: response.end_at, serverNow: response.server_now ?? "" });
+        }
+        // F5.3/F5.5: surface enforcement config + exemptions on every heartbeat.
+        if (response.enforcement || response.enforcement_exemptions) {
+          options.onEnforcementChange?.({ enforcement: response.enforcement, exemptions: response.enforcement_exemptions });
         }
         // B1: an active heartbeat reports the live status; if a proctor
         // locked/ended/paused the session, self-stop the recorder.
