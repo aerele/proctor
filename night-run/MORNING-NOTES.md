@@ -93,6 +93,31 @@ This is the first thing to read in the morning. Three sections, kept current thr
 - Review minors being fixed in the S3 workflow's first step: exact-norm check after sanitized-doc-id lookup; version-prefixed entry ids (re-upload window); mapped-blank-cell → ignore typed for name/email/roll. **Morning call:** hackerrank_username KEEPS the typed fallback when roster cell is blank (session key; blank would strand the candidate) — veto if you want strict.
 
 ---
+## S3 invigilator portal — BUILT + BROWSER-VERIFIED (~06:30)
+- 8/8 plan tasks (e1d4402…c5cee18): invigilator auth + overview, room gate release-code/open-room, candidate room-gate poll/unlock + exec block until `exam_started_at`, room dashboard (stats/students/gate/alerts), gate types + pure gateLogic (12 vitest), `/invigilator` portal UI + admin checkbox, student waiting room. **No signed-QR anything** (deferred scope, as planned).
+- Suites: backend **271/271**, frontend **121/121** + `tsc --noEmit` clean + `vite build` clean.
+- Browser integration (demo mode, Chromium :9222, fresh server on **:5174** with `VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev VITE_INVIGILATOR_PASSWORD=invig`): all 9 checklist items pass — evidence `night-run/evidence/s3-verify-*.png`:
+  1. Admin settings: window + **Room start codes** ticked → Save → Load current keeps it ticked (01).
+  2. `/invigilator` unlock with `invig` + name Priya → room picker lists Lab A-1 / Lab B-2 / Other… (02).
+  3. Lab A-1 dashboard: Recording 3 / Total 12 tiles, students table, room-scoped non-archived alerts only (03).
+  4. Release code → 6-digit `824475` rendered huge; **reload + re-unlock re-displays the SAME code** (idempotent); Regenerate (confirm) → fresh `068629` (04, 05).
+  5. Start now — allow all (confirm) → badge **"Room OPEN — everyone admitted"**, STARTED EXAM 0→12, every row flips to Started (06).
+  6. Student in Lab B-2 (not open): recording starts → **"Waiting for your room code"** panel, coding workspace hidden (07, 07b).
+  7. Wrong code → inline "That code is not correct for your room…" (08); released Lab B-2 code `380471` typed → workspace appears (Sum of Two Numbers, Run/Submit) (09).
+  8. Fresh student in Lab C-3 + portal **Start now** → student auto-advances to IN EXAM within ~5 s, zero typing (10).
+  9. Admin unticks the gate checkbox + Save → fresh waiting student (Lab D-4) auto-released on the next poll, IN EXAM ~1–2 s after save (11). Admin master bypass works.
+- **1 fix found by browser verification, own commit c5cee18:** demo `demoSessionResponse` omitted `room_gate_enabled`, so in demo mode every candidate was released instantly and the waiting room could never appear. One-line parity fix mirroring the backend startResponse; lint+vitest+build green after.
+
+### S3 judgment calls (review these)
+1. **Plaintext OTP in `proctor_room_gates`** (per plan): it's a short-lived room-coordination code that must be re-displayable, not a credential; online guessing bounded by the 20-attempt per-session cap (429 even with the right code at the cap).
+2. **Admin password accepted on invigilator endpoints, in either header** (per plan) — an admin can always open the portal; the invigilator password is closed-by-default when `INVIGILATOR_PASSWORD` is unset.
+3. **Re-arm-after-open semantics** (per plan): releasing a code on an OPEN room re-arms the OTP gate for late arrivals only; already-released candidates keep `exam_started_at`.
+4. **Roll numbers visible to invigilators** (per plan): room rows show name/username/roll for desk checks; NO email, NO IPs, NO media URLs (verified in Task-4 tests).
+5. **Ran browser checks on a second dev server :5174** instead of touching the protected :5173 instance (it lacks `VITE_INVIGILATOR_PASSWORD`; admin-password fallback would have skipped the invig-credential path). :5173 left untouched; :5174 killed after the run.
+6. **Screen share + clipboard automated via page stubs** (canvas `captureStream` for `getDisplayMedia`, stubbed `clipboard.readText`): the OS share picker and the clipboard permission prompt cannot be driven by CDP. The plan explicitly allowed an alternate for the share dialog. Side-finding, NOT a bug: a never-answered clipboard permission prompt parks the start flow in "starting" (`collectEntryReviewEvidence` awaits `readText`); real users answer the prompt and rejections are handled.
+7. **Demo invigilator dashboard reads the curated fixture sessions (`DEMO_ALL_SESSIONS`), not live demo sessions** — deliberate "demo approximation" from Task 5/6; a live demo student (e.g. Lab C-3) doesn't appear in the demo room table, though gates/poll/release still work against it (that's how items 8–9 passed). Left as designed; flag if you want live-store merge in demo.
+
+---
 ## AUDIT (front-loaded morning gate) — full report: night-run/AUDIT-REPORT.md
 **0 blockers / 11 major / 18 minor / 14 nit** over acdba86..84b1c24 (S3-late + S4 get a delta-audit). gitleaks clean (Judge0 key only in gitignored files, verified untracked). PII scanner clean except the items below.
 
