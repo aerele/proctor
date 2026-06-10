@@ -58,6 +58,7 @@ import type {
   UploadManifestItem,
   UploadUrlResponse
 } from "./types";
+import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
@@ -149,6 +150,9 @@ type DemoSession = {
   hackerrank_username: string;
   username_norm: string;
   name: string;
+  // S6: the matched roster id (display form), "" when no roster — mirrors the
+  // backend session doc so demo attendance can join sessions to the roster.
+  roster_unique_id: string;
   room: string;
   contest_slug: string;
   storage_prefix: string;
@@ -285,6 +289,9 @@ export async function startSession(form: StudentForm, existingSessionId?: string
       hackerrank_username: effectiveUsername,
       username_norm: usernameNorm,
       name: rosterName || form.name.trim(),
+      roster_unique_id: demoRosterHit
+        ? (demoRosterHit.row[demoRosterHit.roster.unique_id_column] ?? "").trim()
+        : "",
       room: form.room.trim(),
       contest_slug: contestSlug,
       storage_prefix: demoStoragePrefix(contestSlug, usernameNorm, sessionId),
@@ -1028,6 +1035,58 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
       "x-admin-password": password
     }
   });
+}
+
+// ---- S6 attendance stats ----------------------------------------------------
+// GET /api/admin/attendance — roster-based taken / not-taken / absentees.
+// Spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md.
+// `null` on 404 so the Attendance tab can show "not deployed yet" (same degrade
+// as fetchSessionsList / fetchRosterStatus). The demo branch joins the demo
+// roster against the REAL demo session store via the SAME pure computeAttendance
+// the backend semantics mirror, so demo and production agree by construction.
+export async function fetchAttendance(password: string, contestSlug?: string): Promise<AttendanceReport | null> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    const roster = getDemoRoster();
+    if (!roster) return { configured: false };
+    const mapped = (row: Record<string, string>, field: keyof RosterColumnMapping) => {
+      const column = roster.column_mapping[field];
+      return column ? (row[column] ?? "").trim() : "";
+    };
+    const rosterRows = roster.rows.map((row) => ({
+      unique_id: (row[roster.unique_id_column] ?? "").trim(),
+      name: mapped(row, "name"),
+      roll_number: mapped(row, "roll_number"),
+      room: mapped(row, "room")
+    }));
+    const sessions = readDemoSessions()
+      .filter((session) => !contestSlug || session.contest_slug === contestSlug)
+      .map((session) => ({
+        // Old persisted demo sessions predate the field — read defensively.
+        roster_unique_id: String(session.roster_unique_id ?? ""),
+        status: session.status
+      }));
+    return {
+      configured: true,
+      contest_slug: contestSlug || null,
+      generated_at: new Date().toISOString(),
+      ...computeAttendance(rosterRows, sessions)
+    };
+  }
+
+  const query = new URLSearchParams();
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  const suffix = query.toString();
+  try {
+    return await request<AttendanceReport>(`/api/admin/attendance${suffix ? `?${suffix}` : ""}`, {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
 }
 
 export async function sessionAction(password: string, body: SessionActionRequest): Promise<SessionActionResponse> {
