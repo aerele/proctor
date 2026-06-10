@@ -2,6 +2,7 @@ import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCi
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchExamConfig, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionDetails, fetchSessionsList, parseRosterInput, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
+import { InvigilatorApp } from "./InvigilatorApp";
 import { CodingWorkspace } from "./coding/CodingWorkspace";
 import * as studentCopy from "./studentCopy";
 import { topBarVisible } from "./shell/examShell";
@@ -70,6 +71,8 @@ type IntegrityCheckpoint = {
 };
 
 export function App() {
+  // S3: the invigilator portal lives on its own path, like /admin.
+  if (window.location.pathname.startsWith("/invigilator")) return <InvigilatorApp />;
   const isAdmin = window.location.pathname.startsWith("/admin");
   return isAdmin ? <AdminApp /> : <StudentApp />;
 }
@@ -1416,6 +1419,7 @@ function AdminApp() {
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
+        room_gate_enabled: Boolean(response.room_gate_enabled),
         updated_at: response.updated_at
       });
       setRoomsText((response.rooms ?? []).join(", "));
@@ -1436,6 +1440,7 @@ function AdminApp() {
         start_at: localInputToIso(settings.start_at),
         end_at: localInputToIso(settings.end_at),
         contest_url: settings.contest_url,
+        room_gate_enabled: settings.room_gate_enabled === true,
         // parseRosterInput = the existing comma/newline split + trim + dedupe.
         rooms: parseRosterInput(roomsText)
       });
@@ -1443,6 +1448,7 @@ function AdminApp() {
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
+        room_gate_enabled: Boolean(response.room_gate_enabled),
         updated_at: response.updated_at
       });
       setRoomsText((response.rooms ?? []).join(", "));
@@ -1872,6 +1878,17 @@ function AdminApp() {
           <Field label="End time" type="datetime-local" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
           <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
+          <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
+            <input
+              className="mt-1 h-4 w-4 accent-accent"
+              type="checkbox"
+              checked={settings.room_gate_enabled === true}
+              onChange={(event) => setSettings({ ...settings, room_gate_enabled: event.target.checked })}
+            />
+            <span>
+              <span className="font-medium text-ink">Room start codes (invigilator gate)</span> — after recording starts, candidates wait until their room's invigilator releases a 6-digit code (or presses "Start now") from <code>/invigilator</code>. Unchecking this releases everyone.
+            </span>
+          </label>
           <div className="mt-6 flex flex-wrap gap-3 md:col-span-3">
             <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={loadSettings} disabled={settingsLoading}>
               Load current
