@@ -3062,6 +3062,19 @@ function ProctorAlertTypesSection({ settings, loading, message, onReload, onSave
                   {!config.enabled ? <span className="rounded-full border border-line px-2 py-0.5 text-xs text-muted">disabled</span> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
+                  {/* F9.3: whether this type appears on the INVIGILATOR room
+                      dashboard's alert feed (filtered server-side). Defaults:
+                      critical types visible, warning types admin-only. */}
+                  <label className="flex items-center gap-2 text-xs text-muted">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-accent"
+                      checked={config.show_to_invigilator}
+                      disabled={loading}
+                      onChange={(event) => updateType(type, { show_to_invigilator: event.target.checked })}
+                    />
+                    Show to invigilator
+                  </label>
                   {/* tab_away alone exposes a configurable threshold: the minimum
                       continuous "HackerRank not visible" span (seconds) the
                       monitoring tab-away detector must observe before alerting.

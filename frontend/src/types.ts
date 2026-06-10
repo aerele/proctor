@@ -486,6 +486,9 @@ export type ProctorAlertType =
 export type ProctorAlertTypeConfig = {
   enabled: boolean;
   severity: AlertSeverity;
+  // F9.3: whether alerts of this type appear on the INVIGILATOR room dashboard
+  // (filtered server-side). Defaults: critical types true, warning types false.
+  show_to_invigilator: boolean;
   // Only tab_away carries this: the minimum continuous "HackerRank not visible"
   // span (seconds) the monitoring tab-away detector must observe before raising
   // an alert. Default 12. Source of truth for the detector's --min-gap-seconds.
@@ -714,11 +717,14 @@ export type InvigilatorOverviewResponse = {
   has_unassigned: boolean;
 };
 
+// M13: NO session_id on rows — it is the candidate's write-endpoint bearer
+// token; invigilators identify candidates by name/roll/username.
 export type InvigilatorSessionRow = {
-  session_id: string;
   name: string;
   hackerrank_username: string;
   roll_number: string;
+  /** F9.4: the roster's unique id (identity data — joins the alert detail view). */
+  roster_unique_id: string;
   status: ServerSessionStatus | "";
   stale: boolean;
   exam_started_at: string | null;
@@ -727,15 +733,15 @@ export type InvigilatorSessionRow = {
   created_at: string;
 };
 
+// M12/M13 least-privilege projection: NO session_id (bearer token) and NO
+// free-text detail (the ip_changed detail embeds candidate IPs).
 export type InvigilatorAlert = {
   id: string;
   type: string;
   severity: AlertSeverity;
   timestamp: string;
   title: string;
-  detail: string;
   hackerrank_username: string;
-  session_id: string;
 };
 
 export type InvigilatorRoomStats = {
