@@ -30,7 +30,7 @@ const handler = await import("../src/handler.mjs?identitycore");
 const { api, __setClientsForTest } = handler;
 // handler.mjs?identitycore resolves ./identity.mjs WITHOUT a buster, so this
 // import is the exact module instance the handler configured.
-const { identityNorm, personIdOf, enrollmentIdOf, rosterMetaIdFor } = await import("../src/identity.mjs");
+const { identityNorm, personIdOf, enrollmentIdOf, rosterMetaIdFor, PERSON_ID_SEPARATOR } = await import("../src/identity.mjs");
 
 // Inline req/res + fakes (convention: copied per test file, NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -177,15 +177,37 @@ test("identityNorm: golden table (whitespace, case, sanitize collapse, all-dots,
   assert.equal(identityNorm(long), "x".repeat(120)); // sanitizeSegment caps at 120
 });
 
+test("personIdOf is INJECTIVE: components can never forge the separator (wave-4 fix)", () => {
+  // Pre-fix collisions with the old "--" separator: both pairs below derived
+  // the SAME person_id, silently aliasing two real people onto one
+  // proctor_persons doc / enrollment / live slot / GCS prefix.
+  assert.notEqual(
+    personIdOf(identityNorm("anna -- chennai"), identityNorm("123")),
+    personIdOf(identityNorm("anna"), identityNorm("chennai--123"))
+  );
+  assert.notEqual(
+    personIdOf(identityNorm("abc-"), identityNorm("x")),
+    personIdOf(identityNorm("abc"), identityNorm("-x"))
+  );
+  // The structural guarantee: the separator is a single char OUTSIDE the
+  // sanitized component charset [a-zA-Z0-9._-], so no component can ever
+  // contain (or forge) it — the join point is always unique.
+  assert.equal(PERSON_ID_SEPARATOR.length, 1);
+  assert.doesNotMatch(PERSON_ID_SEPARATOR, /[a-zA-Z0-9._-]/);
+  assert.equal(identityNorm(`x${PERSON_ID_SEPARATOR}y`).includes(PERSON_ID_SEPARATOR), false);
+});
+
 test("composite norm bounds: person_id is sanitize-stable, under Firestore doc-id and GCS path limits", () => {
   const collegeNorm = identityNorm("C".repeat(300)); // worst case: 120 chars
   const uniqueIdNorm = identityNorm("U".repeat(300)); // worst case: 120 chars
   const personId = personIdOf(collegeNorm, uniqueIdNorm);
-  assert.equal(personId, `${"c".repeat(120)}--${"u".repeat(120)}`);
-  assert.equal(personId.length, 242);
+  assert.equal(personId, `${"c".repeat(120)}~${"u".repeat(120)}`);
+  assert.equal(personId.length, 241);
   // person_id must be doc-id/path-safe BY CONSTRUCTION: re-sanitizing each
-  // component is a no-op, and the "--" separator is in the safe charset.
-  assert.match(personId, /^[a-zA-Z0-9@._-]+$/);
+  // component is a no-op, and the "~" separator is legal in Firestore doc ids,
+  // GCS object names and URLs (RFC 3986 unreserved) while staying OUTSIDE the
+  // component charset (injectivity above).
+  assert.match(personId, /^[a-zA-Z0-9@._~-]+$/);
   // Firestore doc id limit: 1500 bytes. Worst enrollment id = slug(<=200) + "::" + person_id.
   const worstSlug = "s".repeat(200);
   assert.ok(Buffer.byteLength(enrollmentIdOf(worstSlug, personId)) < 1500);
@@ -267,7 +289,7 @@ test("confirmed re-post with create resolution: colleges/persons/enrollments/ent
 
   // Person doc (vision §2.3 shape: components stored as fields, never parsed)
   const personId = personIdOf("kec", "21cs001");
-  assert.equal(personId, "kec--21cs001");
+  assert.equal(personId, "kec~21cs001");
   const person = firestore._collections.get("ic_persons").get(personId);
   assert.equal(person.person_id, personId);
   assert.equal(person.college_norm, "kec");
@@ -371,8 +393,8 @@ test("same unique_id under DIFFERENT colleges in one roster: allowed, warned, di
   assert.equal(res.body.ok, true);
   assert.deepEqual(res.body.ambiguous_ids, [{ unique_id_norm: "21cs001", colleges: ["kec", "psgtech"] }]);
   // Two persons, two enrollments — no collision by construction.
-  assert.ok(firestore._collections.get("ic_persons").has("kec--21cs001"));
-  assert.ok(firestore._collections.get("ic_persons").has("psgtech--21cs001"));
+  assert.ok(firestore._collections.get("ic_persons").has("kec~21cs001"));
+  assert.ok(firestore._collections.get("ic_persons").has("psgtech~21cs001"));
   assert.equal(firestore._collections.get("ic_enrollments").size, 2);
 });
 
@@ -387,13 +409,13 @@ test("profile latest-wins + person_profile_updated audit row on name/email chang
   const res = await call(uploadReq(personUpload(contest.slug, [renamed])));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.persons, { created: 0, updated: 1 });
-  const person = firestore._collections.get("ic_persons").get("kec--21cs001");
+  const person = firestore._collections.get("ic_persons").get("kec~21cs001");
   assert.equal(person.name, "Asha R");
   assert.equal(person.email, "asha.r@x.com");
   const audits = [...firestore._collections.get("ic_audit").values()];
   assert.equal(audits.length, 1);
   assert.equal(audits[0].action, "person_profile_updated");
-  assert.equal(audits[0].person_id, "kec--21cs001");
+  assert.equal(audits[0].person_id, "kec~21cs001");
   assert.equal(audits[0].contest_slug, contest.slug);
   assert.deepEqual(audits[0].changes, {
     name: { from: "Asha", to: "Asha R" },
@@ -414,7 +436,7 @@ test("re-upload removal semantics: dropped person → enrollment removed (kept);
 
   // Bala has an in-flight session under the person norm.
   await firestore.collection("ic_sessions").doc("sess-bala").set({
-    session_id: "sess-bala", username_norm: "kec--21cs002", contest_slug: contest.slug,
+    session_id: "sess-bala", username_norm: "kec~21cs002", contest_slug: contest.slug,
     candidate_id: "21CS002", status: "active", room: "Lab A", created_at: "2026-06-10T01:00:00.000Z"
   });
 
@@ -422,20 +444,20 @@ test("re-upload removal semantics: dropped person → enrollment removed (kept);
   const res = await call(uploadReq(personUpload(contest.slug, [ROW_ASHA])));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.enrollments, { created: 0, reactivated: 0, removed: 1 });
-  const enrollment = firestore._collections.get("ic_enrollments").get(enrollmentIdOf(contest.slug, "kec--21cs002"));
+  const enrollment = firestore._collections.get("ic_enrollments").get(enrollmentIdOf(contest.slug, "kec~21cs002"));
   assert.equal(enrollment.status, "removed");
   assert.ok(enrollment.removed_at);
   const alerts = [...firestore._collections.get("ic_alerts").values()];
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].type, "roster_removed_mid_exam");
-  assert.equal(alerts[0].username_norm, "kec--21cs002");
+  assert.equal(alerts[0].username_norm, "kec~21cs002");
   assert.equal(alerts[0].contest_slug, contest.slug);
   assert.equal(alerts[0].session_id, "sess-bala");
 
   // Re-adding Bala reactivates the SAME enrollment doc.
   const back = await call(uploadReq(personUpload(contest.slug, [ROW_ASHA, ROW_BALA])));
   assert.deepEqual(back.body.enrollments, { created: 0, reactivated: 1, removed: 0 });
-  const reactivated = firestore._collections.get("ic_enrollments").get(enrollmentIdOf(contest.slug, "kec--21cs002"));
+  const reactivated = firestore._collections.get("ic_enrollments").get(enrollmentIdOf(contest.slug, "kec~21cs002"));
   assert.equal(reactivated.status, "active");
   assert.equal(reactivated.removed_at, null);
 });
@@ -459,7 +481,7 @@ test("same person across two contests joins BOTH enrollments under the same pers
   await call(uploadReq(personUpload(round1.slug, [ROW_ASHA], { college_resolutions: { kec: { action: "create" } } })));
   const res = await call(uploadReq(personUpload(round2.slug, [ROW_ASHA])));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  const personId = "kec--21cs001";
+  const personId = "kec~21cs001";
   assert.equal(firestore._collections.get("ic_persons").size, 1); // ONE durable person
   assert.ok(firestore._collections.get("ic_enrollments").has(enrollmentIdOf(round1.slug, personId)));
   assert.ok(firestore._collections.get("ic_enrollments").has(enrollmentIdOf(round2.slug, personId)));

@@ -16,6 +16,7 @@ process.env.CONTESTS_COLLECTION = "ct_contests";
 process.env.TEMPLATES_COLLECTION = "ct_templates";
 process.env.PROBLEMS_COLLECTION = "ct_problems";
 process.env.SUBMISSIONS_COLLECTION = "ct_submissions";
+process.env.ALERTS_COLLECTION = "ct_alerts";
 process.env.ADMIN_PASSWORD = "ct-admin-pass";
 
 const handler = await import("../src/handler.mjs?contests");
@@ -359,6 +360,32 @@ test("legacy: create never claims the synthesized legacy slug (suffixes instead)
   const res = await call(createReq({ name: "KEC Aerele 2026" }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.contest.slug, "kec-aerele-2026-2");
+});
+
+test("create: never adopts a HISTORIC legacy slug — orphaned sessions/submissions/alerts push to the next suffix (wave-4 fix)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  // A previous exam run left sessions stamped with a slug NO contest doc owns
+  // (old contest_url-derived legacy slugs look exactly like slugify output).
+  // Adopting it would resolve those sessions onto the NEW contest: resume would
+  // serve the new problems[], exec would 400 problem_not_in_contest, and every
+  // scopedQuery admin read would mix the two populations.
+  await firestore.collection("ct_sessions").doc("old-1").set({
+    session_id: "old-1", contest_slug: "kec-june-2026", username_norm: "alice", status: "ended"
+  });
+  const res = await call(createReq({ name: "KEC June 2026" }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.contest.slug, "kec-june-2026-2");
+
+  // Submission-only and alert-only populations (e.g. ingested external alerts)
+  // are protected by the same probe.
+  await firestore.collection("ct_submissions").doc("s-1").set({ contest_slug: "old-subs", session_id: "x" });
+  assert.equal((await call(createReq({ name: "Old Subs" }))).body.contest.slug, "old-subs-2");
+  await firestore.collection("ct_alerts").doc("a-1").set({ contest_slug: "old-alerts", type: "peer_copy" });
+  assert.equal((await call(createReq({ name: "Old Alerts" }))).body.contest.slug, "old-alerts-2");
+
+  // A slug with NO orphaned data is untouched (no false positives).
+  assert.equal((await call(createReq({ name: "Fresh Name" }))).body.contest.slug, "fresh-name");
 });
 
 // ---- update (name change does NOT change slug) --------------------------------

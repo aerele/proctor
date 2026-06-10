@@ -131,10 +131,10 @@ function freshClients() {
   return { firestore, storage };
 }
 
-async function createOpenContest(name, { window: withWindow = true } = {}) {
+async function createOpenContest(name, { window: withWindow = true, body: extraBody = {} } = {}) {
   // S-I publish gate: a contest cannot open with zero problems, so every
   // open-contest fixture carries the published seed problem.
-  let res = await call(makeReq({ method: "POST", path: "/api/admin/contests", headers: ADMIN_HEADERS, body: { name, problems: [{ problem_id: "sum-two" }] } }));
+  let res = await call(makeReq({ method: "POST", path: "/api/admin/contests", headers: ADMIN_HEADERS, body: { name, problems: [{ problem_id: "sum-two" }], ...extraBody } }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   const contest = res.body.contest;
   if (withWindow) {
@@ -202,8 +202,8 @@ test("person contest + roster: username_norm = person_id, candidate_id = roster 
   assert.equal(res.body.room_gate_enabled, false);
 
   const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
-  assert.equal(session.username_norm, "kec--21cs001"); // person_id IS the norm
-  assert.equal(session.person_id, "kec--21cs001");
+  assert.equal(session.username_norm, "kec~21cs001"); // person_id IS the norm
+  assert.equal(session.person_id, "kec~21cs001");
   assert.equal(session.college_norm, "kec");
   assert.equal(session.candidate_id, "21 CS 001");
   assert.equal(session.identity_label, "Candidate ID");
@@ -214,9 +214,9 @@ test("person contest + roster: username_norm = person_id, candidate_id = roster 
   assert.equal(session.email, "asha@x.com");
   assert.equal(session.roll_number, "R-77");   // unmapped: typed kept
   assert.equal(session.hackerrank_username, undefined); // F9 D2: deleted for new contests
-  assert.equal(session.storage_prefix, `contests/${contest.slug}/sessions/kec--21cs001/${res.body.session_id}/`);
+  assert.equal(session.storage_prefix, `contests/${contest.slug}/sessions/kec~21cs001/${res.body.session_id}/`);
   // H1 live-lock rides the person norm.
-  assert.ok(firestore._collections.get("pi_live_locks").has(`live:kec--21cs001:${contest.slug}`));
+  assert.ok(firestore._collections.get("pi_live_locks").has(`live:kec~21cs001:${contest.slug}`));
 });
 
 test("person contest window gates the start (contest doc, NOT the legacy settings window)", async () => {
@@ -246,7 +246,7 @@ test("ambiguity: same unique_id in two colleges → 409 college_choices payload;
   const picked = await call(startReq({ contest: contest.slug, roster_unique_id: "21CS001", college: "psgtech", consent_accepted: true }));
   assert.equal(picked.statusCode, 200, JSON.stringify(picked.body));
   const session = firestore._collections.get("pi_sessions").get(picked.body.session_id);
-  assert.equal(session.person_id, "psgtech--21cs001");
+  assert.equal(session.person_id, "psgtech~21cs001");
   assert.equal(session.name, "Priya");
 
   const wrongCollege = await call(startReq({ contest: contest.slug, roster_unique_id: "21CS001", college: "nowhere", consent_accepted: true }));
@@ -348,6 +348,138 @@ test("person start response carries the CONTEST window end_at, not the legacy se
   assert.equal(res.body.problems.some((p) => p.id === "legacy-problem"), false);
   assert.equal(res.body.contest_url, ""); // contest_url is dead for person contests
   assert.equal(res.body.room_gate_enabled, false); // contest doc, not settings
+});
+
+// ---- wave-4 fix: contest-owned enforcement/camera/gate are SERVED, not dead ----
+// S-I instantiation snapshot-copies enforcement/camera_recording/
+// room_gate_enabled onto the contest doc; every SESSION-BOUND serve path must
+// read them from the contest, never the global settings doc. (Pre-session
+// /api/exam-config and the invigilator gate endpoints stay settings-driven
+// until S-D defines their contest-aware contracts.)
+
+const WALK_IN = { name: "Guest", email: "guest@x.com", consent_accepted: true };
+
+test("person start serves the CONTEST's snapshot enforcement + camera, never the global settings doc", async () => {
+  const { firestore } = freshClients();
+  // Global deployment knobs are the OPPOSITE of the contest's, to pin the source.
+  await firestore.collection("pi_settings").doc("active").set({
+    enforcement_mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2,
+    camera_recording: { enabled: true, fps: 10, width: 640 }
+  });
+  const contest = await createOpenContest("Soft Mode", { body: {
+    enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5 },
+    camera_recording: { enabled: false, fps: 5, width: 480 }
+  } });
+  const res = await call(startReq({ contest: contest.slug, candidate_id: "G1", ...WALK_IN }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5 });
+  assert.deepEqual(res.body.upload_config.camera, { enabled: false, fps: 5, width: 480 });
+
+  // Resume shares startResponse — same contest-sourced config.
+  const resume = await call(resumeReq({ session_id: res.body.session_id, contest: contest.slug, candidate_id: "G1" }));
+  assert.equal(resume.statusCode, 200);
+  assert.deepEqual(resume.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5 });
+  assert.deepEqual(resume.body.upload_config.camera, { enabled: false, fps: 5, width: 480 });
+});
+
+test("exec room gate reads the CONTEST's room_gate_enabled (contest ON + global OFF → exam_not_started)", async () => {
+  const { firestore } = freshClients();
+  await firestore.collection("pi_settings").doc("active").set({ room_gate_enabled: false });
+  const contest = await createOpenContest("Gated Exec", { body: { room_gate_enabled: true } });
+  const start = await call(startReq({ contest: contest.slug, candidate_id: "G1", ...WALK_IN }));
+  assert.equal(start.statusCode, 200, JSON.stringify(start.body));
+  assert.equal(start.body.room_gate_enabled, true);
+  const run = await call(makeReq({ method: "POST", path: "/api/exec/run", body: {
+    session_id: start.body.session_id, problem_id: "sum-two", language: "python", source_code: "print(1)"
+  } }));
+  assert.equal(run.statusCode, 403);
+  assert.equal(run.body.error, "exam_not_started");
+});
+
+test("candidate room-gate poll follows the CONTEST gate in both directions", async () => {
+  const { firestore } = freshClients();
+  // Contest gate ON + global OFF → the candidate WAITS at the gate.
+  await firestore.collection("pi_settings").doc("active").set({ room_gate_enabled: false });
+  const gated = await createOpenContest("Gated Poll", { body: { room_gate_enabled: true } });
+  const a = await call(startReq({ contest: gated.slug, candidate_id: "G1", ...WALK_IN }));
+  const pollA = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: a.body.session_id } }));
+  assert.equal(pollA.statusCode, 200, JSON.stringify(pollA.body));
+  assert.equal(pollA.body.gate_enabled, true);
+  assert.equal(pollA.body.exam_started, false);
+
+  // Contest gate OFF + global ON → the candidate starts immediately.
+  await firestore.collection("pi_settings").doc("active").set({ room_gate_enabled: true });
+  const open = await createOpenContest("Open Poll", { body: { room_gate_enabled: false } });
+  const b = await call(startReq({ contest: open.slug, candidate_id: "G2", ...WALK_IN }));
+  const pollB = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: b.body.session_id } }));
+  assert.equal(pollB.statusCode, 200, JSON.stringify(pollB.body));
+  assert.equal(pollB.body.gate_enabled, false);
+  assert.equal(pollB.body.exam_started, true);
+});
+
+test("heartbeat (the live channel) serves the CONTEST's enforcement + end_at on person sessions", async () => {
+  const { firestore } = freshClients();
+  await firestore.collection("pi_settings").doc("active").set({
+    enforcement_mode: "block",
+    end_at: new Date(Date.now() + 9 * HOUR).toISOString()
+  });
+  const contest = await createOpenContest("Soft HB", { body: {
+    enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 3 }
+  } });
+  const start = await call(startReq({ contest: contest.slug, candidate_id: "G1", ...WALK_IN }));
+  const hb = await call(makeReq({ method: "POST", path: "/api/heartbeat", body: {
+    session_id: start.body.session_id, recording_state: "combined:recording;screen:recording", visibility_state: "visible"
+  } }));
+  assert.equal(hb.statusCode, 200, JSON.stringify(hb.body));
+  assert.deepEqual(hb.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 3 });
+  const contestDoc = firestore._collections.get("pi_contests").get(contest.slug);
+  assert.equal(hb.body.end_at, contestDoc.end_at); // S5 live end-time stays contest-sourced
+});
+
+test("enforcement-violation consequence follows the CONTEST's mode, both directions", async () => {
+  const { firestore } = freshClients();
+  // alert_first contest under a block global → alert only, never locked.
+  await firestore.collection("pi_settings").doc("active").set({ enforcement_mode: "block" });
+  const soft = await createOpenContest("Soft Violation", { body: {
+    enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 }
+  } });
+  const a = await call(startReq({ contest: soft.slug, candidate_id: "G1", ...WALK_IN }));
+  const resA = await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: a.body.session_id, phase: "exit_limit", exit_count: 3 } }));
+  assert.equal(resA.statusCode, 200, JSON.stringify(resA.body));
+  assert.equal(resA.body.locked, false);
+  assert.equal(resA.body.mode, "alert_first");
+  assert.equal(firestore._collections.get("pi_sessions").get(a.body.session_id).status, "active");
+
+  // block contest under an alert_first global → locked.
+  await firestore.collection("pi_settings").doc("active").set({ enforcement_mode: "alert_first" });
+  const hard = await createOpenContest("Hard Violation", { body: {
+    enforcement: { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 }
+  } });
+  const b = await call(startReq({ contest: hard.slug, candidate_id: "G2", ...WALK_IN }));
+  const resB = await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: b.body.session_id, phase: "exit_limit", exit_count: 3 } }));
+  assert.equal(resB.statusCode, 200, JSON.stringify(resB.body));
+  assert.equal(resB.body.locked, true);
+  assert.equal(firestore._collections.get("pi_sessions").get(b.body.session_id).status, "locked");
+});
+
+test("server-side exit-limit reconciliation (events path) uses the CONTEST's enforcement", async () => {
+  const { firestore } = freshClients();
+  // Global: block with a 0-exit limit — the OLD code would lock on the first exit.
+  await firestore.collection("pi_settings").doc("active").set({ enforcement_mode: "block", fullscreen_exit_limit: 0 });
+  const contest = await createOpenContest("Lenient Events", { body: {
+    enforcement: { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 5 }
+  } });
+  const start = await call(startReq({ contest: contest.slug, candidate_id: "G1", ...WALK_IN }));
+  const res = await call(makeReq({ method: "POST", path: "/api/events", body: {
+    session_id: start.body.session_id,
+    events: [{ type: "fullscreen_exit", timestamp: new Date().toISOString(), detail: {} }]
+  } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const doc = firestore._collections.get("pi_sessions").get(start.body.session_id);
+  assert.equal(doc.fullscreen_exit_count, 1);
+  assert.equal(doc.status, "active"); // contest limit 5 — one exit is no violation
 });
 
 // ---- resume (F9 D8: dual-norm + contest-pinned) --------------------------------

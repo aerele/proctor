@@ -84,7 +84,7 @@ describe("evaluatePersonRosterUpload", () => {
     expect(result.response.persons).toEqual({ created: 2, updated: 0 });
     expect(result.response.enrollments).toEqual({ created: 2, reactivated: 0, removed: 0 });
     expect(result.state.colleges).toEqual({ kec: "KEC" });
-    expect(result.state.enrollments["kec--21cs001"]).toBe("active");
+    expect(result.state.enrollments["kec~21cs001"]).toBe("active");
   });
 
   it("hard-rejects duplicate (college, unique_id) on the FINAL norm with row numbers", () => {
@@ -125,7 +125,7 @@ describe("evaluatePersonRosterUpload", () => {
     expect(dropBala.kind).toBe("ok");
     if (dropBala.kind !== "ok") return;
     expect(dropBala.response.enrollments).toEqual({ created: 0, reactivated: 0, removed: 1 });
-    expect(dropBala.state.enrollments["kec--21cs002"]).toBe("removed");
+    expect(dropBala.state.enrollments["kec~21cs002"]).toBe("removed");
     expect(dropBala.response.persons).toEqual({ created: 0, updated: 1 });
 
     const readd = evaluatePersonRosterUpload(payload([ASHA, BALA]), dropBala.state);
