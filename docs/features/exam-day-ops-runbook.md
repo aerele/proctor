@@ -39,7 +39,7 @@ The candidate opens the contest link and moves through onboarding gates (all in 
 2. **Fullscreen first.** The shell goes fullscreen and starts proctoring/recording.
 3. **Roster identity confirm.** The candidate enters their **unique ID** (labeled per the roster's `identity_label`, e.g. "roll number"); the rest of their roster row pre-fills; they confirm "yes, this is me" and complete the details form. (`POST /api/roster/lookup`; roster identity gate at `App.tsx`.)
 4. **Workspace.** Multi-problem **Monaco** workspace (`frontend/src/admin/`/shell components; starter code via `STARTERS` + per-problem `stubs[lang]`; curated autocomplete) with **Run** and **Submit** against live Judge0. (`POST /api/exec/run`, `POST /api/exec/submit`.)
-5. A **top bar** shows time + name + room and **vanishes on any anomaly** so invigilators can spot trouble across the room.
+5. A slim **proctoring strip** (stage block, pulsing REC, name + ID + room, time left/elapsed) tops the exam; on any anomaly a **big full-width red banner replaces it** — invigilator glance rule: **red banner = walk over** (flipped 2026-06-12 from the old vanishing-bar cue; see [candidate-flow.md](candidate-flow.md)).
 
 The candidate session is created by `POST /api/session/start` (resume via `/api/session/resume`); screen + camera chunks and editor/proctoring events upload through `/api/upload-url`, `/api/events`, `/api/editor-events`. Full detail: [candidate-flow.md](candidate-flow.md).
 
@@ -82,15 +82,15 @@ Enforcement mode and the two thresholds are admin-configurable (Settings → enf
 
 ## 5. Live time control + End-now (Admin)
 
-On the **Live stats** view there is an exam-time card (remaining time computed against the **server** clock, skew-corrected):
+On the **Live stats** view there is an exam-time card (remaining time computed against the **server** clock, skew-corrected). Since 2026-06-12 the card **follows the contest scope** and says so with a chip: scoped to a real contest it shows/edits **that contest's window** (chip "Contest: {slug}", writes via `POST /api/admin/contest-exam-time`); unscoped (or the legacy row) it shows/edits the **legacy Settings schedule** (chip "Legacy schedule", routes below); an unknown scoped slug disables the controls.
 
-| Action | Effect | Route / body |
+| Action | Effect | Route / body (legacy scope; the contest scope uses `contest-exam-time` with the same body) |
 |--------|--------|--------------|
 | **+15 / +5 / −5 min** | Shift the current end time. | `POST /api/admin/exam-time` `{ extend_minutes }` |
 | **New end time** | Set an absolute end. | `POST /api/admin/exam-time` `{ end_at }` |
 | **End for everyone** | End-now: sets end = now **and** force-ends every non-ended session in scope. | `POST /api/admin/exam-time` `{ end_now: true }` |
 
-A plain extend/new-end change **never** force-ends sessions — recording keeps running so candidates end their own test; candidates pick up the new end time via heartbeat (≤15s, no reload). **End-now is the explicit hard stop.** Per-contest end time also lives on the contest detail card (`POST /api/admin/contest-exam-time`). The candidate top-bar timer is **status-bound** — it follows session status (it stops once the session is ended) rather than counting up from wall-clock start.
+A plain extend/new-end change **never** force-ends sessions — recording keeps running so candidates end their own test; candidates pick up the new end time via heartbeat (≤15s, no reload). **End-now is the explicit hard stop.** Per-contest end time also lives on the contest detail card (`POST /api/admin/contest-exam-time`). The candidate strip timer is **status-bound** — it follows session status (it stops once the session is ended) and anchors on the session's server-side start, so it survives recording restarts.
 
 ---
 
@@ -98,7 +98,7 @@ A plain extend/new-end change **never** force-ends sessions — recording keeps 
 
 All under the admin console (`App.tsx`); details in [admin-live-monitoring.md](admin-live-monitoring.md).
 
-![Admin Live stats](../assets/e2e/admin-review/01-live-stats.png)
+![Admin Live stats — current build, scoped contest with the exam-time scope chip](../assets/e2e-live/r3-scoped-examtime.png)
 
 | Surface | What you see | Refresh | Route |
 |---------|--------------|---------|-------|

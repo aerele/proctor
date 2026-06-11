@@ -86,7 +86,7 @@ Per-area, code-verified deep dives under [`features/`](features/).
 
 | Page | What it covers |
 |---|---|
-| [`features/architecture-overview.md`](features/architecture-overview.md) | The fullest single-page tour: the three path-routed frontend surfaces, the partially-decomposed `handler.mjs` backend, the 20+ Firestore collections + GCS evidence prefixes, the `person_id` identity model, the shared Alert contract, the not-deployed video-worker, and the ~80-route HTTP inventory. **Read this first.** |
+| [`features/architecture-overview.md`](features/architecture-overview.md) | The fullest single-page tour: the three path-routed frontend surfaces, the partially-decomposed `handler.mjs` backend, the 20+ Firestore collections + GCS evidence prefixes, the `person_id` identity model, the shared Alert contract, the not-deployed video-worker, and the ~81-route HTTP inventory. **Read this first.** |
 | [`features/alert-taxonomy.md`](features/alert-taxonomy.md) | The shared Alert JSON contract (required fields, idempotent merge on `id`), the proctor alert catalog + admin alert-settings defaults, per-type Share-with-invigilator (default OFF), the optional contest-eval alert types, the `x-api-key` ingest (closed-by-default, batch ≤ 500), and the enforcement-violation lock-ladder flow. |
 
 ### Background research (pre-build)

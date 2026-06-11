@@ -8,11 +8,39 @@ All surfaces in this page live in the admin frontend (`frontend/src/App.tsx`) an
 
 ---
 
+## The admin nav — six sections + the contest scope (redesigned 2026-06-12)
+
+The admin header is one card with at most two slim rows, replacing the old 13 flat tabs that wrapped onto two cluttered rows. The grouping is a pure, unit-tested model (`ADMIN_NAV_GROUPS` / `groupOfView()` in `frontend/src/admin/adminNav.ts`); the render lives in `AdminApp` (`App.tsx`).
+
+- **Top row — six section tabs** (ops-first order): **Live** (Live stats / Live alerts / Sessions / IP report), **Contest** (Contests / Attendance / Results), **Evidence** (Review / Recordings), **Authoring** (Problems / Templates), **People**, **Settings**.
+- **Contest scope picker, top-right of the same row** (`ContestScopePicker`): it scopes **every** admin screen, so it sits above them all. A single dropdown (`All contests` plus every contest), a **Clear** button, and an `(unknown slug)` literal option so a deep link to an old/purged slug is never silently dropped. The selection persists in this tab's URL `?contest=` param — two tabs run two parallel drives.
+- **Second row — the active section's views**, hidden entirely for the single-view People and Settings sections.
+- **Per-section last-view memory**: switching sections returns to the view you last used in that section, drill-downs included (`lastViewByGroup` + the view-change effect).
+- **Alert badge**: the open-alert count badges the **Live** section tab (and the **Live alerts** view tab inside it).
+
+![Admin nav — six section tabs, the Live section's view row, contest scope picker top-right scoped to a contest (the Exam-time card below carries the matching scope chip)](../assets/e2e-live/r3-scoped-examtime.png)
+
+---
+
 ## Live stats
 
-**Admin POV.** The **Live stats** tab (default landing tab) shows current session counts by status across the selected contest, as clickable cards. It auto-refreshes every 5 seconds and has a manual **Refresh** button.
+**Admin POV.** The **Live stats** view (the **Live** section's default, and the console's landing view) shows current session counts by status across the selected contest, as clickable cards. It auto-refreshes every 5 seconds and has a manual **Refresh** button. (Both captures in this page's nav and exam-time sections above/below show the full Live stats screen on the current build.)
 
-![Live stats dashboard with status cards](../assets/e2e/admin-review/01-live-stats.png)
+### Exam-time card — follows the contest scope
+
+Above the status cards sits the **Exam time** card (`ExamTimeCard` in `App.tsx`): the current end time with a live remaining countdown (computed against the **server** clock — skew captured from the stats poll — so the admin display agrees with the students'), **+15 / +5 / −5 min** quick deltas, an absolute **new end time** field (typed-text datetime — see [admin-contests-templates.md](./admin-contests-templates.md)), and a deliberate two-click **End exam now**. Changes reach students within ~15 s via their heartbeat; "End exam now" also force-ends every live session in scope.
+
+Which schedule the card shows **and writes** follows the global contest scope (fixed 2026-06-12 — before that it always read/wrote the legacy Settings schedule, whatever the scope), and an explicit chip names it so the wrong schedule can never be edited on exam day:
+
+| Scope | Chip | Reads / writes |
+| --- | --- | --- |
+| A real contest selected | **Contest: {slug}** | that contest's window, via `POST /api/admin/contest-exam-time` — the same API as Contests → Detail |
+| No scope (or the synthesized legacy row selected) | **Legacy schedule** | the legacy Settings schedule, via `POST /api/admin/exam-time` |
+| A scoped slug not in the contests list (deep link / list still loading) | **Unknown contest: {slug} — controls disabled** | display only; every write is disabled |
+
+Server side, a contest-scoped `GET /api/admin/stats` now returns **that contest's** `end_at` (`adminStats` in `handler.mjs`); an unknown slug carries no window and renders the "no schedule" line rather than the wrong clock.
+
+![Exam-time card unscoped — the "Legacy schedule" chip names the legacy Settings schedule explicitly](../assets/e2e-live/r3-allcontests-legacy-chip.png)
 
 ### Status cards
 
@@ -120,7 +148,7 @@ Bulk buttons in the alerts console show the **union** of valid actions across th
 | Room | All rooms / each room | server (`?room=`) | room list comes from session docs (`listSessionRooms`) so it matches Live stats |
 | Group by | No grouping / Candidate / Alert type | client | grouping only (`alertGrouping.ts`) |
 | Show archived | checkbox, **default OFF** | server (`?include_archived=`) | archived alerts are hidden unless ticked |
-| Contest | global banner above the nav | server | the per-console contest input was removed (A1) — one source of truth |
+| Contest | the scope picker top-right of the nav header | server | the per-console contest input was removed (A1) — one source of truth |
 
 Backend caveat: at most **one** equality filter (`contest_slug`) is pushed to Firestore to stay index-free; severity, source, and room are filtered in memory over an `ALERTS_QUERY_LIMIT` (500) scan, ordered newest-first.
 

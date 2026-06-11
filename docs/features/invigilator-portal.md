@@ -18,6 +18,20 @@ Proctor is a standalone, own-editor exam platform: candidates sit the exam entir
 
 ---
 
+## Floor protocol — reading candidate screens at a glance
+
+Since the candidate exam-shell redesign (2026-06-12) the at-a-distance cue is **inverted** from the earlier build:
+
+| What you see on a candidate screen | Meaning |
+| --- | --- |
+| **Slim dark strip** along the top (colored stage block, pulsing red REC dot, name/ID/room) | Healthy — proctoring active, leave them alone |
+| **Big full-width red banner** pinned to the top | A live problem (fullscreen exit, screen share/camera lost, recording stopped) — **walk over** |
+| Neither — a locked screen owning the whole viewport | The session locked itself (or was locked); the screen tells the candidate to raise their hand — release with the room's unlock code or per-row Unlock (below) |
+
+On the pre-redesign build the prominent bar showed when *healthy* and its absence was the alarm — retrain hall staff accordingly. [`EXAM-DAY-OPS.md`](../EXAM-DAY-OPS.md) carries the same rule; the candidate-side detail is in [candidate-flow.md](./candidate-flow.md).
+
+---
+
 ## Tokenized name-only auth
 
 The portal is reached two ways, both verified in `InvigilatorApp.tsx` (`unlock()`) and `routes/invigilator.mjs` / `lib/auth.mjs`:
@@ -76,7 +90,16 @@ Clicking a tile filters the student list to exactly the rows that tile counts; c
 
 ### Candidate table
 
-Columns: Name, Candidate ID, Roll no., Status, Exam (Started/Waiting), Actions. The backend deliberately omits `session_id` (it is the candidate's write-endpoint bearer token), emails, and IPs — invigilators identify candidates by name / roll / candidate id only.
+Columns: Name, Candidate ID, Roll no., Status, Exam, Actions. The backend deliberately omits `session_id` (it is the candidate's write-endpoint bearer token), emails, and IPs — invigilators identify candidates by name / roll / candidate id only. (Each row also carries the session's stored `username_norm` so the row actions can address person-mode sessions — identity-lookup data, not a credential; see [Per-student unlock](#per-student-unlock-of-a-lock).)
+
+The **Exam** column is gate-aware (fixed 2026-06-12 — `examStageLabel()` in `roomView.ts`). `exam_started_at` is only ever stamped by the room **start gate**, so with the gate disabled (the default) the old `Started/Waiting` rendering showed "Waiting" on every row forever — even Finished ones. It now reads:
+
+| Value | When |
+| --- | --- |
+| **Started** | the start gate stamped `exam_started_at` |
+| **Finished** | the session is ended (never "waiting") |
+| **Waiting** | only while a start gate is actually holding candidates (`room_gate_enabled`) |
+| **—** | the room gate is off — there is nothing to wait for |
 
 If the same candidate appears on two rows (a stale session plus a fresh re-join), the duplicate rows get a "(started HH:MM:SS)" session-start disambiguator so the invigilator can tell which one is live (`duplicateRowKeys` + `sessionStartedLabel` in `roomView.ts`). Unique candidates stay uncluttered.
 
@@ -117,7 +140,9 @@ The **Enforcement unlock code** card renders **always** — locks happen whether
 
 When a student's exam locks itself for fullscreen enforcement, an **Unlock** button appears on that student's row — and **only** on rows whose `locked_reason` is `fullscreen_enforcement`. Admin locks (any other / no reason) never show the button and stay admin-released (`InvigilatorApp.tsx` row render; backend `invigilatorUnlock` returns 403 `not_enforcement_locked` for non-enforcement locks).
 
-Clicking Unlock (after a confirm) calls `POST /api/invigilator/unlock` with room + username (never `session_id`). The backend finds the locked session in that room, sets it back to `active`, clears `locked_reason`, stamps `unlock_method: "invigilator"`, and **resets the server-side fullscreen exit ladder** (`fullscreen_exit_count: 0`) so a later accident is L1 again, not an instant relock. The row updates optimistically. See `candidate-enforcement-ladder.md` for the candidate-side ladder.
+Clicking Unlock (after a confirm) calls `POST /api/invigilator/unlock` with room + the row's identity (never `session_id`). The backend finds the locked session in that room, sets it back to `active`, clears `locked_reason`, stamps `unlock_method: "invigilator"`, and **resets the server-side fullscreen exit ladder** (`fullscreen_exit_count: 0`) so a later accident is L1 again, not an instant relock. The row updates optimistically. See `candidate-enforcement-ladder.md` for the candidate-side ladder.
+
+**Person-mode rows resolve by the exact stored key (fixed 2026-06-12).** Sessions on a roster/person contest are keyed by `username_norm = person_id` (`"{college_norm}~{uid_norm}"`), which the display Candidate ID can never re-normalize back to (`normalizeUsername()` even mangles the `~`), so Unlock used to fail with `no_locked_session_in_room` (Exempt: `no_live_session_in_room`) on every roster contest. The row actions now thread the row's **exact stored `username_norm`** (the room payload carries it per row), and the backend prefers that exact key with the display-`username` fallback kept for older portal bundles — the same exact-key-first precedence as the admin sessions lookup (`rowUsernameNorm()` in `routes/invigilator.mjs`; `unlockStudent` / `toggleExemption` in `InvigilatorApp.tsx`). Operational note: a portal tab that was already open when the fix deployed keeps running the old bundle — hard-refresh invigilator portals after a deploy.
 
 ---
 
@@ -129,8 +154,8 @@ Each student row carries two pill toggles in the Actions column: **Fullscreen** 
 
 Mechanics (`toggleExemption` in `InvigilatorApp.tsx`, `invigilatorExempt` in `routes/invigilator.mjs`):
 
-- Toggling calls `POST /api/invigilator/exempt` with room + username + the single changed exemption (`{ fullscreen }` or `{ switch_away }`).
-- The backend resolves the **live** session in that room by username (never `session_id`), merges the new exemption onto the existing ones, and echoes the merged `enforcement_exemptions` back; the row updates from that echo.
+- Toggling calls `POST /api/invigilator/exempt` with room + the row's identity + the single changed exemption (`{ fullscreen }` or `{ switch_away }`). Like Unlock, the action threads the row's exact stored `username_norm` (fixed 2026-06-12) so person-mode sessions resolve; the display-`username` fallback keeps older portals working.
+- The backend resolves the **live** session in that room by that key (never `session_id`), merges the new exemption onto the existing ones, and echoes the merged `enforcement_exemptions` back; the row updates from that echo.
 - It is **not** gated on `room_gate_enabled` — exemptions are an enforcement tool, independent of the start gate.
 - The exemption applies to the student's live session within one heartbeat **(unverified — the propagation timing is asserted in code comments but not confirmed by a runtime test in this repo).**
 
@@ -173,7 +198,7 @@ Clicking an alert expands it (`AlertRow`) to show candidate detail **joined from
 Verified across `routes/invigilator.mjs` and `auth.mjs`. The portal's endpoints expose:
 
 - **No** emails, **no** IP addresses, **no** signed media / download URLs, **no** `session_id`.
-- Candidates are always addressed by room + username, never by `session_id` (so an invigilator cannot end a candidate's exam or call candidate write-endpoints).
+- Candidates are always addressed by room + username / stored `username_norm` (identity-lookup data), never by `session_id` (so an invigilator cannot end a candidate's exam or call candidate write-endpoints).
 - Alerts are server-filtered to shared types and stripped of `detail` and `session_id`.
 - An invigilator can unlock only **enforcement** locks, never admin locks.
 - Auth is always contest-scoped; a contest key cannot reach another contest's data.

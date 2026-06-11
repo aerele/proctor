@@ -10,11 +10,11 @@ Primary code: `frontend/src/RecordingReview.tsx` (the whole surface), with the p
 
 ## Where it lives
 
-The **Recordings** tab is one of the admin console's surfaces (alongside Live stats, Contests, Live alerts, Sessions, IP report, Attendance, Results, People, Review, Problems, Templates, Settings). The page header offers two modes — **Browse** (free student search) and **Review mode** (one-by-one verdict workflow) — toggled top-right.
+The **Recordings** view lives in the admin nav's **Evidence** section, beside **Review** (the nav was regrouped into six sections on 2026-06-12 — see [admin-live-monitoring.md](./admin-live-monitoring.md)). The page header offers two modes — **Browse** (free student search) and **Review mode** (one-by-one verdict workflow) — toggled top-right.
 
 ![Recordings tab — Browse mode with a student loaded and the Screen/Camera source toggle active](../assets/e2e/retest/02-camera-source-active.png)
 
-The global **Contest** selector at the top scopes the picker (and every other tab) to one contest; **Clear** widens it back to all contests. The selector slug is threaded through every recording lookup so a person who recurs across rounds is never interleaved (`RecordingReview.tsx` `contestSlug` prop → `adminRecordingSessions` / `adminSessions` `contestScopeOf`).
+The global **Contest** scope picker (top-right of the nav header) scopes the picker (and every other screen) to one contest; **Clear** widens it back to all contests. The selector slug is threaded through every recording lookup so a person who recurs across rounds is never interleaved (`RecordingReview.tsx` `contestSlug` prop → `adminRecordingSessions` / `adminSessions` `contestScopeOf`).
 
 ---
 
@@ -39,6 +39,7 @@ This matters because of the identity model: a person-mode session stores `userna
 
 - Loading a candidate calls `loadUser(displayLabel, …, lookupNorm)` (`RecordingReview.tsx`), which passes the exact key to `GET /api/admin/sessions?username_norm=<key>` (handler `adminSessions`, `handler.mjs:2874`). When both `username_norm` and `username` are sent, the exact `username_norm` wins; the re-normalizing `?username=` path is kept for back-compat / manual entry.
 - Signed evidence URLs expire ~1h; `refreshUrls` re-resolves by the **same** stored key (`loadedNormRef`), so an in-place URL refresh never changes which session is shown.
+- The neighbouring **Evidence → Review** dashboard's free search resolves the same way since 2026-06-12: when a typed display Candidate ID returns no sessions, it resolves the id against the sessions list to the stored `username_norm`(s) and re-queries by the exact key (bounded to a few keys when one display id maps to several stored keys) — `search()` in `App.tsx`. Before that, searching e.g. "TEC002" on a roster contest came back silently empty.
 
 Before the fix, browsing a person-mode candidate produced an empty player:
 
@@ -48,13 +49,25 @@ Before the fix, browsing a person-mode candidate produced an empty player:
 
 ## The player: screen + camera playback
 
-After a student is loaded, the right column shows a **Session** dropdown (newest-first, each labeled with created-at · status · screen-chunk count), a **Test start time** anchor (`datetime-local`, defaults to the session's `created_at`), a contents line, and the `<video>` player.
+After a student is loaded, the right column shows a **Session** dropdown (newest-first, each labeled with created-at · status · screen-chunk count), a **Test start time** anchor (a typed-text datetime field with a calendar-popover button — see [admin-contests-templates.md](./admin-contests-templates.md); defaults to the session's `created_at`), a contents line, and the `<video>` player.
 
 ### Playlist built from `chunk-*.webm`
 
-Playback is assembled from the session's evidence objects. Each recorded chunk is a fixed **30-second** `.webm` (`CHUNK_SECONDS = 30`, `recordingPlaylist.ts`). The two chunk series live under the session's storage prefix as `screen/chunk-*.webm` and `camera/chunk-*.webm` (each 1-based). `buildPlaylist` filters to the active source, sorts by index, and places each chunk on the timeline by **real time**: a chunk finalizes when its 30s window closes, so its start offset is `(last_modified − 30s − testStart)`. When `last_modified` is missing it falls back to index-based contiguous placement anchored on `created_at`. This is what correctly handles late-joiners and **recording gaps**.
+Playback is assembled from the session's evidence objects. Each recorded chunk is a fixed **30-second** `.webm` (`CHUNK_SECONDS = 30`, `recordingPlaylist.ts`). The two chunk series live under the session's storage prefix as `screen/chunk-*.webm` and `camera/chunk-*.webm` (each 1-based). `buildPlaylist` filters to the active source and places each chunk on the timeline by **real time**: a chunk finalizes when its 30s window closes, so its start offset is `(last_modified − 30s − testStart)`. When `last_modified` is missing it falls back to index-based contiguous placement anchored on `created_at`. The placed chunks are then ordered **chronologically** (offset, then index — see the multi-stint note below). This is what correctly handles late-joiners and **recording gaps**.
 
 Playback **auto-advances** across chunks (the next chunk is warmed in a hidden `<video>` for a near-seamless handoff), with transport controls: Play/Pause, Prev/Next chunk, ±10s/±1m/±30s skip, a **Jump to** box (accepts `mm:ss`, `h:mm:ss`, or bare minutes), and a `chunk N / total` readout. Keyboard: arrow keys nudge ±5s (Shift ±30s) and Space toggles play when the player area is focused.
+
+### Multi-stint sessions play honestly (fixed 2026-06-12)
+
+A recording restart within one session — share-drop recovery, lock→unlock, refresh-resume — produces a new recording **stint**. Restarts used to re-count chunk indexes from 1 and **overwrite** the prior stint's GCS objects at the same keys, silently destroying earlier video and making the gap summary wildly under-report. Three independent guards now keep every stint's chunks:
+
+1. the recorder persists a per-(session, kind) **sessionStorage high-water mark** at index-allocation time and resumes the count from it (`frontend/src/chunkContinuity.ts`, `useProctorRecorder.ts`);
+2. the start/resume response reports the server's `chunk_count` / `screen_chunk_index_hwm` / `camera_chunk_index_hwm`, covering a brand-new tab after a crash — the continuation base is the max over every leg;
+3. `/api/upload-url` **bumps** any requested index at/below its own per-kind high-water mark to hwm+1, so even a stale cached bundle can never get a write URL onto a surviving object (`createUploadUrl` in `handler.mjs`).
+
+The end-of-test manifest is **cumulative across stints** (`mergeManifest`), and `buildPlaylist` orders the playlist **chronologically** (real-time offset, then index). For sessions recorded after the fix that equals index order; for legacy multi-stint sessions whose restarts overwrote early indexes with late bytes, it restores true play order and keeps the player's binary-search seeking invariant (sorted offsets) intact. A multi-stint session therefore plays in recorded order with **honest hatched gaps** wherever recording was down. Two honest caveats: video already destroyed by pre-fix overwrites is unrecoverable, and on those legacy sessions the gap totals under-count what was actually lost.
+
+![Playback of a multi-stint session — transport controls, summary card, gap-hatched timeline. Captured on the E2E run that surfaced the overwrite bug (pre-fix session, hence the under-reported gap total)](../assets/e2e-live/b6-recording-playback-chunk1.png)
 
 ### Screen / Camera source toggle
 
