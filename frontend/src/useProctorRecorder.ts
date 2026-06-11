@@ -2,7 +2,7 @@ import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
 import type { ApiError } from "./api";
 import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import { writeChunkHwm } from "./chunkContinuity";
-import { runUploadWithRetry } from "./chunkUploadRetry";
+import { advanceUploadChain, runUploadWithRetry } from "./chunkUploadRetry";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 type RecorderOptions = {
@@ -233,6 +233,21 @@ function createEvent(type: string, detail?: Record<string, unknown>): ProctorEve
 // at this size so it stays fixed).
 const CAMERA_VIDEO_BITS_PER_SECOND = 250_000;
 
+// B1: map a backend write rejection (403 session_locked / waiting_for_approval,
+// 409 session_ended) to the lifecycle status the host should flip to. Returns
+// null for ordinary network/transient errors (no self-stop). Pure (no recorder
+// state) — module-scope and exported (RT-4) so the chain tests pin the EXACT
+// fatal predicate the screen upload chain composes from it.
+export function fatalStatusFromError(error: unknown): ServerSessionStatus | null {
+  const err = error as ApiError;
+  if (err?.code === "session_ended") return "ended";
+  if (err?.code === "session_locked") return "locked";
+  if (err?.code === "waiting_for_approval") return "pending_approval";
+  if (err?.status === 409) return "ended";
+  if (err?.status === 403) return "locked";
+  return null;
+}
+
 export function createProctorRecorder(options: RecorderOptions): RecorderControls {
   let screenStream: MediaStream | null = null;
   let cameraStream: MediaStream | null = null;
@@ -279,19 +294,6 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     const event = createEvent(type, detail);
     eventBuffer.push(event);
     options.onEvent(event);
-  };
-
-  // B1: map a backend write rejection (403 session_locked / waiting_for_approval,
-  // 409 session_ended) to the lifecycle status the host should flip to. Returns
-  // null for ordinary network/transient errors (no self-stop).
-  const fatalStatusFromError = (error: unknown): ServerSessionStatus | null => {
-    const err = error as ApiError;
-    if (err?.code === "session_ended") return "ended";
-    if (err?.code === "session_locked") return "locked";
-    if (err?.code === "waiting_for_approval") return "pending_approval";
-    if (err?.status === 409) return "ended";
-    if (err?.status === 403) return "locked";
-    return null;
   };
 
   // B1: stop the recorder and notify the host exactly once when the session is no
@@ -360,13 +362,21 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     return { upload, retried };
   };
 
+  // RT-4: the slot still SEQUENCES on the serial chain, but a NON-fatal
+  // exhausted failure no longer propagates to later chunks — that one chunk
+  // emits its own upload_error (honest gap, timeline marker) and the chain
+  // recovers, so the NEXT chunk attempts its OWN upload instead of inheriting
+  // the rejection until the next recorder restart. ONLY a fatal-status
+  // rejection (401/403/409 → lock/pending/ended) keeps the chain rejected,
+  // so stop()'s `await uploadQueue.catch(...)` still surfaces it through
+  // onFatalError exactly as before.
   const enqueueUpload = (blob: Blob, index: number) => {
     const startedAt = new Date().toISOString();
     queueDepth += 1;
     updateUploadState();
 
-    uploadQueue = uploadQueue
-      .then(async () => {
+    uploadQueue = advanceUploadChain(uploadQueue, {
+      run: async () => {
         const { upload, retried } = await uploadChunkWithRetry("screen", blob, index);
         manifest.push({
           kind: "screen",
@@ -379,24 +389,26 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         uploadedCount += 1;
         // RT-1: identical event; `retried` rides only when a retry happened.
         emit("chunk_uploaded", { kind: "screen", index, bytes: blob.size, storage_key: upload.storage_key, ...(retried ? { retried } : {}) });
-      })
-      .catch((error) => {
+      },
+      onError: (error) => {
         emit("upload_error", { kind: "screen", index, bytes: blob.size, message: String(error) });
         // B1: a 403/409 on upload means the session is no longer writable.
         handleFatalStatus(fatalStatusFromError(error));
-        throw error;
-      })
-      .finally(() => {
+      },
+      isFatal: (error) => fatalStatusFromError(error) !== null,
+      onSettled: () => {
         queueDepth = Math.max(0, queueDepth - 1);
         updateUploadState();
-      });
+      }
+    });
   };
 
   // F10.1: camera chunks ride the SAME upload-url flow but on their OWN chain.
-  // The screen chain re-throws (stop() surfaces a failed screen upload as a
-  // fatal error); the camera chain SWALLOWS after auditing, so one failed
-  // camera chunk neither poisons later camera chunks nor fails the session.
-  // A session-level 403/409 still self-stops via handleFatalStatus.
+  // The screen chain stays rejected ONLY on a fatal-status failure (RT-4 —
+  // stop() surfaces that via onFatalError); the camera chain SWALLOWS every
+  // failure after auditing, so one failed camera chunk neither poisons later
+  // camera chunks nor fails the session. A session-level 403/409 still
+  // self-stops via handleFatalStatus.
   const enqueueCameraUpload = (blob: Blob, index: number) => {
     const startedAt = new Date().toISOString();
     queueDepth += 1;
@@ -609,6 +621,10 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       updateMediaState("screen", "stopped");
       updateMediaState("camera", keepOptionalMediaFinalState(mediaState.camera));
       updateMediaState("microphone", keepOptionalMediaFinalState(mediaState.microphone));
+      // RT-4: the screen chain is rejected ONLY by a fatal-status failure
+      // (lock/pending/ended) — non-fatal chunk failures were already audited
+      // per-chunk (upload_error) and swallowed, so they no longer surface a
+      // stale "Upload queue failed" here.
       await uploadQueue.catch((error) => {
         options.onFatalError(`Upload queue failed: ${String(error)}`);
       });
