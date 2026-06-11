@@ -113,6 +113,16 @@ type CandidateFormFields = {
   roster_unique_id: string;
 };
 
+// Permissive email shape (F12 review gap): a non-space run, then @, then a
+// non-space run, then a dot, then a non-space run. Deliberately lenient — it
+// only catches obvious typos (missing @, missing domain dot), never tries to
+// be RFC-complete. Mirrored server-side in handler.mjs (isValidEmailFormat).
+const EMAIL_FORMAT = /^\S+@\S+\.\S+$/;
+
+export function isCandidateEmailValid(email: string): boolean {
+  return EMAIL_FORMAT.test(email.trim());
+}
+
 // What "Start proctoring" needs per mode. legacy = the shipped rule verbatim;
 // person_roster = the roster supplies name/roll/email server-side, so only the
 // typed id + room + consent gate the button; person_open = the backend's
@@ -129,7 +139,7 @@ export function candidateFormReady(
     return Boolean(
       form.candidate_id.trim() &&
       form.name.trim() &&
-      form.email.trim() &&
+      isCandidateEmailValid(form.email) &&
       form.room.trim() &&
       form.consent_accepted
     );
@@ -139,7 +149,7 @@ export function candidateFormReady(
     form.candidate_id.trim() &&
     form.name.trim() &&
     form.roll_number.trim() &&
-    form.email.trim() &&
+    isCandidateEmailValid(form.email) &&
     form.room.trim() &&
     form.consent_accepted
   );

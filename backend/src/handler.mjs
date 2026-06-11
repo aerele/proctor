@@ -372,6 +372,7 @@ async function startSession(req) {
   // contest time window + complete details. `proctor_passcode` is no longer
   // required (a client may still send it harmlessly; it is ignored).
   requireFields(body, ["hackerrank_username", "name", "roll_number", "email"]);
+  requireValidEmail(body);
   if (body.consent_accepted !== true) {
     return badRequest("Consent is required");
   }
@@ -611,6 +612,7 @@ async function startPersonSession(req, body, contest) {
     // never participate in multi-round linking (documented limitation). The
     // candidate types id + name + email (F9 §1.4).
     requireFields(body, ["name", "email"]);
+    requireValidEmail(body);
     const typed = String(body.candidate_id ?? body.hackerrank_username ?? "").trim();
     if (!typed) return badRequest("candidate_id is required");
     identity = {
@@ -5539,6 +5541,21 @@ function requireFields(body, fields) {
     if (body[field] === undefined || body[field] === null || body[field] === "") {
       throw httpError(400, `${field} is required`);
     }
+  }
+}
+
+// Permissive email shape (F12 review gap): a non-space run, then @, then a
+// non-space run, then a dot, then a non-space run. Deliberately lenient — it
+// only catches obvious typos (missing @, missing domain dot). Mirrors the
+// client gate in candidateRouting.ts (isCandidateEmailValid).
+const EMAIL_FORMAT = /^\S+@\S+\.\S+$/;
+
+// Reject a malformed TYPED email with a clear 400. Only the start handlers
+// where the candidate types the email call this; roster-mapped paths take the
+// email from the roster cell, never the typed field, so they skip it.
+function requireValidEmail(body) {
+  if (!EMAIL_FORMAT.test(String(body.email ?? "").trim())) {
+    throw httpError(400, "email is not a valid email address");
   }
 }
 
