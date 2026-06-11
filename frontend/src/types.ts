@@ -911,6 +911,8 @@ export type ProblemDoc = {
   points: number;
   scoring: ProblemScoring;
   status: ProblemStatus;
+  /** S-I §1.2: bank tags (picker/filter chips). Absent on older backends. */
+  tags?: string[];
   sampleTests: ProblemTest[];
   hiddenTests: ProblemTest[];
   created_at?: string;

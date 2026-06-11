@@ -85,6 +85,39 @@ export function mergeSubmitOutcome(
   };
 }
 
+// One stored submission row (demo store / future replay views).
+export type StoredSubmission = {
+  problem_id: string;
+  verdict: SubmitResult["verdict"];
+  score: number;
+  max_points: number;
+  created_at: string;
+};
+
+// Fold a submission list into the per-problem summary map — mirrors the
+// backend scoreboard.mjs computeSessionSummary (the demo branch reuses this so
+// demo chips/attempts/totals behave exactly like the server's payload).
+export function summarizeSubmissions(submissions: readonly StoredSubmission[]): Record<string, ProblemSubmissionSummary> {
+  const sorted = [...submissions].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const summary: Record<string, ProblemSubmissionSummary> = {};
+  for (const submission of sorted) {
+    if (!submission.problem_id) continue;
+    summary[submission.problem_id] = mergeSubmitOutcome(
+      summary[submission.problem_id],
+      {
+        verdict: submission.verdict,
+        score: submission.score,
+        max_points: submission.max_points,
+        passed_count: 0,
+        total: 0,
+        submission_id: ""
+      },
+      submission.created_at
+    );
+  }
+  return summary;
+}
+
 // ---- Per-problem editor drafts (spec §4.2) ----------------------------------
 // Key scheme: proctor-draft::{session_id}::{problem_id}.
 

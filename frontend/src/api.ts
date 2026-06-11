@@ -74,6 +74,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
+import { summarizeSubmissions, type StoredSubmission } from "./coding/problemSwitch";
 import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type PersonRosterState } from "./roster/personRoster";
 import { normalizeCameraRecording } from "./cameraRecording";
 import { sessionStartPayload } from "./identity";
@@ -278,6 +279,16 @@ function demoCameraRecording() {
 }
 
 function demoSessionResponse(session: DemoSession, contestUrl: string, contest?: ContestSummary | null): SessionStartResponse {
+  // S-I §3.4 parity: ordered problems[] (contest-owned for person contests,
+  // legacy settings problem_id otherwise), the one-release `problem` alias
+  // (= problems[0] minus `order`), the per-problem submissions summary and
+  // the submit budget.
+  const problems = demoContestProblems(contest ?? null);
+  let problemAlias: PublicProblem | null = null;
+  if (problems.length) {
+    const { order: _order, ...alias } = problems[0];
+    problemAlias = alias;
+  }
   return {
     session_id: session.session_id,
     status: session.status,
@@ -301,7 +312,11 @@ function demoSessionResponse(session: DemoSession, contestUrl: string, contest?:
     enforcement_exemptions: session.enforcement_exemptions ?? {},
     locked_reason: session.locked_reason ?? null,
     // S4: server-driven problem assigned to the session (null when unassigned).
-    problem: demoActiveProblem(),
+    // S-I: alias = problems[0]; `problems` is the real ordered payload.
+    problem: problemAlias,
+    problems,
+    submissions_summary: demoSubmissionsSummaryFor(session.session_id),
+    submit_budget: DEMO_SUBMIT_BUDGET,
     upload_config: {
       chunk_seconds: 20,
       video_bits_per_second: 750_000,
@@ -2909,25 +2924,116 @@ export async function sendEditorEvents(sessionId: string, problemId: string, eve
   });
 }
 
+// ---- S-I §6 demo exec parity -------------------------------------------------
+// A localStorage demo-submissions list (so submissions_summary, chips, totals
+// and attempt meters all work offline and survive a reload) + per-(session,
+// problem) cooldown stamps mirroring the backend limiter (run 5s / submit 20s
+// / budget 50 — independent per problem, exactly the server semantics the
+// workspace renders from retry_after_seconds).
+
+const demoSubmissionsKey = "aerele-proctor-demo-submissions-v1";
+const DEMO_SUBMIT_BUDGET = 50;
+const DEMO_RUN_COOLDOWN_SECONDS = 5;
+const DEMO_SUBMIT_COOLDOWN_SECONDS = 20;
+
+// Per-problem demo submit profiles → varied status chips out of the box:
+// sum-two solves (✓), reverse-words lands partial (↻), max-window-sum zeroes
+// (✗). Unknown/authored problems pass everything.
+const DEMO_SUBMIT_PASSES: Record<string, number> = {
+  "reverse-words": 2,
+  "max-window-sum": 0
+};
+
+type DemoStoredSubmission = StoredSubmission & { session_id: string };
+
+function readDemoSubmissions(): DemoStoredSubmission[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(demoSubmissionsKey) || "[]");
+    return Array.isArray(parsed) ? (parsed as DemoStoredSubmission[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeDemoSubmissions(submissions: DemoStoredSubmission[]) {
+  window.localStorage.setItem(demoSubmissionsKey, JSON.stringify(submissions));
+}
+
+function demoSubmissionsSummaryFor(sessionId: string) {
+  return summarizeSubmissions(readDemoSubmissions().filter((item) => item.session_id === sessionId));
+}
+
+// In-memory cooldown stamps (the backend limiter is in-memory too; a reload
+// clearing them is acceptable demo parity).
+const demoExecStamps = new Map<string, { run: number; submit: number }>();
+
+function demoExecGate(sessionId: string, problemId: string, kind: "run" | "submit", attemptsSoFar = 0): void {
+  const key = `${sessionId}::${problemId}`;
+  const stamps = demoExecStamps.get(key) ?? { run: -Infinity, submit: -Infinity };
+  const windowSeconds = kind === "run" ? DEMO_RUN_COOLDOWN_SECONDS : DEMO_SUBMIT_COOLDOWN_SECONDS;
+  const waitMs = windowSeconds * 1000 - (Date.now() - stamps[kind]);
+  if (waitMs > 0) throw demoApiError(429, "rate_limited", { retry_after_seconds: Math.ceil(waitMs / 1000) });
+  // Stored-submission budget (backend: only successful stores count; the demo
+  // store only holds successful submits, so the count matches).
+  if (kind === "submit" && attemptsSoFar >= DEMO_SUBMIT_BUDGET) {
+    throw demoApiError(429, "rate_limited", { retry_after_seconds: 3600 });
+  }
+  stamps[kind] = Date.now();
+  demoExecStamps.set(key, stamps);
+}
+
+// Effective points parity (backend resolveExecProblem): the session's contest
+// entry override wins, else the bank problem's points.
+function demoEffectivePoints(sessionId: string, problem: ProblemDoc): number {
+  const session = readDemoSessions().find((item) => item.session_id === sessionId);
+  const contest = session?.contest_slug
+    ? readDemoContests().find((item) => item.slug === session.contest_slug) ?? null
+    : null;
+  const entry = contest?.problems?.find((item) => item.problem_id === problem.id);
+  return entry?.points ?? problem.points ?? 100;
+}
+
 export async function execRun(req: ExecRequest): Promise<RunResult> {
   if (demoMode) {
+    const problem = findDemoProblem(req.problem_id);
+    if (!problem || problem.status !== "published") throw demoApiError(400, "unknown problem_id");
+    demoExecGate(req.session_id, req.problem_id, "run");
     await wait(300);
-    // The sum-two problem has TWO samples; return both so the demo matches the
-    // real /api/exec/run shape (Task 3 asserts results.length === 2).
-    return { results: [
-      { input: "2 3\n", expected: "5", passed: true, status: "accepted", stdout: "5", stderr: "", compileOutput: "" },
-      { input: "10 20\n", expected: "30", passed: true, status: "accepted", stdout: "30", stderr: "", compileOutput: "" }
-    ] };
+    // Echo the problem's OWN samples as passing — per-problem demo parity with
+    // the real /api/exec/run shape (results.length === sampleTests.length).
+    return {
+      results: problem.sampleTests.map((t) => ({
+        input: t.input, expected: t.expected, passed: true, status: "accepted",
+        stdout: t.expected, stderr: "", compileOutput: ""
+      }))
+    };
   }
   return request<RunResult>("/api/exec/run", { method: "POST", body: JSON.stringify(req) });
 }
 
 export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
   if (demoMode) {
+    const problem = findDemoProblem(req.problem_id);
+    if (!problem || problem.status !== "published") throw demoApiError(400, "unknown problem_id");
+    const stored = readDemoSubmissions();
+    const attempts = stored.filter((item) => item.session_id === req.session_id && item.problem_id === req.problem_id).length;
+    demoExecGate(req.session_id, req.problem_id, "submit", attempts);
     await wait(500);
     // §9 lock: mirror the real /api/exec/submit shape — verdict + counts +
     // score, never per-test hidden detail.
-    return { verdict: "accepted", passed_count: 4, total: 4, score: 100, max_points: 100, submission_id: "demo" };
+    const total = problem.hiddenTests.length || 4;
+    const passed = Math.min(DEMO_SUBMIT_PASSES[req.problem_id] ?? total, total);
+    const maxPoints = demoEffectivePoints(req.session_id, problem);
+    const score = problem.scoring === "all_or_nothing"
+      ? (passed === total ? maxPoints : 0)
+      : Math.floor((maxPoints * passed) / total);
+    const verdict: SubmitResult["verdict"] = passed === total ? "accepted" : "wrong_answer";
+    const created = new Date().toISOString();
+    writeDemoSubmissions([...stored, {
+      session_id: req.session_id, problem_id: req.problem_id,
+      verdict, score, max_points: maxPoints, created_at: created
+    }]);
+    return { verdict, passed_count: passed, total, score, max_points: maxPoints, submission_id: `demo-${stored.length + 1}` };
   }
   return request<SubmitResult>("/api/exec/submit", { method: "POST", body: JSON.stringify(req) });
 }
@@ -2938,7 +3044,10 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
 // whose access code is the fixed "DEMO42", plus the synthesized legacy row
 // derived from the demo settings doc (mirrors backend legacy synthesis).
 
-const demoContestsKey = "aerele-proctor-demo-contests-v1";
+// v2: S-I reseeded demo-drive-r1 with THREE ordered problems (sum-two,
+// reverse-words ×150 pts, max-window-sum ×50 pts) so the multi-problem
+// workspace demos meaningfully — the key bump discards stale v1 stores.
+const demoContestsKey = "aerele-proctor-demo-contests-v2";
 export const DEMO_ACCESS_CODE = "DEMO42";
 const DEMO_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
 
@@ -2962,7 +3071,11 @@ function seedDemoContests(): ContestSummary[] {
     invigilator_key: "demo-invigilator-key-001",
     start_at: new Date(nowMs - 60 * 60_000).toISOString(),
     end_at: new Date(nowMs + 6 * 60 * 60_000).toISOString(),
-    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    problems: [
+      { problem_id: "sum-two", points: null, order: 0 },
+      { problem_id: "reverse-words", points: null, order: 1 },
+      { problem_id: "max-window-sum", points: null, order: 2 }
+    ],
     rooms: ["Lab 1", "Lab 2"],
     room_gate_enabled: false,
     template_slug: "demo-aptitude-r1",
@@ -3320,7 +3433,11 @@ const DEMO_TEMPLATES: DemoTemplate[] = [
     name: "Demo Aptitude — Round 1",
     archived: false,
     preset: false,
-    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    problems: [
+      { problem_id: "sum-two", points: null, order: 0 },
+      { problem_id: "reverse-words", points: null, order: 1 },
+      { problem_id: "max-window-sum", points: null, order: 2 }
+    ],
     defaults: { identity_label: "Roll Number", room_gate_enabled: true, duration_minutes: 120 }
   },
   {
@@ -3892,17 +4009,44 @@ export async function unlockEnforcementGate(sessionId: string, code: string): Pr
 const demoProblemsKey = "aerele-proctor-demo-problems";
 
 // Demo mirror of the backend's built-in seed (problems.mjs SEED_PROBLEMS).
+// S-I §6: 3 published problems (with tags) so the multi-problem workspace
+// demos meaningfully — varied points feed the Total/Solved header and the
+// per-problem demo submit profiles produce varied status chips.
 const DEMO_SEED_PROBLEMS: ProblemDoc[] = [{
   id: "sum-two",
   title: "Sum of Two Numbers",
   statement: "Read two integers a and b on one line separated by a space. Print a + b.",
   languages: ["python", "cpp", "java", "javascript"],
   cpuTimeLimit: 5, memoryLimit: 128000, points: 100,
-  scoring: "per_test", status: "published",
+  scoring: "per_test", status: "published", tags: ["math", "warmup"],
   sampleTests: [{ input: "2 3\n", expected: "5" }, { input: "10 20\n", expected: "30" }],
   hiddenTests: [
     { input: "0 0\n", expected: "0" }, { input: "-5 5\n", expected: "0" },
     { input: "1000000 1\n", expected: "1000001" }, { input: "-100 -200\n", expected: "-300" }
+  ]
+}, {
+  id: "reverse-words",
+  title: "Reverse the Words",
+  statement: "Read one line of text. Print the words in reverse order, separated by single spaces.",
+  languages: ["python", "cpp", "java", "javascript"],
+  cpuTimeLimit: 5, memoryLimit: 128000, points: 150,
+  scoring: "per_test", status: "published", tags: ["strings"],
+  sampleTests: [{ input: "hello world\n", expected: "world hello" }, { input: "a b c\n", expected: "c b a" }],
+  hiddenTests: [
+    { input: "one\n", expected: "one" }, { input: "to be or not\n", expected: "not or be to" },
+    { input: "x y\n", expected: "y x" }, { input: "alpha beta gamma\n", expected: "gamma beta alpha" }
+  ]
+}, {
+  id: "max-window-sum",
+  title: "Maximum Window Sum",
+  statement: "Read n and k on one line, then n integers on the next line. Print the maximum sum over any k consecutive integers.",
+  languages: ["python", "cpp", "java", "javascript"],
+  cpuTimeLimit: 5, memoryLimit: 128000, points: 50,
+  scoring: "per_test", status: "published", tags: ["arrays", "sliding-window"],
+  sampleTests: [{ input: "5 2\n1 2 3 4 5\n", expected: "9" }],
+  hiddenTests: [
+    { input: "3 1\n-1 -2 -3\n", expected: "-1" }, { input: "4 4\n1 1 1 1\n", expected: "4" },
+    { input: "6 3\n2 1 5 1 3 2\n", expected: "9" }, { input: "5 2\n5 -1 5 -1 5\n", expected: "4" }
   ]
 }];
 
@@ -3927,17 +4071,34 @@ function findDemoProblem(id: string): ProblemDoc | null {
     ?? null;
 }
 
-// Candidate view of the demo active problem — published only, never hiddenTests.
-function demoActiveProblem(): PublicProblem | null {
-  const problemId = getDemoSettings()?.problem_id || "";
-  if (!problemId) return null;
-  const p = findDemoProblem(problemId);
-  if (!p || p.status !== "published") return null;
-  return {
-    id: p.id, title: p.title, statement: p.statement, languages: p.languages,
-    points: p.points, cpuTimeLimit: p.cpuTimeLimit, memoryLimit: p.memoryLimit,
-    sampleTests: p.sampleTests
-  };
+// S-I §6 demo shim (mirrors backend contestProblemEntries): non-empty contest
+// problems[] > legacy settings problem_id > []. The legacy demo deployment
+// therefore keeps today's single-problem behavior bit-for-bit.
+function demoProblemEntries(source: { problems?: Array<{ problem_id: string; points: number | null; order: number }>; problem_id?: string } | null): Array<{ problem_id: string; points: number | null; order: number }> {
+  if (source && Array.isArray(source.problems) && source.problems.length) {
+    return [...source.problems].sort((a, b) => a.order - b.order);
+  }
+  if (source?.problem_id) return [{ problem_id: source.problem_id, points: null, order: 0 }];
+  return [];
+}
+
+// Candidate view of a demo contest's problems (backend contestProblemsPublic
+// parity) — published only, never hiddenTests, points = EFFECTIVE points
+// (contest entry override applied), plus `order`. A legacy session (no
+// contest / legacy contest) reads the demo settings problem_id.
+function demoContestProblems(contest: ContestSummary | null): PublicProblem[] {
+  const source = contest && !contest.legacy ? contest : { problem_id: getDemoSettings()?.problem_id || "" };
+  const problems: PublicProblem[] = [];
+  for (const entry of demoProblemEntries(source)) {
+    const p = findDemoProblem(entry.problem_id);
+    if (!p || p.status !== "published") continue;
+    problems.push({
+      id: p.id, title: p.title, statement: p.statement, languages: p.languages,
+      points: entry.points ?? p.points ?? 100, cpuTimeLimit: p.cpuTimeLimit, memoryLimit: p.memoryLimit,
+      sampleTests: p.sampleTests, order: entry.order
+    });
+  }
+  return problems;
 }
 
 export async function fetchProblems(password: string): Promise<ProblemSummary[]> {
@@ -3947,7 +4108,7 @@ export async function fetchProblems(password: string): Promise<ProblemSummary[]>
     return readDemoProblems()
       .map((p) => ({
         id: p.id, title: p.title, status: p.status, points: p.points, scoring: p.scoring,
-        languages: p.languages, sample_count: p.sampleTests.length, hidden_count: p.hiddenTests.length,
+        languages: p.languages, tags: p.tags ?? [], sample_count: p.sampleTests.length, hidden_count: p.hiddenTests.length,
         updated_at: p.updated_at || ""
       }))
       .sort((a, b) => a.id.localeCompare(b.id));
