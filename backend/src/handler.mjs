@@ -311,6 +311,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/template-update") return send(res, 200, await adminUpdateTemplate(req));
     if (req.method === "POST" && path === "/api/admin/template-archive") return send(res, 200, await adminArchiveTemplate(req));
     if (req.method === "POST" && path === "/api/admin/template-clone") return send(res, 200, await adminCloneTemplate(req));
+    if (req.method === "POST" && path === "/api/admin/template-delete") return send(res, 200, await adminDeleteTemplate(req));
     if (req.method === "GET" && path === "/api/admin/problems") return send(res, 200, await adminListProblems(req));
     if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
     if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
@@ -2172,6 +2173,23 @@ async function adminCloneTemplate(req) {
   });
   if (!checked.ok) return badRequest(checked.error);
   return { ok: true, template: await createTemplateDoc(checked.template) };
+}
+
+// Hard delete (FIX-B2 #58): permanently removes an author-owned template doc.
+// Archive is the soft-delete (the picker hides it but it stays listed); this is
+// the explicit "remove it for good" verb the Templates tab needs. A BARE seed
+// preset (no shadow doc — getTemplate returns preset:true) cannot be deleted —
+// it has no doc and would just reappear in the list; deleting a MATERIALIZED
+// shadow doc is allowed and simply restores the preset to its original form.
+async function adminDeleteTemplate(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug"]);
+  const existing = await getTemplate(body.slug);
+  if (!existing) throw httpError(404, "template_not_found");
+  if (existing.preset) throw httpError(400, "template_preset_undeletable");
+  await templateRef(existing.slug).delete();
+  return { ok: true };
 }
 
 // ---- S-B: contests (F9 §2 / F10 §2.7) — SHIPS DARK ---------------------------
