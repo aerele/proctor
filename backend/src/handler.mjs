@@ -264,6 +264,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/exec/submit") return send(res, 200, await execSubmit(req));
     if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
     if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig(req));
+    if (req.method === "GET" && path === "/api/candidate-route") return send(res, 200, await publicCandidateRoute());
     if (req.method === "POST" && path === "/api/access-code") return send(res, 200, await publicAccessCode(req));
     if (req.method === "POST" && path === "/api/roster/lookup") return send(res, 200, await rosterLookup(req));
     if (req.method === "GET" && path === "/api/admin/roster") return send(res, 200, await adminGetRoster(req));
@@ -2500,6 +2501,11 @@ async function contestExamConfig(slug) {
     contest_slug: contest.slug,
     contest_name: contest.name || contest.slug,
     identity_label: contest.identity_label || "Candidate ID",
+    // The pinned candidate app forks its identity UX on this: "person" =
+    // server-resolved id (college picker on 409), "legacy_username" = today's
+    // roster-lookup confirm flow. The two branches below are shape-identical
+    // otherwise, so the payload must say which one it is.
+    identity_mode: contest.identity_mode || (contest.legacy ? "legacy_username" : "person"),
     start_at: contest.start_at || null,
     end_at: contest.end_at || null,
     server_now: new Date().toISOString()
@@ -2569,6 +2575,18 @@ async function publicAccessCode(req) {
   const body = parseBody(req);
   const resolved = await resolveAccessCode(body?.code);
   return { ok: true, ...resolved };
+}
+
+// GET /api/candidate-route — PUBLIC, one boolean: does the LEGACY settings-
+// driven exam still exist? The no-?contest= candidate URL keeps serving today's
+// form while it does (bit-for-bit deployment guarantee) and shows the
+// access-code landing page once it doesn't. This lives on its OWN endpoint
+// because the no-param /api/exam-config payload is a locked contract (its key
+// set is asserted bit-for-bit) and must not grow routing fields. Reveals
+// nothing sensitive: only whether a settings doc exists at all.
+async function publicCandidateRoute() {
+  const settings = await getSettings();
+  return { legacy_configured: Boolean(settings) };
 }
 
 // The ACTIVE-version roster entry for a unique id, or null. Entries from a

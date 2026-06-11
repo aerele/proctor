@@ -75,6 +75,7 @@ const SCOPED_GET_REQUESTS = {
 // exempt. A new GET route must land in exactly one of these two tables.
 const EXEMPT_GETS = {
   "/api/exam-config": "legacy/public pre-session config; ?contest= routing lands at S-D",
+  "/api/candidate-route": "public routing boolean (does the legacy settings doc exist?) — carries no contest data at all",
   "/api/admin/settings": "the global legacy settings doc itself",
   "/api/admin/contests": "the contest list — inherently cross-contest",
   "/api/admin/problems": "global problem bank (assignment is per-contest, content is not)",

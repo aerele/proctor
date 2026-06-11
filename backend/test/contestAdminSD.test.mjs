@@ -359,6 +359,53 @@ test("exam-config?contest=<legacy slug> serves the settings-driven config with t
   assert.equal(res.body.room_gate_enabled, true);
 });
 
+// S-D candidate routing: the pinned candidate app forks its identity UX on the
+// contest's identity_mode (person -> server-resolved id + college picker;
+// legacy_username -> today's roster-lookup confirm flow). The payload must say
+// which one it is — the two branches are otherwise shape-identical.
+test("exam-config?contest= carries identity_mode: person contest vs legacy slug", async () => {
+  const firestore = freshDb();
+  await firestore.collection("sd_settings").doc("active").set({
+    contest_slug: "legacy-exam", rooms: ["Hall B"], room_gate_enabled: false
+  });
+  const contest = await createContest({ name: "Mode Check" });
+  await openContest(contest.slug);
+
+  const person = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(person.statusCode, 200, JSON.stringify(person.body));
+  assert.equal(person.body.identity_mode, "person");
+
+  const legacy = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: "legacy-exam" } }));
+  assert.equal(legacy.statusCode, 200, JSON.stringify(legacy.body));
+  assert.equal(legacy.body.identity_mode, "legacy_username");
+});
+
+// ---- GET /api/candidate-route (PUBLIC) -----------------------------------------
+// The no-?contest= candidate URL must keep serving today's legacy form while
+// the legacy settings doc exists (bit-for-bit deployment guarantee) and show
+// the access-code landing page once there is no legacy exam to serve. The
+// locked no-param /api/exam-config payload cannot carry this signal, so the
+// router asks this tiny public endpoint instead.
+
+test("candidate-route: legacy_configured true while the active settings doc exists", async () => {
+  const firestore = freshDb();
+  await firestore.collection("sd_settings").doc("active").set({
+    contest_slug: "legacy-exam", start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z"
+  });
+  const res = await call(makeReq({ method: "GET", path: "/api/candidate-route" }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body, { legacy_configured: true });
+});
+
+test("candidate-route: legacy_configured false with no settings doc, even when real contests exist", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Pure Contest World" });
+  await openContest(contest.slug);
+  const res = await call(makeReq({ method: "GET", path: "/api/candidate-route" }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body, { legacy_configured: false });
+});
+
 // ---- POST /api/admin/contest-exam-time --------------------------------------------
 
 test("contest-exam-time: extend_minutes moves the contest's OWN end_at and stamps end_at_updated_at", async () => {
