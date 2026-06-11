@@ -17,6 +17,7 @@ import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAt
 import * as studentCopy from "./studentCopy";
 import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
 import { enforcementSettingsFromForm } from "./enforcementSettings";
+import { autofillSuppressionProps } from "./shell/autofill";
 import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
@@ -1599,7 +1600,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                             is often "Roll Number" itself). */}
                         <Field label={examConfig?.unique_id_label || "Candidate ID"} value={form.candidate_id} onChange={(value) => setForm({ ...form, candidate_id: value })} />
                         <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-                        <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+                        <Field label="Email" type="text" inputMode="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
                         <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
                       </>
                     ) : (
@@ -1607,7 +1608,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                         <Field label="Candidate ID" value={form.candidate_id} disabled={rosterConfirmed && Boolean(candidateIdOf(rosterMatch))} onChange={(value) => setForm({ ...form, candidate_id: value })} />
                         <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
                         <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
-                        <Field label="Email" type="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
+                        <Field label="Email" type="text" inputMode="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
                         <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
                       </>
                     )}
@@ -5614,11 +5615,13 @@ function localInputToIso(value: string) {
   return new Date(value).toISOString();
 }
 
-function Field({ label, value, onChange, type = "text", disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; disabled?: boolean }) {
+function Field({ label, value, onChange, type = "text", disabled = false, inputMode }: { label: string; value: string; onChange: (value: string) => void; type?: string; disabled?: boolean; inputMode?: React.ComponentProps<"input">["inputMode"] }) {
+  // F12.1: spread the autofill-suppression set so Chrome's email/address popup
+  // (which drops fullscreen) can never fire on focus. See shell/autofill.ts.
   return (
     <label className="block">
       <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
-      <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm disabled:bg-neutral-100" type={type} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+      <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm disabled:bg-neutral-100" type={type} inputMode={inputMode} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} {...autofillSuppressionProps(label)} />
     </label>
   );
 }
