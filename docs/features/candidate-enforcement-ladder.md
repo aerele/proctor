@@ -14,6 +14,14 @@ executor. (HackerRank was removed from the candidate path in F8.2; an
 externally-hosted contests and feeds the same alerts pipeline — see
 [Related](#related). This page is about the own-editor candidate path.)
 
+> **Presentation note (2026-06-12 exam-shell redesign).** The chrome *around*
+> the ladder changed: healthy = a slim dark proctoring strip, anomaly episode
+> = a fixed full-width red banner, locked screen = owns the whole viewport
+> (see [candidate-flow.md](./candidate-flow.md)). The ladder itself — phases,
+> reducers, server routes, and **all telemetry** — is unchanged; the same
+> redesign also fixed two overlay-presentation bugs (live-truth headlines and
+> the typed-phrase reset), both detailed below.
+
 ## Where the code lives
 
 The entire ladder is a **pure state machine** with thin React glue and three
@@ -70,9 +78,15 @@ The defaults are also the client fallbacks in `App.tsx` (`reentrySeconds ?? 20`,
 **Candidate POV.** While the session is **recording**, leaving fullscreen (the
 candidate exits fullscreen, and the exit is not an `expected` one) raises a
 full-screen, unmissable red **takeover overlay** (`EnforcementOverlay.tsx`,
-`role="alertdialog"`, fixed over everything). The overlay headline is **"You
-left fullscreen"** and shows which exit number was recorded. To resume, the
-candidate must complete **both** steps within the countdown:
+`role="alertdialog"`, fixed over everything — it sits over the redesigned exam
+view exactly as it did over the classic layout). The headline and sub-line
+reflect the **live** state (added 2026-06-12 — `enforcementHeadline()` /
+`enforcementSubline()` in `enforcement.ts`): while out of fullscreen it reads
+**"You left fullscreen"** with the exit number; once the candidate is back in
+fullscreen with only the typed phrase missing it reads **"Finish the steps to
+continue"** and points at the remaining step — it used to keep shouting "You
+left fullscreen" for the whole episode, which read as a stuck alert. To
+resume, the candidate must complete **both** steps within the countdown:
 
 - **Step 1** — type the exact phrase `I will not exit full screen after this`
   (constant `FULLSCREEN_ACK_PHRASE`). The input blocks paste and drop, so the
@@ -80,9 +94,10 @@ candidate must complete **both** steps within the countdown:
 - **Step 2** — click **Re-enter fullscreen now** to return to fullscreen.
 
 When **both** conditions hold (`ackOk` and `fullscreen`), the episode resolves to
-`idle`, the overlay unmounts, the top bar is restored, and a
-`fullscreen_enforcement_ack` event is emitted — a **self-serve resume** with no
-proctor needed. This is the `tryResolve` transition in `enforcement.ts`.
+`idle`, the overlay unmounts, the normal exam view (with its slim proctoring
+strip) returns, and a `fullscreen_enforcement_ack` event is emitted — a
+**self-serve resume** with no proctor needed. This is the `tryResolve`
+transition in `enforcement.ts`.
 
 ![L1 takeover overlay: "You left fullscreen", live countdown, Step 1 type-the-phrase, Step 2 re-enter fullscreen](../assets/e2e/candidate/11-enforcement-overlay.png)
 
@@ -102,6 +117,16 @@ Key blocking-phase behaviours (all in `enforcement.ts`):
   persisted (`serializeEnforcementState` comment), so after a reload the candidate
   must type the sentence again. A fresh L1 episode also always mounts with an
   empty box.
+- **The typed box clears on every phase change (fixed 2026-06-12).** The
+  reducer always reset `ackOk` on a `violate()` transition (blocking →
+  locking/alert_hold), but the typed text lived only in the overlay's local
+  state — after the transition the box still showed the full phrase while
+  Step 1 read "not done", and since `onAckChange` only fires on **edits**, a
+  candidate who then re-entered fullscreen could never resolve an
+  `alert_hold` without realizing they had to retype. The overlay now clears
+  the box (and tells the hook) on any phase change while it stays mounted,
+  keeping the visible text in lockstep with the reducer
+  (`EnforcementOverlay.tsx`). The reducer itself is untouched.
 - An exit **while already blocking** does **not** extend the countdown — the
   existing deadline is kept (`fullscreen_exit` branch in `enforcementReducer`).
 - `exitCount` counts the **session**, not the episode — it is never reset when an
@@ -133,7 +158,7 @@ When the server confirms a block-mode lock, the candidate app flips its gate to
 fullscreen rule"** — telling the candidate to raise their hand and call the room
 proctor.
 
-![L2 locked screen: "Your test is locked — fullscreen rule" with Check again and a 6-digit unlock-code entry panel](../assets/e2e/candidate/12-enforcement-locked.png)
+![L2 locked screen: "Your test is locked — fullscreen rule" with Check again and a 6-digit unlock-code entry panel (current build, 2026-06-12 E2E run)](../assets/e2e-live/a13-locked-fullscreen-rule.png)
 
 The same locked screen reached via L1 countdown expiry during a wave-2 run:
 
@@ -207,9 +232,12 @@ worded by the trigger (`alertHoldMessage` in `enforcement.ts`):
 - countdown trigger → "Time expired…"
 
 The candidate can still self-resolve by completing both steps, or wait for an
-invigilator. No screenshot of `alert_first` mode is available in
-`night-run/evidence/` **(unverified by screenshot)**; the behaviour is verified
-in code (`EnforcementOverlay.tsx` `phase === "alert_hold"` branch and
+invigilator. Entering `alert_hold` clears the typed box along with the
+reducer's `ackOk` (the 2026-06-12 fix above) — the phrase must be retyped
+fresh in the hold, which is what makes the self-resolve actually reachable.
+No screenshot of `alert_first` mode is available in `night-run/evidence/`
+**(unverified by screenshot)**; the behaviour is verified in code
+(`EnforcementOverlay.tsx` `phase === "alert_hold"` branch and
 `enforcement.ts`).
 
 ## Per-session enforcement exemptions (F5.5)

@@ -12,7 +12,7 @@ The **Contests** and **Templates** tabs are where an admin defines and runs an e
 | --- | --- | --- |
 | Templates tab | `frontend/src/admin/TemplatesPanel.tsx`, `frontend/src/admin/templateForm.ts` | `backend/src/templates.mjs`, route bodies in `backend/src/handler.mjs` |
 | Contests tab + detail | `frontend/src/admin/ContestsPanel.tsx`, `frontend/src/admin/contestAdmin.ts` | `backend/src/contests.mjs`, `backend/src/contestProblems.mjs`, route bodies in `backend/src/handler.mjs` |
-| Global selector bar, `?contest=` routing, access-code landing | `frontend/src/App.tsx` (`ContestSelectorBar`, `AccessCodeLanding`) | `backend/src/contests.mjs` (`resolveAccessCode`) |
+| Global contest scope picker, `?contest=` routing, access-code landing | `frontend/src/App.tsx` (`ContestScopePicker`, `AccessCodeLanding`) | `backend/src/contests.mjs` (`resolveAccessCode`) |
 | Live-reference / live-save guards | `frontend/src/admin/saveGuard.ts`, `frontend/src/admin/ProblemBank.tsx` | `backend/src/handler.mjs` (`enforceContestProblemsEditRules`, `adminSaveProblem`, `adminDeleteProblem`), `backend/src/contestProblems.mjs` (`findProblemReferences`) |
 
 > **Decomposition note (unverified beyond what is named here).** The backend was partially split into `lib/*.mjs`, `routes/invigilator.mjs` and `config.mjs` (B0/B1, behavior-preserving), but that refactor is **paused/partial** — the request dispatch table and most contest/template route bodies still live in `backend/src/handler.mjs`.
@@ -138,17 +138,41 @@ Selecting **Detail** opens an in-place panel for that contest. The draft view sh
 ### Candidate access — code + link
 
 - **Candidate link:** `<origin>/?contest=<slug>` with **Copy**.
-- **Test code:** the 6-character access code (alphabet `A–Z` + `2–9`, no `0/1/O/I` lookalikes; minted once at create) with **Copy** and **Regenerate**. Regenerating asks *"Regenerate the test code? The old code stops working immediately."* (`regenerateContestSecretApi` → `POST /api/admin/contest-regenerate`, `field: access_code`). Candidates open the link directly or type the code on the landing page.
+- **Test code:** the 6-character access code (alphabet `A–Z` + `2–9`, no `0/1/O/I` lookalikes; minted at create) with **Copy**, **Regenerate**, and — added 2026-06-12 — a **Set custom code** box for a hand-out-friendly code (e.g. `KEC226`). Regenerating asks *"Regenerate the test code? The old code stops working immediately."* (`regenerateContestSecretApi` → `POST /api/admin/contest-regenerate`, `field: access_code`). Candidates open the link directly or type the code on the landing page.
+
+**Custom test code.** The input beside Regenerate normalizes as you type (uppercase, whitespace stripped, capped at 6 chars — `normalizeTestCodeInput()` in `contestAdmin.ts`) and pre-flights the obvious mistakes inline before the request ("0 and 1 are never used in test codes…", "Use letters A-Z and digits 2-9 only.", "Test codes are exactly 6 characters." — `testCodeIssue()`). Submitting calls `POST /api/admin/contest-set-code` (`setContestAccessCode` in `contests.mjs`); the server re-validates and owns uniqueness, and its error messages render verbatim inline in the Candidate access box:
+
+| Rule | Server response |
+| --- | --- |
+| Format: exactly 6 chars from `A–Z` / `2–9` (input is uppercased and whitespace-stripped server-side too) | `400` "Test code must be exactly 6 characters using letters A-Z or digits 2-9 (0 and 1 are never used)." |
+| Unique **among OPEN contests** (codes are stored normalized, so matching is effectively case-insensitive) | `409` "Test code {code} is already used by the open contest "{name}" ({slug}). Choose a different code." |
+
+Only *open* holders matter because the public access-code resolver picks among open contests — two open holders would make it ambiguous. Draft/archived contests may hold a clashing code, so the same clash check re-runs at the **open transition** (`409` "Cannot open this contest: its test code … is already used by the open contest … Change this contest's test code first, then open it." — `setContestStatus`) and on **create with an explicit `access_code`** (`createContest`; a blank/absent code still mints a random one, collision-checked against *all* contests as before).
+
+![Custom test code rejected — the 409 open-contest clash rendered inline in the Candidate access box](../assets/e2e-live/b7-w4-clash-rejected.png)
 
 ### Invigilator access — key + link
 
 - **Invigilator link:** `<origin>/invigilator?contest=<slug>&key=<invigilator_key>` with **Copy** and **Regenerate key**. The key (18 random bytes, base64url) authenticates room invigilators **for this contest only**; regenerating invalidates every distributed link instantly (confirm dialog, then `POST /api/admin/contest-regenerate`, `field: invigilator_key`).
 
-Both secrets are mint-only — they cannot be set via the update endpoint, only regenerated.
+The invigilator key is mint-only — it can only be regenerated, never chosen. The test code can be regenerated **or** set to a custom value via `contest-set-code`; the general `contest-update` endpoint still rejects `access_code` edits and points at set-code.
 
-### Exam window
+### Exam window — typed-text datetimes
 
-`start` / `end` `datetime-local` inputs with **Save window** (`updateContestApi` → `POST /api/admin/contest-update`). Both must parse and `start < end`. When both are set, **live controls** unlock: **+15 min**, **+30 min**, and a two-click **End now…** → **Confirm end now** (`adjustContestExamTime` → `POST /api/admin/contest-exam-time`, exactly one of `end_at | extend_minutes | end_now`). Until both ends are set, a hint explains that they are required to open the contest and to expose the live controls. The last end-time adjustment timestamp is shown when present.
+**Start** / **End** fields with **Save window** (`updateContestApi` → `POST /api/admin/contest-update`). Admin datetimes are **typed-text-first** (added 2026-06-12 — `DateTimeField.tsx` backed by the pure parsers in `dateTimeText.ts`): the native `datetime-local` segmented control resisted typed (and programmatic) entry, so the primary control is a plain text input that accepts:
+
+- the canonical form `YYYY-MM-DD HH:mm` (24-hour) — an ISO paste `YYYY-MM-DDTHH:mm` also works, an optional `:ss` is ignored, and an `am/pm` suffix is honoured;
+- day-first `12/06/2026 9:30 pm` (also `12-06-2026 9.30 pm`, `12.06.2026, 21:30`) — unambiguous because the 4-digit year comes **last**; US month-first input is deliberately **not** accepted (it would silently swap day and month).
+
+A finished edit echoes the canonical form on blur — typing `12/06/2026 9:30 pm` and clicking Save leaves `2026-06-12 21:30` in the box (the parsed value was already correct; only the display normalizes — fixed 2026-06-12). Blank or unparseable drafts stay untouched for correction, with an amber *"Could not read that — use YYYY-MM-DD HH:mm…"* hint under an invalid field. The native **calendar popover** stays one click away via the calendar button (a visually-hidden `datetime-local` + `showPicker()`, synced both ways). The same field is used on the New-contest form, here on the detail page, on the legacy Settings schedule, on the Live exam-time card, and as the Recordings test-start anchor.
+
+![Typed datetimes — canonical start, a day-first end mid-edit](../assets/e2e-live/b2-m0-datetime-typed.png)
+
+![The calendar popover, one click away via the calendar button](../assets/e2e-live/b3-m0-calendar-popover.png)
+
+![The canonical echo after a finished edit — the same typed-text field on the Live exam-time card showing `2026-06-12 21:30`](../assets/e2e-live/r5c-datetime-normalized.png)
+
+Both must parse and `start < end`. When both are set, **live controls** unlock: **+15 min**, **+30 min**, and a two-click **End now…** → **Confirm end now** (`adjustContestExamTime` → `POST /api/admin/contest-exam-time`, exactly one of `end_at | extend_minutes | end_now`). Until both ends are set, a hint explains that they are required to open the contest and to expose the live controls. The last end-time adjustment timestamp is shown when present.
 
 ![Contest detail — open, with live exam-time controls and ordered problems](../assets/e2e/admin-setup/11-contest-detail-live.png)
 
@@ -211,11 +235,11 @@ On top of the server guards, the Problem Bank UI adds a client-side **warn-on-sa
 
 ---
 
-## Global contest selector bar and routing
+## Global contest scope and routing
 
-### Selector bar (scopes every admin tab)
+### Scope picker (scopes every admin screen)
 
-Below the admin nav sits the **`ContestSelectorBar`** (`App.tsx`). It is a single dropdown — `All contests` plus every contest (`name (slug) — status`, `· legacy` on the synth row) — with a **Clear** button and a "manage contests" link that jumps to the Contests tab. Selecting a contest scopes Live stats, Sessions, Alerts, IP report, Attendance, Results and Review to that contest's `contest_slug`; the **People** tab is cross-round by design and ignores the selector.
+The global contest scope lives **top-right of the admin nav header** (`ContestScopePicker` in `App.tsx`; the 2026-06-12 nav redesign compacted the old below-nav selector bar into the header — it scopes every screen, so it sits above them all). It is a single dropdown — `All contests` plus every contest (`name (slug) — status`, `· legacy` on the synth row) — with a **Clear** button. Selecting a contest scopes Live stats (including the exam-time card), Sessions, Alerts, IP report, Attendance, Results, Review and Recordings to that contest's `contest_slug`; the **People** tab is cross-round by design and ignores the selector.
 
 - The selection is **per browser tab**: it is written to this tab's URL `?contest=<slug>` via `history.replaceState`, so a reload or duplicated tab keeps its scope and two tabs run two parallel drives.
 - An initial `?contest=` URL param always wins; with no param, a single open contest auto-selects (else `All contests`) — `defaultContestSelection`.

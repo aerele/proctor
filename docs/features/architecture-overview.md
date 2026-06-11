@@ -12,7 +12,7 @@ Proctor began life as a "HackerRank companion proctor" where students kept the p
 
 | | Component | Role | Status |
 |---|---|---|---|
-| **Primary** | Own-editor exam platform | Candidates do *everything* in our React + Monaco workspace; Run/Submit run against **Judge0**; evidence (screen video + events) streams to GCS. | Built, deployed to `aerele-proctor-dev` (rev 00006). |
+| **Primary** | Own-editor exam platform | Candidates do *everything* in our React + Monaco workspace; Run/Submit run against **Judge0**; evidence (screen video + events) streams to GCS. | Built, deployed to `aerele-proctor-dev` (rev 00008). |
 | **Secondary / optional** | `monitoring/` contest-eval poller | Live-watches an **externally-hosted** HackerRank contest and emits `source:"contest-eval"` cheating alerts into the **same** alerts pipeline the platform reads. | Still present; a separate, optional component. The "easily-startable adapter" follow-up (F8.5 / task #32) is **pending**. |
 
 The HackerRank-companion lineage survives only as **legacy code paths** kept for backward compatibility — for example `frontend/src/studentCopy.ts` still has an `ownEditor:false` variant ("End the proctoring session only after submitting HackerRank…") that renders only in the legacy external-HR mode. The wire field is still named `hackerrank_username` (frozen for compatibility, per the F9 D1 note in `types.ts`), but the candidate-facing identity input is labelled **"Candidate ID"** (`StudentForm.candidate_id` in `frontend/src/types.ts`).
@@ -52,7 +52,9 @@ The candidate flow is a gated state machine (`StudentGate = "form" | "pending_ap
 5. **Multi-problem Monaco workspace** (S-I) — the start/resume response carries an **ordered `problems[]`**; each problem has a statement, sample tests, languages, and optional **per-language starter stubs** (`stubs`, F12.2; falls back to a generic scaffold when absent). The editor ships a **curated autocomplete** (F12.3 / task #52). Languages: `python | cpp | java | javascript` (`ExecRequest` in `types.ts`).
 6. **Run / Submit against live Judge0** — `POST /api/exec/run` (sample tests, visible results) and `POST /api/exec/submit` (hidden tests; response is verdict + pass/fail counts only, **no per-test array** — `SubmitResult` in `types.ts`). Per-`(session, problem)` cooldowns and a submit budget apply (see §7 config).
 
-![Candidate Monaco workspace — multi-problem coding view](../assets/e2e/candidate/05-workspace.png)
+During the exam itself (own-editor session, recording, released) **the workspace is the page** (redesigned 2026-06-12): a slim ~40 px proctoring strip on top (stage block, pulsing REC, identity, time left/elapsed, Proctoring-panel toggle, End test), a collapsible always-mounted proctoring panel, and a floating bottom-right camera dock. The cue is flipped — healthy = the slim strip; an anomaly episode = a big fixed full-width red banner; the locked screen owns the viewport (`shellHeaderMode()` in `frontend/src/shell/examShell.ts`). Pre-start/waiting/resume/legacy screens keep the classic layout. See [candidate-flow.md](./candidate-flow.md).
+
+![Candidate in-exam view — slim strip, workspace as the page, camera dock](../assets/e2e-live/a4-w1-exam-shell.png)
 
 A browser reload **resumes** the same session verbatim without re-collecting details (`POST /api/session/resume`), restoring per-problem submit history (`submissions_summary`).
 
@@ -70,7 +72,7 @@ The server decides lock vs alert on `POST /api/session/enforcement-violation`. I
 
 ### 3.2 What is recorded
 
-The recorded `.webm` is the **direct screen stream + mixed microphone audio**. A separate **low-res camera stream** is captured for live monitoring (F10.1) — **default ON**, 10 fps, 640 px wide (`CAMERA_RECORDING_DEFAULTS = { enabled: true, fps: 10, width: 640 }`, `handler.mjs` 6062) — but the camera is **never part of the recorded video**; per-source capture states are tracked instead (`CaptureState` in `types.ts`).
+The recorded screen `.webm` is the **direct screen stream + mixed microphone audio**. The camera is **never mixed into that video**: when enabled (F10.1 — **default ON**, 10 fps, 640 px wide, `CAMERA_RECORDING_DEFAULTS = { enabled: true, fps: 10, width: 640 }`) it records as a **separate low-res, video-only chunk series** (`kind: "camera"`) with its own upload chain, alongside the live self-view; per-source capture states are tracked (`CaptureState` in `types.ts`). Since the 2026-06-12 fix wave, chunk indexes for both series are **monotonic across recording restarts** (sessionStorage + server high-water marks, plus a server-side bump in `/api/upload-url`), so a restarted stint can never overwrite a prior stint's chunks.
 
 ---
 
@@ -78,7 +80,9 @@ The recorded `.webm` is the **direct screen stream + mixed microphone audio**. A
 
 A single password-gated console (`x-admin-password` vs `ADMIN_PASSWORD`, timing-safe — `lib/auth.mjs` `requireAdmin`). The frontend ships only a **sha256 hash** (`VITE_ADMIN_PASSWORD_HASH`) and hashes the typed password to compare.
 
-![Admin console home](../assets/e2e/admin-setup/01-admin-home.png)
+Navigation (redesigned 2026-06-12) is one header card: six **section tabs** — Live (Live stats/Live alerts/Sessions/IP report), Contest (Contests/Attendance/Results), Evidence (Review/Recordings), Authoring (Problems/Templates), People, Settings — with the **contest scope picker top-right** (it scopes every screen; the selection persists in the tab's URL `?contest=`), a second row for the active section's views, per-section last-view memory, and an open-alert badge on Live (`frontend/src/admin/adminNav.ts`; see [admin-live-monitoring.md](./admin-live-monitoring.md)).
+
+![Admin console — grouped nav with the contest scope picker top-right](../assets/e2e-live/r3-allcontests-legacy-chip.png)
 
 Surfaces, each with its backing routes:
 
@@ -93,9 +97,9 @@ Surfaces, each with its backing routes:
 | **Alerts console** | List alerts newest-first with room/severity/source filters, archive/unarchive, video deep-links; per-type alert config. | `GET /api/admin/alerts`, `POST alert-action`, `GET/POST alert-settings` |
 | **IP report** | IP-wise clusters of logged-in users (proxy-detection signal) with drill-down. | `GET /api/admin/ip-report` |
 | **Attendance** | Roster-based taken / not-taken counts. | `GET /api/admin/attendance` |
-| **Exam time** | Live end-time control (absolute, extend delta, or force-end-now). | `POST /api/admin/exam-time` |
+| **Exam time** | Live end-time control (absolute, extend delta, or force-end-now); the Live-stats card follows the contest scope — a scoped contest reads/writes its own window via `contest-exam-time`, the legacy schedule only when unscoped (fixed 2026-06-12). | `POST /api/admin/exam-time` (legacy) · `POST /api/admin/contest-exam-time` (scoped) |
 | **Results + People** | Per-contest scoreboard (rank / per-problem / integrity), bulk selection + "selection done"; cross-round person scorecards. | `GET /api/admin/contest-results`, `POST contest-selection`, `contest-selection-done`, `contest-adopt`; `GET /api/admin/people`, `person` |
-| **Recording review** | Screen (+ camera (unverified live playback)) playback with an events/alerts/submission timeline; multi-reviewer YES/NO queue. | `GET /api/admin/submission-events`, `session-events`; `review-roster`, `review-next`, `review-verdict`, `review-mine`, `reviews`; component `frontend/src/RecordingReview.tsx` |
+| **Recording review** | Screen + camera chunk playback with an events/alerts/submission timeline; multi-reviewer YES/NO queue. | `GET /api/admin/submission-events`, `session-events`; `review-roster`, `review-next`, `review-verdict`, `review-mine`, `reviews`; component `frontend/src/RecordingReview.tsx` |
 | **Data lifecycle** | Export → triple-gated purge → tombstone; retention sweep. | `POST /api/admin/contest-export`, `contest-purge`, `retention-sweep` |
 
 > **Verified caveat (from `night-run/RESUME-ANCHOR.md` §1b):** the distributed reviewer **queue** (review-roster/claims/verdicts) is still candidate-norm-keyed, so person-mode review-queue serving does not resolve (the recording **player** does). Person-mode submission-timeline markers are also a pending follow-up (tasks #59/#60).
@@ -236,9 +240,9 @@ Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all
 
 ---
 
-## 11. Full HTTP route inventory (~80 routes)
+## 11. Full HTTP route inventory (~81 routes)
 
-All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes/invigilator.mjs`). Verified by extracting every `path === "/api/..."` dispatch line; **80** routes total. Unmatched path → `404`. Grouped by family:
+All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes/invigilator.mjs`). Verified by extracting every `path === "/api/..."` dispatch line; **81** routes total. Unmatched path → `404`. Grouped by family:
 
 **Candidate session (auth: knowing `session_id`, or time-window gate on start)**
 `POST /api/session/start` · `/api/session/resume` · `/api/upload-url` · `/api/events` · `/api/editor-events` · `/api/review-file` · `/api/heartbeat` · `/api/session/beacon` · `/api/session/validate-end` · `/api/session/end` · `/api/session/room-gate` · `/api/session/enforcement-violation` · `/api/session/unlock-gate`
@@ -250,7 +254,7 @@ All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes
 `GET /api/exam-config` · `/api/candidate-route` · `POST /api/access-code` · `POST /api/roster/lookup`
 
 **Admin — contests & templates** (`x-admin-password`)
-`GET/POST /api/admin/contests` · `contest-update` · `contest-status` · `contest-regenerate` · `contest-exam-time` · `GET /api/admin/templates` · `template` · `POST templates` · `template-update` · `template-archive` · `template-clone` · `template-delete`
+`GET/POST /api/admin/contests` · `contest-update` · `contest-status` · `contest-regenerate` · `contest-set-code` · `contest-exam-time` · `GET /api/admin/templates` · `template` · `POST templates` · `template-update` · `template-archive` · `template-clone` · `template-delete`
 
 **Admin — problems**
 `GET /api/admin/problems` · `problem` · `POST problems` · `problem-delete`

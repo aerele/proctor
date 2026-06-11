@@ -167,23 +167,38 @@ password managers. The email field is treated as plain text rather than
 `type=email`. The helper is `autofillSuppressionProps()` /
 `autofillFieldName()` in `frontend/src/shell/autofill.ts`.
 
-**Transient pre-exam fullscreen loss is non-punitive.** Anomalies only vanish
-the top bar and increment the flag chip **while actively recording**: the
-top-bar reducer ignores any anomaly event whose `recording` flag is false
-(`topBarReducer` in `examShell.ts` — `if (!verdict.anomaly || !action.recording)
-return { state, emit: null }`). Because recording does not start until the form
-is submitted, a fullscreen blip during Stages 1–3 raises no flag and is not
-counted against the candidate.
+**Transient pre-exam fullscreen loss is non-punitive.** Anomalies only trigger
+an episode (the red banner replaces the strip) and increment the flag chip
+**while actively recording**: the shell reducer ignores any anomaly event whose
+`recording` flag is false (`topBarReducer` in `examShell.ts` — `if
+(!verdict.anomaly || !action.recording) return { state, emit: null }`). Because
+recording does not start until the form is submitted, a fullscreen blip during
+Stages 1–3 raises no flag and is not counted against the candidate.
 
 ---
 
 ## Stage 4 — Workspace: multi-problem Monaco + Run/Submit
 
 Once recording is live (and the room is released), the candidate lands in the
-own-editor workspace. The contest's problems come from the server on the
-start/resume response (`problems[]`, with a single-problem `problem` alias).
+own-editor workspace. Since the exam-shell redesign (2026-06-12), **the
+workspace IS the page** for an in-exam own-editor session (recording +
+released — the branch condition in `App.tsx` is `hasProblem && status ===
+"recording" && gate === "running" && !examGateActive`):
 
-![Stage 4 in-exam workspace](../assets/e2e/candidate/05-workspace.png)
+- a **slim ~40 px dark strip** pinned to the top (see
+  [the proctoring strip](#the-slim-proctoring-strip--and-the-flipped-anomaly-cue)),
+- the Monaco workspace filling the rest of the viewport,
+- a **collapsible proctoring panel** behind the strip's **Proctoring** toggle,
+- a **floating camera dock** bottom-right.
+
+Pre-start, waiting (room-code / pending-approval / locked), resume-after-reload
+and legacy HackerRank-link screens all keep the classic proctoring-first
+layout — the redesign applies only to the in-exam branch.
+
+![Stage 4 in-exam workspace — slim top strip, workspace as the page, floating camera dock bottom-right](../assets/e2e-live/a4-w1-exam-shell.png)
+
+The contest's problems come from the server on the start/resume response
+(`problems[]`, with a single-problem `problem` alias).
 
 - Container: `MultiProblemWorkspace`
   (`frontend/src/coding/MultiProblemWorkspace.tsx`). With **≥2** problems it
@@ -194,6 +209,35 @@ start/resume response (`problems[]`, with a single-problem `problem` alias).
 - Presentational pane: `ProblemPane` in
   `frontend/src/coding/CodingWorkspace.tsx` — statement, sample tests, language
   picker, Monaco editor, Run/Submit buttons.
+
+### The collapsible proctoring panel and the camera dock
+
+Everything that used to sit around the editor now tucks behind the strip's
+**Proctoring** toggle as a collapsible panel that opens at the top of the
+content (the toggle also scrolls to top so it surfaces even when the candidate
+is deep in a problem). The panel is **always mounted** — collapsing is
+CSS-only — so no telemetry or preview host ever unmounts (the exam branch in
+`App.tsx`). It contains:
+
+- **Recording health** — recording state, uploaded chunks, per-source
+  screen/camera/microphone capture states, session id, start/current IP
+  (`HealthPanel`);
+- **Entry review files** — the tabs / clipboard / cookies audit collected at
+  entry (`EntryReviewPanel`);
+- **Rules reminder** (`RulesPanel`);
+- **Recent proctor events** (`RecentEventsPanel`).
+
+![Proctoring panel expanded — recording health, entry review files, rules reminder, recent proctor events](../assets/e2e-live/a5-w2-proctoring-expanded.png)
+
+The rule-mandated **camera self-view** floats as a small bottom-right dock
+(`CameraDock` in `App.tsx`): a dark tile with the camera state label, a
+pop-out (picture-in-picture) button, and a minimize toggle that collapses it
+to a pill. Both visual states keep the `<video>` host mounted — the camera
+*capture* lives in the recorder and never depends on this preview.
+
+**End test** lives in the strip's action slot; pressing it opens the
+integrity-assurance `EndTestPanel` above the workspace (see
+[Ending the test](#inline-recovery--integrity-assurance-to-end)).
 
 ### Per-language starter stubs (F12.2)
 
@@ -272,28 +316,68 @@ Editor activity (`code_run`, `code_submit`, focus/keystroke batches, and
 
 ---
 
-## The 5-stage top bar (status-bound timer, F5.7)
+## The slim proctoring strip — and the flipped anomaly cue
 
-A persistent top bar shows the stage block (1–5), the candidate name + room, and
-a clock. The bar is rendered by the exam shell and is present on every branch
-**except during an anomaly episode and on the locked screen**
-(`topBarVisible()`). The room label is normalised so "Room A" is never
-double-prefixed (`formatRoomLabel()`).
+A persistent fixed strip (~40 px tall, the only dark chrome in the otherwise
+light app — `ExamTopBar.tsx`) renders on every healthy branch. Left to right:
+the colored **stage block** (1–5, `STAGE_META`), a **pulsing red REC dot**
+while recording, the contest name, the candidate's **name / candidate ID /
+room** (walk-by ID spot checks; the room label is normalised so "Room A" is
+never double-prefixed, `formatRoomLabel()`), then a permanent **⚑ flag chip**
+when flags exist, the **Left** countdown, the **Elapsed** timer (a ticking
+wall clock before recording — a screenshot cannot tick), and an action slot
+(during the exam: the Proctoring-panel toggle + End test).
 
-- **Vanish on anomaly.** When the candidate leaves fullscreen, blurs the window,
-  hides the tab, or stops the screen share *while recording*, the bar vanishes
-  and a permanent flag chip (⚑) increments once per episode; it restores only
-  when fullscreen + visibility + recording all hold again (`topBarReducer`,
-  `anomalyFromEvent`, `topBarVisible` in `examShell.ts`). The flag chip survives
-  a reload (per-session persistence via `serializeShellState` /
-  `deserializeShellState`); the durable record is the server event stream
-  (`topbar_hidden` / `topbar_restored`).
-- **Status-bound timer (F5.7).** The elapsed count-up ticks **only while
-  actively recording and not ended**; the moment status/gate report ended (or
-  "ending"/"error"), it freezes (`elapsedTimerActive()`). Exam *time left* comes
-  from the authoritative server end time echoed on every heartbeat, so a
-  proctor's live time change propagates within one heartbeat (≤15 s) — no reload
+This **flips the pre-2026-06-12 cue**. The old 64 px bar was the prominent
+element and its *absence* was the alarm; now subtle-and-slim means healthy and
+**big-and-loud means a problem**. Which fixed header renders is a pure
+decision (`shellHeaderMode()` in `examShell.ts`):
+
+| Mode | When | What renders |
+|---|---|---|
+| `strip` | everything healthy | the slim dark strip |
+| `alert` | an anomaly episode is active | a **big fixed full-width red banner** (`AnomalyPanel`) replaces the strip |
+| `hidden` | locked screen | nothing — the locked screen owns the viewport |
+
+- **Anomaly episode → red banner.** When the candidate leaves fullscreen,
+  blurs the window, hides the tab, or the screen share stops *while
+  recording*, the strip is replaced by a pinned full-width red **"Proctoring
+  alert"** banner listing the episode's reason(s) with timestamps, a live "To
+  continue: …" line, a **Re-enter fullscreen** button (when fullscreen is the
+  missing piece), and exactly one primary action — **"I have fixed this"** —
+  that stays disabled until fullscreen + visibility + recording all hold
+  again. The banner is fixed to the viewport top (the pre-redesign in-flow
+  panel could sit scrolled out of view while the candidate worked deep in the
+  workspace), so it cannot be missed from the keyboard or from across the
+  room. The flag chip (⚑) still increments once per episode and survives a
+  reload (`serializeShellState` / `deserializeShellState`); the episode
+  semantics and the durable server events (`topbar_hidden` /
+  `topbar_restored` — wire names kept) are unchanged, only the presentation
+  flipped (`topBarReducer`, `anomalyFromEvent` in `examShell.ts`;
+  `AnomalyPanel.tsx`).
+
+![Anomaly episode — full-width red "Proctoring alert" banner pinned over the page after the screen share was stopped](../assets/e2e-live/a11-screenshare-killed-alert.png)
+
+- **Invigilator floor protocol (inverted).** A glance now reads: slim dark
+  strip with a colored stage block + pulsing REC = healthy; **big red banner =
+  walk over**; locked screen = the candidate is told to raise their hand.
+  ([`EXAM-DAY-OPS.md`](../EXAM-DAY-OPS.md) carries the same rule.)
+- **Status-bound timer (F5.7), restart-proof anchor.** The elapsed count-up
+  ticks **only while actively recording and not ended**; the moment
+  status/gate report ended (or "ending"/"error"), it freezes
+  (`elapsedTimerActive()`). Since the 2026-06-12 fix wave it anchors on the
+  **session's server-side start** (`created_at`, skew-corrected —
+  `sessionElapsedAnchorMs()` in `examTime.ts`), so a recording restart no
+  longer resets it to 0:00; a pre-fix backend that sends no `created_at`
+  degrades to the old per-stint anchor. Exam *time left* comes from the
+  authoritative server end time echoed on every heartbeat, so a proctor's live
+  time change propagates within one heartbeat (≤15 s) — no reload
   (`onExamTimeChange` in `useProctorRecorder.ts`).
+- **Warning strip clears on recovery (fixed 2026-06-12).** The spoken-warning
+  text strip under the chrome (`reloadWarning` in `App.tsx`) now clears when
+  live state recovers (recording resumes / the lock is released) instead of
+  showing a stale "Screen sharing stopped…" or "Your test has been locked…"
+  until the next reload.
 
 ---
 
@@ -349,9 +433,23 @@ chunks (`useProctorRecorder.ts`):
 Defaults and normalisation: `CAMERA_RECORDING_DEFAULTS` in
 `frontend/src/cameraRecording.ts` (backend-parity rules). The recorder starts
 the camera MediaRecorder only when the server enabled it **and** a live camera
-track exists (`shouldRecordCamera()`). The candidate sees a "Camera self-view"
-preview with a pop-out option and a "Recording health" panel (screen / camera /
-microphone states) in the workspace sidebar.
+track exists (`shouldRecordCamera()`). During the exam the candidate sees the
+camera self-view in the floating bottom-right **camera dock** (with pop-out
+and minimize) and the "Recording health" panel inside the collapsible
+proctoring panel; the classic screens (pre-start / waiting / resume / legacy)
+keep the sidebar layout.
+
+**Chunk indexes survive recording restarts (fixed 2026-06-12).** A recording
+restart within one session (share-drop recovery, lock→unlock, refresh-resume)
+used to re-count chunks from 1 and **overwrite** the prior stint's uploaded
+objects. Indexes are now monotonic across stints: the recorder resumes from a
+continuation base computed as the max of a per-(session, kind) sessionStorage
+high-water mark and the server-reported `chunk_count` / `*_chunk_index_hwm`
+on start/resume, and the server's `/api/upload-url` bumps any stale index at
+or below its own per-kind high-water mark, so no write URL can ever land on a
+surviving object (`frontend/src/chunkContinuity.ts`, `useProctorRecorder.ts`;
+`createUploadUrl` in `handler.mjs`). The end-of-test manifest is cumulative
+across stints (`mergeManifest`).
 
 ---
 
@@ -367,8 +465,9 @@ could orphan a session:
 | Screen sharing stopped mid-exam | A recoverable "Resume screen share" prompt + spoken warning; logged, tab must stay open |
 | End-submit failed after recording stopped | Stays on a recoverable "error" state with an inline **Retry** (`retryEnd()` in `App.tsx`) — no reload, so the session is never orphaned as incomplete |
 
-**Ending the test.** The candidate presses **End test**, which opens an
-`EndTestPanel` (`App.tsx`) with a required **integrity-assurance checkbox**:
+**Ending the test.** The candidate presses **End test** (in the slim top
+strip during the exam), which opens an `EndTestPanel` (`App.tsx`) with a
+required **integrity-assurance checkbox**:
 *"I assure that I worked independently, did not copy, did not use AI/external
 help, and submitted only my own solution."* "End and close session" is disabled
 until the box is checked. On end, the client calls
