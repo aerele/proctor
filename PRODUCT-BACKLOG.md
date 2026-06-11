@@ -32,6 +32,17 @@ _Last updated: 2026-06-11 (Karthi multipart prioritization, TG 1841–1845)._
 - **#61 — alert→recording deep-link fallback**: fall back to the raw chunk player (or deploy the video-worker)
   when no merged review video exists.
 
+## Code-review MEDs/LOWs — post-exam wave (2026-06-12 triple review; verdict GO; H1 resolver limit fixed+deployed)
+- **CR-M1**: W4 uniqueness check-then-write is TOCTOU-racy (two simultaneous admin opens/set-codes) → Firestore transaction.
+- **CR-M2**: upload-url hwm guard non-transactional — dual-LIVE-tab same session can double-issue one index (single-tab safe) → transactional allocation.
+- **CR-M3**: RT-1 retry + bump guard shifts object key +1 vs the event/manifest `index` field and inflates `chunk_count` (≤3/chunk) — audit-cosmetic; consider `urls_issued` split.
+- LOWs: clear `examTimeInput` on contest switch; wrap bare `sessionStorage` property access at recorder call sites; F4 fallback fires full sessions-list fetch per zero-result search; `stintManifestRef` not reset between same-tab sessions (unreachable today); ended-session load skips `clearChunkContinuity`; `pt-40` can under-pad a tall wrapped banner.
+
+## UX polish — post-exam (2026-06-12 review; verdict GO; H1/H2/H3+M1/M2/M4 fixed same night)
+- **UX-M3**: invigilator exemption toggles read as commands in OFF state → label "Exempt: fullscreen / switch-away".
+- **UX-M5**: raw snake_case error codes can surface to invigilators → generic fallback message + code in small print.
+- LOWs: "wrong_answer" → "Wrong answer" verdict mapping; "Room Room A" doubling outside the strip (use `formatRoomLabel` everywhere); unify "invigilator/proctor/room proctor" terminology; stage-1 block is red in a red=problem language; sessions table raw `pending_approval` chips.
+
 ## Security hardening — post-exam wave (2026-06-12 triple review; verdict GO, M1 already fixed+deployed)
 - **L1**: upload-url hwm read-modify-write not transactional (own-session race only) → Firestore transaction/increment.
 - **L2** (pre-existing): signed PUT URLs carry no `x-goog-content-length-range` size cap + no per-session URL-count cap.
