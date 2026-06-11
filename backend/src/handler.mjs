@@ -2,8 +2,9 @@ import { randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
 import { bucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
-import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, positiveIntOr, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
+import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
 import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
+import { loadConfig } from "./config.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
@@ -28,18 +29,34 @@ export function __setExecClockForTest(fn) {
   _execClock = fn || (() => Date.now());
 }
 
-const SESSION_COLLECTION = process.env.SESSION_COLLECTION || "proctor_sessions";
-const SETTINGS_COLLECTION = process.env.SETTINGS_COLLECTION || "proctor_settings";
-const ALERTS_COLLECTION = process.env.ALERTS_COLLECTION || "proctor_alerts";
+// All env-derived configuration is read by config.mjs's loadConfig() and
+// destructured here at handler module scope (decomp B0). Because each test
+// imports the handler with a fresh ?<buster>, this destructure re-runs per
+// instance and captures the env the test set just before that import — the
+// capture-at-load contract the ?buster isolation depends on. process.env now
+// appears ONLY in handler.mjs (this call) and config.mjs (env-lint guard).
+const {
+  SESSION_COLLECTION, SETTINGS_COLLECTION, ALERTS_COLLECTION, SUBMISSION_EVENTS_COLLECTION,
+  LIVE_LOCK_COLLECTION, REVIEW_STATE_COLLECTION, REVIEW_COLLECTION, REVIEW_CLAIMS_COLLECTION,
+  SUBMISSIONS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
+  ROOM_GATES_COLLECTION, CONTESTS_COLLECTION, COLLEGES_COLLECTION, PERSONS_COLLECTION,
+  ENROLLMENTS_COLLECTION, ADMIN_AUDIT_COLLECTION, TEMPLATES_COLLECTION,
+  EVIDENCE_BUCKET, JUDGE0_BASE_URL, JUDGE0_MODE, JUDGE0_API_KEY, JUDGE0_AUTH_TOKEN,
+  URL_EXPIRY_SECONDS, ADMIN_PASSWORD, INVIGILATOR_PASSWORD, ALERTS_INGEST_API_KEY,
+  RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
+  EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
+  EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
+  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT
+} = loadConfig();
+
+// ---- Non-env code constants (kept local to the handler) ---------------------
 // Submission-time markers (poller-sourced) for the recording-review timeline.
 // ONE doc per (username_norm, contest_slug) holding the merged, de-duped-by-
 // submission_id events array, so a re-post is an idempotent upsert.
-const SUBMISSION_EVENTS_COLLECTION = process.env.SUBMISSION_EVENTS_COLLECTION || "proctor_submission_events";
 // H1: per-(username_norm, contest_slug) live-slot lock. A start atomically
 // .create()s the lock doc; exactly one concurrent writer wins the slot and goes
 // active, the rest fall to pending_approval. Released when the owning session
 // ends so a later legitimate restart can re-acquire it.
-const LIVE_LOCK_COLLECTION = process.env.LIVE_LOCK_COLLECTION || "proctor_live_locks";
 // Phase 2 (multi-reviewer recording review). The operator sets a ROSTER of
 // usernames; 10 reviewers concurrently pull the next student to review by a
 // fixed PRIORITY and submit a binary verdict.
@@ -53,9 +70,6 @@ const LIVE_LOCK_COLLECTION = process.env.LIVE_LOCK_COLLECTION || "proctor_live_l
 //                                          than CLAIM_TTL_MS is treated as free,
 //                                          and a claim is deleted when its
 //                                          reviewer submits a verdict.
-const REVIEW_STATE_COLLECTION = process.env.REVIEW_STATE_COLLECTION || "proctor_review_state";
-const REVIEW_COLLECTION = process.env.REVIEW_COLLECTION || "proctor_reviews";
-const REVIEW_CLAIMS_COLLECTION = process.env.REVIEW_CLAIMS_COLLECTION || "proctor_review_claims";
 const REVIEW_ROSTER_ID = "roster";
 // A claim this many ms old (or older) is stale — its reviewer is presumed gone,
 // so the username becomes claimable again by anyone (mirrors the live-slot
@@ -65,16 +79,7 @@ const CLAIM_TTL_MS = 10 * 60 * 1000;
 // reviews scan, so a pathological payload can't bloat a request.
 const REVIEW_ROSTER_LIMIT = 5000;
 const REVIEWS_QUERY_LIMIT = 20000;
-const EVIDENCE_BUCKET = process.env.EVIDENCE_BUCKET;
-const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "https://judge0-ce.p.rapidapi.com";
-const JUDGE0_MODE = process.env.JUDGE0_MODE || "rapidapi";
-const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY;
-const JUDGE0_AUTH_TOKEN = process.env.JUDGE0_AUTH_TOKEN;
-const SUBMISSIONS_COLLECTION = process.env.SUBMISSIONS_COLLECTION || "proctor_submissions";
-const PROBLEMS_COLLECTION = process.env.PROBLEMS_COLLECTION || "proctor_problems";
 const PROBLEMS_QUERY_LIMIT = 500;
-const EDITOR_EVENTS_COLLECTION = process.env.EDITOR_EVENTS_COLLECTION || "editor-events"; // GCS sub-prefix label
-const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT || "5000");
 // S2 roster (compulsory roster login). One ACTIVE roster, global (like the
 // "active" settings doc). Meta lives in SETTINGS_COLLECTION under a distinct
 // doc id (mirrors ALERT_SETTINGS_ID); entries live in ROSTER_COLLECTION, one
@@ -82,7 +87,6 @@ const EDITOR_EVENTS_INGEST_LIMIT = Number(process.env.EDITOR_EVENTS_INGEST_LIMIT
 // lookups. Re-upload is a VERSIONED REPLACE: entries carry roster_version and
 // lookups ignore any entry whose version is not the meta's current one, so no
 // mass delete is ever needed and a half-failed upload never becomes active.
-const ROSTER_COLLECTION = process.env.ROSTER_COLLECTION || "proctor_roster";
 const ROSTER_META_ID = "roster_meta";
 const ROSTER_LIMIT = 5000;          // max rows per upload (mirrors REVIEW_ROSTER_LIMIT)
 const ROSTER_COLUMNS_LIMIT = 30;    // max columns kept per row
@@ -97,9 +101,7 @@ const MAX_SOURCE_CODE_LENGTH = 65536; // exec run/submit: cap candidate source s
 // be able to drain it. One run per EXEC_RUN_COOLDOWN_SECONDS, one submit per
 // EXEC_SUBMIT_COOLDOWN_SECONDS, and at most EXEC_MAX_SUBMISSIONS_PER_SESSION
 // stored submissions per session+problem.
-const EXEC_RUN_COOLDOWN_SECONDS = Number(process.env.EXEC_RUN_COOLDOWN_SECONDS || "5");
-const EXEC_SUBMIT_COOLDOWN_SECONDS = Number(process.env.EXEC_SUBMIT_COOLDOWN_SECONDS || "20");
-const EXEC_MAX_SUBMISSIONS_PER_SESSION = Number(process.env.EXEC_MAX_SUBMISSIONS_PER_SESSION || "50");
+// (EXEC_RUN/SUBMIT cooldowns + EXEC_MAX_SUBMISSIONS_PER_SESSION come from config.)
 // Backpressure between candidates and the engine (design §11 item 2): ONE
 // process-wide queue with independent Run/Submit lanes so a submit storm never
 // starves quick sample runs. The lanes are passed to the adapter as GATES: a
@@ -112,10 +114,7 @@ const EXEC_MAX_SUBMISSIONS_PER_SESSION = Number(process.env.EXEC_MAX_SUBMISSIONS
 // from the submit POSTs retry INSIDE the queue with exponential backoff +
 // jitter (honoring Retry-After), while poll-phase retries live inside the
 // adapter (a queue-level retry would re-submit an already-billed batch).
-const EXEC_RUN_CONCURRENCY = Number(process.env.EXEC_RUN_CONCURRENCY || "2");
-const EXEC_SUBMIT_CONCURRENCY = Number(process.env.EXEC_SUBMIT_CONCURRENCY || "4");
-const EXEC_POLL_CONCURRENCY = Number(process.env.EXEC_POLL_CONCURRENCY || "16");
-const EXEC_MAX_QUEUE = Number(process.env.EXEC_MAX_QUEUE || "200");
+// (EXEC_*_CONCURRENCY + EXEC_MAX_QUEUE come from config.)
 const execQueue = makeExecQueue({
   runConcurrency: EXEC_RUN_CONCURRENCY,
   submitConcurrency: EXEC_SUBMIT_CONCURRENCY,
@@ -123,26 +122,12 @@ const execQueue = makeExecQueue({
   maxQueue: EXEC_MAX_QUEUE
   // pollMaxQueue stays at its generous default (1000).
 });
-const PUBLIC_APP_ORIGIN = process.env.PUBLIC_APP_ORIGIN || "*";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-// S3 invigilator portal: a SEPARATE shared password so invigilators never hold
-// the admin credential. Closed-by-default when unset (mirrors ALERTS_INGEST_API_KEY).
-const INVIGILATOR_PASSWORD = process.env.INVIGILATOR_PASSWORD;
-const ROOM_GATES_COLLECTION = process.env.ROOM_GATES_COLLECTION || "proctor_room_gates";
-// Per-session wrong-OTP cap: at the cap further code attempts get 429 (status
-// polls still work, and an invigilator start-now still admits the session).
-// S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
-// silently disable the brute-force cap; fall back to the safe default of 20.
-const GATE_ATTEMPT_LIMIT = positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20);
+// (PUBLIC_APP_ORIGIN, ADMIN_PASSWORD, INVIGILATOR_PASSWORD, ROOM_GATES_COLLECTION,
+// GATE_ATTEMPT_LIMIT, ALERTS_INGEST_API_KEY, RETENTION_SWEEP_API_KEY,
+// URL_EXPIRY_SECONDS come from config — see the loadConfig() destructure above.)
 // Caps for the invigilator room dashboard payload.
 const INVIGILATOR_SESSIONS_LIMIT = 500;
 const INVIGILATOR_ALERTS_LIMIT = 100;
-const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
-// S-H: the Cloud Scheduler key for the daily retention sweep. Closed-by-default
-// (mirrors ALERTS_INGEST_API_KEY): no key configured -> the sweep endpoint
-// rejects every x-api-key request (admin password still works for manual runs).
-const RETENTION_SWEEP_API_KEY = process.env.RETENTION_SWEEP_API_KEY;
-const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
 const SESSIONS_QUERY_LIMIT = 2000;
 // S-J: the Results rollup scans a contest's submissions (one doc per submit).
@@ -167,8 +152,8 @@ const SETTINGS_ID = "active";
 const ALERT_SETTINGS_ID = "alert_settings";
 // A session whose status is still active but whose last liveness signal
 // (heartbeat or beacon) is older than this many milliseconds is treated as a
-// derived "disconnected" signal for the console. Configurable via env.
-const DISCONNECTED_STALENESS_MS = Number(process.env.DISCONNECTED_STALENESS_MS || "45000");
+// derived "disconnected" signal for the console. Configurable via env
+// (DISCONNECTED_STALENESS_MS comes from config — see loadConfig() above).
 // Cap on the distinct rooms list returned to the admin console so a pathological
 // number of room labels can never bloat a stats/alerts response.
 const ROOMS_LIST_LIMIT = 200;
@@ -194,7 +179,6 @@ configureProblemStore({ getFirestore, collection: PROBLEMS_COLLECTION });
 // pattern; the settings collection/id let contests.mjs synthesize the
 // READ-ONLY legacy contest from the "active" doc (F9 §6). No production
 // candidate/session path reads contests yet — only the admin CRUD below.
-const CONTESTS_COLLECTION = process.env.CONTESTS_COLLECTION || "proctor_contests";
 configureContestStore({
   getFirestore,
   collection: CONTESTS_COLLECTION,
@@ -210,10 +194,6 @@ configureContestStore({
 // proctor_enrollments + the per-contest roster pipeline). Same getter pattern.
 // Only identity_mode:"person" contests ever route into it — the legacy global
 // roster path below stays bit-for-bit.
-const COLLEGES_COLLECTION = process.env.COLLEGES_COLLECTION || "proctor_colleges";
-const PERSONS_COLLECTION = process.env.PERSONS_COLLECTION || "proctor_persons";
-const ENROLLMENTS_COLLECTION = process.env.ENROLLMENTS_COLLECTION || "proctor_enrollments";
-const ADMIN_AUDIT_COLLECTION = process.env.ADMIN_AUDIT_COLLECTION || "proctor_admin_audit";
 configureIdentityStore({
   getFirestore,
   collections: {
@@ -232,7 +212,6 @@ configureIdentityStore({
 
 // S-I §1.1: the proctor_templates collection (same getter pattern). The
 // system-check seed preset lives in code; a doc with the same slug shadows it.
-const TEMPLATES_COLLECTION = process.env.TEMPLATES_COLLECTION || "proctor_templates";
 configureTemplateStore({ getFirestore, collection: TEMPLATES_COLLECTION });
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
