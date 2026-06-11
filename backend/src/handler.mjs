@@ -1,8 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
-import { Firestore, FieldValue, FieldPath } from "@google-cloud/firestore";
-import { Storage } from "@google-cloud/storage";
-import { makeJudge0Adapter } from "./judge0Adapter.mjs";
+import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
+import { bucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
 import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, positiveIntOr, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
 import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
@@ -15,33 +14,11 @@ import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people
 import { buildIpReport } from "./ipReport.mjs";
 import { buildExportBundle, evaluatePurgeGate, exportObjectPath, selectExpiredEvidence, selectExpiredExports } from "./dataLifecycle.mjs";
 
-let firestore = new Firestore();
-let storage = new Storage();
-
-// Dependency-injection seam for unit tests only. Production code never calls
-// these; tests inject fake Firestore/Storage objects so no real GCP is touched.
-export function __setClientsForTest({ firestore: fakeFirestore, storage: fakeStorage } = {}) {
-  if (fakeFirestore) firestore = fakeFirestore;
-  if (fakeStorage) storage = fakeStorage;
-}
-
-// Single adapter, built from env on first use. Tests inject a stub via
-// __setJudge0AdapterForTest (mirrors __setClientsForTest). Pass null to reset.
-let _judge0 = null;
-let _judge0Override = null;
-export function __setJudge0AdapterForTest(adapter) {
-  _judge0Override = adapter || null;
-}
-function judge0() {
-  if (_judge0Override) return _judge0Override;
-  if (!_judge0) {
-    _judge0 = makeJudge0Adapter({
-      baseUrl: JUDGE0_BASE_URL, mode: JUDGE0_MODE,
-      apiKey: JUDGE0_API_KEY, authToken: JUDGE0_AUTH_TOKEN
-    });
-  }
-  return _judge0;
-}
+// The mutable GCP client singletons + their judge0/bucket/jsonl/signed-url
+// machinery now live in lib/clients.mjs (decomp B0). Re-export the test seams
+// so the handler's public surface (and the test destructure off it) is
+// unchanged. handler.mjs configures clients with env values just below.
+export { __setClientsForTest, __setJudge0AdapterForTest } from "./lib/clients.mjs";
 
 // Injectable epoch-ms clock for the per-session exec rate limiter (mirrors the
 // __setClientsForTest seam) so cooldown tests are deterministic. Production
@@ -196,9 +173,22 @@ const DISCONNECTED_STALENESS_MS = Number(process.env.DISCONNECTED_STALENESS_MS |
 // number of room labels can never bloat a stats/alerts response.
 const ROOMS_LIST_LIMIT = 200;
 
+// Inject the env-derived client configuration into lib/clients.mjs (decomp B0):
+// the evidence bucket name, signed-URL expiry, and the Judge0 connection params.
+// clients.mjs never reads process.env itself, so the "?buster" re-eval semantics
+// and the env-lint guard hold.
+configureClients({
+  evidenceBucket: EVIDENCE_BUCKET,
+  urlExpirySeconds: URL_EXPIRY_SECONDS,
+  judge0Config: {
+    baseUrl: JUDGE0_BASE_URL, mode: JUDGE0_MODE,
+    apiKey: JUDGE0_API_KEY, authToken: JUDGE0_AUTH_TOKEN
+  }
+});
+
 // S4: wire the problem bank to THIS module's Firestore handle. A getter (not
 // the instance) so __setClientsForTest fakes propagate to problem reads too.
-configureProblemStore({ getFirestore: () => firestore, collection: PROBLEMS_COLLECTION });
+configureProblemStore({ getFirestore, collection: PROBLEMS_COLLECTION });
 
 // S-B (SHIPS DARK): contests collection + scoping chokepoints. Same getter
 // pattern; the settings collection/id let contests.mjs synthesize the
@@ -206,7 +196,7 @@ configureProblemStore({ getFirestore: () => firestore, collection: PROBLEMS_COLL
 // candidate/session path reads contests yet — only the admin CRUD below.
 const CONTESTS_COLLECTION = process.env.CONTESTS_COLLECTION || "proctor_contests";
 configureContestStore({
-  getFirestore: () => firestore,
+  getFirestore,
   collection: CONTESTS_COLLECTION,
   settingsCollection: SETTINGS_COLLECTION,
   settingsId: SETTINGS_ID,
@@ -225,7 +215,7 @@ const PERSONS_COLLECTION = process.env.PERSONS_COLLECTION || "proctor_persons";
 const ENROLLMENTS_COLLECTION = process.env.ENROLLMENTS_COLLECTION || "proctor_enrollments";
 const ADMIN_AUDIT_COLLECTION = process.env.ADMIN_AUDIT_COLLECTION || "proctor_admin_audit";
 configureIdentityStore({
-  getFirestore: () => firestore,
+  getFirestore,
   collections: {
     colleges: COLLEGES_COLLECTION,
     persons: PERSONS_COLLECTION,
@@ -243,7 +233,7 @@ configureIdentityStore({
 // S-I §1.1: the proctor_templates collection (same getter pattern). The
 // system-check seed preset lives in code; a doc with the same slug shadows it.
 const TEMPLATES_COLLECTION = process.env.TEMPLATES_COLLECTION || "proctor_templates";
-configureTemplateStore({ getFirestore: () => firestore, collection: TEMPLATES_COLLECTION });
+configureTemplateStore({ getFirestore, collection: TEMPLATES_COLLECTION });
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
@@ -921,7 +911,7 @@ function publicStubsFor(problem) {
 // This session's stored submissions -> per-problem summary (≤50×n docs, fine).
 const SESSION_SUBMISSIONS_QUERY_LIMIT = 2000;
 async function sessionSubmissionsSummary(sessionId) {
-  const snapshot = await firestore
+  const snapshot = await getFirestore()
     .collection(SUBMISSIONS_COLLECTION)
     .where("session_id", "==", String(sessionId))
     .limit(SESSION_SUBMISSIONS_QUERY_LIMIT)
@@ -933,7 +923,7 @@ async function sessionSubmissionsSummary(sessionId) {
 // any non-ended session blocks a new active start. active wins over
 // locked/pending for the conflict pointer when more than one exists.
 async function findLiveSessionFor(usernameNorm, contestSlug) {
-  const snapshot = await firestore
+  const snapshot = await getFirestore()
     .collection(SESSION_COLLECTION)
     .where("username_norm", "==", usernameNorm)
     .where("contest_slug", "==", contestSlug || "")
@@ -952,7 +942,7 @@ function liveLockId(usernameNorm, contestSlug) {
 }
 
 function liveLockRef(usernameNorm, contestSlug) {
-  return firestore.collection(LIVE_LOCK_COLLECTION).doc(liveLockId(usernameNorm, contestSlug));
+  return getFirestore().collection(LIVE_LOCK_COLLECTION).doc(liveLockId(usernameNorm, contestSlug));
 }
 
 // H1 — atomically acquire the live slot for (username_norm, contest_slug).
@@ -1308,7 +1298,7 @@ function checkExecSubmitLimit(sessionId, problemId) {
 async function contestForSession(session) {
   const slug = String(session?.contest_slug || "");
   if (!slug) return null;
-  const doc = await firestore.collection(CONTESTS_COLLECTION).doc(slug).get();
+  const doc = await getFirestore().collection(CONTESTS_COLLECTION).doc(slug).get();
   return doc.exists ? doc.data() : null;
 }
 
@@ -1466,7 +1456,7 @@ async function execSubmit(req) {
   const createdAt = new Date().toISOString();
   const submissionId = randomUUID();
   try {
-    await firestore.collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
+    await getFirestore().collection(SUBMISSIONS_COLLECTION).doc(submissionId).set({
       // M7: store the VALIDATED language variable (already checked against
       // LANGUAGE_IDS), never the raw client body.language — a body shaped to
       // coerce to a valid key (e.g. ["python"]) must not land verbatim.
@@ -1883,12 +1873,12 @@ async function adminSaveSettings(req) {
 // ---- S4: problem bank (admin authoring) ------------------------------------
 
 function problemRef(id) {
-  return firestore.collection(PROBLEMS_COLLECTION).doc(id);
+  return getFirestore().collection(PROBLEMS_COLLECTION).doc(id);
 }
 
 async function adminListProblems(req) {
   requireAdmin(req);
-  const snapshot = await firestore.collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
+  const snapshot = await getFirestore().collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
   const problems = snapshot.docs
     .map((doc) => doc.data())
     .map((p) => ({
@@ -1941,7 +1931,7 @@ async function adminGetProblem(req) {
 // the original silent-clear branch below instead of a 409.
 async function problemReferenceUniverse() {
   const [contestSnapshot, templates] = await Promise.all([
-    firestore.collection(CONTESTS_COLLECTION).limit(CONTESTS_REFERENCE_LIMIT).get(),
+    getFirestore().collection(CONTESTS_COLLECTION).limit(CONTESTS_REFERENCE_LIMIT).get(),
     listTemplates()
   ]);
   return { contests: contestSnapshot.docs.map((doc) => doc.data()), templates };
@@ -2017,7 +2007,7 @@ async function adminDeleteProblem(req) {
 // template can never silently shadow the system-check preset.
 
 function templateRef(slug) {
-  return firestore.collection(TEMPLATES_COLLECTION).doc(slug);
+  return getFirestore().collection(TEMPLATES_COLLECTION).doc(slug);
 }
 
 const TEMPLATE_SLUG_COLLISION_LIMIT = 50;
@@ -2056,7 +2046,7 @@ async function createTemplateDoc(template) {
 // per-id getBankProblem fallback catches seed problems (e.g. sum-two).
 async function bankProblemPoints() {
   const points = new Map();
-  const snapshot = await firestore.collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
+  const snapshot = await getFirestore().collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
   for (const doc of snapshot.docs) {
     const p = doc.data();
     points.set(p.id, p.points ?? 100);
@@ -2292,7 +2282,7 @@ async function adminUpdateContest(req) {
 //   changing an entry's points -> typed contest-slug confirmation (best scores
 //     are computed live, so the change applies retroactively)
 async function enforceContestProblemsEditRules(slug, body) {
-  const doc = await firestore.collection(CONTESTS_COLLECTION).doc(slug).get();
+  const doc = await getFirestore().collection(CONTESTS_COLLECTION).doc(slug).get();
   if (!doc.exists) throw httpError(404, "contest_not_found");
   const existing = doc.data();
 
@@ -2317,7 +2307,7 @@ async function enforceContestProblemsEditRules(slug, body) {
   for (const entry of oldEntries) {
     if (newById.has(entry.problem_id)) continue;
     // Removal: blocked when this contest already stored submissions for it.
-    const snapshot = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), existing)
+    const snapshot = await scopedQuery(getFirestore().collection(SUBMISSIONS_COLLECTION), existing)
       .where("problem_id", "==", entry.problem_id)
       .limit(1)
       .get();
@@ -2372,7 +2362,7 @@ async function adminContestExamTime(req) {
 // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
 
 function rosterMetaRef() {
-  return firestore.collection(SETTINGS_COLLECTION).doc(ROSTER_META_ID);
+  return getFirestore().collection(SETTINGS_COLLECTION).doc(ROSTER_META_ID);
 }
 
 // The ACTIVE roster meta, or null when no roster is configured (never uploaded,
@@ -2448,13 +2438,13 @@ async function adminSaveRoster(req) {
     // version-orphans is deliberately deferred (matches rosterEntryId's note).
     const currentMeta = await getRosterMeta();
     if (currentMeta?.version) {
-      const snapshot = await firestore.collection(ROSTER_COLLECTION)
+      const snapshot = await getFirestore().collection(ROSTER_COLLECTION)
         .where("roster_version", "==", currentMeta.version)
         .limit(ROSTER_LIMIT)
         .get();
       const ids = snapshot.docs.map((doc) => doc.data()).map((entry) => rosterEntryId(currentMeta.version, entry.unique_id_norm));
       await mapWithConcurrency(ids, 20, async (entryId) => {
-        await firestore.collection(ROSTER_COLLECTION).doc(entryId).delete();
+        await getFirestore().collection(ROSTER_COLLECTION).doc(entryId).delete();
       });
     }
     await rosterMetaRef().set({ configured: false, cleared_at: new Date().toISOString() });
@@ -2515,7 +2505,7 @@ async function adminSaveRoster(req) {
   if (!entries.length) return badRequest("no valid roster rows (every row was skipped)");
 
   await mapWithConcurrency(entries, 20, async ({ entryId, item }) => {
-    await firestore.collection(ROSTER_COLLECTION).doc(entryId).set(item);
+    await getFirestore().collection(ROSTER_COLLECTION).doc(entryId).set(item);
   });
   await rosterMetaRef().set({
     configured: true,
@@ -2699,7 +2689,7 @@ async function publicCandidateRoute() {
 async function findRosterEntry(meta, uniqueId) {
   const norm = normalizeUniqueId(uniqueId);
   if (!norm) return null;
-  const doc = await firestore.collection(ROSTER_COLLECTION).doc(rosterEntryId(meta.version, norm)).get();
+  const doc = await getFirestore().collection(ROSTER_COLLECTION).doc(rosterEntryId(meta.version, norm)).get();
   const entry = doc.exists ? doc.data() : null;
   // Doc-id sanitization can COLLAPSE distinct normalized ids onto one doc id
   // ("2021#cs#001" and "2021$cs$001" both become "2021_cs_001"), so the fetched
@@ -2861,7 +2851,7 @@ async function adminSessions(req) {
   const usernameNorm = usernameNormExact
     ? String(usernameNormExact)
     : normalizeUsername(username);
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
     .where("username_norm", "==", usernameNorm)
     .limit(50)
     .get();
@@ -2917,7 +2907,7 @@ async function adminSessions(req) {
 async function adminRecordingSessions(req) {
   requireAdmin(req);
   const scope = await contestScopeOf(req.query?.contest_slug);
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const allDocs = snapshot.docs.map((doc) => doc.data());
@@ -2965,7 +2955,7 @@ async function adminSessionsList(req) {
   const scope = await contestScopeOf(req.query?.contest_slug);
   const room = normalizeRoomFilter(req.query?.room);
   const status = String(req.query?.status || "");
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   let docs = snapshot.docs.map((doc) => doc.data());
@@ -3167,7 +3157,7 @@ function submissionEventsDocId(usernameNorm, contestSlug) {
 }
 
 function submissionEventsRef(usernameNorm, contestSlug) {
-  return firestore.collection(SUBMISSION_EVENTS_COLLECTION).doc(submissionEventsDocId(usernameNorm, contestSlug));
+  return getFirestore().collection(SUBMISSION_EVENTS_COLLECTION).doc(submissionEventsDocId(usernameNorm, contestSlug));
 }
 
 // Validate + normalize one inbound submission event. submission_id is coerced to
@@ -3278,7 +3268,7 @@ async function adminSubmissionEvents(req) {
     docs = doc.exists ? [doc.data()] : [];
   } else {
     // No contest specified — gather every doc for this user and merge.
-    const snapshot = await firestore
+    const snapshot = await getFirestore()
       .collection(SUBMISSION_EVENTS_COLLECTION)
       .where("username_norm", "==", usernameNorm)
       .limit(50)
@@ -3304,7 +3294,7 @@ async function adminStats(req) {
   const scope = await contestScopeOf(contestSlug);
   const room = normalizeRoomFilter(req.query?.room);
 
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const allDocs = snapshot.docs.map((doc) => doc.data());
@@ -3436,7 +3426,7 @@ async function endAllLiveSessions(contestSlug, now) {
   let endedCount = 0;
   let cursor = null;
   for (;;) {
-    let query = firestore
+    let query = getFirestore()
       .collection(SESSION_COLLECTION)
       .where("contest_slug", "==", contestSlug || "")
       .orderBy(FieldPath.documentId())
@@ -3492,7 +3482,7 @@ async function adminIpReport(req) {
   const scope = String(req.query?.scope || "live");
   if (scope !== "live" && scope !== "all") return badRequest("scope must be live or all");
 
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), contestScope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), contestScope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   let docs = snapshot.docs.map((doc) => doc.data());
@@ -3556,7 +3546,7 @@ async function adminAttendance(req) {
   if (!meta) return { configured: false };
 
   // Active-version roster entries (stale versions are invisible — S2 invariant).
-  const entriesSnap = await firestore
+  const entriesSnap = await getFirestore()
     .collection(ROSTER_COLLECTION)
     .where("roster_version", "==", meta.version)
     .limit(ROSTER_LIMIT)
@@ -3564,7 +3554,7 @@ async function adminAttendance(req) {
   const entries = entriesSnap.docs.map((doc) => doc.data());
 
   // Session docs, optionally contest-scoped (same pattern as adminStats).
-  const sessionsSnap = await scopedQuery(firestore.collection(SESSION_COLLECTION), await contestScopeOf(contestSlug))
+  const sessionsSnap = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), await contestScopeOf(contestSlug))
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const sessions = sessionsSnap.docs.map((doc) => doc.data());
@@ -3638,14 +3628,14 @@ async function personContestAttendance(contest) {
   const meta = await getContestRosterMeta(contest);
   if (!meta) return { configured: false, contest_slug: contest.slug };
 
-  const entriesSnap = await firestore
+  const entriesSnap = await getFirestore()
     .collection(ROSTER_COLLECTION)
     .where("roster_version", "==", meta.version)
     .limit(ROSTER_LIMIT)
     .get();
   const entries = entriesSnap.docs.map((doc) => doc.data());
 
-  const sessionsSnap = await scopedQuery(firestore.collection(SESSION_COLLECTION), contest)
+  const sessionsSnap = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), contest)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const sessions = sessionsSnap.docs.map((doc) => doc.data());
@@ -3733,7 +3723,7 @@ async function computeContestResults(contest) {
   const problemEntries = contestProblemEntries(contest);
   const problemOrder = problemEntries.map((entry) => entry.problem_id);
 
-  const submissionsSnap = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), contest)
+  const submissionsSnap = await scopedQuery(getFirestore().collection(SUBMISSIONS_COLLECTION), contest)
     .limit(SUBMISSIONS_RESULTS_LIMIT)
     .get();
   const submissions = submissionsSnap.docs.map((doc) => doc.data());
@@ -3785,7 +3775,7 @@ async function integrityByPersonFor(contest, activeIds) {
     return out.get(id);
   };
 
-  const alertsSnap = await scopedQuery(firestore.collection(ALERTS_COLLECTION), contest)
+  const alertsSnap = await scopedQuery(getFirestore().collection(ALERTS_COLLECTION), contest)
     .limit(ALERTS_QUERY_LIMIT)
     .get();
   for (const doc of alertsSnap.docs) {
@@ -3902,7 +3892,7 @@ const PURGE_DATASETS = [
 // holds. A contest exceeding this ceiling is a deploy-time signal, not a silent
 // data-loss bug — the manifest counts cross-check in tests pin truncation-free.
 async function readContestDataset(collectionName, contest) {
-  const snap = await scopedQuery(firestore.collection(collectionName), contest)
+  const snap = await scopedQuery(getFirestore().collection(collectionName), contest)
     .limit(EXPORT_DATASET_LIMIT)
     .get();
   return snap.docs.map((doc) => ({ _id: doc.id, ...doc.data() }));
@@ -3916,7 +3906,7 @@ async function readContestSubmissions(contest, sessionIds) {
   const byField = await readContestDataset(SUBMISSIONS_COLLECTION, contest);
   const seen = new Set(byField.map((s) => s._id));
   if (sessionIds.size) {
-    const allSnap = await firestore.collection(SUBMISSIONS_COLLECTION).limit(EXPORT_DATASET_LIMIT).get();
+    const allSnap = await getFirestore().collection(SUBMISSIONS_COLLECTION).limit(EXPORT_DATASET_LIMIT).get();
     for (const doc of allSnap.docs) {
       const data = doc.data();
       if (seen.has(doc.id)) continue;
@@ -3974,7 +3964,7 @@ function enrollmentIdOfHandler(slug, personId) {
 async function readContestRosterEntries(contest) {
   const meta = await getContestRosterMeta(contest);
   if (!meta) return [];
-  const snap = await firestore.collection(ROSTER_COLLECTION)
+  const snap = await getFirestore().collection(ROSTER_COLLECTION)
     .where("roster_version", "==", meta.version)
     .limit(ROSTER_LIMIT)
     .get();
@@ -4020,7 +4010,7 @@ async function adminContestExport(req) {
   }
 
   const lastExport = { at: exportedAt, gcs_key: gcsKey, counts: bundle.manifest.counts };
-  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set({
+  await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set({
     last_export: lastExport,
     last_export_at: exportedAt,
     updated_at: exportedAt
@@ -4111,7 +4101,7 @@ async function adminContestPurge(req) {
   // sweep can finish evidence cleanup even if the run dies before sessions are
   // deleted, when the per-session prefixes would no longer be derivable). The
   // counts and the evidence-handled stamp are filled in AFTER the deletes.
-  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set({
+  await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set({
     db_purged_at: now,
     purged_at: now,
     evidence_prefixes: evidencePrefixes,
@@ -4141,7 +4131,7 @@ async function adminContestPurge(req) {
   }
   // Roster meta doc (settings collection, keyed roster_meta::{slug}) + the
   // review roster doc (review_state, keyed review_roster::{slug}).
-  await firestore.collection(SETTINGS_COLLECTION).doc(rosterMetaIdFor(contest.slug)).delete().catch(() => {});
+  await getFirestore().collection(SETTINGS_COLLECTION).doc(rosterMetaIdFor(contest.slug)).delete().catch(() => {});
   await reviewRosterRef(contest.slug).delete().catch(() => {});
   // Sessions LAST (so evidence-prefix capture above already happened).
   counts.sessions = await deleteDocsByIds(SESSION_COLLECTION, sessions);
@@ -4157,7 +4147,7 @@ async function adminContestPurge(req) {
     tombstone.evidence_purged_at = now;
     tombstone.evidence_prefixes = null;
   }
-  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set(tombstone, { merge: true });
+  await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set(tombstone, { merge: true });
 
   await writeAudit({
     action: "contest_purge_done",
@@ -4203,7 +4193,7 @@ async function exportObjectExists(gcsKey) {
 async function deleteDocsByIds(collectionName, docs) {
   const ids = (Array.isArray(docs) ? docs : []).map((d) => d._id).filter(Boolean);
   await mapWithConcurrency(ids, 20, async (id) => {
-    await firestore.collection(collectionName).doc(id).delete().catch(() => {});
+    await getFirestore().collection(collectionName).doc(id).delete().catch(() => {});
   });
   return ids.length;
 }
@@ -4236,7 +4226,7 @@ async function adminRetentionSweep(req) {
 
   // All real contests (archived included — a purged/archived contest may still
   // hold evidence due for deletion). Cross-contest read is the deliberate sweep.
-  const contestsSnap = await firestore.collection(CONTESTS_COLLECTION).limit(2000).get();
+  const contestsSnap = await getFirestore().collection(CONTESTS_COLLECTION).limit(2000).get();
   const contests = contestsSnap.docs.map((doc) => doc.data());
   const due = selectExpiredEvidence(contests, now);
 
@@ -4273,7 +4263,7 @@ async function adminRetentionSweep(req) {
     for (const contest of contests) {
       const key = contest?.last_export?.gcs_key;
       if (key && deletedExportKeys.has(key)) {
-        await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set({
+        await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set({
           last_export: null,
           last_export_at: null,
           updated_at: now
@@ -4318,7 +4308,7 @@ async function sweepContestEvidence(contest, actor) {
   const now = new Date().toISOString();
   const patch = { evidence_prefixes: null, updated_at: now };
   if (stampable) patch.evidence_purged_at = now;
-  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set(patch, { merge: true });
+  await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set(patch, { merge: true });
 
   await writeAudit({
     action: "evidence_sweep",
@@ -4440,7 +4430,7 @@ async function computePersonScorecard(person) {
     const problemEntries = contestProblemEntries(contest);
     const problemOrder = problemEntries.map((entry) => entry.problem_id);
 
-    const submissionsSnap = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), contest)
+    const submissionsSnap = await scopedQuery(getFirestore().collection(SUBMISSIONS_COLLECTION), contest)
       .where("person_id", "==", personId)
       .limit(SUBMISSIONS_RESULTS_LIMIT)
       .get();
@@ -4526,7 +4516,7 @@ async function resolveActionTargets(body) {
     const out = [];
     for (const username of body.usernames) {
       const usernameNorm = normalizeUsername(username);
-      let query = firestore
+      let query = getFirestore()
         .collection(SESSION_COLLECTION)
         .where("username_norm", "==", usernameNorm);
       if (contestSlug !== null) query = query.where("contest_slug", "==", contestSlug);
@@ -4664,7 +4654,7 @@ async function adminSessionDetails(req) {
       const deAt = normalizeUsername(trimmed.slice(1));
       if (deAt !== "_" && !usernames.includes(deAt)) usernames.push(deAt);
     }
-    let query = firestore
+    let query = getFirestore()
       .collection(SESSION_COLLECTION)
       .where("username_norm", "in", usernames);
     if (contestSlug !== null) query = query.where("contest_slug", "==", contestSlug);
@@ -4713,7 +4703,7 @@ async function adminSessionDetails(req) {
 // suffix (roster doc: roster::{slug}); SLUGLESS ids stay the legacy set and
 // keep working untouched. contestSlug = "" everywhere means "the legacy set".
 function reviewRosterRef(contestSlug = "") {
-  return firestore.collection(REVIEW_STATE_COLLECTION)
+  return getFirestore().collection(REVIEW_STATE_COLLECTION)
     .doc(contestSlug ? `${REVIEW_ROSTER_ID}::${contestSlug}` : REVIEW_ROSTER_ID);
 }
 
@@ -4723,11 +4713,11 @@ function reviewRecordId(usernameNorm, reviewerKey, contestSlug = "") {
 }
 
 function reviewRecordRef(usernameNorm, reviewerKey, contestSlug = "") {
-  return firestore.collection(REVIEW_COLLECTION).doc(reviewRecordId(usernameNorm, reviewerKey, contestSlug));
+  return getFirestore().collection(REVIEW_COLLECTION).doc(reviewRecordId(usernameNorm, reviewerKey, contestSlug));
 }
 
 function reviewClaimRef(usernameNorm, contestSlug = "") {
-  return firestore.collection(REVIEW_CLAIMS_COLLECTION)
+  return getFirestore().collection(REVIEW_CLAIMS_COLLECTION)
     .doc(contestSlug ? `${usernameNorm}::${contestSlug}` : usernameNorm);
 }
 
@@ -4804,7 +4794,7 @@ async function getReviewRoster(contestSlug = "") {
 // All review records IN SCOPE (S-C: contest slug or the legacy slugless set).
 // Capped so a pathological collection can't bloat a request.
 async function getAllReviews(contestSlug = "") {
-  const snapshot = await firestore.collection(REVIEW_COLLECTION).limit(REVIEWS_QUERY_LIMIT).get();
+  const snapshot = await getFirestore().collection(REVIEW_COLLECTION).limit(REVIEWS_QUERY_LIMIT).get();
   return snapshot.docs.map((doc) => doc.data()).filter((review) => inReviewScope(review, contestSlug));
 }
 
@@ -4869,7 +4859,7 @@ function isClaimActive(claim, nowMs) {
 
 // Every currently-active (non-expired) claim IN SCOPE.
 async function getActiveClaims(contestSlug = "") {
-  const snapshot = await firestore.collection(REVIEW_CLAIMS_COLLECTION).limit(REVIEW_ROSTER_LIMIT).get();
+  const snapshot = await getFirestore().collection(REVIEW_CLAIMS_COLLECTION).limit(REVIEW_ROSTER_LIMIT).get();
   const nowMs = Date.now();
   return snapshot.docs.map((doc) => doc.data())
     .filter((claim) => inReviewScope(claim, contestSlug))
@@ -4921,7 +4911,7 @@ async function adminReviewNext(req) {
 // ones) so the ranking pass can decide claimable-ness with a single read. Stale
 // claims are filtered in rankReviewCandidates so they don't exclude a username.
 async function loadClaimsByNorm(contestSlug = "") {
-  const snapshot = await firestore.collection(REVIEW_CLAIMS_COLLECTION).limit(REVIEW_ROSTER_LIMIT).get();
+  const snapshot = await getFirestore().collection(REVIEW_CLAIMS_COLLECTION).limit(REVIEW_ROSTER_LIMIT).get();
   const byNorm = new Map();
   for (const doc of snapshot.docs) {
     const claim = doc.data();
@@ -5176,7 +5166,7 @@ const DEFAULT_PROCTOR_ALERT_SETTINGS = {
 // once per request and thread the result into the sure-shot upsert sites so a
 // single request never re-reads it.
 async function getAlertSettings() {
-  const doc = await firestore.collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).get();
+  const doc = await getFirestore().collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).get();
   const stored = doc.exists ? (doc.data()?.proctor || {}) : {};
   return mergeAlertSettings(stored);
 }
@@ -5528,7 +5518,7 @@ async function adminAlerts(req) {
   // index-free (lower risk than relying on a deployed composite index), we push
   // AT MOST ONE equality filter to Firestore — the most selective, contest_slug —
   // and filter the remaining fields in memory. ALERTS_QUERY_LIMIT bounds the scan.
-  let query = firestore.collection(ALERTS_COLLECTION);
+  let query = getFirestore().collection(ALERTS_COLLECTION);
   if (scope !== ALL_CONTESTS) {
     query = scopedQuery(query, scope);
   } else {
@@ -5576,7 +5566,7 @@ async function adminAlerts(req) {
 // (ALL_CONTESTS for unscoped), capped. Shared by adminAlerts so its room
 // dropdown matches adminStats'.
 async function listSessionRooms(scope) {
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   return distinctRooms(snapshot.docs.map((doc) => doc.data()));
@@ -5638,7 +5628,7 @@ async function invigilatorOverview(req) {
   const settings = contest ? null : await getSettings();
   const contestSlug = invigilatorContestSlug(contest, settings);
   const scope = contest || await contestScopeOf(contestSlug);
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const docs = snapshot.docs.map((doc) => doc.data());
@@ -5667,7 +5657,7 @@ function gateRoomKey(room) {
 }
 
 function roomGateRef(contestSlug, roomKey) {
-  return firestore.collection(ROOM_GATES_COLLECTION).doc(`gate:${contestSlug || "_"}:${roomKey}`);
+  return getFirestore().collection(ROOM_GATES_COLLECTION).doc(`gate:${contestSlug || "_"}:${roomKey}`);
 }
 
 async function getRoomGate(contestSlug, roomKey) {
@@ -5843,7 +5833,7 @@ async function invigilatorUnlock(req) {
   const usernameNorm = normalizeUsername(body.username);
 
   const snapshot = await scopedQuery(
-    firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
+    getFirestore().collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
     contest || await contestScopeOf(contestSlug)
   ).limit(50).get();
   const locked = snapshot.docs
@@ -5891,7 +5881,7 @@ async function invigilatorExempt(req) {
   const usernameNorm = normalizeUsername(body.username);
 
   const snapshot = await scopedQuery(
-    firestore.collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
+    getFirestore().collection(SESSION_COLLECTION).where("username_norm", "==", usernameNorm),
     contest || await contestScopeOf(contestSlug)
   ).limit(50).get();
   const live = snapshot.docs
@@ -6225,7 +6215,7 @@ async function invigilatorRoom(req) {
   const roomKey = gateRoomKey(roomParam);
   const roomLabel = roomKey === "_" ? "" : sanitizeRoom(roomParam);
 
-  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), contestScope)
+  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), contestScope)
     .limit(SESSIONS_QUERY_LIMIT)
     .get();
   const docs = snapshot.docs.map((doc) => doc.data())
@@ -6280,7 +6270,7 @@ async function invigilatorRoom(req) {
   // F9.3: the feed additionally honours the per-type show_to_invigilator config —
   // filtered SERVER-SIDE so hidden alert types never leave the backend.
   const alertSettings = await getAlertSettings();
-  let alertQuery = firestore.collection(ALERTS_COLLECTION);
+  let alertQuery = getFirestore().collection(ALERTS_COLLECTION);
   if (contestScope !== ALL_CONTESTS) {
     alertQuery = scopedQuery(alertQuery, contestScope);
   } else {
@@ -6346,33 +6336,17 @@ async function adminSaveAlertSettings(req) {
   // can never persist an unknown type or an invalid severity.
   const merged = mergeAlertSettings(incoming);
   const now = new Date().toISOString();
-  await firestore.collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).set({
+  await getFirestore().collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).set({
     proctor: merged.proctor,
     updated_at: now
   });
   return merged;
 }
 
-async function resolveSignedReadUrl(objectKey) {
-  // Best-effort: a missing bucket or a signing failure must not break the whole
-  // admin listing, so we degrade to null instead of throwing.
-  try {
-    const [downloadUrl] = await bucket()
-      .file(String(objectKey))
-      .getSignedUrl({
-        version: "v4",
-        action: "read",
-        expires: Date.now() + URL_EXPIRY_SECONDS * 1000
-      });
-    return downloadUrl;
-  } catch (error) {
-    console.warn(`Failed to sign read URL for ${objectKey}: ${error?.message || error}`);
-    return null;
-  }
-}
+// resolveSignedReadUrl moved to lib/clients.mjs (decomp B0); imported at the top.
 
 function alertRef(alertId) {
-  return firestore.collection(ALERTS_COLLECTION).doc(String(alertId));
+  return getFirestore().collection(ALERTS_COLLECTION).doc(String(alertId));
 }
 
 async function getSession(sessionId) {
@@ -6450,23 +6424,14 @@ function sessionPrefix(session) {
 // sanitizeRoom moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 function sessionRef(sessionId) {
-  return firestore.collection(SESSION_COLLECTION).doc(sessionId);
+  return getFirestore().collection(SESSION_COLLECTION).doc(sessionId);
 }
 
 function settingsRef() {
-  return firestore.collection(SETTINGS_COLLECTION).doc(SETTINGS_ID);
+  return getFirestore().collection(SETTINGS_COLLECTION).doc(SETTINGS_ID);
 }
 
-async function putJsonl(key, records) {
-  await bucket().file(key).save(records.map((record) => JSON.stringify(record)).join("\n") + "\n", {
-    contentType: "application/x-ndjson"
-  });
-}
-
-function bucket() {
-  if (!EVIDENCE_BUCKET) throw httpError(500, "EVIDENCE_BUCKET is not configured.");
-  return storage.bucket(EVIDENCE_BUCKET);
-}
+// putJsonl/bucket moved to lib/clients.mjs (decomp B0); imported at the top.
 
 // parseBody/requireFields/requireValidEmail(+EMAIL_FORMAT) moved to lib/http.mjs
 // (decomp B0); imported at the top.
