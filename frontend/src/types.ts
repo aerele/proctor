@@ -1053,12 +1053,57 @@ export type ContestSummary = {
   rooms: string[];
   room_gate_enabled: boolean;
   template_slug: string | null;
+  /** Round N-1 pointer (vision §2.7); set on carry-over contests. */
+  previous_contest_slug?: string | null;
   camera_recording?: CameraRecordingConfigPayload;
   enforcement?: EnforcementConfigPayload;
   languages?: ProblemLanguage[];
   evidence_retention_days?: number;
+  // ---- Data-lifecycle stamps (Wave7-G backend; spread from the contest doc) ----
+  /** ISO of the last successful export (gate 1 of the purge; null = never). */
+  last_export_at?: string | null;
+  /** The last export's GCS object reference + per-dataset counts. */
+  last_export?: { at?: string; gcs_key?: string; counts?: Record<string, number> } | null;
+  /** ISO the retention clock started ("Mark selection done"); null = not started. */
+  selection_done_at?: string | null;
+  /** ISO the evidence sweep deleted the recordings; null = not yet swept. */
+  evidence_purged_at?: string | null;
+  /** ISO the heavy data was purged (tombstone); null = not purged. */
+  db_purged_at?: string | null;
+  /** Alias for db_purged_at on the tombstone (vision §2.16). */
+  purged_at?: string | null;
+  /** Per-dataset delete counts recorded on the tombstone. */
+  purge_counts?: Record<string, number> | null;
   created_at: string | null;
   updated_at: string | null;
+};
+
+/** POST /api/admin/contest-export response (Wave7-G). */
+export type ContestExportResponse = {
+  ok: boolean;
+  gcs_key: string;
+  signed_url: string;
+  counts: Record<string, number>;
+  exported_at: string;
+};
+
+/** POST /api/admin/contest-purge response (Wave7-G). */
+export type ContestPurgeResponse = {
+  ok: boolean;
+  contest: string;
+  already_purged?: boolean;
+  counts?: Record<string, number>;
+  evidence_deleted?: number;
+  evidence_retained?: boolean;
+  enrollments_retained?: boolean;
+};
+
+/** POST /api/admin/retention-sweep response (Wave7-G). */
+export type RetentionSweepResponse = {
+  ok: boolean;
+  swept_at: string;
+  evidence_purged: Array<{ contest?: string; objects_deleted?: number; completed?: boolean }>;
+  exports_deleted: number;
 };
 
 /** POST /api/admin/contests body (create — blank or from a template). */
