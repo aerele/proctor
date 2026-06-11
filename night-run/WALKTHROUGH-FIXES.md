@@ -25,4 +25,6 @@ docs workflow (`wf_145b15ad-957`) is still committing. Subagents edit + verify; 
 
 **2026-06-11 ~22:25 — Karthi asleep (TG 1855). Overnight order: finish these → deploy → exhaustive browser E2E of deployed product via :9222 (candidate flow above all, keystroke data verified) → fix/redeploy/retest until clean → triple review + morning summary → stretch: OMR (F2). First agent attempts died on API 529-Overloaded (tree verified clean); both relaunched.**
 
+**2026-06-12 ~04:00 IST — RETEST rev 00008: ALL PASS.** F1 zero overwrites across 4 stints (every successful upload survives, cumulative manifest, honest gaps); F2 per-row Unlock/Exempt works person-mode; F3 scoped exam-time card + legacy chip; F5 no stale strips; R5 sweeps (F4/F8/F10/F7) all pass; R6 clean candidate pass (100/100, 551 editor events, 98 shell, 55 heartbeats). Full numbers: `evidence/e2e-live/FINDINGS.md` §RETEST. Follow-up RT-1 (chunk-upload retry for flaky Wi-Fi) fixed same night; RT-2/RT-3 (cosmetic) → backlog.
+
 _(W6 … appended live as Karthi comments arrive.)_

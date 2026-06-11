@@ -17,6 +17,8 @@ _Last updated: 2026-06-11 (Karthi multipart prioritization, TG 1841–1845)._
   **Karthi: the one feature we may build today — but only once the whole exam flow is confirmed glitch-free.**
 
 ## Deferred features — "some other day"
+- **RT-2 (LOW, 2026-06-12 retest)**: end-screen/manifest chunk count can undercount vs GCS when a refresh interrupts manifest persistence (44 vs 48 in the retest); player unaffected (lists GCS directly).
+- **RT-3 (LOW, 2026-06-12 retest)**: admin Recordings timeline merges the person's OTHER sessions' alerts at 00:00 ("SESSIONS COVERED 2") — honest timestamps, but visually confusing; consider per-session lanes or offset mapping.
 - **S-F — contest-eval adapter** _(#32)_: make the Python contest-eval poller easily startable + investigate
   why the last real run produced zero contest-eval alerts.
 - **F7 — recording-encoding optimization**: research done; implementation pending a discuss-round (best
