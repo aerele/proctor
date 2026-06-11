@@ -3,8 +3,12 @@
 // gate (client-side verify, then the typed password rides x-invigilator-password
 // on every call; the backend also accepts the admin credential). NO signed-QR
 // ID verification here — that is DEFERRED by design; ID checks stay manual.
+// S-D (vision I1): /invigilator?contest={slug}&key={invigilator_key} — the
+// per-contest token authenticates THAT contest only (verified server-side on
+// the first call; no client hash exists for it). The typed global/admin
+// password stays as the fallback, and every call is contest-scoped.
 import { AlertTriangle, Bell, ChevronDown, ChevronUp, DoorOpen, KeyRound, RefreshCw, ShieldCheck, Unlock, Users } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   adminPassword, adminPasswordHash,
@@ -14,21 +18,28 @@ import {
 } from "./api";
 import { candidateIdOf } from "./identity";
 import { gateStatusLabel } from "./invigilator/gateLogic";
+import { portalCredential, portalLinkOf } from "./invigilator/portalLink";
 import { alertExplanation, matchesStatusFilter } from "./invigilator/roomView";
 import type { StatusFilter } from "./invigilator/roomView";
 import type { EnforcementExemptions, InvigilatorAlert, InvigilatorRoomResponse, InvigilatorSessionRow, RoomGate } from "./types";
 
 const POLL_INTERVAL_MS = 5000;
-const savedKey = "aerele-proctor-invigilator";
+const savedKeyBase = "aerele-proctor-invigilator";
 const UNASSIGNED_KEY = "_";
 const UNASSIGNED_LABEL = "(no room set)";
 const OTHER_CHOICE = "__other__";
 
 type SavedIdentity = { name: string; room: string };
 
-function readSaved(): SavedIdentity {
+// S-D: the saved name/room are per contest — two parallel drives must not
+// hand each other's room to the invigilator. Legacy keeps the historical key.
+function savedKeyFor(contest: string): string {
+  return contest ? `${savedKeyBase}::${contest}` : savedKeyBase;
+}
+
+function readSaved(contest: string): SavedIdentity {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(savedKey) || "{}") as Partial<SavedIdentity>;
+    const parsed = JSON.parse(window.localStorage.getItem(savedKeyFor(contest)) || "{}") as Partial<SavedIdentity>;
     return { name: String(parsed.name || ""), room: String(parsed.room || "") };
   } catch {
     return { name: "", room: "" };
@@ -36,12 +47,17 @@ function readSaved(): SavedIdentity {
 }
 
 export function InvigilatorApp() {
+  // S-D: the tokenized per-contest link (contest="" = the legacy portal).
+  const link = useMemo(() => portalLinkOf(window.location.search), []);
   const [unlocked, setUnlocked] = useState(false);
   const [password, setPassword] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
-  const [name, setName] = useState(() => readSaved().name);
+  // A rejected link key (regenerated/stale) reveals the typed-password
+  // fallback on the entry screen.
+  const [keyRejected, setKeyRejected] = useState(false);
+  const [name, setName] = useState(() => readSaved(link.contest).name);
   // The API value for the selected room ("_" = the unassigned pseudo-room).
-  const [room, setRoom] = useState(() => readSaved().room);
+  const [room, setRoom] = useState(() => readSaved(link.contest).room);
   const [roomChoice, setRoomChoice] = useState("");
   const [otherRoom, setOtherRoom] = useState("");
   const [rooms, setRooms] = useState<string[]>([]);
@@ -57,11 +73,14 @@ export function InvigilatorApp() {
   const [expandedAlertId, setExpandedAlertId] = useState<string | null>(null);
 
   const saveIdentity = (nextRoom: string) => {
-    window.localStorage.setItem(savedKey, JSON.stringify({ name: name.trim(), room: nextRoom }));
+    window.localStorage.setItem(savedKeyFor(link.contest), JSON.stringify({ name: name.trim(), room: nextRoom }));
   };
 
-  // Unlock: invigilator hash → invigilator plain → admin hash → admin plain
-  // (an admin may open the portal with the admin credential).
+  // Unlock. Tokenized link: the key can only be verified SERVER-side (no
+  // client hash exists for a per-contest secret), so the overview call is the
+  // gate — a 401 reveals the typed-password fallback. Typed password: the
+  // existing client-side checks (invigilator hash → plain → admin hash →
+  // plain) run first, then the overview call scopes to the link's contest.
   const unlock = async () => {
     setError("");
     if (!name.trim()) {
@@ -69,31 +88,50 @@ export function InvigilatorApp() {
       return;
     }
     const typed = passwordInput;
-    let ok = false;
-    try {
-      if (invigilatorPasswordHash && (await sha256Hex(typed)) === invigilatorPasswordHash) ok = true;
-      if (!ok && adminPasswordHash && (await sha256Hex(typed)) === adminPasswordHash) ok = true;
-    } catch {
-      setError("This browser cannot hash the password (crypto.subtle unavailable).");
-      return;
+    const usingKey = Boolean(link.key) && !typed;
+    if (!usingKey) {
+      let ok = false;
+      try {
+        if (invigilatorPasswordHash && (await sha256Hex(typed)) === invigilatorPasswordHash) ok = true;
+        if (!ok && adminPasswordHash && (await sha256Hex(typed)) === adminPasswordHash) ok = true;
+      } catch {
+        setError("This browser cannot hash the password (crypto.subtle unavailable).");
+        return;
+      }
+      if (!ok && invigilatorPassword && typed === invigilatorPassword) ok = true;
+      if (!ok && adminPassword && typed === adminPassword) ok = true;
+      if (!ok) {
+        setError("Invalid invigilator password.");
+        return;
+      }
     }
-    if (!ok && invigilatorPassword && typed === invigilatorPassword) ok = true;
-    if (!ok && adminPassword && typed === adminPassword) ok = true;
-    if (!ok) {
-      setError("Invalid invigilator password.");
-      return;
+    const credential = portalCredential(link, typed);
+    if (!usingKey) {
+      // Typed-password path: client-verified — unlock immediately (today's
+      // behavior); a failed overview only surfaces as an error, the room
+      // poll keeps retrying.
+      setPassword(credential);
+      setUnlocked(true);
+      setPasswordInput("");
+      saveIdentity(room);
     }
-    setPassword(typed);
-    setUnlocked(true);
-    setPasswordInput("");
-    saveIdentity(room);
     try {
-      const overview = await fetchInvigilatorOverview(typed);
+      const overview = await fetchInvigilatorOverview(credential, link.contest || undefined);
+      if (usingKey) {
+        setPassword(credential);
+        setUnlocked(true);
+        saveIdentity(room);
+      }
       setRooms(overview.rooms);
       setHasUnassigned(overview.has_unassigned);
       setGateEnabled(overview.room_gate_enabled);
       setContestSlug(overview.contest_slug);
     } catch (cause) {
+      if (usingKey) {
+        setKeyRejected(true);
+        setError("This invigilator link is invalid or was regenerated. Ask the admin for the current link, or enter the invigilator password below.");
+        return;
+      }
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
@@ -119,7 +157,7 @@ export function InvigilatorApp() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const response = await fetchInvigilatorRoom(password, room);
+        const response = await fetchInvigilatorRoom(password, room, link.contest || undefined);
         if (cancelled) return;
         setData(response);
         setGateEnabled(response.room_gate_enabled);
@@ -141,7 +179,7 @@ export function InvigilatorApp() {
     setBusy(true);
     setError("");
     try {
-      const response = await releaseRoomCode(password, room, name.trim(), regenerate);
+      const response = await releaseRoomCode(password, room, name.trim(), regenerate, link.contest || undefined);
       setData((current) => (current ? { ...current, gate: response.gate } : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -155,7 +193,7 @@ export function InvigilatorApp() {
     setBusy(true);
     setError("");
     try {
-      const response = await openRoom(password, room, name.trim());
+      const response = await openRoom(password, room, name.trim(), link.contest || undefined);
       setData((current) => (current ? { ...current, gate: response.gate } : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -171,7 +209,7 @@ export function InvigilatorApp() {
     setBusy(true);
     setError("");
     try {
-      const response = await releaseUnlockCode(password, room, name.trim(), regenerate);
+      const response = await releaseUnlockCode(password, room, name.trim(), regenerate, link.contest || undefined);
       setData((current) => (current ? { ...current, gate: response.gate } : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -187,7 +225,7 @@ export function InvigilatorApp() {
     if (!window.confirm(`Unlock ${row.name || candidateIdOf(row)}? Their exam resumes immediately.`)) return;
     setError("");
     try {
-      await invigilatorUnlock(password, room, candidateIdOf(row));
+      await invigilatorUnlock(password, room, candidateIdOf(row), link.contest || undefined);
       setData((current) => current
         ? {
             ...current,
@@ -210,7 +248,7 @@ export function InvigilatorApp() {
     setError("");
     try {
       const next = { [key]: !(row.enforcement_exemptions?.[key] === true) } as EnforcementExemptions;
-      const response = await invigilatorExempt(password, room, candidateIdOf(row), next);
+      const response = await invigilatorExempt(password, room, candidateIdOf(row), next, link.contest || undefined);
       setData((current) => current
         ? {
             ...current,
@@ -226,6 +264,10 @@ export function InvigilatorApp() {
   };
 
   if (!unlocked) {
+    // S-D: a tokenized link authenticates with the contest's key — only the
+    // name is asked. The password field appears for the legacy portal, or as
+    // the fallback once a link key is rejected (regenerated/stale).
+    const tokenEntry = Boolean(link.key) && !keyRejected;
     return (
       <PortalShell>
         <section className="mx-auto mt-16 max-w-md rounded-lg border border-line bg-panel p-6 shadow-subtle">
@@ -233,24 +275,40 @@ export function InvigilatorApp() {
             <ShieldCheck size={22} className="text-accent" />
             <h1 className="text-xl font-semibold text-ink">Invigilator portal</h1>
           </div>
+          {link.contest ? (
+            <p className="mt-2 inline-flex rounded-full border border-accent/40 bg-accent/10 px-3 py-1 text-xs font-semibold text-accent">
+              Contest: {link.contest}
+            </p>
+          ) : null}
           <p className="mt-2 text-sm leading-6 text-muted">
             Room console: release the start code, start the room, watch who is recording, and read your room's alerts. ID checks are manual (no QR scanning).
           </p>
           <div className="mt-4 space-y-3">
             <label className="block text-sm">
               <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted">Your name</span>
-              <input className="focus-ring h-10 w-full rounded-md border border-line bg-white px-3 text-sm" value={name} onChange={(event) => setName(event.target.value)} />
-            </label>
-            <label className="block text-sm">
-              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted">Invigilator password</span>
               <input
                 className="focus-ring h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
-                type="password"
-                value={passwordInput}
-                onChange={(event) => setPasswordInput(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") void unlock(); }}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter" && tokenEntry) void unlock(); }}
               />
             </label>
+            {!tokenEntry ? (
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-muted">Invigilator password</span>
+                <input
+                  className="focus-ring h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+                  type="password"
+                  value={passwordInput}
+                  onChange={(event) => setPasswordInput(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === "Enter") void unlock(); }}
+                />
+              </label>
+            ) : (
+              <p className="text-xs leading-5 text-muted">
+                This link carries your contest access key — no password needed.
+              </p>
+            )}
             <button className="focus-ring inline-flex h-10 w-full items-center justify-center rounded-md bg-ink text-sm font-medium text-white" onClick={() => void unlock()}>
               Enter
             </button>
