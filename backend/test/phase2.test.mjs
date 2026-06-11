@@ -276,6 +276,60 @@ test("start: a well-formed candidate email → 200 (gate is permissive, not RFC-
   assert.equal(res.statusCode, 200);
 });
 
+// S-E (F8.2): the legacy start no longer hard-requires the field named
+// "hackerrank_username". The modern client sends `candidate_id`; the server
+// synthesizes the FROZEN hackerrank_username session key from it so legacy reads
+// (doc ids, GCS paths, dual-read DTOs) keep working unchanged.
+test("start: candidate_id alone (no hackerrank_username) → 200, frozen key synthesized", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // detailsBody seeds hackerrank_username; null it out and pass candidate_id only.
+  const res = await start(firestore, storage, {
+    hackerrank_username: undefined,
+    candidate_id: "Asha_R",
+    name: "Asha R",
+    email: "asha@example.com",
+    roll_number: "R-9"
+  });
+  assert.equal(res.statusCode, 200);
+  // The frozen field IS the session key — username_norm derives from it, so the
+  // session must be findable under candidate_id's normalized form.
+  const stored = res.body;
+  assert.equal(stored.hackerrank_username, "Asha_R", "candidate_id synthesized into the frozen field");
+  assert.equal(stored.candidate_id, "Asha_R", "modern candidate_id still surfaced in the response");
+});
+
+test("start: NEITHER candidate_id nor hackerrank_username → 400 (id still mandatory)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, {
+    hackerrank_username: undefined,
+    candidate_id: undefined,
+    name: "No Id",
+    email: "noid@example.com",
+    roll_number: "R-0"
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.error, /required/i);
+});
+
+test("start: hackerrank_username still accepted verbatim (back-compat caller)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, {
+    hackerrank_username: "Legacy_User",
+    candidate_id: undefined,
+    name: "Legacy User",
+    email: "legacy@example.com",
+    roll_number: "R-7"
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.hackerrank_username, "Legacy_User");
+});
+
 test("slug: empty contest_url → LEGACY layout, no contests// double slash", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
