@@ -18,6 +18,7 @@ import {
   restoreDraft,
   serializeDraft,
   showProblemSidebar,
+  summarizeSubmissions,
   workspaceTotals
 } from "./problemSwitch";
 import type { ProblemSubmissionSummary, SubmitResult } from "../types";
@@ -112,6 +113,35 @@ describe("mergeSubmitOutcome (live submit → summary, mirrors computeSessionSum
     expect(merged.best_verdict).toBe("accepted");
     expect(merged.last_verdict).toBe("wrong_answer");
     expect(merged.attempts).toBe(2);
+  });
+});
+
+describe("summarizeSubmissions (demo parity — mirrors backend computeSessionSummary)", () => {
+  it("folds a submission list into the per-problem summary map", () => {
+    const summaryMap = summarizeSubmissions([
+      { problem_id: "a", verdict: "wrong_answer", score: 50, max_points: 100, created_at: "t1" },
+      { problem_id: "a", verdict: "accepted", score: 100, max_points: 100, created_at: "t2" },
+      { problem_id: "b", verdict: "wrong_answer", score: 0, max_points: 150, created_at: "t3" }
+    ]);
+    expect(summaryMap.a).toEqual({
+      best_score: 100, max_points: 100, attempts: 2,
+      best_verdict: "accepted", last_verdict: "accepted", last_submitted_at: "t2"
+    });
+    expect(summaryMap.b.attempts).toBe(1);
+    expect(summaryMap.b.best_score).toBe(0);
+  });
+
+  it("sorts by created_at so out-of-order storage cannot corrupt last_*", () => {
+    const summaryMap = summarizeSubmissions([
+      { problem_id: "a", verdict: "accepted", score: 100, max_points: 100, created_at: "t2" },
+      { problem_id: "a", verdict: "wrong_answer", score: 50, max_points: 100, created_at: "t1" }
+    ]);
+    expect(summaryMap.a.last_verdict).toBe("accepted");
+    expect(summaryMap.a.best_score).toBe(100);
+  });
+
+  it("empty list → empty map", () => {
+    expect(summarizeSubmissions([])).toEqual({});
   });
 });
 
