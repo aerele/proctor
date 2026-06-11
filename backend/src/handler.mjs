@@ -9,7 +9,7 @@ import { makeSessionStore } from "./lib/sessionStore.mjs";
 import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
 import { loadConfig } from "./config.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
+import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
@@ -346,6 +346,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/contest-update") return send(res, 200, await adminUpdateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-status") return send(res, 200, await adminContestStatus(req));
     if (req.method === "POST" && path === "/api/admin/contest-regenerate") return send(res, 200, await adminContestRegenerate(req));
+    if (req.method === "POST" && path === "/api/admin/contest-set-code") return send(res, 200, await adminContestSetCode(req));
     if (req.method === "POST" && path === "/api/admin/contest-exam-time") return send(res, 200, await adminContestExamTime(req));
     if (req.method === "GET" && path === "/api/admin/templates") return send(res, 200, await adminListTemplates(req));
     if (req.method === "GET" && path === "/api/admin/template") return send(res, 200, await adminGetTemplate(req));
@@ -2383,6 +2384,16 @@ async function adminContestRegenerate(req) {
   const body = parseBody(req);
   requireFields(body, ["slug", "field"]);
   return { ok: true, contest: await regenerateContestSecret(String(body.slug), String(body.field)) };
+}
+
+// W4: POST /api/admin/contest-set-code {slug, access_code} — set a CUSTOM test
+// code. contests.mjs owns the format rule (6 chars, mint alphabet) and the
+// unique-among-OPEN-contests check.
+async function adminContestSetCode(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  requireFields(body, ["slug", "access_code"]);
+  return { ok: true, contest: await setContestAccessCode(String(body.slug), String(body.access_code)) };
 }
 
 // S-D: POST /api/admin/contest-exam-time {slug, end_at|extend_minutes|end_now}
