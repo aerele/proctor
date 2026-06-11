@@ -1,40 +1,28 @@
-# RESUME ANCHOR — own-editor night run (written 2026-06-10 ~10:10, pre-compaction)
+# RESUME ANCHOR — DAY 2 (written 2026-06-11 ~01:25 IST, pre-compaction)
 
-Read this first after compaction. Repo: /home/karthi/arogara/proctor, branch master, ~60 local commits ahead of origin. **NO PUSH until the history scrub (see Push gate below).**
+**EXAM TODAY 2026-06-11: 700 candidates × ~130 submissions × 10-15 hidden tests in ONE HOUR (end spike). Everything below serves that.**
 
-## DONE (built + tested + reviewed + committed local)
-- **FIRM Slice 1**: same-origin Monaco workspace in StudentApp; /api/exec/run + /api/exec/submit via swap-able Judge0 adapter (RapidAPI, UA header, enable_network:false, full limits, ≤20 chunking); /api/editor-events → per-session GCS NDJSON (sanitized, 2000-char text preserved); counts-only submit responses; randomUUID submission ids.
-- **Hardening**: execQueue (run/submit/poll lanes, bounded concurrency, 429/5xx backoff w/ jitter, retryable:false phase-awareness — never re-bills a submitted batch), per-session cooldowns + submit caps (clock seam), judge_unavailable 503s, stored:false verdict salvage.
-- **S1 exam shell**: FullscreenGate (real modal) + ExamTopBar (5-stage, ⚑ flags, persistence across reload) + AnomalyPanel (role=alert) + useExamShell; 10-point browser walkthrough PASSED (evidence night-run/evidence/s1-*.png).
-- **S2 roster login**: versioned roster store + exact-norm guard + version-prefixed ids; public exam-config + masked lookup; server-side identity override + roster_verified; CSV/TSV parser; admin rooms+roster UI; identity-confirm login + room dropdown.
-- **S3 invigilator portal**: timing-safe auth (invigilator or admin password), room OTP gate ENFORCED on exec server-side, release-code/open-room, room dashboard (least-privilege: NO session_id, NO IPs, NO alert detail), student waiting room, 20-attempt cap (NaN-guarded).
-- **S4 problem authoring**: Firestore problem bank (validation, per_test/all_or_nothing scoring), admin CRUD + Problems tab, active-problem assignment, server-driven candidate problem (SLICE1_PROBLEM removed), built in worktree + MERGED (3ec65f4).
-- **S5 dynamic time + end-now**: admin exam-time card (+/-min, exact set, 2-click end-now), student live countdown + time-up state. VERIFIED (commit 72aad0f).
-- **S6 attendance**: GET /api/admin/attendance (current roster version, taken/not-taken/absentees), pure math + CSV, api client.
-- **Audits**: full sweep DONE (night-run/AUDIT-REPORT.md: 0 blockers; all mechanical majors FIXED + re-review-verified — M2 keystroke disclosure, M5 roster clear deletes, M7, M8 CSV injection, M9-M11 a11y/errors, M12/M13 invigilator least-privilege). S3 delta-audit done (security clean).
-- **Deployed e2e (dev GCP aerele-proctor-dev)**: backend https://proctor-api-238846959672.asia-south1.run.app + frontend https://proctor-web-238846959672.asia-south1.run.app — full candidate flow incl LIVE Judge0 + keystroke forensics ('#api-probe' reconstructed byte-for-byte from GCS NDJSON). NOTE: deployed images predate S3-S7 — final redeploy pending.
+Repo: /home/karthi/arogara/proctor, branch master, ~120 local commits ahead. **NO PUSH EVER until Karthi's PII history scrub (see TODO-admin-polish.md).** Telegram mode was last active; Karthi compacts and continues. (Day-1 anchor content is in git history of this file.)
 
-## IN FLIGHT at compaction — RESOLVED: S5-S7 workflow COMPLETED (all 19 tasks green; suites 330/330 + 174/174). Ignore the resume instructions below.
+## State at compaction
+- Master HEAD aafb72d. Last full gate (a08abbc): backend 563/563, frontend 430/430, build clean.
+- **DEPLOYED (aerele-proctor-dev)**: wave-3 state (camera recording, F5 enforcement, F6 admin, F8/F9 small) — api rev 00003 + web rev 00003, min-instances=1/max 100+50 set, Judge0 RapidAPI env live, smoke incl live run/submit PASSED. Admin pw + invigilator pw in .env.deploy.local. Seeded problem "sum-of-two-numbers" published+active. **Dev settings exam window EXPIRED 2026-06-10T18:00Z — set a fresh window before any candidate test.**
+- **WAVE 5 IN FLIGHT** (resumed run wf_f2e51b97-1ed, bg task wmv35r3l2): S-D slices 1-2 COMMITTED (bbc717f backend plumbing: invigilator_key+regenerate, public access-code resolver, per-contest exam-config/exam-time, rooms edit, token auth; aafb72d Contests tab + detail + global selector). Remaining in-run: S-D slice 3 (candidate ?contest= routing + access-code landing + invigilator key portal) + slice 4 (demo parity), S-I-FE multi-problem workspace, 2-lens review, fix, final gate. If it dies (window limits!): check git status (reset uncommitted), then Workflow({scriptPath: "/home/karthi/.claude/projects/-home-karthi-arogara-proctor/d1d95247-a2f0-4d67-a73c-a24d64c7473f/workflows/scripts/wave5-sd-si-frontend-wf_f2e51b97-1ed.js", resumeFromRunId: "wf_f2e51b97-1ed"}).
 
-<details>OLD:
-- Workflow **waz7af0gl** (resume of wf_a5a43681-607, script s5-s7-final-builds-*.js): S7 IP-report remaining frontend tasks (admin tab + demo parity; backend tasks 1-2 already committed: 8181b83, 3cd4cc5) + final suites verify + final delta-review of S5-S7. All S5/S6 tasks replay from journal cache.
-- If it died again: check journal /home/karthi/.claude/projects/-home-karthi-arogara/d1d95247-a2f0-4d67-a73c-a24d64c7473f/subagents/workflows/wf_a5a43681-607/journal.jsonl, reset any uncommitted partial edits (git status), TaskStop the stale task id, re-invoke Workflow({scriptPath: ".../s5-s7-final-builds-wf_a5a43681-607.js", resumeFromRunId: "wf_a5a43681-607"}).
+## Pipeline after wave 5 (in order)
+1. **Wave 6**: S-J (Results tab: rank/per-problem/integrity/bulk selection + selection-done; carry-over roster; People tab + cross-round scorecard; legacy person backfill — vision §2.14-2.15, §7 S-J) + **decisions batch task #43** (checkpoint REMOVAL entirely; D1 → save-time confirm dialog; invigilator alerts per-type "Share with invigilator" checkbox DEFAULT ALL OFF; M3 roster-lookup rate-limit; M6 verify+close) + wave-4/5 review minors (see wave-4 result: exec in-flight guard race, resume slug translation, alerts scoped-branch orderBy caveat, roster PII orphans, zero-problem edit guard, demo cross-contamination, language allowlist at exec).
+2. **Wave 7**: S-G/S-H lifecycle UI (export → gated purge → tombstone; selection-done + retention sweep + 10-DAY EXPORT-ZIP auto-delete per vision §10.4; Cloud Scheduler) + S-E HR cleanup if time. S-F contest-eval adapter LAST (Karthi approved deferring).
+3. **Full demo-browser walkthrough** (stubs via initScript per NIGHT-LOG ~00:15; Monaco via editor.trigger) — student multi-problem + contests admin + invigilator-by-key.
+4. **DEPLOY both images** (source .env.deploy.local; frontend build needs VITE_API_BASE_URL + VITE_ADMIN_PASSWORD_HASH + VITE_INVIGILATOR_PASSWORD_HASH = sha256 of the two passwords; gcloud builds submit backend|frontend --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/{api|web}:latest --async; gcloud run deploy with sandbox-off). Smoke: exam-config?contest, contests list, live exec run/submit. THEN set up the real contest for the team (template → contest → window → roster → rooms → access code + invigilator links).
+5. **Ops runbook (#40)** — 1-pager for the team + **morning summary to Karthi**.
 
-</details>
+## OPEN DECISION (Karthi) — Judge0 capacity for TODAY
+- His key = RapidAPI BASIC metered: NO rate cap, $0.0017/submission (EVERY hidden test bills as one) → event ≈ $1,500-1,900. Tiers: Pro $45 2k/day, Ultra $90 5k/day, Mega $170 10k/day, same overage (screenshot /tmp/judge0_pricing.png). Shared-cluster throughput at 250-380 exec/s UNVERIFIED.
+- Option A (recommended): SELF-HOST for the event (~$30-50, load-tested before the exam, RapidAPI key stays as one-env-var live fallback). **BLOCKED on Karthi running:** `gcloud projects add-iam-policy-binding aerele-proctor-dev --member="serviceAccount:proctor-deployer@aerele-proctor-dev.iam.gserviceaccount.com" --role="roles/compute.admin" --account=karthi@essdee.fit` — then re-dispatch the infra agent (task #42; Compute API already enabled; scope: validation VM → judge0 CE docker-compose w/ AUTHN token → adapter mode=ce smoke → ~200-parallel throughput probe → fleet sizing → night-run/JUDGE0-SCALE-PLAN.md; token to monitoring/.data/judge0-selfhost.env, gitignored).
+- Option B: stay metered, eat the cost. Either way on deploy: EXEC_* env tuning (EXEC_SUBMIT_COOLDOWN_SECONDS≈20-30, EXEC_MAX_SUBMISSIONS_PER_SESSION≈200, lanes generous), hidden tests ≤10-12 advised.
 
-## REMAINING (in order — updated 10:45)
-1. ~~S7 workflow~~ DONE. Delta-review: 4 minors D1-D4 + 3 nits filed in MORNING-NOTES — fix D1/D2 (focused agent) or defer to Karthi.
-2. **Final merged-stack demo-browser walkthrough** on :5173 (VITE_DEMO_MODE dev server should be running; restart: cd frontend && VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev). Walk: student (gate→details→roster→waiting room if gate on→workspace w/ authored problem→countdown) + /invigilator portal + admin tabs (Problems, attendance, IP report, exam time). Browser MCP on :9222; Monaco typing MUST use editor.trigger('keyboard','type',{text}) — CDP type_text does NOT reach Monaco. getDisplayMedia/clipboard stubs via initScript (see NIGHT-LOG ~00:15 + ~04:45 entries).
-3. **Redeploy BOTH images to aerele-proctor-dev** (everything S3-S7 + fixes): source .env.deploy.local; backend: gcloud builds submit backend --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/api:latest --async (poll: gcloud builds list), then gcloud run deploy proctor-api (same flags as NIGHT-LOG ~04:0x incl JUDGE0_* env). Frontend: npm --workspace frontend run build with VITE_API_BASE_URL + VITE_ADMIN_PASSWORD_HASH (sha256 of ADMIN_PASSWORD), builds submit frontend --async, gcloud run deploy proctor-web. Quick deployed smoke.
-4. Update MORNING-NOTES (final summary already mostly written §-by-§), TODO ticks, final commit.
+## Other open Karthi items
+Jun-8 TG texts 1574/1575 eyeball; push gate (PII scrub); F7 encoding implementation (discuss-first, LAST); F11 full docs at END (task #39).
 
-## Push gate (Karthi does this, NOT the agent)
-65 contest-eval verdict files with real student PII exist in HISTORY at acdba86 (removed from tree at 6640247). Before ANY push: `git filter-repo --path night-run/archive-2026-06-05-sshgate-v12/verdict-queue/ --invert-paths` or keep repo private. Details in MORNING-NOTES "PUSH GATE".
-
-## Karthi's design-call list (morning discussion — in MORNING-NOTES)
-M3 roster-lookup enumeration mitigation · M4 per-candidate start credential · M6 pre-session clipboard scope · username fallback on blank roster cell · chunk-upload retry (pre-existing) · OTP plaintext (accepted) · Monaco still CDN-loaded (bundle before a real offline exam).
-
-## Key environment facts
-- Judge0 key: monitoring/.data/judge0.env (gitignored). Deploy env: .env.deploy.local (gitignored; API_URL filled). GCP SA: ~/proctor-dev-sa.json via monitoring/.data/gcp-dev.env; gcloud at ~/google-cloud-sdk/bin.
-- Usage gate script: night-run/check-usage.sh (5h windows; resets 09:30/14:30 IST pattern).
-- Suites at last green: backend 330/330; frontend 159 vitest + tsc + build (before S7 frontend tasks).
+## Environment facts
+gcloud at ~/google-cloud-sdk/bin authed proctor-deployer (Compute API enabled, NO compute role yet). Secrets: .env.deploy.local + monitoring/.data/judge0.env + gcp-dev.env (all gitignored). Suites: backend `cd backend && npm test`; frontend `cd frontend && npx vitest run && npm run build`. Specs in docs/superpowers/specs/2026-06-10-*.md (the F10 product vision = BUILD TARGET incl §10 answers). Leftover merged worktrees under .claude/worktrees (branches worktree-wf_b5890940-415-1, feat/s-b-contests — safe to prune+delete once released). uiStrings CI test bans rendered "username". Browser testing: chrome-devtools MCP on :9222, media stubs via navigate_page initScript, Monaco typing ONLY via editor.trigger.
