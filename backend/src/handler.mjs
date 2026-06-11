@@ -2646,13 +2646,72 @@ function maskEmail(value) {
   return `${local.slice(0, keep)}${"*".repeat(Math.max(1, local.length - keep))}${text.slice(at)}`;
 }
 
+// ---- M3: roster-lookup enumeration mitigation -------------------------------
+// /api/roster/lookup is PUBLIC and ID-enumerable (s2 design §7 accepted it as a
+// documented limitation). Karthi wants it mitigated now: a BEST-EFFORT per-IP
+// fixed-window rate limiter caps how fast one client can walk the id space, so a
+// scraper can no longer harvest the masked confirmation set (name/roll/masked
+// email) at machine speed. EVERY attempt consumes budget — both a found id and a
+// 404 are enumeration steps, so there is NO success refund (unlike the
+// access-code limiter, where a synchronized hall typing the CORRECT code must
+// never throttle). At 30 lookups/min one IP cannot meaningfully enumerate a real
+// roster, while a legitimate candidate (one lookup, maybe a retry) is never hit.
+//
+// BEST-EFFORT, PER-INSTANCE: the counter lives in this process's memory. Cloud
+// Run runs MANY instances and does NOT share memory across them, so an attacker
+// whose requests fan out across instances gets a higher effective ceiling, and a
+// cold start resets the map. This is an acceptable mitigation that raises the
+// cost of bulk enumeration — NOT a global guarantee. A hard guarantee would need
+// a shared store (Firestore/Redis counter) or fronting WAF, which is out of
+// scope for this slice.
+const ROSTER_LOOKUP_RATE_LIMIT = 30;
+const ROSTER_LOOKUP_RATE_WINDOW_MS = 60_000;
+const ROSTER_LOOKUP_RATE_MAP_LIMIT = 10_000;
+let _rosterLookupClock = () => Date.now();
+export function __setRosterLookupClockForTest(fn) {
+  _rosterLookupClock = fn || (() => Date.now());
+}
+const rosterLookupAttempts = new Map(); // ip -> { count, windowStartMs }
+// Test seam: the limiter map is module-global (it survives across tests in a
+// suite). Clear it between tests so unrelated lookups don't accumulate toward
+// the cap. Production never calls this.
+export function __resetRosterLookupRateLimitForTest() {
+  rosterLookupAttempts.clear();
+}
+
+// Pure decision: record one attempt for `ip` and throw a 429 (rate_limited, with
+// a retry_after_seconds hint the api() catch forwards) once the per-window cap is
+// exceeded. Bounded memory: a full map is swept of expired windows before insert
+// so spoofed-IP rotation cannot grow it without bound.
+export function checkRosterLookupRateLimit(ip) {
+  const nowMs = _rosterLookupClock();
+  if (rosterLookupAttempts.size >= ROSTER_LOOKUP_RATE_MAP_LIMIT) {
+    for (const [key, entry] of rosterLookupAttempts) {
+      if (nowMs - entry.windowStartMs >= ROSTER_LOOKUP_RATE_WINDOW_MS) rosterLookupAttempts.delete(key);
+    }
+  }
+  let entry = rosterLookupAttempts.get(ip);
+  if (!entry || nowMs - entry.windowStartMs >= ROSTER_LOOKUP_RATE_WINDOW_MS) {
+    entry = { count: 0, windowStartMs: nowMs };
+    rosterLookupAttempts.set(ip, entry);
+  }
+  entry.count += 1;
+  if (entry.count > ROSTER_LOOKUP_RATE_LIMIT) {
+    throw rateLimited(Math.max(1, Math.ceil((entry.windowStartMs + ROSTER_LOOKUP_RATE_WINDOW_MS - nowMs) / 1000)));
+  }
+}
+
 // POST /api/roster/lookup — PUBLIC unique-ID-confirm login, step 1. Returns the
 // MINIMUM confirmation set: mapped name/roll/room/username + MASKED email.
 // Unmapped extra columns (phone numbers, ...) and the raw email NEVER leave via
 // this route — the raw email reaches the session doc only through the
-// server-side override at /api/session/start. Enumeration risk is an accepted,
-// documented limitation (spec §7).
+// server-side override at /api/session/start. Enumeration risk is MITIGATED by
+// the best-effort per-IP rate limit above (M3); see its comment for the
+// per-instance caveat.
 async function rosterLookup(req) {
+  // M3: throttle BEFORE any roster read — a rejected caller learns nothing about
+  // the roster (the 429 body is minimal: error + retry hint, no lookup fields).
+  checkRosterLookupRateLimit(getClientIp(req));
   const body = parseBody(req);
   requireFields(body, ["unique_id"]);
   const meta = await getRosterMeta();
