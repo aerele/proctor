@@ -24,7 +24,7 @@ import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
-import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
+import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, rosterLookupErrorMessage, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
@@ -288,6 +288,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [uniqueIdInput, setUniqueIdInput] = useState("");
   const [lookupBusy, setLookupBusy] = useState(false);
   const [lookupError, setLookupError] = useState("");
+  // Wave-6 review: epoch-ms until which the Find-me button stays disabled after a
+  // 429, so re-clicks during the rate-limit window don't burn more budget (the
+  // M3 limiter has no success refund for the MISS path that 429s).
+  const [lookupCooldownUntil, setLookupCooldownUntil] = useState(0);
   const [rosterMatch, setRosterMatch] = useState<RosterLookupResult | null>(null);
   // S4: the assigned problem rides in on the start/resume response. hasProblem
   // drives every own-editor-vs-HackerRank copy fork (studentCopy.ts, stageHint).
@@ -999,22 +1003,44 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
   // S2: look up the typed unique ID against the server-side roster.
   const lookupRosterId = async () => {
+    // Re-clicking during the post-429 cooldown would just burn more budget.
+    if (Date.now() < lookupCooldownUntil) return;
     setLookupBusy(true);
     setLookupError("");
     try {
       setRosterMatch(await rosterLookup(uniqueIdInput.trim()));
     } catch (cause) {
       setRosterMatch(null);
-      const status = (cause as ApiError)?.status;
+      const err = cause as ApiError;
+      const retryAfter = Number(err?.body?.retry_after_seconds);
+      // On a 429 (M3 shared-network throttle) keep the button disabled for the
+      // retry window so re-clicks don't extend the lockout; cap the cooldown so a
+      // bogus huge value can't trap the candidate.
+      if (err?.status === 429 || err?.code === "rate_limited") {
+        const waitMs = (Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 120) : 60) * 1000;
+        setLookupCooldownUntil(Date.now() + waitMs);
+      }
       setLookupError(
-        status === 404
-          ? "We could not find that ID on the student list. Check it and try again, or call an invigilator."
+        err?.status !== undefined || err?.code !== undefined
+          ? rosterLookupErrorMessage(err?.status, err?.code, retryAfter)
           : cause instanceof Error ? cause.message : String(cause)
       );
     } finally {
       setLookupBusy(false);
     }
   };
+
+  // Drive the post-429 cooldown: `lookupCooldownActive` is true while the window
+  // is open, and an effect re-renders once it elapses so the Find-me button
+  // re-enables without the candidate having to interact.
+  const [cooldownTick, setCooldownTick] = useState(0);
+  const lookupCooldownActive = lookupCooldownUntil > Date.now();
+  useEffect(() => {
+    if (!lookupCooldownActive) return;
+    const id = window.setTimeout(() => setCooldownTick((t) => t + 1), Math.max(250, lookupCooldownUntil - Date.now()));
+    return () => window.clearTimeout(id);
+    // cooldownTick re-arms the timer after each elapse check.
+  }, [lookupCooldownActive, lookupCooldownUntil, cooldownTick]);
 
   // "Yes, this is me": prefill the form from the roster record. Roster-sourced
   // fields render disabled; the server overrides them again at start anyway
@@ -1453,6 +1479,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                   value={uniqueIdInput}
                   onChange={setUniqueIdInput}
                   busy={lookupBusy}
+                  cooldown={lookupCooldownActive}
                   error={lookupError}
                   match={rosterMatch}
                   confirmed={rosterConfirmed}
@@ -5523,11 +5550,13 @@ function Field({ label, value, onChange, type = "text", disabled = false, inputM
 // S2 — roster identity gate (form stage, before the details form). Three
 // states: enter-ID, confirm-match, confirmed. The server re-verifies the ID at
 // /api/session/start, so this panel is UX only — never a security boundary.
-function IdentityLookupPanel({ label, value, onChange, busy, error, match, confirmed, confirmedId, onLookup, onConfirm, onReject, onReset }: {
+function IdentityLookupPanel({ label, value, onChange, busy, cooldown, error, match, confirmed, confirmedId, onLookup, onConfirm, onReject, onReset }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   busy: boolean;
+  /** True during the post-429 rate-limit cooldown — the button stays disabled. */
+  cooldown: boolean;
   error: string;
   match: RosterLookupResult | null;
   confirmed: boolean;
@@ -5565,9 +5594,9 @@ function IdentityLookupPanel({ label, value, onChange, busy, error, match, confi
             <button
               className="focus-ring mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
               onClick={onLookup}
-              disabled={busy || !value.trim()}
+              disabled={busy || cooldown || !value.trim()}
             >
-              <Search size={16} /> {busy ? "Checking…" : "Find me"}
+              <Search size={16} /> {busy ? "Checking…" : cooldown ? "Please wait…" : "Find me"}
             </button>
           </div>
           {error ? <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}

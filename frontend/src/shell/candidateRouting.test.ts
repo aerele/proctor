@@ -13,6 +13,7 @@ import {
   contestUrlFor,
   isCandidateEmailValid,
   landingErrorMessage,
+  rosterLookupErrorMessage,
   normalizeAccessCodeInput,
   routeForNoParam,
   routeForPinnedOutcome,
@@ -102,6 +103,34 @@ describe("landingErrorMessage", () => {
   it("invalid_code and anything else -> generic check-the-code copy", () => {
     expect(landingErrorMessage(400, "invalid_code")).toMatch(/6.character/i);
     expect(landingErrorMessage(undefined, undefined)).toMatch(/could not/i);
+  });
+});
+
+describe("rosterLookupErrorMessage", () => {
+  it("429 / rate_limited -> wait copy with the server's retry_after_seconds", () => {
+    const msg = rosterLookupErrorMessage(429, "rate_limited", 17);
+    expect(msg).toMatch(/wait 17 seconds/i);
+    expect(msg).toMatch(/invigilator/i);
+    // It must NOT surface the raw machine code.
+    expect(msg).not.toMatch(/rate_limited/);
+  });
+
+  it("429 with a singular second is grammatical", () => {
+    expect(rosterLookupErrorMessage(429, "rate_limited", 1)).toMatch(/wait 1 second\b/i);
+  });
+
+  it("429 with no/zero retry hint falls back to a minute", () => {
+    expect(rosterLookupErrorMessage(429, "rate_limited")).toMatch(/wait a minute/i);
+    expect(rosterLookupErrorMessage(undefined, "rate_limited", 0)).toMatch(/wait a minute/i);
+  });
+
+  it("404 / not_on_roster -> check-the-id copy", () => {
+    expect(rosterLookupErrorMessage(404, "not_on_roster")).toMatch(/could not find that ID/i);
+    expect(rosterLookupErrorMessage(404, "roster_not_configured")).toMatch(/could not find that ID/i);
+  });
+
+  it("anything else -> generic try-again copy", () => {
+    expect(rosterLookupErrorMessage(500, undefined)).toMatch(/could not check/i);
   });
 });
 
