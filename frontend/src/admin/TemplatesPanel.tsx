@@ -345,6 +345,17 @@ function TemplateEditor({ draft, bank, saving, onChange, onSave, onCancel }: {
               </label>
             </div>
           </div>
+
+          {/* OMR P1: screen-marker fiducials flag (default OFF) — snapshot-
+              copied onto contests at instantiation like camera recording. */}
+          <div>
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">Screen markers (overlay detection)</span>
+            <div className="mt-1 flex flex-wrap items-center gap-3 text-sm">
+              <label className="inline-flex items-center gap-1">
+                <input type="checkbox" disabled={readOnly} checked={draft.screenMarkersEnabled} onChange={(event) => set({ screenMarkersEnabled: event.target.checked })} /> enabled
+              </label>
+            </div>
+          </div>
         </div>
 
         {/* Enforcement */}

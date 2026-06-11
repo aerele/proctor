@@ -11,7 +11,7 @@ import { loadConfig } from "./config.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
-import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
+import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
 import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people.mjs";
@@ -901,6 +901,11 @@ async function startResponse(session, settings, contest = null) {
     // screen constraints use, so the recorder reads ONE authoritative config.
     // Wave-4 fix: person contests serve their OWN snapshot camera config.
     upload_config: { ...uploadConfig, camera: cameraRecordingConfigFor(contest, settings) },
+    // OMR P1 (design §5.2): the start/resume response is the ONLY candidate
+    // carrier for the screen-marker flag, and the key rides ONLY when enabled —
+    // flag off (the default) keeps this payload byte-identical to today and
+    // the canary-pinned no-param /api/exam-config is never touched.
+    ...(screenMarkersConfigFor(contest, settings).enabled ? { screen_markers: { enabled: true } } : {}),
     heartbeat_interval_seconds: 15,
     // S5: authoritative exam end time + the server clock at response time, so
     // the client shows a skew-corrected countdown from the very first response.
@@ -1932,6 +1937,10 @@ async function adminSaveSettings(req) {
     // the stored value rather than resetting it.
     camera_recording: normalizeCameraRecording(
       body.camera_recording !== undefined ? body.camera_recording : existing?.camera_recording),
+    // OMR P1: screen-marker flag — default OFF; an older admin UI that doesn't
+    // SEND the field preserves the stored value (same rule as camera_recording).
+    screen_markers: normalizeScreenMarkers(
+      body.screen_markers !== undefined ? body.screen_markers : existing?.screen_markers),
     passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
     passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
     end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
@@ -2325,6 +2334,7 @@ async function instantiateTemplatePayload(body) {
     identity_label: pick(body.identity_label, defaults.identity_label),
     room_gate_enabled: pick(body.room_gate_enabled, defaults.room_gate_enabled),
     camera_recording: pick(body.camera_recording, defaults.camera_recording),
+    screen_markers: pick(body.screen_markers, defaults.screen_markers),
     enforcement: pick(body.enforcement, defaults.enforcement),
     evidence_retention_days: pick(body.evidence_retention_days, defaults.evidence_retention_days),
     languages: pick(body.languages, defaults.languages)
@@ -6136,6 +6146,26 @@ function cameraRecordingConfig(settings) {
   return normalizeCameraRecording(settings?.camera_recording);
 }
 
+// OMR P1 (2026-06-12 design §5.2) — screen-marker fiducials feature flag.
+// Default OFF everywhere: only an explicit boolean true enables, garbage falls
+// back to disabled, and a deployment that never touches the flag serves every
+// candidate response byte-identical to today (the start/resume carrier below
+// emits the key ONLY when enabled; /api/exam-config is never touched). v1 is
+// boolean-only — marker size/contrast/count are frontend code constants
+// (design Open Question 4).
+const SCREEN_MARKERS_DEFAULTS = { enabled: false };
+
+function normalizeScreenMarkers(raw) {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : SCREEN_MARKERS_DEFAULTS.enabled
+  };
+}
+
+function screenMarkersConfig(settings) {
+  return normalizeScreenMarkers(settings?.screen_markers);
+}
+
 // ---- wave-4 fix: contest-owned enforcement/camera (S-I §1.4 snapshot) -------
 // A session bound to a person contest serves the CONTEST's snapshot-copied
 // enforcement/camera_recording fields; legacy sessions keep the global
@@ -6149,6 +6179,10 @@ function enforcementConfigFor(contest, settings) {
 
 function cameraRecordingConfigFor(contest, settings) {
   return contest ? normalizeTemplateCameraRecording(contest.camera_recording) : cameraRecordingConfig(settings);
+}
+
+function screenMarkersConfigFor(contest, settings) {
+  return contest ? normalizeTemplateScreenMarkers(contest.screen_markers) : screenMarkersConfig(settings);
 }
 
 // Per-session enforcement exemptions (F5.5): ONLY the known keys, ONLY real
@@ -6182,6 +6216,10 @@ function publicSettings(settings) {
     // F10.1: always normalized on read, so a legacy doc (no stored block)
     // reports the defaults (enabled / 10 fps / 640 w).
     camera_recording: cameraRecordingConfig(settings),
+    // OMR P1: screen-marker flag for the admin toggle (default OFF). Admin
+    // settings surface only — candidate responses carry it solely via the
+    // start/resume conditional key, never exam-config.
+    screen_markers: screenMarkersConfig(settings),
     start_at: settings?.start_at || "",
     end_at: settings?.end_at || "",
     contest_url: settings?.contest_url || "",

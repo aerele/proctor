@@ -83,6 +83,7 @@ import type { PeopleDirectoryResponse, PersonScorecardResponse, ScorecardRow } f
 import { summarizeSubmissions, type StoredSubmission } from "./coding/problemSwitch";
 import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type PersonRosterState } from "./roster/personRoster";
 import { normalizeCameraRecording } from "./cameraRecording";
+import { normalizeScreenMarkers } from "./screenMarkers";
 import { sessionStartPayload } from "./identity";
 import { resolveSavedEndAt } from "./examTime";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
@@ -284,6 +285,15 @@ function demoCameraRecording() {
   return normalizeCameraRecording(getDemoSettings()?.camera_recording);
 }
 
+// OMR P1 demo parity: the screen-marker flag with the exact backend rules —
+// person-contest sessions read the CONTEST's snapshot field, legacy sessions
+// the demo settings store; default OFF, garbage falls back to disabled.
+function demoScreenMarkers(contest?: ContestSummary | null) {
+  return normalizeScreenMarkers(
+    contest && !contest.legacy ? contest.screen_markers : getDemoSettings()?.screen_markers
+  );
+}
+
 function demoSessionResponse(session: DemoSession, contestUrl: string, contest?: ContestSummary | null): SessionStartResponse {
   // S-I §3.4 parity: ordered problems[] (contest-owned for person contests,
   // legacy settings problem_id otherwise), the one-release `problem` alias
@@ -334,6 +344,9 @@ function demoSessionResponse(session: DemoSession, contestUrl: string, contest?:
       // (backend startResponse parity).
       camera: demoCameraRecording()
     },
+    // OMR P1 (backend startResponse parity): the screen_markers key rides
+    // ONLY when enabled — flag off keeps the demo payload shaped like today's.
+    ...(demoScreenMarkers(contest).enabled ? { screen_markers: { enabled: true } } : {}),
     heartbeat_interval_seconds: 15,
     // S5: demo sessions read the exam end time from the demo settings store.
     // S-D: person-contest sessions read the exam end time from the CONTEST doc.
@@ -600,6 +613,8 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
           // F10.1: always normalized on read — a legacy store reports the
           // defaults (enabled / 10 fps / 640 w), exactly like the backend.
           camera_recording: normalizeCameraRecording(settings.camera_recording),
+          // OMR P1: same rule — a legacy store reports the default (DISABLED).
+          screen_markers: normalizeScreenMarkers(settings.screen_markers),
           passcode: "",
           end_code: "",
           passcode_set: Boolean(settings.passcode),
@@ -607,7 +622,7 @@ export async function fetchProctorSettings(password: string): Promise<ProctorSet
           end_code_set: Boolean(settings.end_code),
           end_code_preview: maskPasscode(settings.end_code)
         }
-      : { start_at: "", end_at: "", ...normalizeEnforcementSettings(null), camera_recording: normalizeCameraRecording(null), passcode_set: false, end_code_set: false };
+      : { start_at: "", end_at: "", ...normalizeEnforcementSettings(null), camera_recording: normalizeCameraRecording(null), screen_markers: normalizeScreenMarkers(null), passcode_set: false, end_code_set: false };
   }
 
   return request<ProctorSettings>("/api/admin/settings", {
@@ -648,6 +663,9 @@ export async function saveProctorSettings(password: string, settings: ProctorSet
       // F10.1: same preserve-when-absent + normalize rules as the backend.
       camera_recording: normalizeCameraRecording(
         settings.camera_recording !== undefined ? settings.camera_recording : getDemoSettings()?.camera_recording),
+      // OMR P1: same preserve-when-absent + normalize rules (default OFF).
+      screen_markers: normalizeScreenMarkers(
+        settings.screen_markers !== undefined ? settings.screen_markers : getDemoSettings()?.screen_markers),
       problem_id: settings.problem_id || "",
       rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
       // Passcodes are removed from the start/end flow, but we keep persisting any
@@ -3779,6 +3797,9 @@ export async function createContestApi(password: string, body: ContestCreateRequ
       })),
       rooms: body.rooms ?? [],
       room_gate_enabled: body.room_gate_enabled ?? template?.defaults.room_gate_enabled ?? false,
+      // OMR P1 (backend instantiateTemplatePayload parity): the template's
+      // screen-marker default snapshot-copies onto the contest (default OFF).
+      screen_markers: normalizeScreenMarkers(template?.defaults.screen_markers),
       template_slug: template?.slug ?? null,
       created_at: now,
       updated_at: now
@@ -4041,6 +4062,8 @@ export type ContestTemplateDetail = {
     identity_label: string;
     room_gate_enabled: boolean;
     camera_recording: { enabled: boolean; fps: number; width: number };
+    /** OMR P1: screen-marker flag default (absent on pre-flag docs = off). */
+    screen_markers?: { enabled: boolean };
     enforcement: { mode: string; fullscreen_reentry_seconds: number; fullscreen_exit_limit: number };
     evidence_retention_days: number;
     languages: ProblemLanguage[];
@@ -4073,6 +4096,7 @@ const DEMO_SEED_TEMPLATE: ContestTemplateDetail = {
     identity_label: "Roll Number",
     room_gate_enabled: false,
     camera_recording: { enabled: true, fps: 10, width: 320 },
+    screen_markers: { enabled: false },
     enforcement: { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 },
     evidence_retention_days: 1,
     languages: ["python", "cpp", "java", "javascript"]
@@ -4088,6 +4112,8 @@ function demoDefaults(partial?: Partial<ContestTemplateDetail["defaults"]>): Con
     identity_label: partial?.identity_label ?? "Roll Number",
     room_gate_enabled: partial?.room_gate_enabled ?? true,
     camera_recording: { ...base.camera_recording, ...(partial?.camera_recording ?? {}), width: partial?.camera_recording?.width ?? 640 },
+    // OMR P1: backend normalizeDefaults parity — default OFF.
+    screen_markers: normalizeScreenMarkers(partial?.screen_markers),
     enforcement: { ...base.enforcement, ...(partial?.enforcement ?? {}) },
     evidence_retention_days: partial?.evidence_retention_days ?? 4,
     languages: partial?.languages ? [...partial.languages] : [...base.languages]

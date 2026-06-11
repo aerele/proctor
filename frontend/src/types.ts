@@ -46,6 +46,17 @@ export type CameraRecordingConfigPayload = {
   width: number;
 };
 
+// ---- OMR P1: screen-marker fiducials feature flag ----------------------------
+// Server-validated flag (default DISABLED) for the on-screen OMR marker layer
+// (markers/MarkerLayer.tsx). Carried ONLY on the session start/resume response
+// and ONLY when enabled — absence (flag off / older backend) renders zero
+// marker DOM, keeping today's live build bit-for-bit unaffected (2026-06-12
+// overlay-detection design §5.2). The wire shape matches screenMarkers.ts's
+// ScreenMarkersConfig.
+export type ScreenMarkersConfigPayload = {
+  enabled: boolean;
+};
+
 // POST /api/session/enforcement-violation — the server decides lock vs alert.
 export type EnforcementViolationResponse = {
   ok: boolean;
@@ -98,6 +109,9 @@ export type SessionStartResponse = {
      * backend — the recorder then records NO camera, see shouldRecordCamera). */
     camera?: CameraRecordingConfigPayload;
   };
+  /** OMR P1: present ONLY when the contest/settings enabled screen markers —
+   * absent (flag off or older backend) means the MarkerLayer renders null. */
+  screen_markers?: ScreenMarkersConfigPayload;
   heartbeat_interval_seconds: number;
   // S5: authoritative exam end time + the server clock at response time (for
   // client skew correction). Empty/absent when no schedule is configured or
@@ -181,6 +195,8 @@ export type ProctorSettings = {
   enforcement_mode?: EnforcementMode;
   // F10.1: separate low-res camera recording (default enabled / 10 / 640).
   camera_recording?: CameraRecordingConfigPayload;
+  // OMR P1: screen-marker fiducials flag (default DISABLED).
+  screen_markers?: ScreenMarkersConfigPayload;
   // S5/D1: stamped when the exam-time endpoint adjusts the end — while set (and
   // the start is unchanged) exam-time owns end_at, so a stale Settings save
   // cannot revert a live change. Used by the demo store for backend parity.
@@ -1004,6 +1020,8 @@ export type TemplateDefaults = {
   identity_label: string;
   room_gate_enabled: boolean;
   camera_recording: CameraRecordingConfigPayload;
+  /** OMR P1: screen-marker flag default (absent on pre-flag docs = off). */
+  screen_markers?: ScreenMarkersConfigPayload;
   enforcement: EnforcementConfigPayload;
   evidence_retention_days: number;
   languages: ProblemLanguage[];
@@ -1085,6 +1103,8 @@ export type ContestSummary = {
   /** Round N-1 pointer (vision §2.7); set on carry-over contests. */
   previous_contest_slug?: string | null;
   camera_recording?: CameraRecordingConfigPayload;
+  /** OMR P1: screen-marker flag snapshot (absent on pre-flag docs = off). */
+  screen_markers?: ScreenMarkersConfigPayload;
   enforcement?: EnforcementConfigPayload;
   languages?: ProblemLanguage[];
   evidence_retention_days?: number;

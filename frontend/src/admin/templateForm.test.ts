@@ -30,6 +30,7 @@ const FULL_TEMPLATE: ContestTemplateDetail = {
     identity_label: "Hall Ticket",
     room_gate_enabled: false,
     camera_recording: { enabled: false, fps: 5, width: 320 },
+    screen_markers: { enabled: true },
     enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 1 },
     evidence_retention_days: 7,
     languages: ["python", "cpp"]
@@ -46,6 +47,7 @@ describe("emptyTemplateDraft", () => {
     expect(draft.durationMinutes).toBe("120");
     expect(draft.identityLabel).toBe("Roll Number");
     expect(draft.roomGateEnabled).toBe(true);
+    expect(draft.screenMarkersEnabled).toBe(false); // OMR P1: default OFF
     expect(draft.languages).toEqual(["python", "cpp", "java", "javascript"]);
     expect(draft.preset).toBe(false);
   });
@@ -67,6 +69,7 @@ describe("draftFromTemplate", () => {
     expect(draft.cameraEnabled).toBe(false);
     expect(draft.cameraFps).toBe("5");
     expect(draft.cameraWidth).toBe("320");
+    expect(draft.screenMarkersEnabled).toBe(true);
     expect(draft.enforcementMode).toBe("alert_first");
     expect(draft.fullscreenReentrySeconds).toBe("30");
     expect(draft.fullscreenExitLimit).toBe("1");
@@ -86,6 +89,7 @@ describe("draftFromTemplate", () => {
     expect(draft.durationMinutes).toBe("30");
     expect(draft.identityLabel).toBe("Roll Number"); // default
     expect(draft.cameraEnabled).toBe(true);          // default
+    expect(draft.screenMarkersEnabled).toBe(false);  // OMR P1: pre-flag docs hydrate OFF
     expect(draft.languages).toEqual(["python", "cpp", "java", "javascript"]); // default
   });
 });
@@ -102,6 +106,7 @@ describe("draftToSavePayload", () => {
     expect(payload.defaults.duration_minutes).toBe(90);
     expect(payload.defaults.identity_label).toBe("Hall Ticket");
     expect(payload.defaults.camera_recording).toEqual({ enabled: false, fps: 5, width: 320 });
+    expect(payload.defaults.screen_markers).toEqual({ enabled: true });
     expect(payload.defaults.enforcement).toEqual({ mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 1 });
     expect(payload.defaults.languages).toEqual(["python", "cpp"]);
   });

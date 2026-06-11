@@ -19,7 +19,8 @@ import { SUPPORTED_LANGUAGES } from "./problems.mjs";
 import {
   normalizeProblemEntries,
   normalizeTemplateCameraRecording,
-  normalizeTemplateEnforcement
+  normalizeTemplateEnforcement,
+  normalizeTemplateScreenMarkers
 } from "./templates.mjs";
 import { contestProblemEntries } from "./contestProblems.mjs";
 
@@ -129,6 +130,8 @@ export async function createContest(body) {
   const problems = normalizeContestProblems(body?.problems);
   const templateSlug = body?.template_slug ? String(body.template_slug) : null;
   const cameraRecording = normalizeTemplateCameraRecording(body?.camera_recording);
+  // OMR P1: screen-marker flag snapshot (default OFF — design §5.2).
+  const screenMarkers = normalizeTemplateScreenMarkers(body?.screen_markers);
   const enforcement = normalizeTemplateEnforcement(body?.enforcement);
   const languages = normalizeContestLanguages(body?.languages);
   const roomGateEnabled = body?.room_gate_enabled === undefined
@@ -174,6 +177,7 @@ export async function createContest(body) {
       problems,
       template_slug: templateSlug,
       camera_recording: cameraRecording,
+      screen_markers: screenMarkers,
       enforcement,
       languages,
       room_gate_enabled: roomGateEnabled,
@@ -234,6 +238,7 @@ export async function updateContest(slugRaw, body) {
   // rules run in the handler BEFORE this is called) + the snapshot fields.
   if (body?.problems !== undefined) patch.problems = normalizeContestProblems(body.problems);
   if (body?.camera_recording !== undefined) patch.camera_recording = normalizeTemplateCameraRecording(body.camera_recording);
+  if (body?.screen_markers !== undefined) patch.screen_markers = normalizeTemplateScreenMarkers(body.screen_markers);
   if (body?.enforcement !== undefined) patch.enforcement = normalizeTemplateEnforcement(body.enforcement);
   if (body?.languages !== undefined) patch.languages = normalizeContestLanguages(body.languages);
   if (body?.room_gate_enabled !== undefined) patch.room_gate_enabled = requireBoolean(body.room_gate_enabled, "room_gate_enabled");

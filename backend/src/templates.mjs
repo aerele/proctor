@@ -35,6 +35,10 @@ const CAMERA_FPS_MIN = 1;
 const CAMERA_FPS_MAX = 15;
 const CAMERA_WIDTH_MIN = 320;
 const CAMERA_WIDTH_MAX = 1280;
+// OMR P1 (2026-06-12 design §5.2): screen-marker fiducials are default OFF
+// everywhere — only an explicit boolean true turns them on. v1 is boolean-only
+// (size/contrast are frontend code constants, design Open Question 4).
+const SCREEN_MARKERS_DEFAULTS = { enabled: false };
 const ENFORCEMENT_MODES = ["block", "alert_first"];
 const FULLSCREEN_REENTRY_DEFAULT_SECONDS = 20;
 const FULLSCREEN_EXIT_LIMIT_DEFAULT = 2;
@@ -55,6 +59,7 @@ export const SEED_TEMPLATES = {
       identity_label: "Roll Number",
       room_gate_enabled: false,
       camera_recording: { enabled: true, fps: 10, width: 320 },
+      screen_markers: { enabled: false },
       enforcement: { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 },
       evidence_retention_days: 1,
       languages: ["python", "cpp", "java", "javascript"]
@@ -112,6 +117,7 @@ export function structuredCloneTemplate(template) {
     defaults: {
       ...template.defaults,
       camera_recording: { ...template.defaults?.camera_recording },
+      screen_markers: normalizeTemplateScreenMarkers(template.defaults?.screen_markers),
       enforcement: { ...template.defaults?.enforcement },
       languages: [...(template.defaults?.languages || [])]
     }
@@ -188,6 +194,7 @@ function normalizeDefaults(raw) {
       identity_label: identityLabel,
       room_gate_enabled: typeof source.room_gate_enabled === "boolean" ? source.room_gate_enabled : true,
       camera_recording: normalizeTemplateCameraRecording(source.camera_recording),
+      screen_markers: normalizeTemplateScreenMarkers(source.screen_markers),
       enforcement: normalizeTemplateEnforcement(source.enforcement),
       evidence_retention_days: clampIntOr(source.evidence_retention_days, TEMPLATE_BOUNDS.RETENTION_DEFAULT,
         TEMPLATE_BOUNDS.RETENTION_MIN, TEMPLATE_BOUNDS.RETENTION_MAX),
@@ -202,6 +209,16 @@ export function normalizeTemplateCameraRecording(raw) {
     enabled: typeof source.enabled === "boolean" ? source.enabled : CAMERA_DEFAULTS.enabled,
     fps: boundedIntOr(source.fps, CAMERA_DEFAULTS.fps, CAMERA_FPS_MIN, CAMERA_FPS_MAX),
     width: boundedIntOr(source.width, CAMERA_DEFAULTS.width, CAMERA_WIDTH_MIN, CAMERA_WIDTH_MAX)
+  };
+}
+
+// OMR P1: same "garbage → default" rule as the camera normalizer, but the
+// default is DISABLED — a deployment that never touches the flag must behave
+// byte-identically to today (design §5.2/§11).
+export function normalizeTemplateScreenMarkers(raw) {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : SCREEN_MARKERS_DEFAULTS.enabled
   };
 }
 
