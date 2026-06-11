@@ -202,3 +202,136 @@ candidate's recording restarts.
   two TEC001 pending_approval sessions remain; TEC001 selection snapshot unchanged.
 - W4 test contests e2e-w4-draft + e2e-w4-draft-two archived.
 - Alert-sharing setting restored to OFF. Admin alert list: 10 entries (testing artifacts).
+
+## RETEST rev 00008 (fix wave 5ef8f9a) — run 2026-06-12 02:45 → 03:30 IST
+
+Driver: same automation rig (Chromium :9222 CDP, canvas/oscillator media stubs, Monaco
+keyboard-type). Candidate run as roster student **TEC003 / Chitra M**, session
+`da7ddf72-e1ef-4ef5-beba-4cfb3488bc5d`. All three app pages HARD-refreshed onto the new
+bundle first; revisions confirmed `proctor-api-00008-m8f` / `proctor-web-00008-sbn`.
+
+### VERDICT: ALL FIXES HOLD — R1–R6 PASS
+
+| # | Item | Result |
+|---|------|--------|
+| R1 | F1 chunk continuity across recording restarts | **PASS** |
+| R2 | F2 invigilator per-row Unlock / Exempt (person-mode) | **PASS** |
+| R3 | F3 scoped Exam-time card | **PASS** |
+| R4 | F5 stale reload-warning strip | **PASS** |
+| R5a | F4 Review search by Candidate ID | **PASS** |
+| R5b | F8 invigilator EXAM column | **PASS** |
+| R5c | F10 datetime canonical echo | **PASS** |
+| R5d | F7 ELAPSED across restarts | **PASS** |
+| R6 | clean candidate pass + telemetry | **PASS** |
+
+### R1 — F1 chunk continuity (the big one): PASS
+
+Four stints in one session (start → share-kill/Try-again → refresh/Resume-recording →
+lock/unlock/resume → end). Chunk indexes were MONOTONIC the whole way (sessionStorage
+HWM observed 4 → 8 → 12 → 24; final indexes reach 29). **Zero overwrites.**
+
+- **Events ledger vs GCS:** screen 22 chunk_uploaded events = **22 files** (1–4, 8,
+  12–20, 22–29); camera 25 chunk_uploaded events + 1 success whose event was lost to the
+  refresh (index 11, file present) = **26 files** (1–4, 6–8, 10–20, 22–29). Every
+  successful upload survives at its own index. On rev 00007 the same scenario produced
+  49+49 uploads → 24+24 files with cross-era bytes; that failure mode is gone.
+- **Missing indexes are honest, LOGGED losses, not overwrites:** screen 5,6,7,9,10 +
+  camera 5,9 failed with `TypeError: Failed to fetch` (preserved console shows paired
+  `net::ERR_CONNECTION_CLOSED` — transient connection drops at the kill/refresh
+  boundaries, plus one steady-state pair at 02:52:37); screen+camera 21 failed 403
+  `session_locked` during the lock blackout (by design). All 9 failures appear as
+  `upload_error` events AND as "Chunk upload failed" markers on the review timeline.
+- **manifest.json is cumulative across stints** (44 items covering stints 1/2/3/4; on
+  rev 00007 it described only the last stint).
+- **Playback:** Evidence → Recordings → session plays for real (1280×720 stub frames
+  with stint-correct wall-clock timestamps); timeline honestly reports "7 gaps · 10:07
+  total" which exactly matches 22×30s = 11:00 of footage on a 21:00 session; jump to
+  18:30 lands in stint-4 footage (chunk 18/22) — cross-stint playback works.
+
+### R2 — F2 per-row Unlock/Exempt: PASS
+
+Locked TEC003 via fullscreen-ladder expiry (server `locked_reason: fullscreen_enforcement`).
+Invigilator console (tokenized link, hard refresh): per-row **Unlock** on the locked row
+succeeded — LOCKED count 1→0, row released, **no `no_locked_session_in_room`**. Per-row
+**Fullscreen Exempt** toggled on ("Fullscreen: exempt — click to re-enable") and back off,
+no error chips. Candidate "Check again" → Resume recording → re-enter fullscreen → back
+IN EXAM with state intact.
+
+### R3 — F3 scoped Exam-time card: PASS
+
+With scope = e2e-test-round-1: card shows green chip "Contest: e2e-test-round-1",
+"Ends 6/12/2026, 9:30:00 PM · 18:49:32 left" (NOT legacy/"time is up"). **+5 min** moved
+the CONTEST window 16:00Z → 16:05Z (verified via /api/admin/contests); **−5 min** restored
+16:00Z; legacy settings end_at (2026-06-10T19:30Z) untouched throughout. Scope = All
+contests: card swaps to an explicit grey "Legacy schedule" chip with the legacy
+"6/11/2026 1:00 AM · time is up" (buttons not touched).
+
+### R4 — F5 stale warning strip: PASS
+
+After share-drop recovery: no residual "Screen sharing stopped…" strip. After refresh-
+resume and after lock→unlock→resume: no residual "Your test has been locked…" strip
+(the exact rev-00007 repro). Alert banners clear fully via "I have fixed this".
+
+### R5 — quick sweeps: PASS (all four)
+
+- (a) F4: Evidence → Review search "TEC002" returns session 7a7daada with full detail.
+- (b) F8: invigilator EXAM column shows "—" for waiting/disconnected/locked rows and
+  "Finished" for finished rows — no stuck "Waiting".
+- (c) F10: typed `12/06/2026 9:30 pm` → blur → field echoes canonical `2026-06-12 21:30`.
+- (d) F7: ELAPSED continued across every restart (0:02:45 at share-kill → 0:04:00 after
+  recovery → 0:07:12 after refresh-resume → 0:18:29 after unlock; never reset to 0:00).
+
+### R6 — clean candidate pass: PASS
+
+Q1 typed char-by-char (real code), Run "Test 1: passed — got 5", Submit
+"accepted — 3/3 hidden, 100/100" (attempt 1/50), End test → DONE screen ("44 recording
+segment(s) uploaded"). Telemetry for the session: **551 editor events** in 22 NDJSON
+batches (editor_insert 275, editor_cursor 259, code_run 1, code_submit 1, focus/blur
+across stints), **98 shell events**, **55 heartbeats** — all landed. Console: only
+known-expected noise (lock-window 403s; the known-F9 409/unhandled-rejection pattern,
+unchanged — F9 was not in this fix wave).
+
+### Residual observations (new, none blocking)
+
+- **RT-1 · MED — chunk uploads are single-shot; no retry.** 9 of 57 chunk uploads this
+  session died on transient `ERR_CONNECTION_CLOSED` / lock-window 403 and that video is
+  permanently lost (~4.5 min). The losses are now honest (logged + timeline-visible)
+  instead of silent overwrites, but a retry-with-backoff would save real evidence at
+  candidate scale. One failure pair hit during steady-state recording, not just at
+  restart boundaries.
+- **RT-2 · LOW — manifest/end-screen under-count surviving files.** Manifest 44 items &
+  "44 segments" vs 48 files in GCS: the 4 items of the refresh-interrupted stint (screen
+  8; camera 8,10,11) never got persisted to the stint manifest. Files are safe and the
+  player (which lists GCS evidence, not the manifest) plays them; bookkeeping only.
+- **RT-3 · LOW — Recordings timeline merges the person's OTHER sessions' alerts.**
+  "SESSIONS COVERED 2": yesterday's TEC003 session's two lock alerts render at 00:00
+  with their own (PM) timestamps on this session's timeline. Honest but potentially
+  confusing for a reviewer. Likely by design (person-level review).
+
+### Retest screenshot index (r-*)
+
+- r1-stint1-in-exam.png — stint 1 typing, REC, ELAPSED 0:02:21
+- r1-sharedrop-alert.png — share-kill big alert + recovery screen
+- r1-stint2-resumed.png — back IN EXAM after Try again
+- r1-stint3-after-refresh-resume.png — refresh-resume, clean strip, editor intact
+- r1-playback-stint1.png — review player playing stint-1 footage (00:33, chunk 1/22)
+- r1-playback-stint4-crossstint.png — jump to 18:30 plays stint-4 footage (chunk 18/22)
+- r2-candidate-locked.png — lock screen (fullscreen rule)
+- r2-row-unlock-success.png — console after per-row Unlock (LOCKED 0, row released)
+- r2-row-exempt-on.png — per-row "Fullscreen: exempt" active
+- r3-scoped-examtime.png — scoped card with Contest chip + correct window
+- r3-allcontests-legacy-chip.png — "Legacy schedule" chip under All contests
+- r4-no-stale-strip-after-unlock.png — post-unlock IN EXAM, no stale strip
+- r5a-review-search-tec002.png — Review search returns TEC002
+- r5b-invigilator-exam-column.png — EXAM column truthful ("—"/Finished)
+- r5c-datetime-normalized.png — canonical datetime echo after blur
+- r6-q1-accepted.png — accepted 3/3 hidden, 100/100
+- r6-test-ended.png — DONE screen, 44 segments
+
+### State left behind (retest)
+
+- Contest window restored: ends 2026-06-12 21:30 IST; access code 2V6CIQ unchanged.
+- TEC003 retest session da7ddf72 ended cleanly (100/200, Q1 solved); old TEC001 sessions
+  untouched (1 active-disconnected + 2 pending_approval, all pre-existing); no candidate
+  left locked; fullscreen exemption toggled back OFF.
+- Invigilator room unlock code unchanged (was already released pre-retest).
