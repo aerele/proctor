@@ -21,7 +21,7 @@ import { autofillSuppressionProps } from "./shell/autofill";
 import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
-import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, skipEntryClipboardRead, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
+import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
 import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
@@ -59,20 +59,6 @@ const initialForm: StudentForm = {
   room: "",
   consent_accepted: false,
   roster_unique_id: ""
-};
-
-const checkpointMessages = [
-  "Confirm immediately that you are present and working alone.",
-  "Confirm your phone is away and not being used for this assessment.",
-  "Confirm you are not using AI tools, search engines, or external help.",
-  "Confirm your screen share is active and you have not hidden any assessment activity.",
-  "Confirm you are the registered candidate solving this assessment yourself."
-];
-
-type IntegrityCheckpoint = {
-  id: string;
-  message: string;
-  expiresAt: number;
 };
 
 export function App() {
@@ -256,11 +242,9 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [startError, setStartError] = useState<{ kind: RecorderStartErrorKind; message: string } | null>(null);
   const [reloadWarning, setReloadWarning] = useState("");
   const [manifest, setManifest] = useState<UploadManifestItem[]>([]);
-  const [clipboardText, setClipboardText] = useState("");
   const [clipboardAudit, setClipboardAudit] = useState("Not collected yet.");
   const [tabAudit, setTabAudit] = useState("Not collected yet.");
   const [cookieAudit, setCookieAudit] = useState("Not collected yet.");
-  const [checkpoint, setCheckpoint] = useState<IntegrityCheckpoint | null>(null);
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   // S5: authoritative exam end time + server-clock skew, fed by start/resume
@@ -429,12 +413,13 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       return;
     }
     try {
-      // Permission primer only: the text itself is NOT kept — the authoritative
-      // entry snapshot still happens in collectEntryReviewEvidence at start
-      // (which now reads silently because the grant already happened here).
-      const text = await navigator.clipboard.readText();
+      // Permission primer only: the read triggers the browser grant so the
+      // recorder can log in-exam copy/cut/paste once the session starts. The
+      // pre-session clipboard CONTENT is outside the disclosed monitoring scope
+      // (M6), so we keep neither the text nor its length — only the grant.
+      await navigator.clipboard.readText();
       setPermissions((c) => ({ ...c, clipboard: "granted" }));
-      recordSetupEvent("setup_clipboard_permission_granted", { text_length: text.length });
+      recordSetupEvent("setup_clipboard_permission_granted", {});
     } catch (cause) {
       setPermissions((c) => ({ ...c, clipboard: "denied" }));
       recordSetupEvent("setup_clipboard_permission_failed", { message: cause instanceof Error ? cause.message : String(cause) });
@@ -745,56 +730,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     const timer = window.setInterval(addNotice, 12_000 + Math.floor(Math.random() * 8_000));
     return () => window.clearInterval(timer);
   }, [status]);
-
-  useEffect(() => {
-    if (status !== "recording" || !sessionId) return;
-    let closed = false;
-    let promptTimer: number | undefined;
-    let expiryTimer: number | undefined;
-
-    const scheduleNext = () => {
-      if (closed) return;
-      const delay = 45_000 + Math.floor(Math.random() * 35_000);
-      promptTimer = window.setTimeout(() => {
-        if (closed) return;
-        const nextCheckpoint = {
-          id: crypto.randomUUID(),
-          message: checkpointMessages[Math.floor(Math.random() * checkpointMessages.length)],
-          expiresAt: Date.now() + 45_000
-        };
-        setCheckpoint(nextCheckpoint);
-        const shownEvent = createUiEvent("integrity_checkpoint_shown", {
-          checkpoint_id: nextCheckpoint.id,
-          message: nextCheckpoint.message,
-          expires_at: new Date(nextCheckpoint.expiresAt).toISOString()
-        });
-        addEvent(shownEvent);
-        void sendEvents(sessionId, [shownEvent]);
-
-        expiryTimer = window.setTimeout(() => {
-          setCheckpoint((current) => {
-            if (!current || current.id !== nextCheckpoint.id) return current;
-            const missedEvent = createUiEvent("integrity_checkpoint_missed", {
-              checkpoint_id: nextCheckpoint.id,
-              message: nextCheckpoint.message
-            });
-            addEvent(missedEvent);
-            void sendEvents(sessionId, [missedEvent]);
-            scheduleNext();
-            return null;
-          });
-        }, 45_000);
-      }, delay);
-    };
-
-    scheduleNext();
-    return () => {
-      closed = true;
-      if (promptTimer) window.clearTimeout(promptTimer);
-      if (expiryTimer) window.clearTimeout(expiryTimer);
-      setCheckpoint(null);
-    };
-  }, [sessionId, status]);
 
   // F5.7: the elapsed ticker is bound to the live test status — the pure
   // elapsedTimerActive rule stops it the moment status OR gate reports ended
@@ -1268,64 +1203,25 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       detail: { message: "Tab/focus review active. Shared-screen recording and focus changes are logged." }
     });
 
-    // F5.1 wave-3 residual fix: a stage-1 clipboard denial/dismissal leaves the
-    // browser permission re-promptable, so the entry re-read below would pop a
-    // dialog AFTER fullscreen. Skip the read entirely — the stage-1
-    // setup_clipboard_permission_failed event already recorded the denial.
-    if (skipEntryClipboardRead(permissions.clipboard)) {
-      setClipboardText("");
-      setClipboardAudit("Clipboard was blocked during setup, so it was not re-read (no browser prompt mid-exam). The denial is noted for the proctor.");
-      await uploadReviewFile(activeSessionId, "clipboard", [{
-        type: "clipboard_skipped_setup_denied",
-        timestamp: new Date().toISOString(),
-        reason: "stage-1 clipboard permission denied or dismissed",
-        visibility_state: document.visibilityState
-      }]);
-      addEvent({
-        type: "clipboard_skipped_setup_denied",
-        timestamp: new Date().toISOString(),
-        visibility_state: document.visibilityState,
-        detail: { reason: "stage-1 clipboard permission denied or dismissed" }
-      });
-    } else {
-      try {
-        if (!navigator.clipboard?.readText) {
-          throw new Error("Clipboard read is not supported by this browser.");
-        }
-        const text = await navigator.clipboard.readText();
-        setClipboardText(text);
-        setClipboardAudit(text ? "Clipboard captured and uploaded." : "Clipboard is empty; empty value uploaded.");
-        await uploadReviewFile(activeSessionId, "clipboard", [{
-          type: "initial_clipboard_snapshot",
-          timestamp: new Date().toISOString(),
-          text,
-          text_length: text.length,
-          visibility_state: document.visibilityState
-        }]);
-        addEvent({
-          type: "clipboard_review_uploaded",
-          timestamp: new Date().toISOString(),
-          visibility_state: document.visibilityState,
-          detail: { text_length: text.length }
-        });
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        setClipboardText("");
-        setClipboardAudit(`Clipboard could not be read: ${message}`);
-        await uploadReviewFile(activeSessionId, "clipboard", [{
-          type: "initial_clipboard_snapshot_failed",
-          timestamp: new Date().toISOString(),
-          reason: message,
-          visibility_state: document.visibilityState
-        }]);
-        addEvent({
-          type: "clipboard_review_failed",
-          timestamp: new Date().toISOString(),
-          visibility_state: document.visibilityState,
-          detail: { reason: message }
-        });
-      }
-    }
+    // M6 (privacy): we DO NOT snapshot the candidate's clipboard at entry. The
+    // entry read captured whatever was copied BEFORE the session/consent — that
+    // is pre-session content outside the disclosed monitoring scope. Clipboard
+    // monitoring instead begins with the session: the recorder logs in-exam
+    // copy/cut/paste (clipboard_activity) once recording starts. We record only
+    // a NON-CONTENT note here so the proctor knows the scope, never the text.
+    setClipboardAudit("Clipboard content is not captured at entry. Copy, cut, and paste actions during the test are logged for review.");
+    await uploadReviewFile(activeSessionId, "clipboard", [{
+      type: "clipboard_monitoring_in_exam_only",
+      timestamp: new Date().toISOString(),
+      note: "Entry-time clipboard content is not snapshotted (pre-session scope). In-exam copy/cut/paste is logged as clipboard_activity.",
+      visibility_state: document.visibilityState
+    }]);
+    addEvent({
+      type: "clipboard_monitoring_in_exam_only",
+      timestamp: new Date().toISOString(),
+      visibility_state: document.visibilityState,
+      detail: { note: "Entry-time clipboard content not captured; in-exam copy/cut/paste is logged." }
+    });
 
     const cookieRecord = {
       type: "app_cookie_storage_audit",
@@ -1408,18 +1304,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       setStatus("error");
       setEndFailed(true);
     }
-  };
-
-  const confirmCheckpoint = () => {
-    if (!checkpoint || !sessionId) return;
-    const confirmedEvent = createUiEvent("integrity_checkpoint_confirmed", {
-      checkpoint_id: checkpoint.id,
-      message: checkpoint.message,
-      response_time_remaining_ms: Math.max(0, checkpoint.expiresAt - Date.now())
-    });
-    addEvent(confirmedEvent);
-    void sendEvents(sessionId, [confirmedEvent]);
-    setCheckpoint(null);
   };
 
   // ---- Blocked / non-running gate screens -------------------------------
@@ -1688,10 +1572,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             </div>
           ) : null}
 
-          {checkpoint ? (
-            <IntegrityCheckpointPanel checkpoint={checkpoint} onConfirm={confirmCheckpoint} />
-          ) : null}
-
           <div className="mt-5 flex flex-wrap gap-3">
             {/* While the recoverable share-error panel is up it owns the retry, so
                 we hide the duplicate Start/Resume buttons to avoid two CTAs. */}
@@ -1753,7 +1633,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             <>
               <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
               <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
-              <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
+              <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
               <RulesPanel hasProblem={hasProblem} />
             </>
           )}
@@ -5825,33 +5705,7 @@ function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, man
   );
 }
 
-function IntegrityCheckpointPanel({ checkpoint, onConfirm }: { checkpoint: IntegrityCheckpoint; onConfirm: () => void }) {
-  const [remaining, setRemaining] = useState(Math.max(0, checkpoint.expiresAt - Date.now()));
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setRemaining(Math.max(0, checkpoint.expiresAt - Date.now()));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [checkpoint.expiresAt]);
-
-  return (
-    <div className="mt-5 rounded-lg border border-warning/40 bg-warning/10 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold text-warning">Integrity checkpoint</p>
-          <p className="mt-1 text-sm leading-6 text-ink">{checkpoint.message}</p>
-          <p className="mt-1 text-xs text-muted">Missed checkpoints are logged as integrity anomalies. Time remaining: {Math.ceil(remaining / 1000)}s</p>
-        </div>
-        <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-warning px-4 py-2 text-sm font-medium text-white" onClick={onConfirm}>
-          <CheckCircle2 size={16} /> Confirm now
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit }: { clipboardAudit: string; clipboardText: string; tabAudit: string; cookieAudit: string }) {
+function EntryReviewPanel({ clipboardAudit, tabAudit, cookieAudit }: { clipboardAudit: string; tabAudit: string; cookieAudit: string }) {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-2">
@@ -5864,11 +5718,10 @@ function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit
           <p className="mt-1 leading-6 text-muted">{tabAudit}</p>
         </div>
         <div>
+          {/* M6: clipboard CONTENT is never snapshotted at entry — this only
+              describes the in-exam monitoring scope, never any pasted text. */}
           <p className="font-medium">Clipboard</p>
           <p className="mt-1 leading-6 text-muted">{clipboardAudit}</p>
-          {clipboardText ? (
-            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-white p-3 font-mono text-xs text-ink">{clipboardText}</pre>
-          ) : null}
         </div>
         <div>
           <p className="flex items-center gap-2 font-medium"><Cookie size={15} /> Cookies and storage</p>

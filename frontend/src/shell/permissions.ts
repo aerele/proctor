@@ -24,7 +24,7 @@ export const PERMISSION_META: Record<PermissionKey, { label: string; required: b
   screen: { label: "Screen sharing", required: true, blurb: "Your ENTIRE screen is recorded from start to finish." },
   camera: { label: "Camera", required: false, blurb: "Live camera monitoring while you take the test." },
   microphone: { label: "Microphone", required: false, blurb: "Room audio is recorded alongside your screen." },
-  clipboard: { label: "Clipboard", required: false, blurb: "Checked once at the start for pre-copied content." }
+  clipboard: { label: "Clipboard", required: false, blurb: "Copy, cut, and paste during the test are logged for review." }
 };
 
 export const initialPermissionChecklist: PermissionChecklist = {
@@ -80,17 +80,6 @@ export function permissionStatusLine(key: PermissionKey, status: PermissionStatu
   return key === "screen" ? "Not shared yet." : "Not requested yet.";
 }
 
-// F5.1 wave-3 residual fix: the recording-start entry snapshot re-reads the
-// clipboard — but a stage-1 DENIAL/dismissal leaves the browser permission
-// re-promptable, so that readText() would pop a dialog AFTER fullscreen (the
-// exact mid-exam prompt the permissions-first stage exists to prevent). A
-// recorded denial therefore skips the re-read (the caller logs
-// clipboard_skipped_setup_denied instead). "unavailable" has no API to prompt
-// with and "pending"/"requesting" never reached a verdict — those keep the
-// snapshot's existing read-and-report-failure path.
-export function skipEntryClipboardRead(status: PermissionStatus): boolean {
-  return status === "denied";
-}
 
 // Map a classified screen-share failure onto the checklist: an unsupported
 // browser is a dead end; everything else is retryable.
