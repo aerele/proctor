@@ -32,6 +32,12 @@ _Last updated: 2026-06-11 (Karthi multipart prioritization, TG 1841–1845)._
 - **#61 — alert→recording deep-link fallback**: fall back to the raw chunk player (or deploy the video-worker)
   when no merged review video exists.
 
+## Security hardening — post-exam wave (2026-06-12 triple review; verdict GO, M1 already fixed+deployed)
+- **L1**: upload-url hwm read-modify-write not transactional (own-session race only) → Firestore transaction/increment.
+- **L2** (pre-existing): signed PUT URLs carry no `x-goog-content-length-range` size cap + no per-session URL-count cap.
+- **L3**: routesAuthLint scans only `src/routes/*.mjs` — extend to handler-resident `admin*` functions (contest-set-code verified auth-first manually).
+- **L4**: upload retries inflate `chunk_count` (admin duration estimate drifts; manifest stays truthful).
+
 ## Paused work — resume after the test
 - **Architecture decomposition** (behavior-preserving god-file split). **B0+B1 DONE + green** (HEAD `49af4f1`,
   backend 705/705, tree clean). **Resume at B2.** Plan: `docs/superpowers/plans/2026-06-11-architecture-decomposition.md`
