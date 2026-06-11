@@ -135,6 +135,17 @@ export function ProblemPane({
           ) : null}
           {busyNote ? <span className="text-xs text-muted">{busyNote}</span> : null}
         </div>
+        {/* UX-H2: the submit verdict renders directly under the Run/Submit row
+            (not at the end of the column) so the floating camera dock can never
+            cover it and the candidate sees it next to the button they pressed. */}
+        {submit && (() => {
+          const presentation = presentSubmitResult(submit);
+          return (
+            <div className={`rounded-md border p-3 text-sm ${SUBMIT_TONE_CLASSES[presentation.tone]}`}>
+              {presentation.message}
+            </div>
+          );
+        })()}
         {atCap ? (
           <div className="rounded-md border border-line bg-panel p-3 text-sm text-muted">
             Submission limit reached for this problem — your best score so far is kept.
@@ -158,14 +169,6 @@ export function ProblemPane({
             ))}
           </div>
         )}
-        {submit && (() => {
-          const presentation = presentSubmitResult(submit);
-          return (
-            <div className={`rounded-md border p-3 text-sm ${SUBMIT_TONE_CLASSES[presentation.tone]}`}>
-              {presentation.message}
-            </div>
-          );
-        })()}
       </section>
     </div>
   );
