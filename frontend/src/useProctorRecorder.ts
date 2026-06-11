@@ -2,6 +2,7 @@ import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
 import type { ApiError } from "./api";
 import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import { writeChunkHwm } from "./chunkContinuity";
+import { runUploadWithRetry } from "./chunkUploadRetry";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 type RecorderOptions = {
@@ -325,6 +326,40 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     options.onMediaStateChange?.({ ...mediaState });
   };
 
+  // RT-1 (rev-00008 retest): one chunk's upload with bounded TRANSIENT-failure
+  // retries, shared by both kinds. Each attempt re-requests a FRESH signed URL
+  // for the SAME already-allocated index and the SAME bytes (the old URL may be
+  // expired/consumed; the backend hwm guard maps the re-request to an unused
+  // object key — never an overwrite — and the returned storage_key is what the
+  // manifest records, so the bookkeeping stays truthful). By-design 401/403/409
+  // rejections are NOT retried — they reject immediately into the existing
+  // catch path (upload_error + handleFatalStatus), unchanged. Retries run
+  // INSIDE this chunk's slot of the serial per-kind chain, so at most one retry
+  // sequence is in flight per kind and exhaustion (~7s of backoff) falls
+  // through to the exact same honest-gap path as a single failure today.
+  const uploadChunkWithRetry = async (kind: "screen" | "camera", blob: Blob, index: number) => {
+    let retried = 0;
+    const upload = await runUploadWithRetry(
+      async () => {
+        const fresh = await getUploadUrl({
+          session_id: options.sessionId,
+          kind,
+          chunk_index: index,
+          content_type: blob.type || "video/webm"
+        });
+        await uploadBlob(fresh.upload_url, blob);
+        return fresh;
+      },
+      {
+        onRetry: ({ attempt, delayMs, error }) => {
+          retried = attempt;
+          emit("chunk_upload_retry", { kind, index, bytes: blob.size, attempt, delay_ms: delayMs, message: String(error) });
+        }
+      }
+    );
+    return { upload, retried };
+  };
+
   const enqueueUpload = (blob: Blob, index: number) => {
     const startedAt = new Date().toISOString();
     queueDepth += 1;
@@ -332,13 +367,7 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
 
     uploadQueue = uploadQueue
       .then(async () => {
-        const upload = await getUploadUrl({
-          session_id: options.sessionId,
-          kind: "screen",
-          chunk_index: index,
-          content_type: blob.type || "video/webm"
-        });
-        await uploadBlob(upload.upload_url, blob);
+        const { upload, retried } = await uploadChunkWithRetry("screen", blob, index);
         manifest.push({
           kind: "screen",
           index,
@@ -348,7 +377,8 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
           completed_at: new Date().toISOString()
         });
         uploadedCount += 1;
-        emit("chunk_uploaded", { kind: "screen", index, bytes: blob.size, storage_key: upload.storage_key });
+        // RT-1: identical event; `retried` rides only when a retry happened.
+        emit("chunk_uploaded", { kind: "screen", index, bytes: blob.size, storage_key: upload.storage_key, ...(retried ? { retried } : {}) });
       })
       .catch((error) => {
         emit("upload_error", { kind: "screen", index, bytes: blob.size, message: String(error) });
@@ -374,13 +404,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
 
     cameraUploadQueue = cameraUploadQueue
       .then(async () => {
-        const upload = await getUploadUrl({
-          session_id: options.sessionId,
-          kind: "camera",
-          chunk_index: index,
-          content_type: blob.type || "video/webm"
-        });
-        await uploadBlob(upload.upload_url, blob);
+        // RT-1: same bounded retry as the screen chain (own serial chain, so a
+        // camera retry never delays a screen chunk and vice versa).
+        const { upload, retried } = await uploadChunkWithRetry("camera", blob, index);
         manifest.push({
           kind: "camera",
           index,
@@ -390,7 +416,7 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
           completed_at: new Date().toISOString()
         });
         uploadedCount += 1;
-        emit("chunk_uploaded", { kind: "camera", index, bytes: blob.size, storage_key: upload.storage_key });
+        emit("chunk_uploaded", { kind: "camera", index, bytes: blob.size, storage_key: upload.storage_key, ...(retried ? { retried } : {}) });
       })
       .catch((error) => {
         emit("upload_error", { kind: "camera", index, bytes: blob.size, message: String(error) });
