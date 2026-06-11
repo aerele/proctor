@@ -529,6 +529,124 @@ async function clearContestRoster(contest) {
   return { ok: true, configured: false, contest: contest.slug, count: 0, skipped: [] };
 }
 
+// ---- S-J §2.9/§2.14 enrollment selection + final_snapshot --------------------
+// proctor_enrollments is owned HERE (the per-contest person × contest spine).
+// The Results endpoint drives bulk selection transitions and "Mark selection
+// done" through these helpers; the heavy score/integrity JOIN lives in the
+// handler (it owns sessions/submissions/alerts/reviews) and is passed in.
+
+export const SELECTION_STATUSES = ["none", "shortlisted", "selected", "rejected"];
+
+// All enrollments for a contest (active + removed) — the Results spine reads
+// this and drops removed rows. ENROLLMENTS_QUERY_LIMIT bounds the scan; a
+// contest never has more enrollments than its roster (≤ ROSTER_LIMIT).
+export async function listEnrollments(contest) {
+  const snapshot = await scopedQuery(col("enrollments"), contest).limit(ENROLLMENTS_QUERY_LIMIT).get();
+  return snapshot.docs.map((doc) => doc.data());
+}
+
+// Persons for a set of ids (the Results JOIN supplies label-driven id + name +
+// college). person docs are keyed by person_id, so this is a bounded fan-out of
+// direct doc reads — no index, no full-collection scan. Returns a Map.
+export async function getPersonsByIds(personIds) {
+  const ids = [...new Set((Array.isArray(personIds) ? personIds : []).map((id) => String(id || "")).filter(Boolean))];
+  const out = new Map();
+  await mapWithConcurrency(ids, WRITE_CONCURRENCY, async (id) => {
+    const doc = await col("persons").doc(id).get();
+    if (doc.exists) out.set(id, doc.data());
+  });
+  return out;
+}
+
+// College display names keyed by college_norm (for the multi-college label
+// projection). Reuses listColleges (bounded) — small, low-cardinality.
+export async function getCollegeNameMap() {
+  const colleges = await listColleges();
+  return new Map(colleges.map((c) => [c.college_norm, c.name]));
+}
+
+// Bulk selection transition with a from_status PRECONDITION (cheap race guard,
+// vision §2.9). Only enrollments currently in `fromStatus` (or any, when
+// fromStatus is null/"") flip to `toStatus`; removed enrollments never flip.
+// Returns the per-person outcome so the UI reflects exactly what changed.
+export async function applySelectionTransition(contest, personIds, fromStatus, toStatus, actor = {}) {
+  if (!SELECTION_STATUSES.includes(toStatus)) {
+    throw httpError(400, `selection_status must be one of ${SELECTION_STATUSES.join(", ")}`);
+  }
+  if (fromStatus && !SELECTION_STATUSES.includes(fromStatus)) {
+    throw httpError(400, `from_status must be one of ${SELECTION_STATUSES.join(", ")}`);
+  }
+  const ids = [...new Set((Array.isArray(personIds) ? personIds : []).map((id) => String(id || "")).filter(Boolean))];
+  if (!ids.length) throw httpError(400, "person_ids must be a non-empty array");
+
+  const now = new Date().toISOString();
+  const updated = [];
+  const skipped = [];
+  await mapWithConcurrency(ids, WRITE_CONCURRENCY, async (personId) => {
+    const ref = col("enrollments").doc(enrollmentIdOf(contest.slug, personId));
+    const doc = await ref.get();
+    if (!doc.exists) { skipped.push({ person_id: personId, reason: "not_enrolled" }); return; }
+    const enrollment = doc.data();
+    if (enrollment.status === "removed") { skipped.push({ person_id: personId, reason: "removed" }); return; }
+    if (fromStatus && String(enrollment.selection_status || "none") !== fromStatus) {
+      skipped.push({ person_id: personId, reason: "from_status_mismatch", current: enrollment.selection_status || "none" });
+      return;
+    }
+    await ref.set({
+      ...enrollment,
+      selection_status: toStatus,
+      selection_updated_at: now,
+      selection_by: String(actor.name || "")
+    });
+    updated.push(personId);
+  });
+
+  await writeAudit({
+    action: "selection_transition",
+    contest_slug: contest.slug,
+    from_status: fromStatus || null,
+    to_status: toStatus,
+    count: updated.length
+  }, actor, now);
+
+  return { ok: true, to_status: toStatus, updated: updated.sort(), skipped };
+}
+
+// "Mark selection done" (vision §2.9/§2.14 + §10.2): freeze each ACTIVE
+// enrollment's final_snapshot from the handler-supplied per-person rollup and
+// stamp selection_done_at — which starts the retention clock (Wave-7 sweep
+// reads this field; the scheduler itself is NOT built here). Idempotent: a
+// re-run REFRESHES the snapshots (also what purge does). snapshotByPerson maps
+// person_id → { total_score, per_problem, integrity, session_status }.
+export async function stampSelectionDone(contest, snapshotByPerson = new Map(), actor = {}) {
+  const now = new Date().toISOString();
+  const enrollments = await listEnrollments(contest);
+  const get = (id) => (snapshotByPerson instanceof Map ? snapshotByPerson.get(id) : snapshotByPerson?.[id]) || null;
+  let stamped = 0;
+  await mapWithConcurrency(enrollments, WRITE_CONCURRENCY, async (enrollment) => {
+    if (enrollment.status === "removed") return;
+    const ref = col("enrollments").doc(enrollmentIdOf(contest.slug, enrollment.person_id));
+    const snapshot = get(enrollment.person_id) || { total_score: 0, per_problem: {}, integrity: null, session_status: "" };
+    await ref.set({ ...enrollment, final_snapshot: snapshot });
+    stamped += 1;
+  });
+
+  // selection_done_at lives on the CONTEST doc (one clock per contest). The
+  // retention sweep (Wave 7, S-H) reads this + evidence_retention_days.
+  // TODO(Wave-7 S-H): the daily Cloud Scheduler sweep that purges evidence
+  // `evidence_retention_days` after this stamp is NOT built here — only the
+  // field is stamped. See vision §2.16 / §7 row S-H.
+  await col("contests").doc(contest.slug).set({ selection_done_at: now, updated_at: now }, { merge: true });
+
+  await writeAudit({
+    action: "selection_done",
+    contest_slug: contest.slug,
+    enrollments_snapshotted: stamped
+  }, actor, now);
+
+  return { ok: true, contest: contest.slug, selection_done_at: now, enrollments_snapshotted: stamped };
+}
+
 // ---- proctor_admin_audit (F9 D16: global, rows carry contest_slug, never
 // purged; actor_ip/actor_ua captured automatically, honor-system identity) ----
 

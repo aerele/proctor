@@ -1,0 +1,88 @@
+// frontend/src/results/computeResults.test.ts — S-J Results-tab pure helpers.
+// The Results tab has no jsdom render harness, so the table's filter + CSV
+// logic is extracted here and unit-tested directly (vision §2.14).
+import { describe, it, expect } from "vitest";
+import { filterResultRows, buildResultsCsv, selectionCounts, type ResultRow } from "./computeResults";
+
+function row(over: Partial<ResultRow> = {}): ResultRow {
+  return {
+    person_id: "kec~21cs001",
+    rank: 1,
+    candidate_id: "21CS001",
+    name: "Asha",
+    college_norm: "kec",
+    college: "KEC",
+    display_id: "21CS001",
+    total: 130,
+    per_problem: [{ problem_id: "p1", best_score: 80, max_points: 100, attempts: 2 }, { problem_id: "p2", best_score: 50, max_points: 100, attempts: 1 }],
+    integrity: { alerts_by_severity: { critical: 0, warning: 0, info: 0 }, total_alerts: 0, has_critical: false, review_count: 0, review_cheating_count: 0, review_verdict: "none" },
+    selection_status: "none",
+    from_snapshot: false,
+    room: "",
+    ...over
+  };
+}
+
+const ROWS: ResultRow[] = [
+  row({ person_id: "a", candidate_id: "21CS001", name: "Asha", college: "KEC", college_norm: "kec", total: 130, room: "Lab A", selection_status: "shortlisted", integrity: { alerts_by_severity: { critical: 1, warning: 0, info: 0 }, total_alerts: 1, has_critical: true, review_count: 0, review_cheating_count: 0, review_verdict: "none" } }),
+  row({ person_id: "b", candidate_id: "21CS002", name: "Bala", college: "PSG", college_norm: "psg", total: 100, room: "Lab B", selection_status: "none" }),
+  row({ person_id: "c", candidate_id: "21CS003", name: "Cara", college: "KEC", college_norm: "kec", total: 40, room: "Lab A", selection_status: "selected" })
+];
+
+describe("filterResultRows", () => {
+  it("no filters → every row", () => {
+    expect(filterResultRows(ROWS, {}).map((r) => r.person_id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("college filter (by norm)", () => {
+    expect(filterResultRows(ROWS, { college: "kec" }).map((r) => r.person_id)).toEqual(["a", "c"]);
+  });
+
+  it("room filter", () => {
+    expect(filterResultRows(ROWS, { room: "Lab B" }).map((r) => r.person_id)).toEqual(["b"]);
+  });
+
+  it("minScore filter keeps rows at or above the threshold", () => {
+    expect(filterResultRows(ROWS, { minScore: 100 }).map((r) => r.person_id)).toEqual(["a", "b"]);
+  });
+
+  it("noCritical filter drops candidates with any critical alert", () => {
+    expect(filterResultRows(ROWS, { noCritical: true }).map((r) => r.person_id)).toEqual(["b", "c"]);
+  });
+
+  it("text search matches candidate id or name (case-insensitive)", () => {
+    expect(filterResultRows(ROWS, { search: "bal" }).map((r) => r.person_id)).toEqual(["b"]);
+    expect(filterResultRows(ROWS, { search: "21CS003" }).map((r) => r.person_id)).toEqual(["c"]);
+  });
+
+  it("selection filter", () => {
+    expect(filterResultRows(ROWS, { selection: "selected" }).map((r) => r.person_id)).toEqual(["c"]);
+  });
+
+  it("filters compose (AND)", () => {
+    expect(filterResultRows(ROWS, { college: "kec", minScore: 50 }).map((r) => r.person_id)).toEqual(["a"]);
+  });
+});
+
+describe("selectionCounts", () => {
+  it("tallies every selection bucket including none", () => {
+    expect(selectionCounts(ROWS)).toEqual({ none: 1, shortlisted: 1, selected: 1, rejected: 0 });
+  });
+});
+
+describe("buildResultsCsv", () => {
+  it("header + per-problem title columns + integrity + selection; rows in order", () => {
+    const csv = buildResultsCsv(ROWS, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
+    const lines = csv.split("\n");
+    expect(lines[0]).toBe("rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status");
+    expect(lines[1]).toBe("1,21CS001,Asha,KEC,130,80,50,1,0,0,none,shortlisted");
+    expect(lines.length).toBe(4);
+  });
+
+  it("CSV-injection guard on candidate-supplied id/name", () => {
+    const evil = [row({ candidate_id: "=cmd()", name: "a,b\nc" })];
+    const csv = buildResultsCsv(evil, [{ problem_id: "p1", title: "P1" }]);
+    expect(csv).toContain(",'=cmd(),");
+    expect(csv).toContain(',"a,b\nc"');
+  });
+});
