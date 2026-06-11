@@ -74,6 +74,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
+import type { ContestResultsResponse, ResultRow, SelectionStatus } from "./results/computeResults";
 import { summarizeSubmissions, type StoredSubmission } from "./coding/problemSwitch";
 import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type PersonRosterState } from "./roster/personRoster";
 import { normalizeCameraRecording } from "./cameraRecording";
@@ -1632,6 +1633,184 @@ export async function fetchAttendance(password: string, contestSlug?: string): P
     if ((cause as ApiError)?.status === 404) return null;
     throw cause;
   }
+}
+
+// ---- S-J Results tab (vision §2.14) ----------------------------------------
+//
+// GET /api/admin/contest-results — ADMIN-ONLY ranked rollup. Returns null on a
+// 404 (endpoint not deployed yet) so the tab degrades gracefully like
+// attendance/ip-report. The demo branch serves a deterministic, localStorage-
+// backed dataset for the demo contest so selection transitions persist.
+
+export async function fetchContestResults(password: string, contestSlug: string): Promise<ContestResultsResponse | null> {
+  if (demoMode) {
+    await wait(160);
+    assertDemoAdmin(password);
+    return demoContestResults(contestSlug);
+  }
+  const query = contestSlug ? `?contest=${encodeURIComponent(contestSlug)}` : "";
+  try {
+    return await request<ContestResultsResponse>(`/api/admin/contest-results${query}`, {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/contest-selection — bulk selection transition (with an
+// optional from_status race guard). Returns the per-person outcome.
+export async function setContestSelection(
+  password: string,
+  body: { contest: string; person_ids: string[]; selection_status: SelectionStatus; from_status?: SelectionStatus }
+): Promise<{ ok: boolean; to_status: string; updated: string[]; skipped: Array<{ person_id: string; reason: string }> }> {
+  if (demoMode) {
+    await wait(140);
+    assertDemoAdmin(password);
+    return demoSetSelection(body);
+  }
+  return request("/api/admin/contest-selection", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+}
+
+// POST /api/admin/contest-selection-done — freeze final_snapshot + stamp the
+// retention clock. The Wave-7 sweep reads selection_done_at; this only stamps.
+export async function markSelectionDone(
+  password: string,
+  contestSlug: string
+): Promise<{ ok: boolean; selection_done_at: string; enrollments_snapshotted: number }> {
+  if (demoMode) {
+    await wait(180);
+    assertDemoAdmin(password);
+    return demoMarkSelectionDone(contestSlug);
+  }
+  return request("/api/admin/contest-selection-done", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ contest: contestSlug })
+  });
+}
+
+// ---- demo Results dataset (parity for the NEW tab — acceptance bar S4) ------
+// Deterministic ranked rows for the demo contest (demo-drive-r1), with
+// selection_status persisted in localStorage so the bulk-selection UI + "Mark
+// selection done" behave like production. Two colleges so the multi-college
+// label projection (vision §2.13) is visible.
+
+const demoSelectionKey = "aerele-proctor-demo-selection-v1";
+const demoSelectionDoneKey = "aerele-proctor-demo-selection-done-v1";
+
+type DemoResultSeed = {
+  person_id: string; candidate_id: string; name: string; college_norm: string; college: string;
+  room: string; scores: [number, number, number]; critical: number; warning: number; review: "none" | "cleared" | "flagged";
+};
+
+// 12 candidates across KEC + PSG; problem points 100/150/50 (sum-two/reverse-
+// words/max-window-sum). Scores hand-tuned for a believable spread.
+const DEMO_RESULT_SEEDS: DemoResultSeed[] = [
+  { person_id: "kec~21cs017", candidate_id: "21CS017", name: "Asha Ramanathan", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 150, 50], critical: 0, warning: 0, review: "cleared" },
+  { person_id: "psg~22it004", candidate_id: "22IT004", name: "Bala Subramanian", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 150, 0], critical: 0, warning: 1, review: "none" },
+  { person_id: "kec~21cs033", candidate_id: "21CS033", name: "Chitra Nair", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 100, 50], critical: 0, warning: 0, review: "none" },
+  { person_id: "psg~22it019", candidate_id: "22IT019", name: "Deepak Rao", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 150, 0], critical: 1, warning: 2, review: "flagged" },
+  { person_id: "kec~21cs008", candidate_id: "21CS008", name: "Esha Pillai", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 75, 50], critical: 0, warning: 0, review: "none" },
+  { person_id: "psg~22it041", candidate_id: "22IT041", name: "Farhan Ali", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 100, 0], critical: 0, warning: 1, review: "none" },
+  { person_id: "kec~21cs025", candidate_id: "21CS025", name: "Gita Menon", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [60, 100, 0], critical: 0, warning: 0, review: "none" },
+  { person_id: "psg~22it012", candidate_id: "22IT012", name: "Harish Kumar", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 0, 0], critical: 0, warning: 0, review: "none" },
+  { person_id: "kec~21cs049", candidate_id: "21CS049", name: "Ishita Bhat", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [40, 50, 0], critical: 2, warning: 1, review: "flagged" },
+  { person_id: "psg~22it027", candidate_id: "22IT027", name: "Jayant Verma", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [60, 0, 0], critical: 0, warning: 0, review: "none" },
+  { person_id: "kec~21cs002", candidate_id: "21CS002", name: "Kavya Iyer", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [0, 0, 0], critical: 0, warning: 0, review: "none" },
+  { person_id: "psg~22it038", candidate_id: "22IT038", name: "Lokesh Babu", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [0, 0, 0], critical: 1, warning: 0, review: "none" }
+];
+
+const DEMO_RESULT_PROBLEMS = [
+  { problem_id: "sum-two", title: "Sum of Two Numbers", points: 100 },
+  { problem_id: "reverse-words", title: "Reverse the Words", points: 150 },
+  { problem_id: "max-window-sum", title: "Maximum Window Sum", points: 50 }
+];
+
+function readDemoSelection(): Record<string, SelectionStatus> {
+  try {
+    const raw = window.localStorage.getItem(demoSelectionKey);
+    return raw ? (JSON.parse(raw) as Record<string, SelectionStatus>) : {};
+  } catch {
+    return {};
+  }
+}
+function writeDemoSelection(map: Record<string, SelectionStatus>) {
+  window.localStorage.setItem(demoSelectionKey, JSON.stringify(map));
+}
+
+function demoContestResults(contestSlug: string): ContestResultsResponse {
+  // Results is a person-layer surface: only the seeded demo contest carries it.
+  if (contestSlug !== "demo-drive-r1") return { configured: false };
+  const selection = readDemoSelection();
+  const rows: ResultRow[] = DEMO_RESULT_SEEDS.map((seed) => {
+    const total = seed.scores[0] + seed.scores[1] + seed.scores[2];
+    return {
+      person_id: seed.person_id,
+      rank: 0,
+      candidate_id: seed.candidate_id,
+      name: seed.name,
+      college_norm: seed.college_norm,
+      college: seed.college,
+      display_id: `${seed.candidate_id} · ${seed.college}`, // multi-college demo
+      total,
+      per_problem: DEMO_RESULT_PROBLEMS.map((p, i) => ({
+        problem_id: p.problem_id, best_score: seed.scores[i], max_points: p.points, attempts: seed.scores[i] > 0 ? 1 : 0
+      })),
+      integrity: {
+        alerts_by_severity: { critical: seed.critical, warning: seed.warning, info: 0 },
+        total_alerts: seed.critical + seed.warning,
+        has_critical: seed.critical > 0,
+        review_count: seed.review === "none" ? 0 : 1,
+        review_cheating_count: seed.review === "flagged" ? 1 : 0,
+        review_verdict: seed.review
+      },
+      selection_status: selection[seed.person_id] ?? "none",
+      from_snapshot: false,
+      room: seed.room
+    };
+  });
+  rows.sort((a, b) => b.total - a.total || a.candidate_id.localeCompare(b.candidate_id));
+  rows.forEach((row, index) => { row.rank = index + 1; });
+  return {
+    configured: true,
+    contest_slug: contestSlug,
+    multi_college: true,
+    selection_done_at: window.localStorage.getItem(demoSelectionDoneKey),
+    problems: DEMO_RESULT_PROBLEMS,
+    rows,
+    generated_at: new Date().toISOString()
+  };
+}
+
+function demoSetSelection(body: { contest: string; person_ids: string[]; selection_status: SelectionStatus; from_status?: SelectionStatus }) {
+  const selection = readDemoSelection();
+  const updated: string[] = [];
+  const skipped: Array<{ person_id: string; reason: string }> = [];
+  for (const id of body.person_ids) {
+    const current = selection[id] ?? "none";
+    if (body.from_status && current !== body.from_status) {
+      skipped.push({ person_id: id, reason: "from_status_mismatch" });
+      continue;
+    }
+    selection[id] = body.selection_status;
+    updated.push(id);
+  }
+  writeDemoSelection(selection);
+  return { ok: true, to_status: body.selection_status, updated: updated.sort(), skipped };
+}
+
+function demoMarkSelectionDone(contestSlug: string) {
+  if (contestSlug !== "demo-drive-r1") throw demoApiError(400, "contest must name a person-mode contest");
+  const now = new Date().toISOString();
+  window.localStorage.setItem(demoSelectionDoneKey, now);
+  return { ok: true, selection_done_at: now, enrollments_snapshotted: DEMO_RESULT_SEEDS.length };
 }
 
 // S7 — GET /api/admin/ip-report: IP-wise counts of logged-in users (the

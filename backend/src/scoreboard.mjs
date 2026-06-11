@@ -76,6 +76,202 @@ function compareImprovement(a, b) {
   return String(a).localeCompare(String(b));
 }
 
+// ---- S-J §2.14 Results rollup (the JOIN over the scoreboard) -----------------
+// buildResultsRows fuses the computeScoreboard output with the per-contest
+// enrollment rows (selection_status + final_snapshot), the persons directory
+// (label-driven id + name + college), and a per-candidate integrity summary
+// (alerts-by-severity + review verdict). It is the single pure implementation
+// the admin Results endpoint serves AND the final_snapshot stamp reads — kept
+// here so it never re-joins in the handler. PURE: handler.mjs supplies the
+// already-fetched docs.
+
+const SEVERITY_ORDER = ["critical", "warning", "info"];
+
+// Fold one candidate's alerts + review records into the Results integrity
+// column. Alerts group by the three known severities (anything else is
+// dropped, never silently bucketed). review_verdict: "flagged" if ANY reviewer
+// marked verdict==1 (cheating), else "cleared" when reviews exist, else "none".
+export function summarizeIntegrity({ alerts = [], reviews = [] } = {}) {
+  const bySeverity = { critical: 0, warning: 0, info: 0 };
+  for (const alert of alerts) {
+    const severity = String(alert?.severity || "");
+    if (Object.prototype.hasOwnProperty.call(bySeverity, severity)) bySeverity[severity] += 1;
+  }
+  const totalAlerts = bySeverity.critical + bySeverity.warning + bySeverity.info;
+  const reviewList = Array.isArray(reviews) ? reviews : [];
+  const cheating = reviewList.filter((r) => Number(r?.verdict) === 1).length;
+  let verdict = "none";
+  if (reviewList.length) verdict = cheating > 0 ? "flagged" : "cleared";
+  return {
+    alerts_by_severity: bySeverity,
+    total_alerts: totalAlerts,
+    has_critical: bySeverity.critical > 0,
+    review_count: reviewList.length,
+    review_cheating_count: cheating,
+    review_verdict: verdict
+  };
+}
+
+// Per-problem cells in CONTEST PROBLEM ORDER (every ordered problem appears,
+// even when a candidate never touched it — so columns line up across rows).
+function perProblemCells(problemOrder, byProblem) {
+  return problemOrder.map((problemId) => {
+    const cell = byProblem?.[problemId];
+    return {
+      problem_id: problemId,
+      best_score: cell ? cell.best_score : 0,
+      max_points: cell ? cell.max_points : 0,
+      attempts: cell ? cell.attempts : 0
+    };
+  });
+}
+
+// THE Results join. Active enrollments are the row spine (results denominator =
+// active enrollments, vision §2.9); a candidate with no submissions still gets
+// a 0-score row, and a PURGED contest (purged:true → no submissions/persons)
+// materializes rows from enrollment.final_snapshot (purge-survivor rule). The
+// label-driven display id gains the college ONLY when the contest is
+// multi-college (vision §2.13 projection rule).
+export function buildResultsRows({
+  submissions = [],
+  enrollments = [],
+  persons = new Map(),
+  integrityByPerson = new Map(),
+  collegeNames = new Map(),
+  problemOrder = [],
+  multiCollege = false,
+  purged = false
+} = {}) {
+  const scoreboard = new Map(
+    computeScoreboard(submissions, problemOrder).map((row) => [row.username_norm, row])
+  );
+  const personOf = (id) => (persons instanceof Map ? persons.get(id) : persons?.[id]) || null;
+  const integrityOf = (id) => (integrityByPerson instanceof Map ? integrityByPerson.get(id) : integrityByPerson?.[id]) || null;
+  const collegeNameOf = (norm) => (collegeNames instanceof Map ? collegeNames.get(norm) : collegeNames?.[norm]) || norm;
+
+  const rows = [];
+  for (const enrollment of enrollments) {
+    if (String(enrollment?.status || "active") === "removed") continue; // active-only denominator
+    const personId = String(enrollment.person_id || "");
+    const snapshot = purged ? (enrollment.final_snapshot || null) : null;
+    const board = scoreboard.get(personId);
+    const person = personOf(personId);
+
+    // identity: live person doc → snapshot copy → person_id components last.
+    const uniqueId = String(person?.unique_id ?? snapshot?.unique_id ?? "");
+    const name = String(person?.name ?? snapshot?.name ?? "");
+    const collegeNorm = String(enrollment.college_norm || person?.college_norm || "");
+    const collegeName = collegeNorm ? collegeNameOf(collegeNorm) : "";
+
+    let total;
+    let perProblem;
+    let integrity;
+    let fromSnapshot = false;
+    if (board) {
+      total = board.total;
+      perProblem = perProblemCells(problemOrder, board.per_problem);
+      integrity = summarizeIntegrity(integrityOf(personId) || {});
+    } else if (snapshot) {
+      fromSnapshot = true;
+      total = Number(snapshot.total_score || 0);
+      perProblem = problemOrder.map((problemId) => ({
+        problem_id: problemId,
+        best_score: Number(snapshot.per_problem?.[problemId] || 0),
+        max_points: 0,
+        attempts: 0
+      }));
+      integrity = normalizeSnapshotIntegrity(snapshot.integrity);
+    } else {
+      total = 0;
+      perProblem = perProblemCells(problemOrder, {});
+      integrity = summarizeIntegrity(integrityOf(personId) || {});
+    }
+
+    rows.push({
+      person_id: personId,
+      candidate_id: uniqueId,
+      name,
+      college_norm: collegeNorm,
+      college: collegeName,
+      display_id: multiCollege && collegeName ? `${uniqueId} · ${collegeName}` : uniqueId,
+      total,
+      per_problem: perProblem,
+      integrity,
+      selection_status: String(enrollment.selection_status || "none"),
+      from_snapshot: fromSnapshot,
+      last_improvement_at: board?.last_improvement_at || null
+    });
+  }
+
+  // Rank: total desc, then earlier last_improvement_at, then candidate_id asc
+  // (deterministic; never-scored rows sort after scored rows) — mirrors
+  // computeScoreboard's order so the live and purged paths agree.
+  rows.sort((a, b) =>
+    (b.total - a.total)
+    || compareImprovement(a.last_improvement_at, b.last_improvement_at)
+    || String(a.person_id).localeCompare(String(b.person_id)));
+  rows.forEach((row, index) => { row.rank = index + 1; });
+  return rows;
+}
+
+// A stored final_snapshot integrity blob may be partial — normalize it to the
+// same shape summarizeIntegrity returns so the UI never branches on origin.
+function normalizeSnapshotIntegrity(integrity) {
+  const src = integrity && typeof integrity === "object" ? integrity : {};
+  const sev = src.alerts_by_severity && typeof src.alerts_by_severity === "object" ? src.alerts_by_severity : {};
+  const bySeverity = {
+    critical: Number(sev.critical || 0),
+    warning: Number(sev.warning || 0),
+    info: Number(sev.info || 0)
+  };
+  return {
+    alerts_by_severity: bySeverity,
+    total_alerts: bySeverity.critical + bySeverity.warning + bySeverity.info,
+    has_critical: bySeverity.critical > 0,
+    review_count: Number(src.review_count || 0),
+    review_cheating_count: Number(src.review_cheating_count || 0),
+    review_verdict: src.review_verdict || "none"
+  };
+}
+
+// RFC-4180-ish CSV with the same formula-injection guard the frontend uses
+// (candidate-supplied id/name are quoted + prefixed). Header carries the
+// per-problem TITLES (in contest order) so the export reads like the table.
+export function buildResultsCsv(rows, problems = []) {
+  const titles = problems.map((p) => String(p?.title || p?.problem_id || ""));
+  const header = [
+    "rank", "candidate_id", "name", "college", "total",
+    ...titles,
+    "critical_alerts", "warning_alerts", "info_alerts", "review_verdict", "selection_status"
+  ].map(csvField).join(",");
+  const lines = rows.map((row) => {
+    const cells = [
+      row.rank, row.candidate_id, row.name, row.college, row.total,
+      ...problems.map((p) => {
+        const cell = (row.per_problem || []).find((c) => c.problem_id === p.problem_id);
+        return cell ? cell.best_score : 0;
+      }),
+      row.integrity.alerts_by_severity.critical,
+      row.integrity.alerts_by_severity.warning,
+      row.integrity.alerts_by_severity.info,
+      row.integrity.review_verdict,
+      row.selection_status
+    ];
+    return cells.map((value) => csvField(String(value))).join(",");
+  });
+  return [header, ...lines].join("\n");
+}
+
+// Same escaping rules as the frontend csvField (M8 formula guard): a cell that
+// could be read as a spreadsheet formula gets a leading apostrophe; cells with
+// commas/quotes/newlines are quoted with doubled inner quotes.
+function csvField(value) {
+  let v = String(value ?? "");
+  if (v && /^[=+\-@\t\r]/.test(v)) v = `'${v}`;
+  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
+}
+
 // One SESSION's per-problem submission summary — startResponse ships this so a
 // reload restores chips/attempt meters/total instantly (spec §3.4).
 export function computeSessionSummary(submissions) {

@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
@@ -10,6 +10,7 @@ import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs }
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
 import { ContestsPanel } from "./admin/ContestsPanel";
+import { ResultsPanel } from "./admin/ResultsPanel";
 import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
 import { MultiProblemWorkspace } from "./coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "./coding/problemSwitch";
@@ -1818,7 +1819,7 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
   );
 }
 
-type AdminView = "stats" | "contests" | "alerts" | "sessions" | "attendance" | "review" | "recordings" | "problems" | "settings" | "ips";
+type AdminView = "stats" | "contests" | "alerts" | "sessions" | "attendance" | "results" | "review" | "recordings" | "problems" | "settings" | "ips";
 
 // A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
 // AdminStats card labels. "" = no status filter (the Total card). "disconnected"
@@ -2788,6 +2789,7 @@ function AdminApp() {
         <AdminTab active={view === "sessions"} onClick={() => { setView("sessions"); void loadSessions(); }} icon={<Users size={16} />} label="Sessions" />
         <AdminTab active={view === "ips"} onClick={() => { setView("ips"); void loadIpReport(); }} icon={<Network size={16} />} label="IP report" />
         <AdminTab active={view === "attendance"} onClick={() => setView("attendance")} icon={<UserCheck size={16} />} label="Attendance" />
+        <AdminTab active={view === "results"} onClick={() => setView("results")} icon={<Award size={16} />} label="Results" />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
         <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
         <AdminTab active={view === "problems"} onClick={() => setView("problems")} icon={<ClipboardList size={16} />} label="Problems" />
@@ -2873,6 +2875,10 @@ function AdminApp() {
 
       {view === "attendance" ? (
         <AttendancePanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
+      ) : null}
+
+      {view === "results" ? (
+        <ResultsPanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
       ) : null}
 
       {view === "ips" ? (

@@ -56,6 +56,7 @@ const INVIG_HEADERS = { "x-invigilator-password": "cn-invig-pass" };
 const SCOPED_GET_REQUESTS = {
   "/api/admin/alerts": () => adminGet("/api/admin/alerts", { contest_slug: A }),
   "/api/admin/attendance": () => adminGet("/api/admin/attendance", { contest_slug: A }),
+  "/api/admin/contest-results": () => adminGet("/api/admin/contest-results", { contest: A }),
   "/api/admin/ip-report": () => adminGet("/api/admin/ip-report", { contest_slug: A, scope: "all" }),
   "/api/admin/recording-sessions": () => adminGet("/api/admin/recording-sessions", { contest_slug: A }),
   "/api/admin/review-mine": () => adminGet("/api/admin/review-mine", { contest: A, reviewer_name: "Rev" }),
@@ -289,14 +290,25 @@ async function seedTwoContestFixture() {
   });
 
   // Enrollments (cross-check b: one person, two contests — and B is invisible
-  // to A's scope by doc-id + field construction).
+  // to A's scope by doc-id + field construction). B's enrollment carries a
+  // CANARY final_snapshot so the Results-tab purge-survivor path is a positive
+  // control too (A reads live data; B's snapshot must never leak into A).
   for (const slug of [A, B]) {
     await firestore.collection("cn_enrollments").doc(`${slug}::kec--21cs001`).set({
       contest_slug: slug, person_id: "kec--21cs001", college_norm: "kec",
       status: "active", source: "csv", selection_status: "none",
-      selection_updated_at: null, selection_by: null, final_snapshot: null, created_at: now
+      selection_updated_at: null, selection_by: null,
+      final_snapshot: slug === B ? { total_score: 0, per_problem: {}, integrity: null, name: CANARY } : null,
+      created_at: now
     });
   }
+
+  // Persons directory (the Results JOIN reads names from here). B's person name
+  // is the sentinel — the Results endpoint scoped to A must never surface it.
+  await firestore.collection("cn_persons").doc("kec--21cs001").set({
+    person_id: "kec--21cs001", college_norm: "kec", unique_id: "21 CS 001",
+    unique_id_norm: "21cs001", name: "Asha", created_at: now, updated_at: now
+  });
 
   return firestore;
 }
@@ -323,7 +335,10 @@ test("canary positive control: the same endpoints scoped to contest B DO return 
     adminGet("/api/admin/submission-events", { username: "21 CS 001", contest_slug: B }),
     adminGet("/api/admin/reviews", { contest: B }),
     adminGet("/api/admin/roster", { contest: B }),
-    adminGet("/api/admin/attendance", { contest_slug: B })
+    adminGet("/api/admin/attendance", { contest_slug: B }),
+    // Results: B has no live submissions but a CANARY final_snapshot → the
+    // purge-survivor path surfaces it (and must NOT leak into A's results).
+    adminGet("/api/admin/contest-results", { contest: B })
   ];
   for (const req of positive) {
     const res = await call(req);

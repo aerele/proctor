@@ -5,10 +5,10 @@ import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
-import { configureIdentityStore, findContestRosterEntries, getContestRosterMeta, getContestRosterSummary, identityNorm, listColleges, saveContestRoster } from "./identity.mjs";
+import { applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonsByIds, identityNorm, listColleges, listEnrollments, saveContestRoster, stampSelectionDone } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
-import { computeSessionSummary } from "./scoreboard.mjs";
+import { buildResultsCsv, buildResultsRows, computeSessionSummary } from "./scoreboard.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -160,6 +160,11 @@ const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
 const SESSIONS_QUERY_LIMIT = 2000;
+// S-J: the Results rollup scans a contest's submissions (one doc per submit).
+// A heavy multi-problem hall (5000 candidates × N problems × a few submits)
+// stays comfortably under this cap; bounded so a pathological contest can't
+// blow the request.
+const SUBMISSIONS_RESULTS_LIMIT = 50000;
 // Max rows per sessions-list response page (the drill-down/status-join list).
 const SESSIONS_LIST_PAGE_LIMIT = 500;
 const SETTINGS_ID = "active";
@@ -305,6 +310,9 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
     if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));
     if (req.method === "GET" && path === "/api/admin/attendance") return send(res, 200, await adminAttendance(req));
+    if (req.method === "GET" && path === "/api/admin/contest-results") return send(res, 200, await adminContestResults(req));
+    if (req.method === "POST" && path === "/api/admin/contest-selection") return send(res, 200, await adminContestSelection(req));
+    if (req.method === "POST" && path === "/api/admin/contest-selection-done") return send(res, 200, await adminContestSelectionDone(req));
     if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
@@ -3603,6 +3611,170 @@ async function personContestAttendance(contest) {
     absentees,
     unmatched_sessions: unmatched,
     generated_at: new Date().toISOString()
+  };
+}
+
+// ---- S-J §2.14 Results tab (the post-exam admin rollup) --------------------
+//
+// GET /api/admin/contest-results?contest=slug — ADMIN-ONLY (candidates never
+// see others' scores, vision §2.14). For every ACTIVE enrollment in the
+// contest: rank + label-driven id/name/college + total + per-problem best +
+// the integrity column (alerts-by-severity + review verdict) + selection_status.
+// Reuses computeScoreboard/computeSessionSummary via scoreboard.buildResultsRows
+// (best-per-problem default). The F9 no-bleed invariant holds: every Firestore
+// read goes through scopedQuery on the RESOLVED contest. CSV export rides the
+// same builder when format=csv.
+async function adminContestResults(req) {
+  requireAdmin(req);
+  const contest = await personContestForFilter(req.query?.contest ?? req.query?.contest_slug);
+  if (!contest) {
+    // Results is a person-layer surface: legacy/unknown/global has no enrollment
+    // spine. Degrade to a clean "not available" rather than 500 or leak global.
+    return { configured: false };
+  }
+  const data = await computeContestResults(contest);
+  if (String(req.query?.format || "").toLowerCase() === "csv") {
+    return { csv: buildResultsCsv(data.rows, data.problems) };
+  }
+  return data;
+}
+
+// The shared rollup: ONE enrollment scan + ONE submissions scan + ONE alerts
+// scan + ONE reviews scan, all contest-scoped, joined in memory by the pure
+// scoreboard module. Purged contests (no live submissions) fall back to each
+// enrollment's final_snapshot (vision §2.9 purge-survivor; the per-row
+// from_snapshot flag tells the UI to mark it).
+async function computeContestResults(contest) {
+  const enrollments = await listEnrollments(contest);
+  const problemEntries = contestProblemEntries(contest);
+  const problemOrder = problemEntries.map((entry) => entry.problem_id);
+
+  const submissionsSnap = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), contest)
+    .limit(SUBMISSIONS_RESULTS_LIMIT)
+    .get();
+  const submissions = submissionsSnap.docs.map((doc) => doc.data());
+
+  // Purge-survivor: with no live submissions but stamped snapshots, read from
+  // the frozen enrollment.final_snapshot instead of the (deleted) heavy data.
+  const purged = submissions.length === 0
+    && enrollments.some((enrollment) => enrollment.status !== "removed" && enrollment.final_snapshot);
+
+  const activeIds = enrollments.filter((e) => e.status !== "removed").map((e) => e.person_id);
+  const [persons, collegeNames, integrityByPerson] = await Promise.all([
+    purged ? new Map() : getPersonsByIds(activeIds),
+    getCollegeNameMap(),
+    purged ? new Map() : integrityByPersonFor(contest, activeIds)
+  ]);
+
+  const multiCollege = Array.isArray(contest.colleges) && contest.colleges.length > 1;
+  const rows = buildResultsRows({
+    submissions, enrollments, persons, integrityByPerson, collegeNames,
+    problemOrder, multiCollege, purged
+  });
+
+  // Per-problem column titles (contest order) for the table header + CSV.
+  const problems = await Promise.all(problemEntries.map(async (entry) => {
+    const problem = await getProblem(entry.problem_id).catch(() => null);
+    return { problem_id: entry.problem_id, title: problem?.title || entry.problem_id, points: entry.points };
+  }));
+
+  return {
+    configured: true,
+    contest_slug: contest.slug,
+    multi_college: multiCollege,
+    selection_done_at: contest.selection_done_at || null,
+    problems,
+    rows,
+    generated_at: new Date().toISOString()
+  };
+}
+
+// Per-candidate integrity inputs: this contest's alerts grouped by username_norm
+// (= person_id under person mode) + this contest's review records grouped the
+// same way. ONE bounded scan each, scoped to the contest. summarizeIntegrity
+// (pure) folds them in buildResultsRows.
+async function integrityByPersonFor(contest, activeIds) {
+  const activeSet = new Set(activeIds);
+  const out = new Map();
+  const ensure = (id) => {
+    if (!out.has(id)) out.set(id, { alerts: [], reviews: [] });
+    return out.get(id);
+  };
+
+  const alertsSnap = await scopedQuery(firestore.collection(ALERTS_COLLECTION), contest)
+    .limit(ALERTS_QUERY_LIMIT)
+    .get();
+  for (const doc of alertsSnap.docs) {
+    const alert = doc.data();
+    if (alert.archived) continue; // archived = triaged-away, not an open integrity signal
+    const personId = String(alert.username_norm || "");
+    if (!activeSet.has(personId)) continue;
+    ensure(personId).alerts.push({ severity: alert.severity });
+  }
+
+  // Reviews are stored per (username, reviewer, contest-slug); reuse the S-C
+  // scope helper so a person-contest reads its OWN review set (not the legacy
+  // slugless pile). Bounded scan + in-memory scope filter (mirrors getAllReviews).
+  const reviews = await getAllReviews(contest.slug);
+  for (const review of reviews) {
+    const personId = String(review.username_norm || "");
+    if (!activeSet.has(personId)) continue;
+    ensure(personId).reviews.push({ verdict: review.verdict, reviewer_name: review.reviewer_name });
+  }
+  return out;
+}
+
+// POST /api/admin/contest-selection — bulk selection transition on enrollment
+// rows (shortlisted / selected / rejected / none) with a from_status race
+// guard. ADMIN-ONLY. Drives the Results-tab bulk-selection UI.
+async function adminContestSelection(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const contest = await personContestForFilter(body.contest ?? body.contest_slug);
+  if (!contest) return badRequest("contest must name a person-mode contest");
+  const toStatus = String(body.selection_status || "");
+  const fromStatus = body.from_status === undefined || body.from_status === null ? "" : String(body.from_status);
+  return applySelectionTransition(contest, body.person_ids, fromStatus, toStatus, adminActor(req, body));
+}
+
+// POST /api/admin/contest-selection-done — "Mark selection done": freeze each
+// active enrollment's final_snapshot from the current rollup + stamp the
+// retention clock (selection_done_at on the contest). ADMIN-ONLY. The retention
+// SWEEP itself is Wave 7 (see stampSelectionDone's TODO marker).
+async function adminContestSelectionDone(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const contest = await personContestForFilter(body.contest ?? body.contest_slug);
+  if (!contest) return badRequest("contest must name a person-mode contest");
+  const data = await computeContestResults(contest);
+  // Build the per-person snapshot map the enrollment store freezes. We snapshot
+  // the SAME numbers the Results table shows (single source of truth).
+  const snapshotByPerson = new Map();
+  for (const row of data.rows) {
+    const perProblem = {};
+    for (const cell of row.per_problem) perProblem[cell.problem_id] = cell.best_score;
+    snapshotByPerson.set(row.person_id, {
+      total_score: row.total,
+      per_problem: perProblem,
+      integrity: {
+        alerts_by_severity: row.integrity.alerts_by_severity,
+        review_verdict: row.integrity.review_verdict
+      },
+      unique_id: row.candidate_id,
+      name: row.name,
+      session_status: ""
+    });
+  }
+  return stampSelectionDone(contest, snapshotByPerson, adminActor(req, body));
+}
+
+// Honor-system admin actor for audit + selection_by attribution (the admin
+// console may send actor_name; ip/ua are captured automatically).
+function adminActor(req, body = {}) {
+  return {
+    name: String(body.actor_name || "").slice(0, 200),
+    ip: getClientIp(req),
+    userAgent: req.get?.("user-agent") || req.headers?.["user-agent"] || ""
   };
 }
 
