@@ -1,8 +1,10 @@
-import { createHash, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { Firestore, FieldValue, FieldPath } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
 import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
+import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, positiveIntOr, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
+import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
@@ -269,7 +271,7 @@ const UPLOAD_CHUNK_KINDS = new Set(["screen", "camera"]);
 
 export const api = async (req, res) => {
   try {
-    setCors(res);
+    setCors(res, PUBLIC_APP_ORIGIN);
     if (req.method === "OPTIONS") {
       res.status(204).send("");
       return;
@@ -2706,17 +2708,7 @@ async function findRosterEntry(meta, uniqueId) {
   return entry;
 }
 
-// Mask an email for the public confirm card: keep at most 2 leading chars of
-// the local part + the full domain ("asha@x.com" -> "as**@x.com").
-function maskEmail(value) {
-  const text = String(value || "");
-  if (!text) return "";
-  const at = text.indexOf("@");
-  if (at <= 0) return `${text.slice(0, 2)}***`;
-  const local = text.slice(0, at);
-  const keep = Math.min(2, local.length);
-  return `${local.slice(0, keep)}${"*".repeat(Math.max(1, local.length - keep))}${text.slice(at)}`;
-}
+// maskEmail moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 // ---- M3: roster-lookup enumeration mitigation -------------------------------
 // /api/roster/lookup is PUBLIC and ID-enumerable (s2 design §7 accepted it as a
@@ -2827,22 +2819,7 @@ async function rosterLookup(req) {
   };
 }
 
-// Run an async mapper over items with a bounded number of concurrent workers, so
-// a single request can't fan out into hundreds of simultaneous GCS/IAM calls.
-async function mapWithConcurrency(items, limit, fn) {
-  const results = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker)
-  );
-  return results;
-}
+// mapWithConcurrency moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 // S-C: route an OPTIONAL admin/invigilator contest filter through the
 // scopedQuery chokepoint (F9 §2.3.2). Absent/"" → ALL_CONTESTS (no filter —
@@ -5446,10 +5423,7 @@ function sureShotVideoKey(session) {
   return session.merged_video_key || null;
 }
 
-function isoOrNow(value) {
-  if (value && !Number.isNaN(Date.parse(value))) return new Date(value).toISOString();
-  return new Date().toISOString();
-}
+// isoOrNow moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 const ALERT_SOURCES = ["proctor", "contest-eval"];
 const ALERT_SEVERITIES = ["critical", "warning", "info"];
@@ -5608,13 +5582,7 @@ async function listSessionRooms(scope) {
   return distinctRooms(snapshot.docs.map((doc) => doc.data()));
 }
 
-// A query param is "truthy" when it is the string "true"/"1"/"yes" (case
-// insensitive) or the boolean true. Anything else (incl. absent) is false.
-function isTruthyParam(value) {
-  if (value === true) return true;
-  const lowered = String(value === undefined || value === null ? "" : value).toLowerCase();
-  return lowered === "true" || lowered === "1" || lowered === "yes";
-}
+// isTruthyParam moved to lib/http.mjs (decomp B0); imported at the top.
 
 // ---- Alert archive (admin) -------------------------------------------------
 //
@@ -6479,12 +6447,7 @@ function sessionPrefix(session) {
   return buildStoragePrefix(session?.contest_slug, session?.username_norm, session?.session_id);
 }
 
-// Room label sanitizer (Epic 4.2): a short human-readable label, stored on the
-// session/alert for display only (never used in a GCS key). Keep letters,
-// digits, space, dash, dot, underscore; bound the length. Never throws.
-function sanitizeRoom(value) {
-  return String(value).trim().replace(/[^a-zA-Z0-9 ._-]/g, "").slice(0, 80);
-}
+// sanitizeRoom moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 function sessionRef(sessionId) {
   return firestore.collection(SESSION_COLLECTION).doc(sessionId);
@@ -6505,41 +6468,8 @@ function bucket() {
   return storage.bucket(EVIDENCE_BUCKET);
 }
 
-function parseBody(req) {
-  if (!req.body) return {};
-  if (typeof req.body !== "string") return req.body;
-  // N3: malformed JSON is a client error, not a server crash. Catch the
-  // SyntaxError and surface a clean 400 instead of falling through to the
-  // catch-all (which would otherwise report it as a 500).
-  try {
-    return JSON.parse(req.body);
-  } catch {
-    throw httpError(400, "invalid_json");
-  }
-}
-
-function requireFields(body, fields) {
-  for (const field of fields) {
-    if (body[field] === undefined || body[field] === null || body[field] === "") {
-      throw httpError(400, `${field} is required`);
-    }
-  }
-}
-
-// Permissive email shape (F12 review gap): a non-space run, then @, then a
-// non-space run, then a dot, then a non-space run. Deliberately lenient — it
-// only catches obvious typos (missing @, missing domain dot). Mirrors the
-// client gate in candidateRouting.ts (isCandidateEmailValid).
-const EMAIL_FORMAT = /^\S+@\S+\.\S+$/;
-
-// Reject a malformed TYPED email with a clear 400. Only the start handlers
-// where the candidate types the email call this; roster-mapped paths take the
-// email from the roster cell, never the typed field, so they skip it.
-function requireValidEmail(body) {
-  if (!EMAIL_FORMAT.test(String(body.email ?? "").trim())) {
-    throw httpError(400, "email is not a valid email address");
-  }
-}
+// parseBody/requireFields/requireValidEmail(+EMAIL_FORMAT) moved to lib/http.mjs
+// (decomp B0); imported at the top.
 
 function requireAdmin(req) {
   // Timing-safe compare via safeEqual, matching requireApiKey / requireInvigilatorFor.
@@ -6633,15 +6563,7 @@ function requireApiKey(req) {
   }
 }
 
-function safeEqual(a, b) {
-  const bufA = Buffer.from(String(a), "utf8");
-  const bufB = Buffer.from(String(b), "utf8");
-  // timingSafeEqual requires equal-length buffers; comparing lengths first would
-  // leak length but bail out, so hash both to a fixed width and compare those.
-  const hashA = createHash("sha256").update(bufA).digest();
-  const hashB = createHash("sha256").update(bufB).digest();
-  return timingSafeEqual(hashA, hashB);
-}
+// safeEqual moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 // ---- F5.3/F5.5: fullscreen enforcement config + per-session exemptions -----
 //
@@ -6778,115 +6700,9 @@ function publicSettings(settings) {
   };
 }
 
-function isHttpUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
+// isHttpUrl moved to lib/http.mjs; normalizeUsername/sanitizeSegment/
+// sanitizeObject/sanitizeEditorDetail/getClientIp/normalizeIp/hashPasscode/
+// maskPasscode moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
-function normalizeUsername(value) {
-  return sanitizeSegment(String(value).trim().toLowerCase());
-}
-
-function sanitizeSegment(value) {
-  const cleaned = String(value).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-  // M1: a segment that is empty or all-dots (e.g. "", ".", "..") is a path
-  // traversal / blank-key hazard once it lands in a GCS object key. Substitute a
-  // safe token so a username like ".." can never become a ".." path component.
-  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
-  return cleaned;
-}
-
-function sanitizeObject(value) {
-  return JSON.parse(JSON.stringify(value, (_key, nested) => {
-    if (typeof nested === "string") return nested.slice(0, 500);
-    return nested;
-  }));
-}
-
-// Editor-event detail sanitizer (paste forensics). detail.text carries up to
-// 2000 chars of inserted text by design; sanitizeObject's generic 500-char cap
-// would clip it. Pull text out first, sanitize the rest, then re-attach with
-// its OWN 2000-char cap plus a text_truncated flag when it was longer.
-const EDITOR_TEXT_MAX_LENGTH = 2000;
-function sanitizeEditorDetail(rawDetail) {
-  if (!rawDetail || typeof rawDetail !== "object" || Array.isArray(rawDetail)
-      || !("text" in rawDetail)) {
-    return sanitizeObject(rawDetail || {});
-  }
-  const { text, ...rest } = rawDetail;
-  const detail = sanitizeObject(rest);
-  const textStr = String(text);
-  detail.text = textStr.slice(0, EDITOR_TEXT_MAX_LENGTH);
-  if (textStr.length > EDITOR_TEXT_MAX_LENGTH) detail.text_truncated = true;
-  return detail;
-}
-
-function getClientIp(req) {
-  // Cloud Run's ingress proxy APPENDS the real connecting client IP as the
-  // LAST x-forwarded-for value; any earlier entries arrived in the client's
-  // own request and are spoofable. Take the last hop (the only trustworthy one
-  // for a direct Cloud Run deployment); fall back to the socket address when
-  // there is no proxy (local dev).
-  const forwarded = req.get?.("x-forwarded-for") || req.headers?.["x-forwarded-for"] || "";
-  const hops = String(forwarded).split(",").map((part) => part.trim()).filter(Boolean);
-  const lastForwarded = hops.length ? hops[hops.length - 1] : "";
-  const direct = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || "";
-  return normalizeIp(lastForwarded || direct || "unknown");
-}
-
-function normalizeIp(value) {
-  return String(value).replace(/^::ffff:/, "").slice(0, 80);
-}
-
-function hashPasscode(value) {
-  return createHash("sha256").update(String(value)).digest("hex");
-}
-
-function maskPasscode(value) {
-  const text = String(value);
-  return `${"*".repeat(Math.max(0, text.length - 2))}${text.slice(-2)}`;
-}
-
-function badRequest(message) {
-  throw httpError(400, message);
-}
-
-function httpError(statusCode, message, payload) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  // S-C: optional structured payload merged into the JSON error body by the
-  // api() catch (college_choices picker, duplicate row lists, ...).
-  if (payload) error.payload = payload;
-  return error;
-}
-
-// httpError carrying structured machine-readable context (S-I guard payloads).
-// `extra` is merged into the JSON error body by the api() catch — only ever
-// server-built objects (slug lists, problem-id lists), never raw client input.
-function httpErrorWith(statusCode, message, extra) {
-  const error = httpError(statusCode, message);
-  error.extra = extra;
-  return error;
-}
-
-// Parse an env-supplied count into a POSITIVE integer, falling back to `fallback`
-// when the value is missing, non-numeric (NaN), or <= 0. Used for caps where a
-// silent NaN/0 would disable a safety limit (e.g. the brute-force GATE cap).
-function positiveIntOr(raw, fallback) {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-}
-
-function setCors(res) {
-  res.set("access-control-allow-origin", PUBLIC_APP_ORIGIN);
-  res.set("access-control-allow-methods", "GET,POST,OPTIONS");
-  res.set("access-control-allow-headers", "content-type,x-admin-password,x-api-key,x-invigilator-password");
-}
-
-function send(res, statusCode, body) {
-  res.status(statusCode).json(body);
-}
+// http transport helpers (badRequest/httpError/httpErrorWith/positiveIntOr/
+// setCors/send) moved to lib/http.mjs (decomp B0); imported at the top.
