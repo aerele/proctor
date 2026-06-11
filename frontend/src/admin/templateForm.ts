@@ -41,6 +41,8 @@ export type TemplateDraft = {
   cameraEnabled: boolean;
   cameraFps: string;
   cameraWidth: string;
+  /** OMR P1: screen-marker fiducials flag (default OFF). */
+  screenMarkersEnabled: boolean;
   enforcementMode: (typeof TEMPLATE_ENFORCEMENT_MODES)[number];
   fullscreenReentrySeconds: string;
   fullscreenExitLimit: string;
@@ -63,6 +65,7 @@ export function emptyTemplateDraft(): TemplateDraft {
     cameraEnabled: true,
     cameraFps: "10",
     cameraWidth: "640",
+    screenMarkersEnabled: false,
     enforcementMode: "block",
     fullscreenReentrySeconds: "20",
     fullscreenExitLimit: "2",
@@ -96,6 +99,8 @@ export function draftFromTemplate(template: ContestTemplateDetail): TemplateDraf
     cameraEnabled: camera.enabled !== false,
     cameraFps: numToStr(camera.fps, "10"),
     cameraWidth: numToStr(camera.width, "640"),
+    // OMR P1: only an explicit true enables (pre-flag docs hydrate to off).
+    screenMarkersEnabled: d.screen_markers?.enabled === true,
     enforcementMode: enforcement.mode === "alert_first" ? "alert_first" : "block",
     fullscreenReentrySeconds: numToStr(enforcement.fullscreen_reentry_seconds, "20"),
     fullscreenExitLimit: numToStr(enforcement.fullscreen_exit_limit, "2"),
@@ -150,6 +155,7 @@ export type TemplateSavePayload = {
     identity_label: string;
     room_gate_enabled: boolean;
     camera_recording: { enabled: boolean; fps: number; width: number };
+    screen_markers: { enabled: boolean };
     enforcement: { mode: string; fullscreen_reentry_seconds: number; fullscreen_exit_limit: number };
     evidence_retention_days: number;
     languages: ProblemLanguage[];
@@ -174,6 +180,7 @@ export function draftToSavePayload(draft: TemplateDraft): TemplateSavePayload {
         fps: Number(draft.cameraFps),
         width: Number(draft.cameraWidth)
       },
+      screen_markers: { enabled: draft.screenMarkersEnabled },
       enforcement: {
         mode: draft.enforcementMode,
         fullscreen_reentry_seconds: Number(draft.fullscreenReentrySeconds),

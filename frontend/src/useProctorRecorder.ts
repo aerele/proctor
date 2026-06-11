@@ -46,6 +46,10 @@ type RecorderControls = {
   stop: () => Promise<UploadManifestItem[]>;
   getManifest: () => UploadManifestItem[];
   getQueueDepth: () => number;
+  /** OMR P1: the live screen track's getSettings() (null before start/after
+   * stop) — the marker_layout event reports the ACTUAL captured dims so the
+   * P2 detector never guesses geometry. Read-only; no recorder behavior. */
+  getScreenTrackSettings: () => MediaTrackSettings | null;
 };
 
 export type MediaCaptureState = {
@@ -639,6 +643,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     },
     getQueueDepth() {
       return queueDepth;
+    },
+    getScreenTrackSettings() {
+      return screenStream?.getVideoTracks()[0]?.getSettings() ?? null;
     }
   };
 

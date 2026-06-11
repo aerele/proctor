@@ -22,6 +22,8 @@ import { clearSessionDrafts } from "./coding/problemSwitch";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
 import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
+import { normalizeScreenMarkers } from "./screenMarkers";
+import { MarkerLayer } from "./markers/MarkerLayer";
 import { enforcementSettingsFromForm } from "./enforcementSettings";
 import { autofillSuppressionProps } from "./shell/autofill";
 import { elapsedTimerActive, shellHeaderMode } from "./shell/examShell";
@@ -410,6 +412,14 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     else preSessionEventsRef.current = [...preSessionEventsRef.current, event].slice(-50);
   };
 
+  // OMR P1 (design §5.3): the additive camera_pip event — the camera pop-out
+  // is an OS always-on-top window that occludes screen markers in the
+  // recording, so P3's correlation needs to know PiP was active to downgrade.
+  // Ref-bridged because the listeners attach inside the once-memoized
+  // attachCameraVideo callback (same pattern as cameraStreamRef).
+  const cameraPipEmitRef = useRef<(active: boolean) => void>(() => undefined);
+  cameraPipEmitRef.current = (active: boolean) => recordSetupEvent("camera_pip", { active });
+
   const acquireScreenPermission = async (): Promise<void> => {
     setPermissions((c) => ({ ...c, screen: "requesting" }));
     setScreenSetupMessage("");
@@ -612,6 +622,23 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       onEnterFullscreen={shell.enterFullscreen}
     />
   ) : null;
+  // OMR P1 (design §5.1/§5.2): the screen-marker fiducial layer, mounted in
+  // BOTH candidate branches that can be on-screen while status === "recording"
+  // (the W1 exam view and the classic fallback). The flag arrives ONLY via the
+  // start/resume response's optional screen_markers key — absent (flag off /
+  // older backend) renders null, so today's live build is bit-for-bit
+  // unaffected. marker_layout rides the same additive event funnel.
+  const screenMarkersOn = Boolean(sessionConfig?.screen_markers?.enabled);
+  const markerLayer = (
+    <MarkerLayer
+      enabled={screenMarkersOn}
+      recording={status === "recording"}
+      trackWidth={sessionConfig?.upload_config.max_width ?? SETUP_SCREEN_CONSTRAINTS.maxWidth}
+      getScreenTrackSettings={() => recorderRef.current?.getScreenTrackSettings() ?? null}
+      onLayout={(detail) => recordSetupEvent("marker_layout", detail)}
+    />
+  );
+
   // W2: page top padding follows which fixed header is rendered — the slim
   // strip needs a small offset, the big alert banner a larger one, the locked
   // screen none ("hidden").
@@ -903,7 +930,23 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // ref re-attaches the live stream whenever a new node mounts. The camera
   // CAPTURE itself lives in the recorder (off-DOM) — this is preview-only.
   const attachCameraVideo = useMemo(() => {
+    // OMR P1: enter/leave PiP listeners ride every mounted camera node so the
+    // camera_pip event fires however the pop-out starts or ends (button, the
+    // PiP window's own close control, node unmount). Additive only — the
+    // existing stream re-attach behavior is unchanged.
+    let pipAttached: HTMLVideoElement | null = null;
+    const onPipEnter = () => cameraPipEmitRef.current(true);
+    const onPipLeave = () => cameraPipEmitRef.current(false);
     return (node: HTMLVideoElement | null) => {
+      if (pipAttached && pipAttached !== node) {
+        pipAttached.removeEventListener("enterpictureinpicture", onPipEnter);
+        pipAttached.removeEventListener("leavepictureinpicture", onPipLeave);
+      }
+      if (node && node !== pipAttached) {
+        node.addEventListener("enterpictureinpicture", onPipEnter);
+        node.addEventListener("leavepictureinpicture", onPipLeave);
+      }
+      pipAttached = node;
       cameraVideoRef.current = node;
       const stream = cameraStreamRef.current;
       if (node && node.srcObject !== stream) {
@@ -1589,6 +1632,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           }
         />
         {enforcementOverlay}
+        {markerLayer}
 
         {/* Functional notices only — nothing else sits above the workspace. */}
         {examTimeNotice ? (
@@ -1656,6 +1700,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     <Shell padTop={shellPadTop}>
       {shellChrome}
       {enforcementOverlay}
+      {markerLayer}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 
       {/* S5: end-time change notice + time-up banner. The countdown itself lives
@@ -2163,6 +2208,9 @@ function AdminApp() {
   const [cameraRecEnabled, setCameraRecEnabled] = useState(true);
   const [cameraFpsText, setCameraFpsText] = useState("10");
   const [cameraWidthText, setCameraWidthText] = useState("640");
+  // OMR P1: screen-marker fiducials flag — default OFF (the live exam runs
+  // with this stack flag-off; only an explicit save turns it on).
+  const [screenMarkersEnabled, setScreenMarkersEnabled] = useState(false);
   // Wave-3: the F5.3 enforcement knobs get the same TEXT-state treatment —
   // clearing "Fullscreen exit limit" used to save 0 (lock on the FIRST exit)
   // silently; enforcementSettingsFromForm maps blank/invalid to 20 s / 2 exits.
@@ -2593,6 +2641,7 @@ function AdminApp() {
       setCameraRecEnabled(camera.enabled);
       setCameraFpsText(String(camera.fps));
       setCameraWidthText(String(camera.width));
+      setScreenMarkersEnabled(normalizeScreenMarkers(response.screen_markers).enabled);
       setSettingsMessage("Loaded current gate.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2620,6 +2669,8 @@ function AdminApp() {
         // F10.1: blank/invalid fps/width text falls back to the defaults here
         // (never 0); the server normalizes again with the same rules.
         camera_recording: cameraRecordingFromForm({ enabled: cameraRecEnabled, fps: cameraFpsText, width: cameraWidthText }),
+        // OMR P1: boolean-only flag (size/contrast are code constants).
+        screen_markers: { enabled: screenMarkersEnabled },
         // parseRosterInput = the existing comma/newline split + trim + dedupe.
         rooms: parseRosterInput(roomsText)
       });
@@ -2639,6 +2690,7 @@ function AdminApp() {
       setCameraRecEnabled(savedCamera.enabled);
       setCameraFpsText(String(savedCamera.fps));
       setCameraWidthText(String(savedCamera.width));
+      setScreenMarkersEnabled(normalizeScreenMarkers(response.screen_markers).enabled);
       setSettingsMessage("Saved. The time window is now the only start gate (no passcode).");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -3342,6 +3394,20 @@ function AdminApp() {
             </div>
             <p className="mt-2 text-xs text-muted">Blank or out-of-range values save the defaults (10 fps, 640 px). The camera picks its nearest supported resolution.</p>
           </div>
+          {/* OMR P1: screen-marker fiducials flag — default OFF. Mirrors the
+              camera_recording toggle; v1 is boolean-only (size/contrast are
+              code constants until real recordings justify knobs). */}
+          <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
+            <input
+              className="mt-1 h-4 w-4 accent-accent"
+              type="checkbox"
+              checked={screenMarkersEnabled}
+              onChange={(event) => setScreenMarkersEnabled(event.target.checked)}
+            />
+            <span>
+              <span className="font-medium text-ink">Screen markers (overlay detection)</span> — render small tone-on-tone OMR-style markers at the edges and a few interior points of the candidate's exam screen. They ride into the screen recording so review-time analysis can detect windows drawn over the exam. Visual only — recording and telemetry behave exactly the same when off.
+            </span>
+          </label>
           <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
             <input
               className="mt-1 h-4 w-4 accent-accent"
