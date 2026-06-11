@@ -2539,9 +2539,13 @@ async function contestExamConfig(slug) {
 // ---- S-D: PUBLIC access-code resolver (vision §10.3) -------------------------
 // POST /api/access-code {code} -> {slug, name}. Per-IP fixed-window rate limit
 // (in-memory, single-instance — same documented limitation as the exec
-// limiter); EVERY attempt counts, valid or not, so the 34^6 space cannot be
-// enumerated faster than the cap regardless of response shape.
-const ACCESS_CODE_RATE_LIMIT = 10;
+// limiter). Only FAILED attempts consume the budget: a successful resolve is
+// REFUNDED, because the typed code is built for weak campus labs that NAT a
+// whole hall through ONE egress IP (the IP-report cluster detection banks on
+// exactly that), so a synchronized hall typing the CORRECT code must never be
+// throttled. Anti-enumeration only needs failures capped — at 60 failures/min
+// the 34^6 (~1.5B) space still cannot be walked.
+const ACCESS_CODE_RATE_LIMIT = 60;
 const ACCESS_CODE_RATE_WINDOW_MS = 60_000;
 const ACCESS_CODE_RATE_MAP_LIMIT = 10_000;
 let _accessCodeClock = () => Date.now();
@@ -2568,12 +2572,17 @@ function checkAccessCodeRateLimit(ip) {
   if (entry.count > ACCESS_CODE_RATE_LIMIT) {
     throw rateLimited(Math.max(1, Math.ceil((entry.windowStartMs + ACCESS_CODE_RATE_WINDOW_MS - nowMs) / 1000)));
   }
+  // Refund closure: a SUCCESSFUL resolve gives the attempt back, so the cap
+  // only ever bites failures. Bound to THIS entry object — if the window
+  // rolled over in between, decrementing the detached entry is harmless.
+  return () => { if (entry.count > 0) entry.count -= 1; };
 }
 
 async function publicAccessCode(req) {
-  checkAccessCodeRateLimit(getClientIp(req));
+  const refundAttempt = checkAccessCodeRateLimit(getClientIp(req));
   const body = parseBody(req);
   const resolved = await resolveAccessCode(body?.code);
+  refundAttempt(); // valid code — only failed attempts consume the budget
   return { ok: true, ...resolved };
 }
 
@@ -2681,9 +2690,13 @@ async function adminSessions(req) {
   const username = req.query?.username;
   if (!username) return badRequest("username is required");
 
+  // S-D (A1: "selector scopes every tab"): the review search honours the
+  // OPTIONAL global contest filter like every other admin GET. Under person
+  // identity the same person_id recurs across rounds BY DESIGN, so an unscoped
+  // username search would interleave Round-1 sessions into a Round-2 review.
+  const scope = await contestScopeOf(req.query?.contest_slug);
   const usernameNorm = normalizeUsername(username);
-  const snapshot = await firestore
-    .collection(SESSION_COLLECTION)
+  const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
     .where("username_norm", "==", usernameNorm)
     .limit(50)
     .get();
