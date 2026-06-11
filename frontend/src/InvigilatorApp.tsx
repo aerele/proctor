@@ -19,7 +19,7 @@ import {
 import { candidateIdOf } from "./identity";
 import { gateStatusLabel } from "./invigilator/gateLogic";
 import { portalCredential, portalLinkOf } from "./invigilator/portalLink";
-import { alertExplanation, matchesStatusFilter } from "./invigilator/roomView";
+import { alertExplanation, duplicateRowKeys, emptyAlertsHint, matchesStatusFilter, portalEntryBlurb, sessionStartedLabel } from "./invigilator/roomView";
 import type { StatusFilter } from "./invigilator/roomView";
 import type { EnforcementExemptions, InvigilatorAlert, InvigilatorRoomResponse, InvigilatorSessionRow, RoomGate } from "./types";
 
@@ -281,7 +281,10 @@ export function InvigilatorApp() {
             </p>
           ) : null}
           <p className="mt-2 text-sm leading-6 text-muted">
-            Room console: release the start code, start the room, watch who is recording, and read your room's alerts. ID checks are manual (no QR scanning).
+            {/* FIX-B3 #4: the "release the start code / start the room" clause is
+                conditional on the room gate — with the gate OFF no start-code
+                panel renders, so the copy must not promise that step. */}
+            {portalEntryBlurb(gateEnabled)}
           </p>
           <div className="mt-4 space-y-3">
             <label className="block text-sm">
@@ -354,6 +357,13 @@ export function InvigilatorApp() {
   // F9.2: the student list below honours the clicked stat tile.
   const sessions = data?.sessions ?? [];
   const visibleSessions = sessions.filter((row) => matchesStatusFilter(row, statusFilter));
+  // FIX-B3 #5: the same candidate can occupy two rows (a stale session + a
+  // re-join). Identify the candidate key the same way the React key is composed,
+  // then flag which keys appear more than once so those rows get a session-start
+  // disambiguator. Computed over ALL sessions (not just the filtered view) so a
+  // duplicate is recognized even when the filter hides its twin.
+  const rowKeyOf = (row: InvigilatorSessionRow) => candidateIdOf(row) || row.name || "";
+  const duplicateKeys = duplicateRowKeys(sessions, rowKeyOf);
   const toggleFilter = (filter: Exclude<StatusFilter, null>) =>
     setStatusFilter((current) => (current === filter ? null : filter));
 
@@ -458,9 +468,24 @@ export function InvigilatorApp() {
               <tbody>
                 {visibleSessions.map((row) => {
                   const badge = statusBadge(row);
+                  // FIX-B3 #5: show the session-start time only for a candidate
+                  // who has more than one row (stale session + re-join), so the
+                  // invigilator can tell the rows apart. Unique candidates stay
+                  // uncluttered.
+                  const isDuplicate = duplicateKeys.has(rowKeyOf(row));
+                  const startedLabel = isDuplicate ? sessionStartedLabel(row.created_at) : "";
                   return (
-                    <tr key={candidateIdOf(row) || row.name} className="border-b border-line/60">
-                      <td className="py-2 pr-3 font-medium text-ink">{row.name || "—"}</td>
+                    // created_at keeps the React key unique across a duplicated
+                    // candidate (same id/name on two rows) so React doesn't warn.
+                    <tr key={`${rowKeyOf(row)}::${row.created_at}`} className="border-b border-line/60">
+                      <td className="py-2 pr-3 font-medium text-ink">
+                        {row.name || "—"}
+                        {startedLabel ? (
+                          <span className="ml-2 font-mono text-xs font-normal text-muted" title="Session start time — distinguishes a re-join from a stale session">
+                            (started {startedLabel})
+                          </span>
+                        ) : null}
+                      </td>
                       <td className="py-2 pr-3 text-muted">{candidateIdOf(row) || "—"}</td>
                       <td className="py-2 pr-3 text-muted">{row.roll_number || "—"}</td>
                       <td className="py-2 pr-3">
@@ -531,7 +556,7 @@ export function InvigilatorApp() {
             ))}
           </div>
         ) : (
-          <p className="text-sm text-muted">{data ? "No open alerts for this room." : "Loading…"}</p>
+          <p className="text-sm text-muted">{data ? emptyAlertsHint(data.alerts_shared ?? true) : "Loading…"}</p>
         )}
       </section>
     </PortalShell>

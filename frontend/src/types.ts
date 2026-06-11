@@ -893,6 +893,9 @@ export type InvigilatorRoomResponse = {
   sessions: InvigilatorSessionRow[];
   gate: RoomGate | null;
   alerts: InvigilatorAlert[];
+  /** FIX-B3 #6: true when at least one alert type is shared with invigilators —
+   *  drives the empty-feed copy ("nothing fired" vs "nothing is shared"). */
+  alerts_shared?: boolean;
   disconnected_staleness_ms?: number;
 };
 

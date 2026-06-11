@@ -721,6 +721,26 @@ test("GET /api/invigilator/room: alert feed filters by show_to_invigilator serve
   assert.deepEqual(admin.body.alerts.map((a) => a.id).sort(), ["crit1", "warn1"]);
 });
 
+test("GET /api/invigilator/room: alerts_shared reflects whether any type is shared (FIX-B3 #6)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "a1");
+  // Default ALL OFF → nothing is shared → alerts_shared false (empty feed reads
+  // as intentional, not broken).
+  const before = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(before.statusCode, 200);
+  assert.equal(before.body.alerts_shared, false);
+  // Admin opts ONE type in → alerts_shared flips true.
+  await call(makeReq({ method: "POST", path: "/api/admin/alert-settings",
+    headers: { "x-admin-password": "invig-admin-pass" },
+    body: { proctor: { tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: true } } } }));
+  const after = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(after.body.alerts_shared, true);
+});
+
 test("GET /api/invigilator/room: catalog-unknown alert types are NEVER shared (no opt-in switch)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });

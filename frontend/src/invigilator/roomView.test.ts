@@ -1,7 +1,10 @@
 // frontend/src/invigilator/roomView.test.ts — F9.2 clickable status filters +
 // F9.4 plain-language alert explanations (pure logic for the invigilator portal).
 import { describe, expect, it } from "vitest";
-import { alertExplanation, matchesStatusFilter, type StatusFilter } from "./roomView";
+import {
+  alertExplanation, duplicateRowKeys, emptyAlertsHint, matchesStatusFilter,
+  portalEntryBlurb, sessionStartedLabel, type StatusFilter
+} from "./roomView";
 
 type Row = Parameters<typeof matchesStatusFilter>[0];
 
@@ -68,5 +71,72 @@ describe("alertExplanation (F9.4)", () => {
     const text = alertExplanation("some_future_type");
     expect(text.length).toBeGreaterThan(20);
     expect(text).not.toContain("some_future_type");
+  });
+});
+
+describe("portalEntryBlurb (FIX-B3 #4)", () => {
+  it("mentions the start code / starting the room when the gate is ON", () => {
+    const text = portalEntryBlurb(true);
+    expect(text).toContain("start code");
+    expect(text).toContain("start the room");
+  });
+  it("drops the start-code / start-the-room promise when the gate is OFF", () => {
+    const text = portalEntryBlurb(false);
+    expect(text).not.toContain("start code");
+    expect(text).not.toContain("start the room");
+    // still describes the monitoring view
+    expect(text).toContain("recording");
+    expect(text).toContain("alerts");
+  });
+});
+
+describe("sessionStartedLabel (FIX-B3 #5)", () => {
+  it("formats an ISO timestamp as HH:MM:SS local time", () => {
+    // Build via a Date so the assertion is timezone-agnostic.
+    const d = new Date(2026, 5, 10, 9, 5, 3);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    expect(sessionStartedLabel(d.toISOString())).toBe(`${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`);
+  });
+  it("returns empty string for missing / blank / unparseable input", () => {
+    expect(sessionStartedLabel(null)).toBe("");
+    expect(sessionStartedLabel(undefined)).toBe("");
+    expect(sessionStartedLabel("")).toBe("");
+    expect(sessionStartedLabel("   ")).toBe("");
+    expect(sessionStartedLabel("not-a-date")).toBe("");
+  });
+});
+
+describe("duplicateRowKeys (FIX-B3 #5)", () => {
+  const keyOf = (r: { candidate_id?: string; name?: string }) => r.candidate_id || r.name || "";
+  it("flags only candidate keys that appear more than once", () => {
+    const rows = [
+      { candidate_id: "A1", name: "Asha" },
+      { candidate_id: "A1", name: "Asha" }, // stale + rejoin → duplicate
+      { candidate_id: "B2", name: "Bala" }
+    ];
+    const dupes = duplicateRowKeys(rows, keyOf);
+    expect(dupes.has("A1")).toBe(true);
+    expect(dupes.has("B2")).toBe(false);
+  });
+  it("falls back to name when there is no candidate id", () => {
+    const rows = [{ name: "Cara" }, { name: "Cara" }, { name: "Deepa" }];
+    const dupes = duplicateRowKeys(rows, keyOf);
+    expect(dupes.has("Cara")).toBe(true);
+    expect(dupes.has("Deepa")).toBe(false);
+  });
+  it("ignores rows with no usable key", () => {
+    const rows = [{}, {}];
+    expect(duplicateRowKeys(rows, keyOf).size).toBe(0);
+  });
+});
+
+describe("emptyAlertsHint (FIX-B3 #6)", () => {
+  it("says nothing-fired when alert types ARE shared", () => {
+    expect(emptyAlertsHint(true)).toBe("No open alerts for this room.");
+  });
+  it("explains intentional emptiness when NO alert types are shared", () => {
+    const text = emptyAlertsHint(false);
+    expect(text).toContain("No alert types are shared");
+    expect(text).not.toBe("No open alerts for this room.");
   });
 });

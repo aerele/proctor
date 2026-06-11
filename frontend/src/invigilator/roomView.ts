@@ -57,3 +57,58 @@ const GENERIC_ALERT_EXPLANATION =
 export function alertExplanation(type: string): string {
   return ALERT_EXPLANATIONS[type] ?? GENERIC_ALERT_EXPLANATION;
 }
+
+// FIX-B3 #4: the portal entry blurb must not promise a step that won't appear.
+// When the contest's room gate is ON the invigilator releases the start code /
+// starts the room (the GateCard renders). When it's OFF no start-code panel
+// exists, so the copy drops that clause and just describes the monitoring view.
+export function portalEntryBlurb(gateEnabled: boolean): string {
+  return gateEnabled
+    ? "Room console: release the start code, start the room, watch who is recording, and read your room's alerts. ID checks are manual (no QR scanning)."
+    : "Room console: watch who is recording and read your room's alerts. ID checks are manual (no QR scanning).";
+}
+
+// FIX-B3 #5: an invigilator room can show the SAME candidate twice — a stale
+// session left behind plus a fresh re-join. With identical name/roll/id the two
+// rows are indistinguishable. Disambiguate by the session START TIME so the
+// invigilator can tell "which one is live". Returns "" when the row has no
+// usable timestamp (nothing to show) or when the time is unparseable.
+export function sessionStartedLabel(createdAt: string | null | undefined): string {
+  const raw = String(createdAt ?? "").trim();
+  if (!raw) return "";
+  const ms = Date.parse(raw);
+  if (Number.isNaN(ms)) return "";
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// FIX-B3 #5: should we even SHOW the per-row session-start disambiguator? Only
+// when it adds signal — i.e. when more than one row shares the same candidate
+// identity in the room. A unique candidate needs no extra timestamp clutter.
+// Keyed by candidate id (falling back to name) so duplicates are detected the
+// same way the React key is composed.
+export function duplicateRowKeys<Row>(
+  rows: Row[],
+  keyOf: (row: Row) => string
+): Set<string> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const dupes = new Set<string>();
+  for (const [key, count] of counts) if (count > 1) dupes.add(key);
+  return dupes;
+}
+
+// FIX-B3 #6: distinguish an EMPTY alerts feed that is empty by configuration
+// (no alert types are shared with invigilators for this contest) from one that
+// is empty because nothing has fired yet. `alertsShared === false` means the
+// admin opted no types in, so empty reads as intentional, not broken.
+export function emptyAlertsHint(alertsShared: boolean): string {
+  return alertsShared
+    ? "No open alerts for this room."
+    : "No alert types are shared with invigilators for this contest.";
+}
