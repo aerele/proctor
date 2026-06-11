@@ -33,6 +33,7 @@ import type {
   IpReportResponse,
   IpReportScope,
   ProblemDoc,
+  ProblemLanguage,
   ProblemSummary,
   ProctorAlertTypeConfig,
   ProctorEvent,
@@ -3971,9 +3972,13 @@ export async function fetchCandidateRoute(): Promise<{ legacy_configured: boolea
   return request<{ legacy_configured: boolean }>("/api/candidate-route", { method: "GET" });
 }
 
-// ---- S-D: templates list (the create-from-template picker) -------------------
-// Full Templates tab CRUD is the S-I frontend wave; the Contests tab only
-// needs the LIST to instantiate from.
+// ---- S-D / FIX-B2 (#58): templates — the create-from-template picker AND the
+// full Templates-tab CRUD. A TEMPLATE is a named, reusable contest blueprint
+// (ordered bank-problem refs + default settings) the admin authors once and
+// instantiates into real contests from the Contests tab. The backend
+// (handler.mjs adminListTemplates/CreateTemplate/UpdateTemplate/DeleteTemplate/
+// CloneTemplate + src/templates.mjs) owns validation/storage; demo mode mirrors
+// it with a localStorage-backed store so a saved template survives a reload.
 
 export type ContestTemplateSummary = {
   slug: string;
@@ -3985,56 +3990,144 @@ export type ContestTemplateSummary = {
   updated_at: string;
 };
 
-type DemoTemplate = {
+// The FULL template doc (GET /api/admin/template?slug=…). defaults mirrors the
+// backend normalizeDefaults output exactly so the form can hydrate every field.
+export type ContestTemplateDetail = {
   slug: string;
   name: string;
+  description: string;
   archived: boolean;
   preset: boolean;
   problems: Array<{ problem_id: string; points: number | null; order: number }>;
-  defaults: { identity_label: string; room_gate_enabled: boolean; duration_minutes: number };
+  defaults: {
+    duration_minutes: number;
+    identity_label: string;
+    room_gate_enabled: boolean;
+    camera_recording: { enabled: boolean; fps: number; width: number };
+    enforcement: { mode: string; fullscreen_reentry_seconds: number; fullscreen_exit_limit: number };
+    evidence_retention_days: number;
+    languages: ProblemLanguage[];
+  };
+  created_at: string | null;
+  updated_at: string | null;
 };
 
-const DEMO_TEMPLATES: DemoTemplate[] = [
-  {
-    slug: "demo-aptitude-r1",
-    name: "Demo Aptitude — Round 1",
-    archived: false,
-    preset: false,
-    problems: [
-      { problem_id: "sum-two", points: null, order: 0 },
-      { problem_id: "reverse-words", points: null, order: 1 },
-      { problem_id: "max-window-sum", points: null, order: 2 }
-    ],
-    defaults: { identity_label: "Roll Number", room_gate_enabled: true, duration_minutes: 120 }
-  },
-  {
-    slug: "system-check",
-    name: "System check",
-    archived: false,
-    preset: true,
-    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
-    defaults: { identity_label: "Candidate ID", room_gate_enabled: false, duration_minutes: 30 }
-  }
-];
+export type TemplateSaveRequest = {
+  slug?: string;
+  name: string;
+  description?: string;
+  problems: Array<{ problem_id: string; points: number | null; order?: number }>;
+  defaults?: Partial<ContestTemplateDetail["defaults"]>;
+};
 
-function demoTemplateBySlug(slug: string): DemoTemplate {
-  const hit = DEMO_TEMPLATES.find((template) => template.slug === slug);
+const demoTemplatesKey = "aerele-proctor-demo-templates-v1";
+
+// The day-before lab-check preset (mirrors backend SEED_TEMPLATES.system-check).
+// It has no stored doc — it's merged into every list and cannot be deleted.
+const DEMO_SEED_TEMPLATE: ContestTemplateDetail = {
+  slug: "system-check",
+  name: "System check",
+  description: "Day-before lab check: instantiate as an always-open no-roster contest and run one trivial problem end-to-end on every machine.",
+  archived: false,
+  preset: true,
+  problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+  defaults: {
+    duration_minutes: 30,
+    identity_label: "Roll Number",
+    room_gate_enabled: false,
+    camera_recording: { enabled: true, fps: 10, width: 320 },
+    enforcement: { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 },
+    evidence_retention_days: 1,
+    languages: ["python", "cpp", "java", "javascript"]
+  },
+  created_at: null,
+  updated_at: null
+};
+
+function demoDefaults(partial?: Partial<ContestTemplateDetail["defaults"]>): ContestTemplateDetail["defaults"] {
+  const base = DEMO_SEED_TEMPLATE.defaults;
+  return {
+    duration_minutes: partial?.duration_minutes ?? 120,
+    identity_label: partial?.identity_label ?? "Roll Number",
+    room_gate_enabled: partial?.room_gate_enabled ?? true,
+    camera_recording: { ...base.camera_recording, ...(partial?.camera_recording ?? {}), width: partial?.camera_recording?.width ?? 640 },
+    enforcement: { ...base.enforcement, ...(partial?.enforcement ?? {}) },
+    evidence_retention_days: partial?.evidence_retention_days ?? 4,
+    languages: partial?.languages ? [...partial.languages] : [...base.languages]
+  };
+}
+
+function seedDemoTemplates(): ContestTemplateDetail[] {
+  const now = new Date().toISOString();
+  return [
+    {
+      slug: "demo-aptitude-r1",
+      name: "Demo Aptitude — Round 1",
+      description: "Three-problem aptitude opener. Edit me, then instantiate from the Contests tab.",
+      archived: false,
+      preset: false,
+      problems: [
+        { problem_id: "sum-two", points: null, order: 0 },
+        { problem_id: "reverse-words", points: null, order: 1 },
+        { problem_id: "max-window-sum", points: null, order: 2 }
+      ],
+      defaults: demoDefaults({ identity_label: "Roll Number", room_gate_enabled: true, duration_minutes: 120 }),
+      created_at: now,
+      updated_at: now
+    }
+  ];
+}
+
+function readDemoTemplates(): ContestTemplateDetail[] {
+  const raw = window.localStorage.getItem(demoTemplatesKey);
+  if (raw) {
+    try {
+      return JSON.parse(raw) as ContestTemplateDetail[];
+    } catch {
+      /* fall through to reseed */
+    }
+  }
+  const seeded = seedDemoTemplates();
+  window.localStorage.setItem(demoTemplatesKey, JSON.stringify(seeded));
+  return seeded;
+}
+
+function writeDemoTemplates(templates: ContestTemplateDetail[]): void {
+  window.localStorage.setItem(demoTemplatesKey, JSON.stringify(templates));
+}
+
+// Docs (localStorage) shadow the seed by slug; the seed merges in marked preset.
+function demoTemplatesMerged(): ContestTemplateDetail[] {
+  const bySlug = new Map<string, ContestTemplateDetail>();
+  bySlug.set(DEMO_SEED_TEMPLATE.slug, DEMO_SEED_TEMPLATE);
+  for (const doc of readDemoTemplates()) bySlug.set(doc.slug, doc);
+  return [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+function demoTemplateBySlug(slug: string): ContestTemplateDetail {
+  const hit = demoTemplatesMerged().find((template) => template.slug === slug);
   if (!hit) throw demoApiError(404, "template_not_found");
   return hit;
+}
+
+function demoTemplateTotalPoints(template: ContestTemplateDetail): number {
+  // The demo has no live bank-points map, so an explicit override counts and a
+  // blank counts 100 (the demo bank default) — enough to populate the column.
+  return template.problems.reduce((sum, entry) => sum + (entry.points ?? 100), 0);
 }
 
 export async function fetchTemplates(password: string): Promise<ContestTemplateSummary[]> {
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
-    return DEMO_TEMPLATES.map((template) => ({
+    return demoTemplatesMerged().map((template) => ({
       slug: template.slug,
       name: template.name,
       archived: template.archived,
       preset: template.preset,
       problem_count: template.problems.length,
-      total_points: 100 * template.problems.length,
-      updated_at: ""
+      total_points: demoTemplateTotalPoints(template),
+      updated_at: template.updated_at ?? ""
     }));
   }
   const response = await request<{ templates: ContestTemplateSummary[] }>("/api/admin/templates", {
@@ -4042,6 +4135,98 @@ export async function fetchTemplates(password: string): Promise<ContestTemplateS
     headers: { "x-admin-password": password }
   });
   return response.templates;
+}
+
+export async function fetchTemplateDetail(password: string, slug: string): Promise<ContestTemplateDetail> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    return demoTemplateBySlug(slug);
+  }
+  const response = await request<{ template: ContestTemplateDetail }>(
+    `/api/admin/template?slug=${encodeURIComponent(slug)}`,
+    { method: "GET", headers: { "x-admin-password": password } }
+  );
+  return response.template;
+}
+
+export async function createTemplateApi(password: string, body: TemplateSaveRequest): Promise<ContestTemplateDetail> {
+  if (demoMode) {
+    await wait(160);
+    assertDemoAdmin(password);
+    const name = body.name.trim();
+    if (!name) throw demoApiError(400, "name is required");
+    if (!body.problems.length) throw demoApiError(400, "problems must be a non-empty array");
+    const baseSlug = demoSlugify(name);
+    if (!baseSlug) throw demoApiError(400, "name must contain letters or digits");
+    const docs = readDemoTemplates();
+    let slug = baseSlug;
+    for (let n = 2; slug === DEMO_SEED_TEMPLATE.slug || docs.some((t) => t.slug === slug); n++) slug = `${baseSlug}-${n}`;
+    const now = new Date().toISOString();
+    const item: ContestTemplateDetail = {
+      slug, name, description: body.description ?? "", archived: false, preset: false,
+      problems: body.problems.map((entry, order) => ({ problem_id: entry.problem_id, points: entry.points ?? null, order: entry.order ?? order })),
+      defaults: demoDefaults(body.defaults),
+      created_at: now, updated_at: now
+    };
+    writeDemoTemplates([...docs, item]);
+    return item;
+  }
+  const response = await request<{ ok: boolean; template: ContestTemplateDetail }>("/api/admin/templates", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+  return response.template;
+}
+
+export async function updateTemplateApi(password: string, body: TemplateSaveRequest & { slug: string }): Promise<ContestTemplateDetail> {
+  if (demoMode) {
+    await wait(160);
+    assertDemoAdmin(password);
+    const docs = readDemoTemplates();
+    const existing = docs.find((t) => t.slug === body.slug)
+      ?? (body.slug === DEMO_SEED_TEMPLATE.slug ? DEMO_SEED_TEMPLATE : undefined);
+    if (!existing) throw demoApiError(404, "template_not_found");
+    const now = new Date().toISOString();
+    const item: ContestTemplateDetail = {
+      slug: existing.slug,
+      name: (body.name ?? existing.name).trim() || existing.name,
+      description: body.description ?? existing.description,
+      archived: existing.archived,
+      preset: false, // editing materializes a shadow doc over the seed
+      problems: (body.problems ?? existing.problems).map((entry, order) => ({ problem_id: entry.problem_id, points: entry.points ?? null, order: entry.order ?? order })),
+      defaults: demoDefaults({ ...existing.defaults, ...(body.defaults ?? {}) }),
+      created_at: existing.created_at ?? now, updated_at: now
+    };
+    writeDemoTemplates([...docs.filter((t) => t.slug !== body.slug), item]);
+    return item;
+  }
+  const response = await request<{ ok: boolean; template: ContestTemplateDetail }>("/api/admin/template-update", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+  return response.template;
+}
+
+export async function deleteTemplateApi(password: string, slug: string): Promise<void> {
+  if (demoMode) {
+    await wait(140);
+    assertDemoAdmin(password);
+    const docs = readDemoTemplates();
+    if (!docs.some((t) => t.slug === slug)) {
+      if (slug === DEMO_SEED_TEMPLATE.slug) throw demoApiError(400, "template_preset_undeletable");
+      throw demoApiError(404, "template_not_found");
+    }
+    writeDemoTemplates(docs.filter((t) => t.slug !== slug));
+    return;
+  }
+  await request<{ ok: boolean }>("/api/admin/template-delete", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ slug })
+  });
 }
 
 // ---- S3: invigilator portal + room start gate -------------------------------

@@ -117,6 +117,7 @@ const createReq = (body, h = ADMIN) => makeReq({ method: "POST", path: "/api/adm
 const updateReq = (body, h = ADMIN) => makeReq({ method: "POST", path: "/api/admin/template-update", headers: h, body });
 const archiveReq = (body, h = ADMIN) => makeReq({ method: "POST", path: "/api/admin/template-archive", headers: h, body });
 const cloneReq = (body, h = ADMIN) => makeReq({ method: "POST", path: "/api/admin/template-clone", headers: h, body });
+const deleteReq = (body, h = ADMIN) => makeReq({ method: "POST", path: "/api/admin/template-delete", headers: h, body });
 
 function validTemplate(overrides = {}) {
   return {
@@ -239,6 +240,7 @@ test("templates: every admin endpoint rejects without the admin password", async
   assert.equal((await call(updateReq({ slug: "x" }, {}))).statusCode, 401);
   assert.equal((await call(archiveReq({ slug: "x", archived: true }, {}))).statusCode, 401);
   assert.equal((await call(cloneReq({ slug: "x" }, {}))).statusCode, 401);
+  assert.equal((await call(deleteReq({ slug: "x" }, {}))).statusCode, 401);
 });
 
 // ---- endpoints: create / get / list -----------------------------------------------
@@ -414,4 +416,31 @@ test("clone: deep copy under a new slug; defaults name 'Copy of …'; fresh time
   assert.equal(seedClone.statusCode, 200);
   assert.equal(seedClone.body.template.slug, "copy-of-system-check");
   assert.equal(seedClone.body.template.defaults.duration_minutes, 30);
+});
+
+// ---- endpoints: delete (hard remove of an author-owned template) ------------------------
+
+test("delete: removes the doc; it drops off the list; the seed preset cannot be deleted", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore });
+  await call(createReq(validTemplate({ name: "Disposable" })));
+  assert.ok(firestore._collections.get("tp_templates").has("disposable"));
+
+  const res = await call(deleteReq({ slug: "disposable" }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(firestore._collections.get("tp_templates").has("disposable"), false);
+
+  const list = await call(listReq());
+  assert.equal(list.body.templates.some((t) => t.slug === "disposable"), false);
+
+  // Unknown slug -> 404.
+  assert.equal((await call(deleteReq({ slug: "ghost" }))).statusCode, 404);
+
+  // The system-check seed has no doc to delete and must never disappear from the
+  // list — deleting it is a 400 (clone-then-delete is the customize path).
+  const seed = await call(deleteReq({ slug: "system-check" }));
+  assert.equal(seed.statusCode, 400);
+  assert.equal(seed.body.error, "template_preset_undeletable");
+  assert.ok((await call(listReq())).body.templates.some((t) => t.slug === "system-check"));
 });
