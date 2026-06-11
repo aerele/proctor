@@ -5,12 +5,13 @@ import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
-import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, saveContestRoster, stampSelectionDone } from "./identity.mjs";
+import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
 import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people.mjs";
 import { buildIpReport } from "./ipReport.mjs";
+import { buildExportBundle, evaluatePurgeGate, exportObjectPath, selectExpiredEvidence, selectExpiredExports } from "./dataLifecycle.mjs";
 
 let firestore = new Firestore();
 let storage = new Storage();
@@ -158,6 +159,10 @@ const GATE_ATTEMPT_LIMIT = positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20);
 const INVIGILATOR_SESSIONS_LIMIT = 500;
 const INVIGILATOR_ALERTS_LIMIT = 100;
 const ALERTS_INGEST_API_KEY = process.env.ALERTS_INGEST_API_KEY;
+// S-H: the Cloud Scheduler key for the daily retention sweep. Closed-by-default
+// (mirrors ALERTS_INGEST_API_KEY): no key configured -> the sweep endpoint
+// rejects every x-api-key request (admin password still works for manual runs).
+const RETENTION_SWEEP_API_KEY = process.env.RETENTION_SWEEP_API_KEY;
 const URL_EXPIRY_SECONDS = Number(process.env.URL_EXPIRY_SECONDS || "900");
 const ALERTS_QUERY_LIMIT = 500;
 const SESSIONS_QUERY_LIMIT = 2000;
@@ -166,6 +171,10 @@ const SESSIONS_QUERY_LIMIT = 2000;
 // stays comfortably under this cap; bounded so a pathological contest can't
 // blow the request.
 const SUBMISSIONS_RESULTS_LIMIT = 50000;
+// S-G export/purge: the per-dataset ceiling the dedicated lifecycle readers use
+// (F9 D11 — never the capped admin helpers). Generous; a contest beyond it is a
+// deploy-time signal, surfaced by the manifest-count cross-check test.
+const EXPORT_DATASET_LIMIT = 50000;
 // S-J People directory: max persons we fan out per-person enrollment counts for
 // in ONE directory response (the admin narrows with search/college first; a
 // person page reads ONE person's full cross-round scorecard unbounded by this).
@@ -320,6 +329,9 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/contest-selection") return send(res, 200, await adminContestSelection(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection-done") return send(res, 200, await adminContestSelectionDone(req));
     if (req.method === "POST" && path === "/api/admin/contest-adopt") return send(res, 200, await adminContestAdopt(req));
+    if (req.method === "POST" && path === "/api/admin/contest-export") return send(res, 200, await adminContestExport(req));
+    if (req.method === "POST" && path === "/api/admin/contest-purge") return send(res, 200, await adminContestPurge(req));
+    if (req.method === "POST" && path === "/api/admin/retention-sweep") return send(res, 200, await adminRetentionSweep(req));
     if (req.method === "GET" && path === "/api/admin/people") return send(res, 200, await adminPeople(req));
     if (req.method === "GET" && path === "/api/admin/person") return send(res, 200, await adminPerson(req));
     if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
@@ -3835,6 +3847,407 @@ async function adminContestAdopt(req) {
     return badRequest("unknown contest");
   }
   return adoptContestIntoPersonModel(contest, body, adminActor(req, body));
+}
+
+// ---- Wave7-G data lifecycle (S-G/S-H): export → triple-gated purge → sweep ----
+//
+// SENSITIVE: irreversible deletion. The pure decision/assembly/selection logic
+// lives in dataLifecycle.mjs (unit-tested on a clock seam); THIS layer owns the
+// Firestore reads, GCS object writes/deletes, tombstone writes and audit rows,
+// and never deletes a contest's heavy data unless evaluatePurgeGate() returns
+// ok:true. resolveContest/scopedQuery keep the F9 no-bleed invariant intact —
+// every read is scoped to the RESOLVED contest; persons/colleges/other contests
+// are never touched.
+
+// The per-contest datasets a purge deletes, in delete order. Each is keyed by a
+// `contest_slug` field on its docs (denormalized on every NEW write) so a
+// scopedQuery on the resolved contest selects exactly this contest's docs.
+const PURGE_DATASETS = [
+  { key: "alerts", collection: () => ALERTS_COLLECTION },
+  { key: "submission_events", collection: () => SUBMISSION_EVENTS_COLLECTION },
+  { key: "live_locks", collection: () => LIVE_LOCK_COLLECTION },
+  { key: "room_gates", collection: () => ROOM_GATES_COLLECTION }
+];
+
+// Dedicated reader for a contest-scoped dataset (F9 D11 — deliberately NOT the
+// capped SESSIONS_QUERY_LIMIT/REVIEWS_QUERY_LIMIT admin helpers, which would
+// silently truncate a big contest). Bounded by the generous export ceiling
+// (50k) and scoped through the scopedQuery chokepoint so the no-bleed invariant
+// holds. A contest exceeding this ceiling is a deploy-time signal, not a silent
+// data-loss bug — the manifest counts cross-check in tests pin truncation-free.
+async function readContestDataset(collectionName, contest) {
+  const snap = await scopedQuery(firestore.collection(collectionName), contest)
+    .limit(EXPORT_DATASET_LIMIT)
+    .get();
+  return snap.docs.map((doc) => ({ _id: doc.id, ...doc.data() }));
+}
+
+// Submissions need the legacy session-join leg too (F9 D7): NEW docs carry
+// contest_slug, but legacy docs only carry session_id. We read the contest's
+// sessions first, then union (scoped-by-contest_slug submissions) with (any
+// submission whose session_id belongs to this contest).
+async function readContestSubmissions(contest, sessionIds) {
+  const byField = await readContestDataset(SUBMISSIONS_COLLECTION, contest);
+  const seen = new Set(byField.map((s) => s._id));
+  if (sessionIds.size) {
+    const allSnap = await firestore.collection(SUBMISSIONS_COLLECTION).limit(EXPORT_DATASET_LIMIT).get();
+    for (const doc of allSnap.docs) {
+      const data = doc.data();
+      if (seen.has(doc.id)) continue;
+      if (sessionIds.has(String(data.session_id || ""))) {
+        byField.push({ _id: doc.id, ...data });
+        seen.add(doc.id);
+      }
+    }
+  }
+  return byField;
+}
+
+// Gather every per-contest dataset for export/purge. ONE place so export and
+// purge agree on exactly what a contest's data IS.
+async function gatherContestDatasets(contest) {
+  const sessions = await readContestDataset(SESSION_COLLECTION, contest);
+  const sessionIds = new Set(sessions.map((s) => String(s.session_id || s._id)));
+  const submissions = await readContestSubmissions(contest, sessionIds);
+  const enrollments = (await listEnrollments(contest)).map((e) => ({ _id: enrollmentIdOfHandler(contest.slug, e.person_id), ...e }));
+  const personIds = [...new Set(enrollments.map((e) => String(e.person_id || "")).filter(Boolean))];
+  const personsMap = await getPersonsByIds(personIds);
+  const persons = [...personsMap.entries()].map(([id, p]) => ({ _id: id, ...p }));
+  const colleges = (await listColleges()).map((c) => ({ _id: c.college_norm, ...c }));
+  // Review docs carry no `id` field; their doc id is deterministic from the
+  // stored (username_norm, reviewer_name, contest_slug) — reconstruct it so the
+  // purge delete-by-id targets the REAL doc (a legacy slugless review carries
+  // contest_slug:"" and its id is slugless — reconstruct that form too).
+  const reviews = (await getAllReviews(contest.slug)).map((r) => ({
+    _id: reviewRecordId(String(r.username_norm || ""), reviewerKeyFor(String(r.reviewer_name || "")), String(r.contest_slug || "")),
+    ...r
+  }));
+  // Review claims (at most one per username/contest); doc id is
+  // {usernameNorm}::{slug} (slugless = legacy). reviewContestSlugOf maps a
+  // legacy/synth contest to "" so getActiveClaims reads the right scope.
+  const reviewScopeSlug = await reviewContestSlugOf(contest.slug).catch(() => contest.slug);
+  const claims = await getActiveClaims(reviewScopeSlug);
+  const review_claims = claims.map((c) => ({
+    _id: reviewScopeSlug ? `${String(c.username_norm || "")}::${reviewScopeSlug}` : String(c.username_norm || ""),
+    ...c
+  }));
+
+  const datasets = { sessions, submissions, enrollments, persons, colleges, reviews, review_claims };
+  for (const ds of PURGE_DATASETS) {
+    datasets[ds.key] = await readContestDataset(ds.collection(), contest);
+  }
+  // roster_entries: this contest's active-version entries (keyed by version).
+  datasets.roster_entries = await readContestRosterEntries(contest);
+  return datasets;
+}
+
+function enrollmentIdOfHandler(slug, personId) {
+  return `${slug}::${personId}`;
+}
+
+async function readContestRosterEntries(contest) {
+  const meta = await getContestRosterMeta(contest);
+  if (!meta) return [];
+  const snap = await firestore.collection(ROSTER_COLLECTION)
+    .where("roster_version", "==", meta.version)
+    .limit(ROSTER_LIMIT)
+    .get();
+  return snap.docs.map((doc) => ({ _id: doc.id, ...doc.data() }));
+}
+
+// POST /api/admin/contest-export {contest} — assemble a self-contained archive
+// of the contest's data + the Results rollup, write it to GCS under the
+// contest's exports/ prefix, stamp last_export_at + the export object path on
+// the contest doc, and audit it. Returns a reference/temp (signed) URL. The
+// heavy video is NOT in the archive (GCS-native; F9 §3.1).
+async function adminContestExport(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const contest = await personContestForFilter(body.contest ?? body.contest_slug);
+  if (!contest) return badRequest("contest must name a person-mode contest");
+
+  const exportedAt = new Date().toISOString();
+  const datasets = await gatherContestDatasets(contest);
+  // The Results rollup is the human-facing scores snapshot; reuse the SAME
+  // computation the Results tab serves (single source of truth).
+  const results = await computeContestResults(contest).catch(() => null);
+  const bundle = buildExportBundle({ contest, datasets, results, exportedAt });
+
+  // Serialize the bundle as ONE newline-delimited object (no heavy zip dep — a
+  // self-describing text bundle: each file is a `=== name ===` section). The
+  // manifest counts + per-section bodies make it losslessly re-importable.
+  const archiveBody = bundle.entries
+    .map((entry) => `=== ${entry.name} ===\n${entry.body}`)
+    .join("\n\n");
+  const gcsKey = exportObjectPath(contest.slug, exportedAt);
+  // The storage call goes through the existing bucket() client so tests stub it.
+  await bucket().file(gcsKey).save(archiveBody, { contentType: "application/x-ndjson" });
+  let signedUrl = "";
+  try {
+    const [url] = await bucket().file(gcsKey).getSignedUrl({
+      version: "v4", action: "read", expires: Date.now() + URL_EXPIRY_SECONDS * 1000
+    });
+    signedUrl = url;
+  } catch (err) {
+    // A signing failure must not lose the export — the object is already written.
+    console.error(`export signed-url failed for ${gcsKey}: ${err?.message || err}`);
+  }
+
+  const lastExport = { at: exportedAt, gcs_key: gcsKey, counts: bundle.manifest.counts };
+  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set({
+    last_export: lastExport,
+    last_export_at: exportedAt,
+    updated_at: exportedAt
+  }, { merge: true });
+
+  await writeAudit({
+    action: "contest_export",
+    contest_slug: contest.slug,
+    gcs_key: gcsKey,
+    counts: bundle.manifest.counts
+  }, adminActor(req, body), exportedAt);
+
+  return { ok: true, gcs_key: gcsKey, signed_url: signedUrl, counts: bundle.manifest.counts, exported_at: exportedAt };
+}
+
+// POST /api/admin/contest-purge {contest, confirm, slug, include_evidence} —
+// the TRIPLE-GATED, server-enforced, irreversible purge (F9 §3.2 / D12).
+// Gates: a prior successful export (last_export_at), an explicit confirm flag,
+// and the typed contest slug echoed in the body. Deletes the heavy data,
+// RETAINS enrollments + final_snapshot (purge-survivor, vision §2.9), NEVER
+// touches persons/colleges/other contests, and stamps a tombstone. Idempotent.
+async function adminContestPurge(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const contest = await personContestForFilter(body.contest ?? body.contest_slug);
+  if (!contest) return badRequest("contest must name a person-mode contest");
+
+  // SERVER-ENFORCED triple gate (the UI mirrors this; it is not the authority).
+  const gate = evaluatePurgeGate({
+    contest,
+    confirm: body.confirm,
+    typedSlug: body.slug ?? body.confirm_name
+  });
+  if (!gate.ok) throw httpError(400, gate.code);
+  if (gate.already_purged) {
+    return { ok: true, already_purged: true, contest: contest.slug };
+  }
+
+  const includeEvidence = body.include_evidence === true;
+  const now = new Date().toISOString();
+
+  // Read everything FIRST so the tombstone records accurate counts + evidence
+  // prefixes, and so the purge-survivor snapshot is computed from live data.
+  const datasets = await gatherContestDatasets(contest);
+  const sessions = datasets.sessions;
+  const evidencePrefixes = [...new Set(sessions.map((s) => sessionPrefix(s)).filter(Boolean))];
+
+  // PURGE-SURVIVOR: refresh each active enrollment's final_snapshot from the
+  // current Results rollup BEFORE deleting the heavy data it was computed from
+  // (vision §2.9). stampSelectionDone freezes the snapshot; it also (re)stamps
+  // selection_done_at, which is harmless/correct at purge time.
+  const results = await computeContestResults(contest).catch(() => null);
+  if (results && Array.isArray(results.rows)) {
+    const snapshotByPerson = new Map();
+    for (const row of results.rows) {
+      const perProblem = {};
+      for (const cell of row.per_problem || []) perProblem[cell.problem_id] = cell.best_score;
+      snapshotByPerson.set(row.person_id, {
+        total_score: row.total,
+        per_problem: perProblem,
+        integrity: { alerts_by_severity: row.integrity.alerts_by_severity, review_verdict: row.integrity.review_verdict },
+        unique_id: row.candidate_id, name: row.name, session_status: ""
+      });
+    }
+    await stampSelectionDone(contest, snapshotByPerson, adminActor(req, body));
+  }
+
+  // Write the tombstone audit row BEFORE deletion starts (F9 §3.2).
+  await writeAudit({ action: "contest_purge_start", contest_slug: contest.slug, include_evidence: includeEvidence }, adminActor(req, body), now);
+
+  // Evidence: if include_evidence, delete the GCS objects NOW via per-session
+  // storage_prefix iteration (the only legacy-correct path; exports/ excluded).
+  // Otherwise persist the prefixes onto the tombstone for the later sweep (D13).
+  let evidenceDeleted = 0;
+  if (includeEvidence) {
+    for (const prefix of evidencePrefixes) {
+      evidenceDeleted += await deleteEvidencePrefix(prefix);
+    }
+  }
+
+  // Delete the heavy Firestore data (idempotent per-doc deletes). Enrollments
+  // are KEPT. Persons/colleges are KEPT.
+  const counts = {};
+  counts.submissions = await deleteDocsByIds(SUBMISSIONS_COLLECTION, datasets.submissions);
+  counts.reviews = await deleteDocsByIds(REVIEW_COLLECTION, datasets.reviews);
+  counts.review_claims = await deleteDocsByIds(REVIEW_CLAIMS_COLLECTION, datasets.review_claims);
+  counts.roster_entries = await deleteDocsByIds(ROSTER_COLLECTION, datasets.roster_entries);
+  for (const ds of PURGE_DATASETS) {
+    counts[ds.key] = await deleteDocsByIds(ds.collection(), datasets[ds.key]);
+  }
+  // Roster meta doc (settings collection, keyed roster_meta::{slug}) + the
+  // review roster doc (review_state, keyed review_roster::{slug}).
+  await firestore.collection(SETTINGS_COLLECTION).doc(rosterMetaIdFor(contest.slug)).delete().catch(() => {});
+  await reviewRosterRef(contest.slug).delete().catch(() => {});
+  // Sessions LAST (so evidence-prefix capture above already happened).
+  counts.sessions = await deleteDocsByIds(SESSION_COLLECTION, sessions);
+
+  // TOMBSTONE: kept contest doc + db_purged_at + counts + (if evidence retained)
+  // the prefix list the sweep will use.
+  const tombstone = {
+    db_purged_at: now,
+    purged_at: now,
+    purge_counts: counts,
+    updated_at: now
+  };
+  if (includeEvidence) {
+    tombstone.evidence_purged_at = now;
+    tombstone.evidence_prefixes = null;
+  } else {
+    tombstone.evidence_prefixes = evidencePrefixes;
+  }
+  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set(tombstone, { merge: true });
+
+  await writeAudit({
+    action: "contest_purge_done",
+    contest_slug: contest.slug,
+    counts,
+    evidence_deleted: includeEvidence ? evidenceDeleted : 0,
+    evidence_retained: !includeEvidence
+  }, adminActor(req, body), new Date().toISOString());
+
+  return {
+    ok: true,
+    contest: contest.slug,
+    counts,
+    evidence_deleted: includeEvidence ? evidenceDeleted : 0,
+    evidence_retained: !includeEvidence,
+    enrollments_retained: true
+  };
+}
+
+// Idempotent per-doc deletes for a list of {_id, ...} docs in a collection.
+// Bounded concurrency; a missing doc delete is a no-op (resume-safe).
+async function deleteDocsByIds(collectionName, docs) {
+  const ids = (Array.isArray(docs) ? docs : []).map((d) => d._id).filter(Boolean);
+  await mapWithConcurrency(ids, 20, async (id) => {
+    await firestore.collection(collectionName).doc(id).delete().catch(() => {});
+  });
+  return ids.length;
+}
+
+// Delete every GCS object under one session storage_prefix (evidence/recordings).
+// The exports/ subtree can never sit under a session prefix, so it is excluded
+// by construction. Returns the count deleted.
+async function deleteEvidencePrefix(prefix) {
+  if (!prefix || prefix.startsWith("exports/")) return 0;
+  let deleted = 0;
+  const [files] = await bucket().getFiles({ prefix });
+  await mapWithConcurrency(files, 20, async (file) => {
+    try { await file.delete(); deleted += 1; } catch { /* resume-safe: retried next sweep */ }
+  });
+  return deleted;
+}
+
+// POST /api/admin/retention-sweep — the daily Cloud Scheduler job (S-H / F9
+// §3.4, Decision 14). Authed by the scheduler key (x-api-key) OR the admin
+// password (manual "run now"). Closed-by-default: no key configured AND no admin
+// password => reject. For each contest whose retention window elapsed it deletes
+// the EVIDENCE (keeping results/snapshots) and stamps evidence_purged_at only
+// when a final listing returns empty (resume-safe). It ALSO deletes export zips
+// older than 10 days (vision §10.4). Reports what it purged.
+async function adminRetentionSweep(req) {
+  requireSweepAuth(req);
+  const body = parseBody(req);
+  const now = new Date().toISOString();
+  const actor = adminActor(req, body);
+
+  // All real contests (archived included — a purged/archived contest may still
+  // hold evidence due for deletion). Cross-contest read is the deliberate sweep.
+  const contestsSnap = await firestore.collection(CONTESTS_COLLECTION).limit(2000).get();
+  const contests = contestsSnap.docs.map((doc) => doc.data());
+  const due = selectExpiredEvidence(contests, now);
+
+  const evidencePurged = [];
+  for (const contest of due) {
+    const result = await sweepContestEvidence(contest, actor);
+    evidencePurged.push(result);
+  }
+
+  // Export-zip retention (vision §10.4): list every exports/ object, delete the
+  // ones older than 10 days. ONE bucket listing under the shared exports/ prefix.
+  let exportsDeleted = 0;
+  try {
+    const [files] = await bucket().getFiles({ prefix: "exports/" });
+    const listed = files.map((file) => ({
+      name: file.name,
+      created_at: file.metadata?.timeCreated || file.metadata?.updated || "",
+      _file: file
+    }));
+    const expired = selectExpiredExports(listed, now);
+    await mapWithConcurrency(expired, 20, async (item) => {
+      try { await item._file.delete(); exportsDeleted += 1; } catch { /* retried next sweep */ }
+    });
+  } catch (err) {
+    console.error(`export-zip sweep failed: ${err?.message || err}`);
+  }
+
+  await writeAudit({
+    action: "retention_sweep",
+    contests_swept: evidencePurged.length,
+    exports_deleted: exportsDeleted
+  }, actor, now);
+
+  return { ok: true, swept_at: now, evidence_purged: evidencePurged, exports_deleted: exportsDeleted };
+}
+
+// Delete one contest's evidence and stamp evidence_purged_at ONLY if the final
+// listing is empty (resume-safe; a scheduler retry finishes a timed-out run).
+// Uses the tombstone evidence_prefixes list when present (DB already purged), a
+// per-session storage_prefix pass otherwise, PLUS the reconstructed
+// contests/{slug}/sessions/ prefix as belt-and-braces (D13).
+async function sweepContestEvidence(contest, actor) {
+  const prefixes = new Set();
+  if (Array.isArray(contest.evidence_prefixes)) {
+    for (const p of contest.evidence_prefixes) if (p) prefixes.add(p);
+  } else {
+    // DB not purged yet — derive prefixes from the live sessions.
+    const sessions = await readContestDataset(SESSION_COLLECTION, contest);
+    for (const s of sessions) { const p = sessionPrefix(s); if (p) prefixes.add(p); }
+  }
+  // Belt-and-braces reconstructed prefix (catches anything the per-session list
+  // missed; legacy slugless paths still rely on the explicit list above).
+  prefixes.add(`contests/${contest.slug}/sessions/`);
+
+  let deleted = 0;
+  for (const prefix of prefixes) deleted += await deleteEvidencePrefix(prefix);
+
+  // Stamp ONLY when a final listing of the reconstructed prefix is empty.
+  const [remaining] = await bucket().getFiles({ prefix: `contests/${contest.slug}/sessions/` });
+  const stampable = (remaining || []).length === 0;
+  const now = new Date().toISOString();
+  const patch = { evidence_prefixes: null, updated_at: now };
+  if (stampable) patch.evidence_purged_at = now;
+  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set(patch, { merge: true });
+
+  await writeAudit({
+    action: "evidence_sweep",
+    contest_slug: contest.slug,
+    objects_deleted: deleted,
+    completed: stampable
+  }, actor, now);
+
+  return { contest: contest.slug, objects_deleted: deleted, completed: stampable };
+}
+
+// Sweep auth: the scheduler key (x-api-key === RETENTION_SWEEP_API_KEY) OR the
+// admin password. Closed-by-default — with neither configured nothing passes.
+function requireSweepAuth(req) {
+  const admin = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
+  if (ADMIN_PASSWORD && safeEqual(admin, ADMIN_PASSWORD)) return;
+  const key = req.get?.("x-api-key") || req.headers?.["x-api-key"] || "";
+  if (RETENTION_SWEEP_API_KEY && safeEqual(key, RETENTION_SWEEP_API_KEY)) return;
+  throw httpError(401, "Unauthorized");
 }
 
 // ---- S-J §2.14 People tab (directory + cross-round scorecard) ----------------
