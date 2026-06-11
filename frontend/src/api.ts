@@ -2156,14 +2156,16 @@ function demoAlerts(): Alert[] {
 
 // Default per-type proctor alert config — mirrors the backend
 // DEFAULT_PROCTOR_ALERT_SETTINGS so the demo console renders the same toggle list.
+// F9.3 (Wave6, Karthi): show_to_invigilator DEFAULTS ALL OFF — the admin opts in
+// per type; nothing is shared with invigilators by default.
 const DEFAULT_DEMO_ALERT_SETTINGS: AlertSettings = {
   proctor: {
-    recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
-    screen_share_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
-    recording_error: { enabled: true, severity: "critical", show_to_invigilator: true },
+    recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: false },
+    screen_share_stopped: { enabled: true, severity: "critical", show_to_invigilator: false },
+    recording_error: { enabled: true, severity: "critical", show_to_invigilator: false },
     // F5.3: the fullscreen enforcement ladder tripped (alert display only —
     // the block-mode lock is policy, governed by enforcement_mode).
-    fullscreen_enforcement: { enabled: true, severity: "critical", show_to_invigilator: true },
+    fullscreen_enforcement: { enabled: true, severity: "critical", show_to_invigilator: false },
     ip_changed: { enabled: true, severity: "warning", show_to_invigilator: false },
     tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: false },
     tab_away: { enabled: true, severity: "warning", show_to_invigilator: false, threshold_seconds: 12 },
@@ -3672,16 +3674,16 @@ export async function fetchInvigilatorRoom(password: string, room: string, conte
         locked_reason: s.locked_reason,
         created_at: s.created_at
       }));
-    // F9.3 parity: honour show_to_invigilator per type (catalog-unknown types
-    // fall back to severity — critical shown). M12/M13 parity: NO detail, NO
-    // session_id on the projected alert rows. The demo alert store belongs to
-    // the LEGACY population — a pinned contest's feed starts empty.
+    // F9.3 parity (Wave6): honour show_to_invigilator per type — DEFAULT ALL OFF,
+    // and catalog-unknown types are never shared (no opt-in switch exists). M12/M13
+    // parity: NO detail, NO session_id on the projected alert rows. The demo alert
+    // store belongs to the LEGACY population — a pinned contest's feed starts empty.
     const alertSettings = readDemoAlertSettings();
     const alerts: InvigilatorAlert[] = personContest ? [] : readDemoAlerts()
       .filter((a) => String(a.room || "") === roomLabel && !a.archived)
       .filter((a) => {
         const config = alertSettings.proctor[a.type];
-        return config ? config.show_to_invigilator === true : a.severity === "critical";
+        return config ? config.show_to_invigilator === true : false;
       })
       .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
       .slice(0, 100)

@@ -799,8 +799,9 @@ test("fullscreen_enforcement appears in the proctor alert-settings catalog (admi
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   const res = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings", headers: adminHeaders }));
   assert.equal(res.statusCode, 200);
+  // Wave6 (Karthi): show_to_invigilator DEFAULTS OFF — the admin opts each type in.
   assert.deepEqual(res.body.proctor.fullscreen_enforcement,
-    { enabled: true, severity: "critical", show_to_invigilator: true });
+    { enabled: true, severity: "critical", show_to_invigilator: false });
 });
 
 test("a disabled fullscreen_enforcement alert type still locks in block mode (alert is display-only)", async () => {

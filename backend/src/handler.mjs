@@ -4208,19 +4208,23 @@ const SURE_SHOT_EVENT_TYPES = {
 // minimum continuous "HackerRank not visible" span the monitoring tab-away
 // detector must observe before raising an alert. This is the source of truth for
 // the detector's --min-gap-seconds.
-// F9.3: show_to_invigilator gates each type's appearance on the INVIGILATOR room
-// dashboard's alert feed (server-side filter in invigilatorRoom; the admin
-// console always sees everything). Defaults: critical sure-shots visible,
-// warning-grade noise admin-only.
+// F9.3 (Karthi decision, Wave6): show_to_invigilator gates each type's appearance
+// on the INVIGILATOR room dashboard's alert feed (server-side filter in
+// invigilatorRoom; the admin console always sees everything). The admin OPTS IN
+// per type — DEFAULT ALL OFF: nothing is shared with invigilators until the admin
+// explicitly ticks "Share with invigilator" for a type. An empty/absent stored
+// config therefore shares NOTHING (back-compat: a doc saved before this flag
+// existed had no show_to_invigilator, which merges to the default → false → not
+// shared, so no historical doc silently leaks alerts to invigilators).
 const TAB_AWAY_DEFAULT_THRESHOLD_SECONDS = 12;
 const DEFAULT_PROCTOR_ALERT_SETTINGS = {
-  recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
-  screen_share_stopped: { enabled: true, severity: "critical", show_to_invigilator: true },
-  recording_error: { enabled: true, severity: "critical", show_to_invigilator: true },
+  recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: false },
+  screen_share_stopped: { enabled: true, severity: "critical", show_to_invigilator: false },
+  recording_error: { enabled: true, severity: "critical", show_to_invigilator: false },
   // F5.3: the fullscreen enforcement ladder tripped (countdown expired / exit
   // limit exceeded). Disabling this hides the ALERT only — the block-mode lock
   // itself is policy, not alerting, and is governed by enforcement_mode.
-  fullscreen_enforcement: { enabled: true, severity: "critical", show_to_invigilator: true },
+  fullscreen_enforcement: { enabled: true, severity: "critical", show_to_invigilator: false },
   ip_changed: { enabled: true, severity: "warning", show_to_invigilator: false },
   tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: false },
   tab_away: { enabled: true, severity: "warning", show_to_invigilator: false, threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
@@ -4271,14 +4275,17 @@ function alertTypeConfig(settings, type, fallbackSeverity) {
   return { enabled: true, severity: fallbackSeverity };
 }
 
-// F9.3: does this STORED alert appear on the invigilator room dashboard?
-// Catalog types follow their show_to_invigilator config; catalog-UNKNOWN types
-// (legacy invalid_share_surface, future ingest types) fall back to severity —
-// critical shown, anything quieter stays admin-only.
+// F9.3 (Karthi decision, Wave6): does this STORED alert appear on the invigilator
+// room dashboard? Catalog types follow their explicit show_to_invigilator config;
+// catalog-UNKNOWN types (legacy invalid_share_surface, future ingest types) are
+// NOT shared — the admin can only opt in types the catalog actually exposes, so
+// an unknown type has no opt-in switch and stays admin-only (matches the new
+// default-all-off contract: nothing is surfaced to invigilators unless an
+// explicit boolean flag says so).
 function isAlertShownToInvigilator(settings, alert) {
   const entry = settings?.proctor?.[alert?.type];
   if (entry) return entry.show_to_invigilator === true;
-  return alert?.severity === "critical";
+  return false;
 }
 
 // Recorder states that mean "not recording" for the heartbeat sure-shot.
