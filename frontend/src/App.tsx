@@ -47,8 +47,9 @@ import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
 //
 // Candidate-facing copy is surface-specific (studentCopy.ts): with a problem
 // assigned, no student string may direct the candidate to HackerRank. The copy
-// keys off Boolean(sessionConfig?.problem) per session — before a session
-// exists the client cannot know, so pre-session copy uses the legacy variant.
+// keys off ownEditorCopy (UX-H1): Boolean(sessionConfig?.problem) once a
+// session exists, with a pinned ?contest= link selecting the own-editor
+// variant pre-session too (pinned contests are own-editor sessions).
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -312,6 +313,16 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const sessionProblems = sessionConfig?.problems ?? (sessionConfig?.problem ? [sessionConfig.problem] : []);
   const activeProblem = sessionConfig?.problem ?? sessionProblems[0] ?? null;
   const hasProblem = activeProblem !== null;
+  // UX-H1: which COPY variant (own-editor vs legacy HackerRank) the candidate
+  // sees. The problem only arrives with the start/resume response, so keying
+  // copy off hasProblem alone left the pre-start rules + consent page on the
+  // legacy variants (and silently dropped the keystroke-recording consent
+  // clause). Every pinned ?contest= candidate is an own-editor session, so a
+  // pinned contest selects own-editor copy too (the public exam-config payload
+  // carries no own-editor flag to gate on instead; a pinned legacy-HackerRank
+  // contest would mis-show own-editor copy — that flow is not in use).
+  // Behavior gates (the W1 exam branch) still key off hasProblem.
+  const ownEditorCopy = hasProblem || pinned !== null;
   // F10.1: is the separate low-res camera RECORDING enabled? Pre-session the
   // public exam-config carries it (the consent disclosure renders before any
   // session exists); once a session starts, its upload_config is authoritative.
@@ -581,7 +592,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       onRetry: retryPermission,
       onContinue: confirmPermissions
     },
-    ownEditor: hasProblem,
+    ownEditor: ownEditorCopy,
     remainingLabel: examRemainingMs !== null ? formatRemaining(examRemainingMs) : null,
     timeUp: examTimeUp
   };
@@ -1018,7 +1029,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             kind: "share_cancelled",
             message: "Screen sharing stopped, so recording is paused. This is logged. Press Resume screen share and choose your Entire Screen to continue — do not close this tab."
           });
-          speakWarning("Screen sharing stopped. Return to the proctor app and resume your screen share immediately.");
+          speakWarning("Screen sharing stopped. Press 'Try again — share entire screen' below to continue.");
         } else {
           // A local capture failure (e.g. MediaRecorder error). Still recoverable
           // via Try again, but surface the raw reason for transparency.
@@ -1599,7 +1610,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           <div className="mb-5 [&>*]:mt-0">
             <EndTestPanel
               assuranceAccepted={assuranceAccepted}
-              hasProblem={hasProblem}
+              hasProblem={ownEditorCopy}
               onAssuranceChange={setAssuranceAccepted}
               onCancel={() => setEndRequested(false)}
               onEnd={stop}
@@ -1613,7 +1624,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           <div className="grid gap-5 lg:grid-cols-3">
             <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
             <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
-            <RulesPanel hasProblem={hasProblem} />
+            <RulesPanel hasProblem={ownEditorCopy} />
           </div>
           <RecentEventsPanel events={events} />
         </div>
@@ -1662,7 +1673,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       {/* Pre-start: the rules are the headline, not a sidebar afterthought. The
           candidate reads exactly what is required and what is recorded before the
           form, so the rules are unmissable. */}
-      {isFormStage ? <PreStartRules hasProblem={hasProblem} /> : null}
+      {isFormStage ? <PreStartRules hasProblem={ownEditorCopy} /> : null}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -1676,9 +1687,14 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
                 {isFormStage
-                  ? studentCopy.formStageIntro(hasProblem)
+                  ? studentCopy.formStageIntro(ownEditorCopy)
                   : activeProblem
-                    ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
+                    // UX-H3: with a problem assigned but recording down (share
+                    // dropped / resume pending), "solve the problem below" points
+                    // at a hidden workspace — name the paused state and the fix.
+                    ? status === "recording" || status === "ending"
+                      ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
+                      : "Your exam is paused — your work is saved. Restart your screen share below to get back to your code."
                     : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
               </p>
             </div>
@@ -1782,7 +1798,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                       onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
                     />
                     <span>
-                      {studentCopy.consentDisclosure(hasProblem, cameraRecordingOn)}
+                      {studentCopy.consentDisclosure(ownEditorCopy, cameraRecordingOn)}
                     </span>
                   </label>
                 </>
@@ -1795,6 +1811,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           {startError ? (
             <ScreenShareErrorPanel
               startError={startError}
+              stopped={gate === "running"}
               busy={status === "starting"}
               onRetry={retryScreenShare}
               onDismiss={() => setStartError(null)}
@@ -1860,7 +1877,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           {endRequested && status === "recording" ? (
             <EndTestPanel
               assuranceAccepted={assuranceAccepted}
-              hasProblem={hasProblem}
+              hasProblem={ownEditorCopy}
               onAssuranceChange={setAssuranceAccepted}
               onCancel={() => setEndRequested(false)}
               onEnd={stop}
@@ -1874,13 +1891,13 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
               so we show a compact preview of what monitoring will capture instead.
               Recording stage: the live panels take over. */}
           {isFormStage ? (
-            <WhatIsRecordedPanel hasProblem={hasProblem} />
+            <WhatIsRecordedPanel hasProblem={ownEditorCopy} />
           ) : (
             <>
               <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
               <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
-              <RulesPanel hasProblem={hasProblem} />
+              <RulesPanel hasProblem={ownEditorCopy} />
             </>
           )}
         </aside>
@@ -5879,7 +5896,10 @@ function Shell({ children, padTop = false, variant = "page" }: { children: React
   const pad = padTop === "alert" ? "pt-40" : padTop ? "pt-14" : "";
   return (
     <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${pad}`}>
-      <div className={`mx-auto ${variant === "exam" ? "max-w-screen-2xl" : "max-w-6xl"}`}>
+      {/* UX-H2: the exam variant reserves bottom clearance (pb-48) so the
+          fixed bottom-right CameraDock never covers end-of-page content
+          (run results / verdict) once the candidate scrolls to the bottom. */}
+      <div className={`mx-auto ${variant === "exam" ? "max-w-screen-2xl pb-48" : "max-w-6xl"}`}>
         {variant === "exam" ? null : (
           <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
             <div className="flex items-center gap-3">
@@ -6229,9 +6249,9 @@ const testRulesWithIcons = (ownEditor: boolean): Array<{ icon: React.ReactNode; 
 
 // PROMINENT pre-start rules — the candidate reads this before the form. This is
 // the headline of the page at the form stage, not a sidebar afterthought.
-// hasProblem is always false pre-session today (the problem arrives with the
-// start response), so this renders the legacy-variant rules; the prop keeps the
-// wiring honest if a pre-session problem signal is ever added.
+// UX-H1: the caller passes ownEditorCopy (pinned ?contest= = own-editor), so a
+// pinned candidate reads the own-editor rules pre-session instead of the
+// legacy HackerRank variants.
 function PreStartRules({ hasProblem }: { hasProblem: boolean }) {
   const rules = testRulesWithIcons(hasProblem);
   return (
@@ -6326,13 +6346,18 @@ function WhatIsRecordedPanel({ hasProblem }: { hasProblem: boolean }) {
 // PROMINENT, recoverable screen-share / start failure. Always offers an inline
 // Try-again that re-invokes the share prompt — never a page reload. The headline
 // makes the NOT-RECORDING state unmistakable.
-function ScreenShareErrorPanel({ startError, busy, onRetry, onDismiss }: { startError: { kind: RecorderStartErrorKind; message: string }; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
+function ScreenShareErrorPanel({ startError, stopped, busy, onRetry, onDismiss }: { startError: { kind: RecorderStartErrorKind; message: string }; stopped: boolean; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
   const isInvalidSurface = startError.kind === "invalid_surface";
+  // UX-H3: once the session is live (`stopped`), "has NOT started" reads as a
+  // glitch to a candidate whose share dropped mid-exam — name the stopped
+  // state and the fix instead. Pre-start keeps the truthful never-started title.
   const heading = isInvalidSurface
     ? "Recording has NOT started — share your entire screen"
     : startError.kind === "unsupported"
       ? "Recording has NOT started — unsupported browser"
-      : "Recording has NOT started";
+      : stopped
+        ? "Recording stopped — restart your screen share"
+        : "Recording has NOT started";
   return (
     <div className="mt-5 rounded-lg border-2 border-danger/50 bg-danger/5 p-5 shadow-subtle">
       <div className="flex items-start gap-3">
@@ -6405,7 +6430,10 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
 }
 
 function EventRow({ event }: { event: ProctorEvent }) {
-  const message = typeof event.detail?.message === "string" ? event.detail.message : event.detail ? JSON.stringify(event.detail) : event.visibility_state;
+  // UX-M1: candidate-facing rows render the friendly message only — never the
+  // raw detail JSON (it carries internals like upload storage keys). Admin
+  // surfaces have their own event views and are unaffected.
+  const message = typeof event.detail?.message === "string" ? event.detail.message : event.visibility_state;
   return (
     <div className="grid gap-2 rounded-md border border-line bg-white/60 p-3 text-sm md:grid-cols-[180px_180px_1fr]">
       <span className="font-mono text-xs text-muted">{new Date(event.timestamp).toLocaleTimeString()}</span>

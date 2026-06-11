@@ -27,7 +27,7 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
   const pending: string[] = [];
   if (!preconditions.fullscreen) pending.push("re-enter fullscreen");
   if (!preconditions.visible) pending.push("keep this exam tab visible");
-  if (!preconditions.recording) pending.push("restart recording with the Resume / Try again button on this page");
+  if (!preconditions.recording) pending.push("press 'Try again — share entire screen' below");
 
   return (
     <div role="alert" aria-live="assertive" className="fixed inset-x-0 top-0 z-50 border-b-4 border-red-900 bg-red-700 px-4 py-3 text-white shadow-subtle md:px-8">
