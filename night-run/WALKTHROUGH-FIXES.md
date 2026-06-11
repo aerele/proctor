@@ -16,6 +16,14 @@ docs workflow (`wf_145b15ad-957`) is still committing. Subagents edit + verify; 
 ## Ledger
 | id | flow | comment | status | commit |
 |----|------|---------|--------|--------|
-| M0 | admin | E2E #8 — admin datetime picker resists keyboard/programmatic entry (calendar popover works). Make it keyboard-friendly. (Section-C minor, Karthi-approved TG 1843.) | queued | — |
+| M0 | admin | E2E #8 — admin datetime picker resists keyboard/programmatic entry (calendar popover works). Make it keyboard-friendly. (Section-C minor, Karthi-approved TG 1843.) | dispatched (agent B) | — |
+| W1 | candidate | Coding must be THE central thing: problems list front-and-center → click → coding screen. All proctoring chrome (recording status, rules, etc.) collapsible / out of the way. Once the contest starts: zero distractions, only essentials around the editor. (TG 1851) | dispatched (agent A) | — |
+| W2 | candidate | FLIP the proctoring visual cue: normal operation = subtle indicator (still distinctive enough to recognize from afar); on a real issue = the BIG bar appears with the actual issue. Not the other way around. (TG 1851) | dispatched (agent A) | — |
+| W3 | admin | Contest filter currently sits BELOW the screen-select buttons (Live stats / Contest / Live alerts…). It's common to all screens → must sit ABOVE them (e.g. top-right). Also: two rows of buttons is too many — rethink and reorganize the admin page header/nav properly. (TG 1851) | dispatched (agent B) | — |
+| W4 | admin | Test code: alongside Regenerate, add **Set custom test code**. Server-enforced uniqueness among ACTIVE contests — checked when setting the code, when activating a contest (block activation with a clear error until the code is changed), and on create. (TG 1851) | dispatched (agent B) | — |
 
-_(W1, W2 … appended live as Karthi comments arrive.)_
+| W5 | candidate | Fullscreen out/in + alert behavior is buggy: when an alert shows / doesn't show / what happens after, there's a looping problem and unexpected behavior here and there. Review the whole fullscreen-alert state machine fully and fix. (TG 1853) | dispatched (agent A, bundled W1+W2+W5) | — |
+
+**2026-06-11 ~22:25 — Karthi asleep (TG 1855). Overnight order: finish these → deploy → exhaustive browser E2E of deployed product via :9222 (candidate flow above all, keystroke data verified) → fix/redeploy/retest until clean → triple review + morning summary → stretch: OMR (F2). First agent attempts died on API 529-Overloaded (tree verified clean); both relaunched.**
+
+_(W6 … appended live as Karthi comments arrive.)_
