@@ -20,7 +20,7 @@ Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/inv
 ## 2. AT START
 
 - **Invigilators** open `<web>/invigilator?contest=<slug>&key=<key>` → enter a **name only** (tokenized; the name is recorded against every code they release). Pick the room → room console.
-- **Candidates** open the access-code link (or type the test code on the bare landing) → **Stage 1 Permissions** (share **Entire Screen** + allow camera/mic/clipboard; recording starts) → **Stage 2 Fullscreen** → **Stage 3 Details**: type the unique ID → roster lookup pre-fills name/email/room → **"Yes, this is me"** → **Stage 4 workspace**. If the room start-gate is on, the candidate **waits** until the invigilator releases the room.
+- **Candidates** open the access-code link — **distribute the full `?contest=<slug>` link, not the bare domain**: if a legacy settings doc exists the bare `/` can show the legacy shell with no code box (E2E-live F6) → **Stage 1 Permissions** (share **Entire Screen** + allow camera/mic/clipboard; recording starts) → **Stage 2 Fullscreen** → **Stage 3 Details**: type the unique ID → roster lookup pre-fills name/email/room → **"Yes, this is me"** → **Stage 4 workspace**. If the room start-gate is on, the candidate **waits** until the invigilator releases the room.
 
 > Verified: `night-run/evidence/e2e/candidate/01-permissions-gate.png` → `04-details-filled.png`; `invigilator/01-portal-entry-nameonly.png`, `02-room-picker.png`.
 
@@ -31,9 +31,11 @@ Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/inv
 **Time control (Live stats → Exam time card):** push a new end-time live, or **End now…** (two-click; immediate end for everyone). The candidate timer follows session status and stops on end.
 
 **Candidate LOCKED — the ladder (`shell/enforcement.ts`):**
-- **L1 (self-serve):** on a fullscreen exit while recording, a takeover overlay requires TYPING `I will not exit full screen after this` **and** re-entering fullscreen within the countdown (default ~20s, admin-configurable). No staff needed.
+- **L1 (self-serve):** on a fullscreen exit while recording, a takeover overlay requires TYPING `I will not exit full screen after this` **and** re-entering fullscreen within the countdown (default ~20s, admin-configurable). No staff needed. **⚠️ Set the contest's re-entry window to 45–60s** — at the 20s default, typing the 38-char phrase + re-entering rarely fits (E2E-live verified: near-impossible even deliberately) and compliant candidates get locked.
 - **L2 (needs you):** countdown expiry **or** more than K exits → session **LOCKED**. To release: the invigilator mints a **6-digit unlock code** (its own namespace — **NOT the room start code**) and reads it to that one student to type in the candidate Unlock panel; **or** uses the per-row **Unlock** action; **or** an admin unlocks from Sessions.
 - **Genuine environment problem:** invigilator sets a **per-student enforcement exemption** (Fullscreen / Switch-away toggle) — an exempt session never engages the overlay (the exemption releases any active overlay on the next heartbeat). Switch-away is debounced (notification, not auto-block).
+
+**Floor protocol (glance test — W2 redesign):** a healthy candidate screen shows a **slim dark strip** on top (green stage block + pulsing REC). A **big red full-width banner** means a live problem (fullscreen exit, share/camera lost, recording stopped) — **red banner = walk over**. (Inverted from the pre-2026-06-12 build, where the prominent bar showed when healthy.)
 
 **Invigilator room actions** (`routes/invigilator.mjs`): release/regenerate the room **START** code (only when room-gate enabled), **open room** (start-now/allow-all), mint **unlock** code, per-student exemptions, per-student unlock. Invigilators see **only** alert types the admin marked "Share with invigilator" (**default: all OFF**).
 
