@@ -435,12 +435,13 @@ test("checkRosterLookupRateLimit: fixed-window cap per IP; window roll-over rese
   __resetRosterLookupRateLimitForTest();
   let now = 1_000_000;
   __setRosterLookupClockForTest(() => now);
-  // Under the cap: no throw.
-  for (let i = 0; i < 30; i++) checkRosterLookupRateLimit("10.0.0.1");
-  // The 31st attempt in the same window trips the cap.
+  // Under the cap: no throw (each call returns a refund closure we don't use here,
+  // i.e. these stand in for enumeration MISSES that consume the budget).
+  for (let i = 0; i < 60; i++) checkRosterLookupRateLimit("10.0.0.1");
+  // The 61st attempt in the same window trips the cap.
   let threw = null;
   try { checkRosterLookupRateLimit("10.0.0.1"); } catch (e) { threw = e; }
-  assert.ok(threw, "31st attempt in-window must be rejected");
+  assert.ok(threw, "over-cap attempt in-window must be rejected");
   assert.equal(threw.statusCode, 429);
   assert.equal(threw.message, "rate_limited");
   assert.ok(Number(threw.retry_after_seconds) > 0);
@@ -452,20 +453,53 @@ test("checkRosterLookupRateLimit: fixed-window cap per IP; window roll-over rese
   __setRosterLookupClockForTest(null);
 });
 
-test("POST /api/roster/lookup: over-limit returns 429 with a minimal masked body (no roster fields)", async () => {
+// Shared-NAT safety (Wave-6 review fix): refunding successful lookups means an
+// UNBOUNDED number of found-id confirms from ONE IP in a window are never
+// throttled — a NAT'd hall of real logins must never dead-end. Only the unrefunded
+// MISS path consumes budget.
+test("checkRosterLookupRateLimit: refunded (successful) lookups never accrue — a NAT'd hall is not throttled", () => {
+  __resetRosterLookupRateLimitForTest();
+  const now = 5_000_000;
+  __setRosterLookupClockForTest(() => now);
+  // 200 candidates behind ONE NAT IP each do their single found-id confirm. Each
+  // takes the budget then immediately refunds it (the found-id path) — none throw.
+  for (let i = 0; i < 200; i++) {
+    const refund = checkRosterLookupRateLimit("10.9.9.9");
+    refund(); // found id -> attempt given back
+  }
+  // The budget is fully intact afterwards: a fresh full window of misses still fits.
+  assert.doesNotThrow(() => { for (let i = 0; i < 60; i++) checkRosterLookupRateLimit("10.9.9.9"); });
+  __setRosterLookupClockForTest(null);
+});
+
+test("POST /api/roster/lookup: a NAT'd hall of FOUND lookups from one IP is never throttled (success refund)", async () => {
   freshClients();
   await uploadSampleRoster();
-  let now = 2_000_000;
+  const now = 2_000_000;
   __setRosterLookupClockForTest(() => now);
   const ip = { "x-forwarded-for": "203.0.113.55" };
-  // Burn the whole window with VALID lookups (every attempt counts — found or
-  // not — because both are enumeration steps; there is no success refund here).
-  let last = null;
-  for (let i = 0; i < 30; i++) {
-    last = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "21CS001" } }));
-    assert.equal(last.statusCode, 200);
+  // Far MORE than the cap, all from one shared NAT IP, all FOUND ids — a real
+  // exam hall's synchronized login rush. Every one is refunded, so none 429.
+  for (let i = 0; i < 120; i++) {
+    const res = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "21CS001" } }));
+    assert.equal(res.statusCode, 200, `legit found lookup #${i + 1} must not be throttled`);
   }
-  const blocked = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "21CS001" } }));
+  __setRosterLookupClockForTest(null);
+});
+
+test("POST /api/roster/lookup: over-limit MISSES return 429 with a minimal masked body (no roster fields)", async () => {
+  freshClients();
+  await uploadSampleRoster();
+  let now = 3_000_000;
+  __setRosterLookupClockForTest(() => now);
+  const ip = { "x-forwarded-for": "203.0.113.77" };
+  // Burn the whole window with enumeration MISSES (404 not_on_roster) — these are
+  // the only attempts that consume budget, since found lookups are refunded.
+  for (let i = 0; i < 60; i++) {
+    const miss = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: `99XX${i}` } }));
+    assert.equal(miss.statusCode, 404);
+  }
+  const blocked = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "99XXZZ" } }));
   assert.equal(blocked.statusCode, 429);
   assert.equal(blocked.body.error, "rate_limited");
   assert.ok(Number(blocked.body.retry_after_seconds) > 0);
@@ -475,7 +509,9 @@ test("POST /api/roster/lookup: over-limit returns 429 with a minimal masked body
   assert.equal(raw.includes("example.com"), false);
   assert.equal("name" in blocked.body, false);
   assert.equal("email_masked" in blocked.body, false);
-  // A different IP is unaffected; window roll-over frees the throttled IP.
+  // Even while THIS IP is throttled, a legitimate FOUND lookup from the SAME IP
+  // is still rejected (the budget is spent) — but a different IP is unaffected,
+  // and a window roll-over frees the throttled IP.
   const otherIp = await call(makeReq({ method: "POST", path: "/api/roster/lookup",
     headers: { "x-forwarded-for": "198.51.100.9" }, body: { unique_id: "21CS001" } }));
   assert.equal(otherIp.statusCode, 200);
@@ -528,6 +564,47 @@ test("start: valid roster id -> session created with roster-overridden identity"
   assert.equal(session.roster_unique_id, "21CS001");
   assert.equal(session.roster_verified, true);
   assert.equal(session.hackerrank_username, "typed_user"); // not mapped -> typed value kept
+});
+
+// Wave-6 review (M2): on the legacy roster path the email column is mapped, so
+// the typed email is DISCARDED and replaced by the roster cell. Gating its format
+// would 400 a non-official/replayed client over a field about to be ignored. The
+// roster start must succeed regardless of what the typed email is (blank, junk).
+test("start: roster-mapped email — BLANK typed email still starts (typed value ignored)", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21CS001", email: "" }) }));
+  assert.equal(res.statusCode, 200);
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  assert.equal(doc.data().email, "asha@example.com"); // roster cell wins, not the blank typed one
+});
+
+test("start: roster-mapped email — NON-EMAIL typed value still starts (typed value ignored)", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster();
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21CS001", email: "not-an-email" }) }));
+  assert.equal(res.statusCode, 200);
+  const doc = await firestore.collection(process.env.SESSION_COLLECTION).doc(res.body.session_id).get();
+  assert.equal(doc.data().email, "asha@example.com");
+});
+
+// The gate is only relaxed when the email is roster-sourced: with the email column
+// UNMAPPED the typed email IS the effective email, so its format is still enforced.
+test("start: roster with email column UNMAPPED — malformed typed email still 400s", async () => {
+  const { firestore } = freshClients();
+  seedOpenWindow(firestore);
+  await uploadSampleRoster({
+    columns: ["Roll No", "Student Name"],
+    column_mapping: { name: "Student Name", roll_number: "Roll No" },
+    rows: [{ "Roll No": "21CS001", "Student Name": "Asha Raman" }]
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start",
+    body: startBody({ roster_unique_id: "21CS001", email: "nope" }) }));
+  assert.equal(res.statusCode, 400);
 });
 
 test("start: roster-mapped hackerrank_username overrides the typed one", async () => {

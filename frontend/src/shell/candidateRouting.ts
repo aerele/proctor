@@ -83,6 +83,31 @@ export function landingErrorMessage(status?: number, code?: string): string {
   return "Could not check the code. Make sure you are online and try again.";
 }
 
+/**
+ * Human copy for a failed POST /api/roster/lookup (the unique-id-confirm login),
+ * keyed on the API error. The M3 rate limiter can 429 a shared-network burst, so
+ * the candidate gets a plain wait-and-retry message (with the server's
+ * retry_after_seconds when present) instead of the raw `rate_limited` string.
+ * A 404 is a wrong/unknown id; anything else is a generic try-again.
+ */
+export function rosterLookupErrorMessage(
+  status?: number,
+  code?: string,
+  retryAfterSeconds?: number
+): string {
+  if (status === 429 || code === "rate_limited") {
+    const secs = Number(retryAfterSeconds);
+    const wait = Number.isFinite(secs) && secs > 0
+      ? `Wait ${secs} second${secs === 1 ? "" : "s"} and try again`
+      : "Wait a minute and try again";
+    return `Too many lookups from this network. ${wait}, or ask an invigilator for help.`;
+  }
+  if (status === 404 || code === "not_on_roster" || code === "roster_not_configured") {
+    return "We could not find that ID on the student list. Check it and try again, or call an invigilator.";
+  }
+  return "Could not check that ID. Make sure you are online and try again.";
+}
+
 /** The pinned candidate URL a resolved access code redirects to. */
 export function contestUrlFor(slug: string): string {
   return `/?contest=${encodeURIComponent(slug)}`;

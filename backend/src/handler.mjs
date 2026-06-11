@@ -388,8 +388,7 @@ async function startSession(req) {
   // Phase 2 (0.1): the entry passcode is gone. Start is gated only by the
   // contest time window + complete details. `proctor_passcode` is no longer
   // required (a client may still send it harmlessly; it is ignored).
-  requireFields(body, ["hackerrank_username", "name", "roll_number", "email"]);
-  requireValidEmail(body);
+  requireFields(body, ["hackerrank_username", "name", "roll_number"]);
   if (body.consent_accepted !== true) {
     return badRequest("Consent is required");
   }
@@ -403,11 +402,13 @@ async function startSession(req) {
   // carry a valid roster id; the client keeps it in form state.)
   const rosterMeta = await getRosterMeta();
   let rosterIdentity = null;
+  let emailIsRosterMapped = false;
   if (rosterMeta) {
     if (!body.roster_unique_id) throw httpError(403, "roster_id_required");
     const entry = await findRosterEntry(rosterMeta, String(body.roster_unique_id));
     if (!entry) throw httpError(403, "not_on_roster");
     const mapping = rosterMeta.column_mapping || {};
+    emailIsRosterMapped = Boolean(mapping.email);
     const fromRoster = (field) => (mapping[field] ? String(entry.fields?.[mapping[field]] || "") : "");
     // Spec §2.5: a MAPPED field is authoritative even when the student's cell
     // is blank — the client-typed value is IGNORED (empty string stored), never
@@ -424,6 +425,18 @@ async function startSession(req) {
       // session no proctor tooling can match to a contest user.
       hackerrank_username: fromRoster("hackerrank_username") || String(body.hackerrank_username ?? "")
     };
+  }
+
+  // Wave-6 review (M2): the TYPED email is only validated when it is what gets
+  // stored. On the roster path with a MAPPED email column the typed value is
+  // discarded and replaced by the roster cell (spec §2.5 above), so gating its
+  // format would 400 a non-official/replayed client over a field about to be
+  // ignored — mirroring the client, which gates the typed email only in legacy/
+  // person_open, never person_roster. Require + format-check the typed email
+  // ONLY when it is the effective email (no roster, or email column unmapped).
+  if (!emailIsRosterMapped) {
+    requireFields(body, ["email"]);
+    requireValidEmail(body);
   }
 
   // With a roster match the rosterIdentity value is used AS-IS (it may
@@ -2668,11 +2681,23 @@ function maskEmail(value) {
 // documented limitation). Karthi wants it mitigated now: a BEST-EFFORT per-IP
 // fixed-window rate limiter caps how fast one client can walk the id space, so a
 // scraper can no longer harvest the masked confirmation set (name/roll/masked
-// email) at machine speed. EVERY attempt consumes budget — both a found id and a
-// 404 are enumeration steps, so there is NO success refund (unlike the
-// access-code limiter, where a synchronized hall typing the CORRECT code must
-// never throttle). At 30 lookups/min one IP cannot meaningfully enumerate a real
-// roster, while a legitimate candidate (one lookup, maybe a retry) is never hit.
+// email) at machine speed.
+//
+// SHARED-NAT SAFETY (Wave-6 review fix). Roster lookup is the FIRST step EVERY
+// candidate performs (the unique-id-confirm login), and a campus lab NATs the
+// whole hall through ONE egress IP — exactly the property the IP-report cluster
+// detection banks on, and exactly the hazard the sibling access-code limiter
+// (above) was designed around. So this limiter MIRRORS that design instead of
+// charging every attempt:
+//   1. A SUCCESSFUL (found-id) lookup is REFUNDED — a legitimate candidate's
+//      single confirm never accrues budget, so a synchronized hall of 30-60+
+//      real logins behind one NAT IP is never throttled. Only 404 MISSES (the
+//      enumeration signal) consume the budget.
+//   2. The cap is hall-sized (matches the access-code limiter's 60/min for the
+//      same shared-IP population) with headroom, so even the brief pre-refund
+//      window of a concurrent-login burst on one instance's bucket stays clear.
+// Anti-enumeration is still achieved: one attacker walking the id space from one
+// IP sees mostly misses, and 60 misses/min cannot meaningfully harvest a roster.
 //
 // BEST-EFFORT, PER-INSTANCE: the counter lives in this process's memory. Cloud
 // Run runs MANY instances and does NOT share memory across them, so an attacker
@@ -2681,7 +2706,7 @@ function maskEmail(value) {
 // cost of bulk enumeration — NOT a global guarantee. A hard guarantee would need
 // a shared store (Firestore/Redis counter) or fronting WAF, which is out of
 // scope for this slice.
-const ROSTER_LOOKUP_RATE_LIMIT = 30;
+const ROSTER_LOOKUP_RATE_LIMIT = 60;
 const ROSTER_LOOKUP_RATE_WINDOW_MS = 60_000;
 const ROSTER_LOOKUP_RATE_MAP_LIMIT = 10_000;
 let _rosterLookupClock = () => Date.now();
@@ -2700,6 +2725,11 @@ export function __resetRosterLookupRateLimitForTest() {
 // a retry_after_seconds hint the api() catch forwards) once the per-window cap is
 // exceeded. Bounded memory: a full map is swept of expired windows before insert
 // so spoofed-IP rotation cannot grow it without bound.
+//
+// Returns a REFUND closure (mirrors checkAccessCodeRateLimit): the caller invokes
+// it on a SUCCESSFUL (found-id) lookup to give the attempt back, so a legitimate
+// candidate's single confirm never accrues budget and a NAT'd hall is never
+// throttled. Only 404 misses (the enumeration signal) end up consuming budget.
 export function checkRosterLookupRateLimit(ip) {
   const nowMs = _rosterLookupClock();
   if (rosterLookupAttempts.size >= ROSTER_LOOKUP_RATE_MAP_LIMIT) {
@@ -2716,6 +2746,10 @@ export function checkRosterLookupRateLimit(ip) {
   if (entry.count > ROSTER_LOOKUP_RATE_LIMIT) {
     throw rateLimited(Math.max(1, Math.ceil((entry.windowStartMs + ROSTER_LOOKUP_RATE_WINDOW_MS - nowMs) / 1000)));
   }
+  // Refund closure bound to THIS entry: a found-id lookup gives the attempt back.
+  // If the window rolled over before the refund fires, decrementing the detached
+  // entry is harmless.
+  return () => { if (entry.count > 0) entry.count -= 1; };
 }
 
 // POST /api/roster/lookup — PUBLIC unique-ID-confirm login, step 1. Returns the
@@ -2728,13 +2762,16 @@ export function checkRosterLookupRateLimit(ip) {
 async function rosterLookup(req) {
   // M3: throttle BEFORE any roster read — a rejected caller learns nothing about
   // the roster (the 429 body is minimal: error + retry hint, no lookup fields).
-  checkRosterLookupRateLimit(getClientIp(req));
+  // A SUCCESSFUL (found-id) lookup is refunded below so a NAT'd hall of real
+  // logins never accrues budget; only 404 misses (enumeration) consume it.
+  const refundLookup = checkRosterLookupRateLimit(getClientIp(req));
   const body = parseBody(req);
   requireFields(body, ["unique_id"]);
   const meta = await getRosterMeta();
   if (!meta) throw httpError(404, "roster_not_configured");
   const entry = await findRosterEntry(meta, String(body.unique_id));
   if (!entry) throw httpError(404, "not_on_roster");
+  refundLookup(); // a real candidate's confirm — only enumeration misses pay
   const mapping = meta.column_mapping || {};
   const field = (name) => (mapping[name] ? String(entry.fields?.[mapping[name]] || "") : "");
   return {
