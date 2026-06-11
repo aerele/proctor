@@ -254,13 +254,25 @@ export function makeInvigilatorRoutes(ctx) {
     return { ok: true, contest_slug: contestSlug || null, gate: publicRoomGate(item) };
   }
 
+  // F2 (E2E live): resolve the stored session key the row actions match on.
+  // An EXACT `username_norm` from the row payload is authoritative — it matches
+  // BOTH legacy docs (username_norm = normalized candidate) AND person-mode
+  // docs (username_norm = person_id "{college_norm}~{uid_norm}", whose "~"
+  // normalizeUsername mangles to "_", so a display id can NEVER match them).
+  // The display `username` stays as the legacy fallback for older portals —
+  // the same exact-key-first precedence as adminSessions (FIX-B1).
+  function rowUsernameNorm(body) {
+    const exact = typeof body.username_norm === "string" ? body.username_norm.trim() : "";
+    return exact || normalizeUsername(body.username);
+  }
+
   // POST /api/invigilator/unlock — release one student's ENFORCEMENT lock from
   // the room dashboard (F5.6, wave-2 review fix: the locked screen promises
   // "unlock you from their console", which previously required ADMIN
   // credentials). Same least-privilege addressing as /api/invigilator/exempt
-  // (room + username, never session_id). Admin locks (no/different
-  // locked_reason) stay admin-only — an invigilator must not undo a deliberate
-  // admin lock. Independent of the room start gate.
+  // (room + username/username_norm, never session_id). Admin locks (no/
+  // different locked_reason) stay admin-only — an invigilator must not undo a
+  // deliberate admin lock. Independent of the room start gate.
   async function invigilatorUnlock(req) {
     const contest = await invigilatorContestOf(req);
     requireInvigilatorFor(req, contest);
@@ -270,7 +282,7 @@ export function makeInvigilatorRoutes(ctx) {
     const contestSlug = invigilatorContestSlug(contest, settings);
     const roomKey = gateRoomKey(body.room);
     const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
-    const usernameNorm = normalizeUsername(body.username);
+    const usernameNorm = rowUsernameNorm(body);
 
     const snapshot = await scopedQuery(
       getFirestore().collection(sessionCollection).where("username_norm", "==", usernameNorm),
@@ -304,9 +316,9 @@ export function makeInvigilatorRoutes(ctx) {
 
   // POST /api/invigilator/exempt — F5.5: per-student enforcement exemption from
   // the room dashboard. Least privilege preserved: the invigilator addresses the
-  // candidate by room + username (rows never expose session_id — it is the
-  // candidate's write-endpoint bearer token), the backend resolves the LIVE
-  // session in that room, and the response never echoes the token either.
+  // candidate by room + username/username_norm (rows never expose session_id —
+  // it is the candidate's write-endpoint bearer token), the backend resolves the
+  // LIVE session in that room, and the response never echoes the token either.
   // Deliberately NOT behind requireGateEnabledSettings — exemptions are an
   // enforcement tool, independent of the room start gate.
   async function invigilatorExempt(req) {
@@ -318,7 +330,7 @@ export function makeInvigilatorRoutes(ctx) {
     const contestSlug = invigilatorContestSlug(contest, settings);
     const roomKey = gateRoomKey(body.room);
     const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
-    const usernameNorm = normalizeUsername(body.username);
+    const usernameNorm = rowUsernameNorm(body);
 
     const snapshot = await scopedQuery(
       getFirestore().collection(sessionCollection).where("username_norm", "==", usernameNorm),
@@ -387,6 +399,12 @@ export function makeInvigilatorRoutes(ctx) {
         name: doc.name || "",
         hackerrank_username: doc.hackerrank_username || "",
         candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
+        // F2 (E2E live): the EXACT stored session key the row actions (Unlock /
+        // Exempt) post back as `username_norm` — person-mode rows (username_norm
+        // = person_id "{college}~{uid}") are only addressable by it. Identity
+        // lookup data like roster_unique_id, NOT a credential (the session_id
+        // bearer token stays M13-removed).
+        username_norm: doc.username_norm || "",
         roll_number: doc.roll_number || "",
         // F9.4: the roster's unique id — alert-detail expansion joins on username
         // and shows this alongside the roll number. Identity data, not a credential.

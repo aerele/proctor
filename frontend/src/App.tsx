@@ -1,12 +1,13 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustContestExamTime, adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "./admin/alertActions";
 import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, viewEventsAffordance, viewRecordingAffordance } from "./admin/sessionDetail";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs } from "./examTime";
+import { chunkIndexBase, clearChunkContinuity, mergeManifest, readChunkHwm, readStintManifest, writeStintManifest } from "./chunkContinuity";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, sessionElapsedAnchorMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
 import { ContestsPanel } from "./admin/ContestsPanel";
@@ -319,6 +320,17 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     ? sessionConfig.upload_config.camera.enabled
     : normalizeCameraRecording(examConfig?.camera_recording).enabled;
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
+  // F1 (e2e finding): manifest items accumulated across EVERY recording stint
+  // of this session (each recorder instance only knows its own uploads). The
+  // accumulator is persisted to sessionStorage so a same-tab refresh-resume
+  // keeps the earlier stints; the end-of-test manifest merges this with the
+  // final recorder's list, de-duplicated by (kind, index).
+  const stintManifestRef = useRef<UploadManifestItem[]>([]);
+  const collectStintManifest = (items: UploadManifestItem[] | undefined, forSessionId: string) => {
+    if (!items?.length || !forSessionId) return;
+    stintManifestRef.current = mergeManifest(stintManifestRef.current, items);
+    writeStintManifest(window.sessionStorage, forSessionId, stintManifestRef.current);
+  };
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   cameraStreamRef.current = cameraStream;
   // F5.1 permissions-first onboarding (stage 1, before fullscreen): the
@@ -381,7 +393,9 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const recordSetupEvent = (type: string, detail?: Record<string, unknown>) => {
     const event = createUiEvent(type, detail);
     addEvent(event);
-    if (sessionId) void sendEvents(sessionId, [event]);
+    // F9: best-effort audit post — a locked/ended session 403/409s these by
+    // design; swallow so expected rejections never hit the console unhandled.
+    if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
     else preSessionEventsRef.current = [...preSessionEventsRef.current, event].slice(-50);
   };
 
@@ -521,7 +535,13 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       setLockedReason(reason);
       // Stop the recorder NOW (the heartbeat's 403 would catch it within one
       // interval anyway, but the lock should be immediate and audible).
-      if (recorderRef.current) void recorderRef.current.stop().catch(() => undefined);
+      // F1: bank the stint's manifest once the stop has flushed its uploads.
+      const active = recorderRef.current;
+      if (active) {
+        void active.stop()
+          .then((items) => collectStintManifest(items, sessionId))
+          .catch(() => undefined);
+      }
       setStatus("idle");
       setGate("locked");
       speakWarning("Your test has been locked for leaving fullscreen. Raise your hand and call your room proctor.");
@@ -626,6 +646,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     else if (serverStatus === "locked") setGate("locked");
     else if (serverStatus === "ended") setGate("ended");
     else setGate("running");
+    // F5 (e2e finding): the warning strip must reflect LIVE state. The server
+    // reporting ACTIVE invalidates any lock-episode message ("Your test has
+    // been locked…") that would otherwise sit stale over a recovered session.
+    if (serverStatus === "active") setReloadWarning("");
     return serverStatus;
   };
 
@@ -786,7 +810,8 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       speakWarning("Time is up. Please end your test now.");
       const event = createUiEvent("exam_time_up", { end_at: examEndAt });
       addEvent(event);
-      if (sessionId) void sendEvents(sessionId, [event]);
+      // F9: best-effort — expected 403/409 once the session is locked/ended.
+      if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
     };
     check();
     const timer = window.setInterval(check, 1000);
@@ -842,7 +867,8 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         meta_key: event.metaKey
       });
       addEvent(reloadEvent);
-      if (sessionId) void sendEvents(sessionId, [reloadEvent]);
+      // F9: best-effort — expected 403/409 once the session is locked/ended.
+      if (sessionId) void sendEvents(sessionId, [reloadEvent]).catch(() => undefined);
     };
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
@@ -908,6 +934,8 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     const at = new Date(endAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     if (change === "extended") {
       timeUpAnnouncedRef.current = false; // more time: a past "time is up" no longer holds
+      // F5: an extension also invalidates a lingering "Time is up" strip.
+      setReloadWarning("");
       setExamTimeNotice(`The proctor extended the exam — new end time ${at}.`);
     } else {
       setExamTimeNotice(`The proctor moved the exam end earlier — new end time ${at}.`);
@@ -924,13 +952,23 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     // and the student is retrying), tear it down first so we don't leave a second
     // heartbeat/upload loop running against the same session.
     if (recorderRef.current) {
-      await recorderRef.current.stop().catch(() => undefined);
+      const prior = recorderRef.current;
       recorderRef.current = null;
+      await prior.stop().catch(() => undefined);
+      // F1: bank the finished stint's manifest before the new stint starts.
+      collectStintManifest(prior.getManifest(), session.session_id);
     }
+    // F1: restore prior stints banked before a same-tab refresh (idempotent —
+    // the merge de-duplicates by (kind, index)).
+    stintManifestRef.current = mergeManifest(
+      readStintManifest(window.sessionStorage, session.session_id),
+      stintManifestRef.current
+    );
     // Flush the queued setup-stage audit events now that a session exists.
     const queuedSetupEvents = preSessionEventsRef.current;
     preSessionEventsRef.current = [];
-    if (queuedSetupEvents.length) void sendEvents(session.session_id, queuedSetupEvents);
+    // F9: best-effort — expected 403/409 if the session got blocked meanwhile.
+    if (queuedSetupEvents.length) void sendEvents(session.session_id, queuedSetupEvents).catch(() => undefined);
     setStartIp(session.start_ip || "unavailable");
     setCurrentIp(session.start_ip || "unavailable");
     setIpChanged(false);
@@ -948,6 +986,23 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       sessionId: session.session_id,
       config: session.upload_config,
       heartbeatSeconds: session.heartbeat_interval_seconds,
+      // F1: chunk indexes CONTINUE from the prior stint's high-water mark —
+      // max over the server's knowledge (start/resume counts + exact hwm) and
+      // the local sessionStorage hwm — so a restarted recording never reuses
+      // an index and never overwrites earlier chunks. All legs are 0 for a
+      // fresh session (indexes start at 1, exactly as before).
+      chunkIndexBase: {
+        screen: chunkIndexBase([
+          session.chunk_count,
+          session.screen_chunk_index_hwm,
+          readChunkHwm(window.sessionStorage, session.session_id, "screen")
+        ]),
+        camera: chunkIndexBase([
+          session.camera_chunk_count,
+          session.camera_chunk_index_hwm,
+          readChunkHwm(window.sessionStorage, session.session_id, "camera")
+        ])
+      },
       acquired,
       onEvent: addEvent,
       onUploadChange: (depth, uploaded) => {
@@ -975,6 +1030,9 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       // already stopped itself. Flip the gate to the matching blocked screen so
       // the UI stops claiming "recording".
       onStatusChange: (serverStatus) => {
+        // F1: bank whatever this stint managed to upload (idempotent merge; a
+        // later teardown/end re-collects and fills in any still-in-flight tail).
+        collectStintManifest(recorderRef.current?.getManifest(), session.session_id);
         if (serverStatus === "ended") {
           setStatus("ended");
           setGate("ended");
@@ -1017,9 +1075,16 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     });
     recorderRef.current = recorder;
     await recorder.start();
-    const startedAt = Date.now();
-    setRecordingStartedAt(startedAt);
-    setElapsedSeconds(0);
+    // F7 (e2e finding): ELAPSED anchors on the SESSION's server-side start
+    // (skew-corrected), not on this stint — a recording restart or a reload
+    // resumes the count instead of resetting to 0:00. Pre-F7 backends send no
+    // created_at → the anchor degrades to "now" (the old per-stint behavior).
+    const anchor = sessionElapsedAnchorMs(session.created_at, session.server_now, Date.now());
+    setRecordingStartedAt(anchor);
+    setElapsedSeconds(Math.max(0, Math.floor((Date.now() - anchor) / 1000)));
+    // F5 (e2e finding): recording is LIVE again — any prior episode's warning
+    // strip ("Screen sharing stopped…", "…locked…", reload notice) is stale now.
+    setReloadWarning("");
     setStatus("recording");
   };
 
@@ -1326,13 +1391,18 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       }
       const finalManifest = await recorderRef.current?.stop();
       recorderStopped = true;
-      const uploads = finalManifest ?? [];
+      // F1: the submitted manifest covers EVERY stint of this session — the
+      // banked prior stints merged with the final recorder's own list.
+      const uploads = mergeManifest(stintManifestRef.current, finalManifest ?? []);
       setManifest(uploads);
       if (sessionId) {
         await endSession({ sessionId, manifest: uploads, assuranceAccepted });
       }
       window.localStorage.removeItem(sessionKey);
-      if (sessionId) clearSessionDrafts(sessionId, window.localStorage);
+      if (sessionId) {
+        clearSessionDrafts(sessionId, window.localStorage);
+        clearChunkContinuity(window.sessionStorage, sessionId);
+      }
       setStatus("ended");
       setGate("ended");
       setEndRequested(false);
@@ -1363,7 +1433,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         await endSession({ sessionId, manifest, assuranceAccepted });
       }
       window.localStorage.removeItem(sessionKey);
-      if (sessionId) clearSessionDrafts(sessionId, window.localStorage);
+      if (sessionId) {
+        clearSessionDrafts(sessionId, window.localStorage);
+        clearChunkContinuity(window.sessionStorage, sessionId);
+      }
       setEndFailed(false);
       setStatus("ended");
       setGate("ended");
@@ -2188,14 +2261,39 @@ function AdminApp() {
     setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
   };
 
+  // F3 (E2E live): the Live exam-time card follows the GLOBAL contest scope.
+  // Where its display value comes from and where its quick-actions write:
+  //   - no scope            → the legacy settings schedule (clearly labeled)
+  //   - scoped, legacy row  → same legacy schedule (the synthesized contest IS
+  //                           the settings doc)
+  //   - scoped, real row    → THAT contest's window via contest-exam-time —
+  //                           the same API the Contest → Detail panel uses
+  //   - scoped, unknown slug (deep link / list still loading) → editor disabled,
+  //     never silently writing the wrong schedule
+  const examTimeScope: ExamTimeCardScope = (() => {
+    const slug = alertFilters.contest_slug ?? "";
+    if (!slug) return { kind: "legacy" as const };
+    const match = (adminContests ?? []).find((contest) => contest.slug === slug) ?? null;
+    if (!match) return { kind: "unknown" as const, slug };
+    return match.legacy ? { kind: "legacy" as const, slug } : { kind: "contest" as const, slug };
+  })();
+
   // S5: apply an exam-time change; outcomes surface through the existing
   // actionMessage banner, and stats reload so counts reflect an end-now.
+  // F3: a scoped real contest writes through contest-exam-time (its OWN
+  // end_at + end-now sweep over ITS sessions); legacy keeps /api/admin/exam-time.
   const runExamTime = async (body: ExamTimeRequest) => {
+    if (examTimeScope.kind === "unknown") {
+      setError(`Contest "${examTimeScope.slug}" is not in the contests list — exam-time controls are disabled for this scope.`);
+      return;
+    }
     setExamTimeBusy(true);
     setError("");
     setActionMessage("");
     try {
-      const response = await adjustExamTime(password, body);
+      const response = examTimeScope.kind === "contest"
+        ? await adjustContestExamTime(password, examTimeScope.slug, body)
+        : await adjustExamTime(password, body);
       setExamEndAt(response.end_at);
       setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
       setEndNowArmed(false);
@@ -2535,12 +2633,33 @@ function AdminApp() {
   // S-D (A1): the review search is scoped by the GLOBAL contest selector like
   // every other tab. `filters` mirrors loadStats/loadAlerts — selectContest
   // passes the NEXT filters explicitly because setState is async.
+  // F4 (E2E live): a roster/person-mode candidate's STORED key is the
+  // person_id ("{college}~{uid}"), which the typed display id can never
+  // normalize to — so when the direct lookup comes back empty, resolve the
+  // typed id against the sessions list (the same stored-key join the
+  // Recordings picker uses) and re-query by the EXACT username_norm.
   const search = async (filters?: AlertFilters) => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetchAdminSessions(username, password, (filters ?? alertFilters).contest_slug);
-      setResult(response.sessions);
+      const contestSlug = (filters ?? alertFilters).contest_slug;
+      const response = await fetchAdminSessions(username, password, contestSlug);
+      let sessions = response.sessions;
+      if (!sessions.length && username.trim()) {
+        const typed = username.trim().toLowerCase();
+        const list = await fetchSessionsList(password, { status: "", contestSlug }).catch(() => null);
+        const norms = [...new Set((list?.sessions ?? [])
+          .filter((row) => candidateIdOf(row).toLowerCase() === typed)
+          .map((row) => row.username_norm || "")
+          .filter(Boolean))];
+        // Same display id under several stored keys (e.g. two colleges sharing
+        // a roll number across contests when unscoped) → union a bounded few.
+        for (const norm of norms.slice(0, 3)) {
+          const resolved = await fetchAdminSessions(username, password, contestSlug, norm);
+          sessions = sessions.concat(resolved.sessions);
+        }
+      }
+      setResult(sessions);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -3009,6 +3128,7 @@ function AdminApp() {
             absoluteInput={examTimeInput}
             onAbsoluteInputChange={setExamTimeInput}
             onAdjust={(body) => void runExamTime(body)}
+            scope={examTimeScope}
           />
           <StatsDashboard
             stats={stats}
@@ -4046,11 +4166,26 @@ function ContestScopePicker({ contests, contestSlug, onSelect }: {
   );
 }
 
+// F3 (E2E live): where the Live exam-time card reads from / writes to.
+//   legacy  — the legacy settings schedule (no scope, or the synthesized
+//             legacy contest is scoped); writes via /api/admin/exam-time.
+//   contest — a real contest is scoped; the card shows ITS window and writes
+//             via contest-exam-time (the Contest → Detail panel's API).
+//   unknown — a scoped slug not in the contests list (deep link / still
+//             loading); the editor is disabled so nothing wrong gets written.
+type ExamTimeCardScope =
+  | { kind: "legacy"; slug?: string }
+  | { kind: "contest"; slug: string }
+  | { kind: "unknown"; slug: string };
+
 // S5: live exam-time control on the Live stats view. Remaining time is computed
 // against the SERVER clock (skew captured when the stats/exam-time response
 // arrived) so the admin display agrees with the students'. The 1 s ticker only
 // re-renders this card. "End exam now" is a deliberate two-click confirm.
-function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteInput, onAbsoluteInputChange, onAdjust }: {
+// F3 (E2E live): the card is scope-aware — an explicit chip says WHICH
+// schedule it shows/edits, so a scoped contest can never be confused with the
+// legacy schedule on exam day.
+function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteInput, onAbsoluteInputChange, onAdjust, scope }: {
   endAt: string;
   skewMs: number;
   busy: boolean;
@@ -4059,6 +4194,7 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
   absoluteInput: string;
   onAbsoluteInputChange: (value: string) => void;
   onAdjust: (body: ExamTimeRequest) => void;
+  scope: ExamTimeCardScope;
 }) {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -4067,12 +4203,30 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
   }, []);
   const left = remainingMs(endAt, Date.now(), skewMs);
   const over = left !== null && left <= 0;
+  // F3: an unknown scope disables every write (display still shows whatever
+  // the scoped stats poll reported — "" → the no-schedule line).
+  const editable = scope.kind !== "unknown";
   const buttonClass = "focus-ring inline-flex h-10 items-center justify-center rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50";
   return (
     <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-ink">Exam time</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold text-ink">Exam time</h2>
+            {scope.kind === "contest" ? (
+              <span className="inline-flex rounded-full border border-accent/40 bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent" title="This card shows and edits the scoped contest's exam window — the same window as Contests → Detail.">
+                Contest: {scope.slug}
+              </span>
+            ) : scope.kind === "legacy" ? (
+              <span className="inline-flex rounded-full border border-line bg-white/60 px-2.5 py-0.5 text-xs font-semibold text-muted" title="This card shows and edits the LEGACY schedule (Settings), not any contest window. Scope to a contest (top-right) to control its window.">
+                Legacy schedule{scope.slug ? ` (${scope.slug})` : ""}
+              </span>
+            ) : (
+              <span className="inline-flex rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 text-xs font-semibold text-warning" title="The scoped slug is not in the contests list — controls are disabled so the wrong schedule can never be edited.">
+                Unknown contest: {scope.slug} — controls disabled
+              </span>
+            )}
+          </div>
           {endAt ? (
             <p className="mt-1 text-sm text-muted">
               Ends {new Date(endAt).toLocaleString()} ·{" "}
@@ -4081,26 +4235,36 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
               </span>
             </p>
           ) : (
-            <p className="mt-1 text-sm text-muted">No schedule configured yet — set the gate in Settings.</p>
+            <p className="mt-1 text-sm text-muted">
+              {scope.kind === "contest"
+                ? "No exam window configured for this contest yet — set it in Contests → Detail."
+                : scope.kind === "unknown"
+                  ? "No schedule to show for this scope."
+                  : "No schedule configured yet — set the gate in Settings."}
+            </p>
           )}
         </div>
         <div className="flex flex-wrap items-end gap-2">
-          <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: 15 })}>+15 min</button>
-          <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: 5 })}>+5 min</button>
-          <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: -5 })}>−5 min</button>
-          <DateTimeField label="New end time" value={absoluteInput} onChange={onAbsoluteInputChange} className="w-64" />
-          <button className={buttonClass} disabled={busy || !absoluteInput} onClick={() => onAdjust({ end_at: localInputToIso(absoluteInput) })}>Set</button>
+          <button className={buttonClass} disabled={busy || !endAt || !editable} onClick={() => onAdjust({ extend_minutes: 15 })}>+15 min</button>
+          <button className={buttonClass} disabled={busy || !endAt || !editable} onClick={() => onAdjust({ extend_minutes: 5 })}>+5 min</button>
+          <button className={buttonClass} disabled={busy || !endAt || !editable} onClick={() => onAdjust({ extend_minutes: -5 })}>−5 min</button>
+          <DateTimeField label="New end time" value={absoluteInput} onChange={onAbsoluteInputChange} className="w-64" disabled={!editable} />
+          <button className={buttonClass} disabled={busy || !absoluteInput || !editable} onClick={() => onAdjust({ end_at: localInputToIso(absoluteInput) })}>Set</button>
           {endNowArmed ? (
             <>
-              <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md bg-danger px-3 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => onAdjust({ end_now: true })}>Confirm: end for everyone</button>
+              <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md bg-danger px-3 text-sm font-medium text-white disabled:opacity-50" disabled={busy || !editable} onClick={() => onAdjust({ end_now: true })}>Confirm: end for everyone</button>
               <button className={buttonClass} disabled={busy} onClick={() => onArmEndNow(false)}>Cancel</button>
             </>
           ) : (
-            <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md border border-danger/40 px-3 text-sm font-medium text-danger disabled:opacity-50" disabled={busy || !endAt} onClick={() => onArmEndNow(true)}>End exam now…</button>
+            <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md border border-danger/40 px-3 text-sm font-medium text-danger disabled:opacity-50" disabled={busy || !endAt || !editable} onClick={() => onArmEndNow(true)}>End exam now…</button>
           )}
         </div>
       </div>
-      <p className="mt-3 text-xs text-muted">Changes reach students within ~15 seconds via their heartbeat — no reload needed. "End exam now" also force-ends every live session in the contest.</p>
+      <p className="mt-3 text-xs text-muted">
+        {scope.kind === "contest"
+          ? `Changes reach students within ~15 seconds via their heartbeat — no reload needed. "End exam now" force-ends every live session in ${scope.slug} only.`
+          : "Changes reach students within ~15 seconds via their heartbeat — no reload needed. \"End exam now\" also force-ends every live session in the contest."}
+      </p>
     </section>
   );
 }

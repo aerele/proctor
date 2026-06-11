@@ -1,6 +1,6 @@
 // frontend/src/admin/dateTimeText.test.ts — M0 typed-datetime parsing.
 import { describe, expect, it } from "vitest";
-import { formatDateTimeText, parseDateTimeText } from "./dateTimeText";
+import { formatDateTimeText, normalizeDateTimeText, parseDateTimeText } from "./dateTimeText";
 
 describe("parseDateTimeText", () => {
   it("parses the canonical display form (YYYY-MM-DD HH:mm) and the T form", () => {
@@ -49,5 +49,25 @@ describe("parseDateTimeText", () => {
     expect(formatDateTimeText("")).toBe("");
     // A stored value with seconds still displays minute precision.
     expect(formatDateTimeText("2026-06-12T09:30:00")).toBe("2026-06-12 09:30");
+  });
+});
+
+describe("normalizeDateTimeText (F10 E2E live — canonical echo on blur/save)", () => {
+  it("snaps any parseable text to the canonical display form", () => {
+    expect(normalizeDateTimeText("12/06/2026 9:30 pm")).toBe("2026-06-12 21:30");
+    expect(normalizeDateTimeText("12-06-2026 9:30")).toBe("2026-06-12 09:30");
+    expect(normalizeDateTimeText("2026-6-2 7:05")).toBe("2026-06-02 07:05");
+    expect(normalizeDateTimeText("  2026-06-12   09:30  ")).toBe("2026-06-12 09:30");
+  });
+
+  it("is idempotent on already-canonical text", () => {
+    expect(normalizeDateTimeText("2026-06-12 21:30")).toBe("2026-06-12 21:30");
+  });
+
+  it("leaves blank / incomplete / invalid drafts untouched for correction", () => {
+    expect(normalizeDateTimeText("")).toBe("");
+    expect(normalizeDateTimeText("2026-06-12")).toBe("2026-06-12");
+    expect(normalizeDateTimeText("tomorrow 9am")).toBe("tomorrow 9am");
+    expect(normalizeDateTimeText("31/02/2026 09:30")).toBe("31/02/2026 09:30");
   });
 });

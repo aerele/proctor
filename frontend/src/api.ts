@@ -1593,7 +1593,16 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
       else if (session.status === "ended") stats.finished += 1;
     }
     stats.not_started_or_total = stats.total;
-    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000, end_at: getDemoSettings()?.end_at || "", server_now: new Date().toISOString() };
+    // F3 (E2E live) backend parity: a contest-scoped poll reports THAT
+    // contest's end_at (the legacy demo contest mirrors the settings doc);
+    // unscoped keeps the legacy schedule; an unknown slug reports "".
+    const scopedContest = contestSlug
+      ? demoContestsList().find((c) => c.slug === contestSlug) ?? null
+      : null;
+    const endAt = contestSlug
+      ? (scopedContest && !scopedContest.legacy ? scopedContest.end_at || "" : scopedContest ? getDemoSettings()?.end_at || "" : "")
+      : getDemoSettings()?.end_at || "";
+    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000, end_at: endAt, server_now: new Date().toISOString() };
   }
 
   const query = new URLSearchParams();
@@ -4376,7 +4385,8 @@ export async function fetchInvigilatorRoom(password: string, room: string, conte
     // legacy demo population (and vice versa).
     type DemoRoomDoc = {
       session_id: string; status: ServerSessionStatus; name: string;
-      hackerrank_username: string; roll_number: string; roster_unique_id: string;
+      hackerrank_username: string; username_norm: string;
+      roll_number: string; roster_unique_id: string;
       stale: boolean; exam_started_at: string | null;
       enforcement_exemptions: EnforcementExemptions; locked_reason: string | null;
       created_at: string;
@@ -4389,6 +4399,9 @@ export async function fetchInvigilatorRoom(password: string, room: string, conte
             status: s.status,
             name: s.name,
             hackerrank_username: s.hackerrank_username,
+            // F2 (E2E live): the EXACT stored key the row actions post back —
+            // for person sessions this is the person_id "{college}~{id}".
+            username_norm: s.username_norm,
             roll_number: s.roster_unique_id,
             roster_unique_id: s.roster_unique_id,
             stale: false,
@@ -4407,6 +4420,8 @@ export async function fetchInvigilatorRoom(password: string, room: string, conte
             status: s.status,
             name: s.name,
             hackerrank_username: s.hackerrank_username,
+            // F2: legacy demo population is legacy-shaped — normalized candidate.
+            username_norm: normalizeUsername(s.hackerrank_username || ""),
             roll_number: `R-${s.session_id.slice(-4).toUpperCase()}`,
             roster_unique_id: `R-${s.session_id.slice(-4).toUpperCase()}`,
             stale: s.status === "active" && s.stale === true,
@@ -4434,6 +4449,8 @@ export async function fetchInvigilatorRoom(password: string, room: string, conte
       .map((s) => ({
         name: s.name,
         hackerrank_username: s.hackerrank_username,
+        // F2 (E2E live): the exact stored key for the row actions.
+        username_norm: s.username_norm,
         roll_number: s.roll_number,
         roster_unique_id: s.roster_unique_id,
         status: s.status,
@@ -4609,11 +4626,14 @@ export async function releaseUnlockCode(
 
 // F5.6 wave-2 fix: release one student's ENFORCEMENT lock from the room
 // dashboard. Least privilege mirrors invigilatorExempt: addressed by room +
-// username, never session_id. Admin locks are refused server-side
-// (not_enforcement_locked). Demo mode mutates the shared admin population row
-// (demo convention: a locked demo row is an enforcement lock).
+// username/username_norm, never session_id. Admin locks are refused
+// server-side (not_enforcement_locked). Demo mode mutates the shared admin
+// population row (demo convention: a locked demo row is an enforcement lock).
+// F2 (E2E live): `usernameNorm` is the row's EXACT stored key — person-mode
+// sessions key on person_id ("{college}~{uid}"), which the display id can
+// never normalize to; when given it wins server-side (FIX-B1 precedence).
 export async function invigilatorUnlock(
-  password: string, room: string, username: string, contest?: string
+  password: string, room: string, username: string, contest?: string, usernameNorm?: string
 ): Promise<{ ok: boolean; username: string; status: string }> {
   if (demoMode) {
     await wait(120);
@@ -4622,18 +4642,20 @@ export async function invigilatorUnlock(
     const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
     if (pinned && !pinned.legacy) {
       // Person sessions live in the localStorage demo store — release the
-      // newest locked one for this candidate display id in this room.
+      // newest locked one for this row's stored key (display id fallback).
       const locked = readDemoSessions()
         .filter((s) => s.contest_slug === pinned.slug && String(s.room || "") === roomLabel)
-        .filter((s) => s.status === "locked" && (s.hackerrank_username === username || s.roster_unique_id === username));
+        .filter((s) => s.status === "locked" && (
+          (usernameNorm ? s.username_norm === usernameNorm : false)
+          || s.hackerrank_username === username || s.roster_unique_id === username));
       if (!locked.length) throw demoApiError(404, "no_locked_session_in_room");
       const session = locked[locked.length - 1];
       upsertDemoSession({ ...session, status: "active", locked_reason: null });
       return { ok: true, username: session.hackerrank_username, status: "active" };
     }
-    const usernameNorm = normalizeUsername(username);
+    const lookupNorm = usernameNorm || normalizeUsername(username);
     const locked = DEMO_ALL_SESSIONS
-      .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status === "locked")
+      .filter((row) => normalizeUsername(row.hackerrank_username) === lookupNorm && row.status === "locked")
       .filter((row) => String(row.room || "") === roomLabel)
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
     if (!locked.length) throw demoApiError(404, "no_locked_session_in_room");
@@ -4644,20 +4666,23 @@ export async function invigilatorUnlock(
   return request<{ ok: boolean; username: string; status: string }>("/api/invigilator/unlock", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, username, ...invigilatorContestBody(contest) })
+    body: JSON.stringify({ room, username, ...(usernameNorm ? { username_norm: usernameNorm } : {}), ...invigilatorContestBody(contest) })
   });
 }
 
 // F5.5: per-student enforcement exemption from the invigilator room dashboard.
-// Least privilege: addressed by room + username (never session_id). Demo mode
-// mutates the shared admin population row in place (same pattern as the demo
-// session actions), so the next 5 s poll reflects the toggle.
+// Least privilege: addressed by room + username/username_norm (never
+// session_id). Demo mode mutates the shared admin population row in place
+// (same pattern as the demo session actions), so the next 5 s poll reflects
+// the toggle. F2 (E2E live): `usernameNorm` is the row's EXACT stored key —
+// see invigilatorUnlock.
 export async function invigilatorExempt(
   password: string,
   room: string,
   username: string,
   exemptions: EnforcementExemptions,
-  contest?: string
+  contest?: string,
+  usernameNorm?: string
 ): Promise<{ ok: boolean; username: string; enforcement_exemptions: EnforcementExemptions }> {
   if (demoMode) {
     await wait(120);
@@ -4667,16 +4692,18 @@ export async function invigilatorExempt(
     if (pinned && !pinned.legacy) {
       const live = readDemoSessions()
         .filter((s) => s.contest_slug === pinned.slug && String(s.room || "") === roomLabel)
-        .filter((s) => s.status !== "ended" && (s.hackerrank_username === username || s.roster_unique_id === username));
+        .filter((s) => s.status !== "ended" && (
+          (usernameNorm ? s.username_norm === usernameNorm : false)
+          || s.hackerrank_username === username || s.roster_unique_id === username));
       if (!live.length) throw demoApiError(404, "no_live_session_in_room");
       const session = live[live.length - 1];
       const merged = { ...sanitizeDemoExemptions(session.enforcement_exemptions), ...sanitizeDemoExemptions(exemptions) };
       upsertDemoSession({ ...session, enforcement_exemptions: merged });
       return { ok: true, username: session.hackerrank_username, enforcement_exemptions: { ...merged } };
     }
-    const usernameNorm = normalizeUsername(username);
+    const lookupNorm = usernameNorm || normalizeUsername(username);
     const live = DEMO_ALL_SESSIONS
-      .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status !== "ended")
+      .filter((row) => normalizeUsername(row.hackerrank_username) === lookupNorm && row.status !== "ended")
       .filter((row) => String(row.room || "") === roomLabel)
       .sort((a, b) => b.created_at.localeCompare(a.created_at));
     if (!live.length) throw demoApiError(404, "no_live_session_in_room");
@@ -4687,7 +4714,7 @@ export async function invigilatorExempt(
   return request<{ ok: boolean; username: string; enforcement_exemptions: EnforcementExemptions }>("/api/invigilator/exempt", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, username, exemptions, ...invigilatorContestBody(contest) })
+    body: JSON.stringify({ room, username, exemptions, ...(usernameNorm ? { username_norm: usernameNorm } : {}), ...invigilatorContestBody(contest) })
   });
 }
 

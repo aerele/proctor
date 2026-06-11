@@ -1,6 +1,6 @@
 // frontend/src/examTime.test.ts — pure exam-time math (S5).
 import { describe, expect, it } from "vitest";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, resolveSavedEndAt } from "./examTime";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, resolveSavedEndAt, sessionElapsedAnchorMs } from "./examTime";
 
 describe("computeClockSkewMs", () => {
   it("is server minus client", () => {
@@ -97,5 +97,39 @@ describe("classifyEndAtChange", () => {
   it("extended / shortened by comparing instants", () => {
     expect(classifyEndAtChange("2026-06-09T11:00:00.000Z", "2026-06-09T11:30:00.000Z")).toBe("extended");
     expect(classifyEndAtChange("2026-06-09T11:00:00.000Z", "2026-06-09T10:45:00.000Z")).toBe("shortened");
+  });
+});
+
+// F7 (e2e finding): the ELAPSED counter anchors on the session's server-side
+// start, mapped to the client clock, so recorder restarts never reset it.
+describe("sessionElapsedAnchorMs", () => {
+  const clientNow = Date.parse("2026-06-12T10:30:00.000Z");
+
+  it("maps created_at onto the client clock (zero skew → identity)", () => {
+    const createdAt = "2026-06-12T10:00:00.000Z";
+    const anchor = sessionElapsedAnchorMs(createdAt, "2026-06-12T10:30:00.000Z", clientNow);
+    expect(anchor).toBe(Date.parse(createdAt));
+    // 30 minutes elapsed, regardless of which recording stint is running.
+    expect(Math.floor((clientNow - anchor) / 1000)).toBe(1800);
+  });
+
+  it("corrects for clock skew the same way the countdown does", () => {
+    // Client clock 5 minutes BEHIND the server: server_now reads 10:35 when
+    // the client reads 10:30. Session started 10:00 server time → elapsed is
+    // 35 minutes of server time, anchored correctly on the client clock.
+    const anchor = sessionElapsedAnchorMs("2026-06-12T10:00:00.000Z", "2026-06-12T10:35:00.000Z", clientNow);
+    expect(Math.floor((clientNow - anchor) / 1000)).toBe(35 * 60);
+  });
+
+  it("falls back to 'now' (stint start) when created_at is missing or garbage", () => {
+    expect(sessionElapsedAnchorMs(undefined, "2026-06-12T10:30:00.000Z", clientNow)).toBe(clientNow);
+    expect(sessionElapsedAnchorMs("", undefined, clientNow)).toBe(clientNow);
+    expect(sessionElapsedAnchorMs("not-a-date", undefined, clientNow)).toBe(clientNow);
+  });
+
+  it("clamps a future anchor to 'now' so elapsed never renders negative", () => {
+    // A skewed/garbled stamp placing the start in the client future.
+    const anchor = sessionElapsedAnchorMs("2026-06-12T11:00:00.000Z", undefined, clientNow);
+    expect(anchor).toBe(clientNow);
   });
 });

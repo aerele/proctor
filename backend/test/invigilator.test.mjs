@@ -785,6 +785,113 @@ test("GET /api/invigilator/room: session rows carry roster_unique_id; alert proj
     ["hackerrank_username", "id", "severity", "timestamp", "title", "type"]);
 });
 
+// ---- F2 (E2E live): person-mode row actions (Unlock / Exempt) ----------------
+// Person-mode sessions are keyed by username_norm = person_id
+// ("{college_norm}~{uid_norm}"); the "~" sits OUTSIDE normalizeUsername's
+// charset, so a display Candidate ID can never normalize to it. The row
+// actions therefore thread the row's EXACT stored key through a
+// `username_norm` body field (same exact-key-first precedence as
+// adminSessions FIX-B1); the display `username` stays the legacy fallback.
+
+const PERSON_ID = "testengineeringcollege~tec002";
+
+// A person-mode session doc: candidate_id is the display form, username_norm
+// the person_id; hackerrank_username is never written on the person path.
+function seedPersonSession(firestore, id, overrides = {}) {
+  firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({
+    session_id: id, status: "active",
+    candidate_id: "TEC002", username_norm: PERSON_ID,
+    person_id: PERSON_ID, college_norm: "testengineeringcollege",
+    roster_unique_id: "TEC002", hackerrank_username: "",
+    name: "Bharath K", roll_number: "R2", email: "b@x.y", room: "Lab A-1",
+    contest_slug: "kec-2026",
+    storage_prefix: `contests/kec-2026/sessions/${PERSON_ID}/${id}/`,
+    created_at: "2026-06-11T09:00:00.000Z",
+    last_heartbeat_at: new Date().toISOString(),
+    ...overrides
+  });
+}
+
+test("POST /api/invigilator/unlock: exact username_norm releases a person-mode enforcement lock (F2)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedPersonSession(firestore, "p1", { status: "locked", locked_reason: "fullscreen_enforcement" });
+  // The pre-fix payload (display Candidate ID only) can never match a
+  // person-mode doc — pinned so the identity-threading regression stays loud.
+  const displayOnly = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", username: "TEC002" } }));
+  assert.equal(displayOnly.statusCode, 404);
+  assert.equal(displayOnly.body.error, "no_locked_session_in_room");
+  // The row payload carries the EXACT stored key → the lock releases.
+  const res = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", username: "TEC002", username_norm: PERSON_ID } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.status, "active");
+  const doc = firestore._collections.get(process.env.SESSION_COLLECTION).get("p1");
+  assert.equal(doc.status, "active");
+  assert.equal(doc.locked_reason, null);
+  assert.equal(doc.unlock_method, "invigilator");
+  assert.equal(doc.fullscreen_exit_count, 0);
+});
+
+test("POST /api/invigilator/exempt: exact username_norm reaches a person-mode live session (F2)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedPersonSession(firestore, "p2");
+  const res = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", username: "TEC002", username_norm: PERSON_ID,
+            exemptions: { fullscreen: true } } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.enforcement_exemptions, { fullscreen: true });
+  assert.deepEqual(
+    firestore._collections.get(process.env.SESSION_COLLECTION).get("p2").enforcement_exemptions,
+    { fullscreen: true });
+  // Least privilege unchanged: the bearer token never echoes.
+  assert.equal(res.body.session_id, undefined);
+});
+
+test("invigilator unlock/exempt: legacy sessions keep working by display username alone (back-compat)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "l1", { status: "locked", locked_reason: "fullscreen_enforcement" });
+  const unlock = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", username: "Alice" } }));
+  assert.equal(unlock.statusCode, 200, JSON.stringify(unlock.body));
+  assert.equal(firestore._collections.get(process.env.SESSION_COLLECTION).get("l1").status, "active");
+  // A BLANK username_norm must not shadow the legacy fallback.
+  const exempt = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt",
+    headers: { "x-invigilator-password": "invig-pass" },
+    body: { room: "Lab A-1", username: "Alice", username_norm: "", exemptions: { switch_away: true } } }));
+  assert.equal(exempt.statusCode, 200, JSON.stringify(exempt.body));
+  assert.deepEqual(exempt.body.enforcement_exemptions, { switch_away: true });
+});
+
+test("GET /api/invigilator/room: rows carry the exact stored username_norm for BOTH identity models (F2)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "a1");
+  seedPersonSession(firestore, "p3");
+  const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
+    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.find((r) => r.name === "Alice A").username_norm, "alice");
+  const person = res.body.sessions.find((r) => r.name === "Bharath K");
+  assert.equal(person.username_norm, PERSON_ID);
+  assert.equal(person.candidate_id, "TEC002");
+  // M13 least privilege stays: no bearer token / email / IPs on rows.
+  for (const row of res.body.sessions) {
+    assert.ok(!("session_id" in row) && !("email" in row) && !("start_ip" in row) && !("current_ip" in row));
+  }
+});
+
 test("GET /api/invigilator/room: room=_ selects blank-room sessions; room param required", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });

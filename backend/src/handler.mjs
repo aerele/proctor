@@ -883,6 +883,20 @@ async function startResponse(session, settings, contest = null) {
     problems,
     submissions_summary: await sessionSubmissionsSummary(session.session_id),
     submit_budget: EXEC_MAX_SUBMISSIONS_PER_SESSION,
+    // F1 (e2e finding): chunk-index continuation — the recorder resumes its
+    // per-kind chunk count from the server's knowledge so a restarted stint
+    // (share-drop recovery, refresh-resume, even a new tab after a crash)
+    // never reuses indexes and never overwrites the prior stint's GCS objects.
+    // counts = issued upload URLs (always >= the highest index with a
+    // surviving object); hwm = exact highest issued index (absent on pre-F1
+    // sessions). Read-side additions only — older clients ignore them.
+    chunk_count: Number(session.chunk_count) || 0,
+    camera_chunk_count: Number(session.camera_chunk_count) || 0,
+    screen_chunk_index_hwm: Number(session.screen_chunk_index_hwm) || 0,
+    camera_chunk_index_hwm: Number(session.camera_chunk_index_hwm) || 0,
+    // F7 (e2e finding): the candidate ELAPSED counter anchors on the session's
+    // server-side start, not the recorder stint start, so it survives restarts.
+    created_at: session.created_at || "",
     // F10.1: the camera-recording knobs ride the same upload_config object the
     // screen constraints use, so the recorder reads ONE authoritative config.
     // Wave-4 fix: person contests serve their OWN snapshot camera config.
@@ -1138,8 +1152,20 @@ async function createUploadUrl(req) {
     return badRequest("Invalid chunk_index");
   }
 
+  // F1 (e2e finding): chunk indexes must NEVER be reused within a session — a
+  // restarted recorder that re-counts from 1 would OVERWRITE the prior stint's
+  // GCS objects at the same keys. The session doc tracks a per-kind index
+  // high-water mark; a request at/below it (an old/stale client restarting its
+  // count) is bumped to hwm+1 so every stint's chunks survive. The fixed
+  // frontend resumes its count monotonically and never trips this guard.
+  // Storage layout is unchanged (kind/chunk-{index:05d}.ext) — only which
+  // index gets used. hwm fields are absent on pre-F1 sessions (-> 0, no bump).
+  const hwmField = kind === "camera" ? "camera_chunk_index_hwm" : "screen_chunk_index_hwm";
+  const indexHwm = Number(session[hwmField]) || 0;
+  const effectiveIndex = chunkIndex <= indexHwm && indexHwm > 0 ? indexHwm + 1 : chunkIndex;
+
   const extension = String(body.content_type).includes("webm") ? "webm" : "bin";
-  const objectKey = `${sessionPrefix(session)}${kind}/chunk-${String(chunkIndex).padStart(5, "0")}.${extension}`;
+  const objectKey = `${sessionPrefix(session)}${kind}/chunk-${String(effectiveIndex).padStart(5, "0")}.${extension}`;
   const [uploadUrl] = await bucket()
     .file(objectKey)
     .getSignedUrl({
@@ -1151,6 +1177,10 @@ async function createUploadUrl(req) {
 
   await sessionRef(session.session_id).update({
     updated_at: new Date().toISOString(),
+    // F1: per-kind hwm advances with every issued URL (uploads are serialized
+    // per kind client-side; the two kinds write distinct fields, so this
+    // read-modify-write never races itself).
+    [hwmField]: Math.max(indexHwm, effectiveIndex),
     // F10.1: chunk_count stays the SCREEN counter — the admin UI's recording-
     // duration math (chunks × 30s) and the recordings picker both read it, so
     // camera chunks must never inflate it. The camera stream counts separately.
@@ -3380,6 +3410,12 @@ async function adminStats(req) {
 
   // S5: the console exam-time card rides on the existing 5 s stats poll, so the
   // current end time + a server clock stamp come back with every poll.
+  // F3 (E2E live): a contest-scoped stats poll reports THAT contest's window —
+  // the legacy settings end_at said "time is up" while the scoped contest had
+  // hours left. ALL_CONTESTS keeps today's legacy schedule; the synthesized
+  // legacy contest mirrors the settings doc so its value is identical; an
+  // unknown slug (contestScopeOf's literal fallback carries no window) reports
+  // "" → the card renders "no schedule" instead of the wrong clock.
   const settings = await getSettings();
   return {
     contest_slug: contestSlug ? String(contestSlug) : null,
@@ -3387,7 +3423,7 @@ async function adminStats(req) {
     stats,
     rooms,
     disconnected_staleness_ms: DISCONNECTED_STALENESS_MS,
-    end_at: settings?.end_at || "",
+    end_at: scope === ALL_CONTESTS ? (settings?.end_at || "") : (scope.end_at || ""),
     server_now: new Date().toISOString()
   };
 }

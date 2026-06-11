@@ -68,7 +68,7 @@ export function buildPlaylist(
     .filter((entry) => Number.isFinite(entry.index))
     .sort((a, b) => a.index - b.index);
 
-  return chunks.map((entry) => {
+  const placed = chunks.map((entry) => {
     const modifiedMs = entry.file.last_modified ? Date.parse(entry.file.last_modified) : NaN;
     let offsetSec: number;
     if (Number.isFinite(modifiedMs) && Number.isFinite(testStartMs)) {
@@ -88,4 +88,11 @@ export function buildPlaylist(
       endSec: offsetSec + CHUNK_SECONDS
     };
   });
+
+  // F1: order the playlist CHRONOLOGICALLY (offset, then index). For sessions
+  // recorded after the index-continuation fix this equals index order; for
+  // legacy multi-stint sessions whose restarts OVERWROTE early indexes with
+  // late bytes, it restores true play order, keeps the player's binary-search
+  // invariant (offsets sorted) intact, and makes the gap summary honest.
+  return placed.sort((a, b) => a.offsetSec - b.offsetSec || a.index - b.index);
 }

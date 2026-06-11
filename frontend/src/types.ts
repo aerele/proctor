@@ -104,6 +104,18 @@ export type SessionStartResponse = {
   // the backend predates S5.
   end_at?: string;
   server_now?: string;
+  // F1 (e2e finding): server-side chunk-index continuation knowledge — counts
+  // of issued upload URLs and the exact per-kind index high-water marks. The
+  // recorder resumes its chunk count from max(these, the local sessionStorage
+  // hwm) so a restarted stint never overwrites prior chunks. Absent on a
+  // pre-F1 backend (treated as 0 — old behavior).
+  chunk_count?: number;
+  camera_chunk_count?: number;
+  screen_chunk_index_hwm?: number;
+  camera_chunk_index_hwm?: number;
+  // F7 (e2e finding): the session's server-side start — anchors the candidate
+  // ELAPSED counter so it survives recorder restarts and reloads.
+  created_at?: string;
 };
 
 // Event `type` is an open string (the backend stores arbitrary types). S1
@@ -847,6 +859,11 @@ export type InvigilatorSessionRow = {
   hackerrank_username: string;
   /** S-A accept-both (see SessionStartResponse.candidate_id). */
   candidate_id?: string;
+  /** F2 (E2E live): the EXACT stored session key (legacy = normalized
+   *  candidate, person-mode = person_id "{college}~{uid}") the row actions
+   *  (Unlock / Exempt) post back — a display id can never normalize to a
+   *  person_id. Absent on older backends (actions fall back to the display id). */
+  username_norm?: string;
   roll_number: string;
   /** F9.4: the roster's unique id (identity data — joins the alert detail view). */
   roster_unique_id: string;

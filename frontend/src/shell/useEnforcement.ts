@@ -109,7 +109,10 @@ export function useEnforcement(opts: {
       const event = makeShellEvent(type, detail, new Date().toISOString(), document.visibilityState);
       addEventRef.current(event);
       const sid = sessionIdRef.current;
-      if (sid) void sendEvents(sid, [event]);
+      // F9: best-effort audit post — the enforcement ladder keeps emitting on
+      // the locked screen, where the server 403s by design; swallow so the
+      // expected rejection never surfaces as an unhandled promise error.
+      if (sid) void sendEvents(sid, [event]).catch(() => undefined);
     };
   }, []);
 

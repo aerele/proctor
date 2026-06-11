@@ -19,7 +19,7 @@ import {
 import { candidateIdOf } from "./identity";
 import { gateStatusLabel } from "./invigilator/gateLogic";
 import { portalCredential, portalLinkOf } from "./invigilator/portalLink";
-import { alertExplanation, duplicateRowKeys, emptyAlertsHint, matchesStatusFilter, portalEntryBlurb, sessionStartedLabel } from "./invigilator/roomView";
+import { alertExplanation, duplicateRowKeys, emptyAlertsHint, examStageLabel, matchesStatusFilter, portalEntryBlurb, sessionStartedLabel } from "./invigilator/roomView";
 import type { StatusFilter } from "./invigilator/roomView";
 import type { EnforcementExemptions, InvigilatorAlert, InvigilatorRoomResponse, InvigilatorSessionRow, RoomGate } from "./types";
 
@@ -221,11 +221,14 @@ export function InvigilatorApp() {
   // F5.6 wave-2 fix: per-student release of an enforcement lock (the locked
   // screen tells the candidate the room proctor can "unlock you from their
   // console" — this is that console action). Admin locks never show the button.
+  // F2 (E2E live): the action threads the row's EXACT stored key
+  // (row.username_norm) — person-mode sessions are keyed by person_id
+  // ("{college}~{uid}"), which the display Candidate ID can never resolve.
   const unlockStudent = async (row: InvigilatorSessionRow) => {
     if (!window.confirm(`Unlock ${row.name || candidateIdOf(row)}? Their exam resumes immediately.`)) return;
     setError("");
     try {
-      await invigilatorUnlock(password, room, candidateIdOf(row), link.contest || undefined);
+      await invigilatorUnlock(password, room, candidateIdOf(row), link.contest || undefined, row.username_norm || undefined);
       setData((current) => current
         ? {
             ...current,
@@ -243,12 +246,13 @@ export function InvigilatorApp() {
   // F5.5: toggle one enforcement exemption for ONE student (legit environment
   // problems — e.g. a flaky projector hook stealing focus). Applies to the
   // student's LIVE session within a heartbeat; the row updates optimistically
-  // from the server's echoed exemptions.
+  // from the server's echoed exemptions. F2 (E2E live): threads the row's
+  // exact stored key, same as unlockStudent.
   const toggleExemption = async (row: InvigilatorSessionRow, key: keyof EnforcementExemptions) => {
     setError("");
     try {
       const next = { [key]: !(row.enforcement_exemptions?.[key] === true) } as EnforcementExemptions;
-      const response = await invigilatorExempt(password, room, candidateIdOf(row), next, link.contest || undefined);
+      const response = await invigilatorExempt(password, room, candidateIdOf(row), next, link.contest || undefined, row.username_norm || undefined);
       setData((current) => current
         ? {
             ...current,
@@ -491,7 +495,10 @@ export function InvigilatorApp() {
                       <td className="py-2 pr-3">
                         <span className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.className}`}>{badge.label}</span>
                       </td>
-                      <td className="py-2 pr-3 text-muted">{row.exam_started_at ? "Started" : "Waiting"}</td>
+                      {/* F8 (E2E live): gate-aware stage — exam_started_at only
+                          exists when the start gate stamps it, so with the
+                          gate off this column was "Waiting" forever. */}
+                      <td className="py-2 pr-3 text-muted">{examStageLabel(row, gateEnabled)}</td>
                       <td className="py-2">
                         {/* F5.5: per-student enforcement exemptions for legit
                             environment problems. Disabled for ended sessions.

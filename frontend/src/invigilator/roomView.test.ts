@@ -2,8 +2,8 @@
 // F9.4 plain-language alert explanations (pure logic for the invigilator portal).
 import { describe, expect, it } from "vitest";
 import {
-  alertExplanation, duplicateRowKeys, emptyAlertsHint, matchesStatusFilter,
-  portalEntryBlurb, sessionStartedLabel, type StatusFilter
+  alertExplanation, duplicateRowKeys, emptyAlertsHint, examStageLabel,
+  matchesStatusFilter, portalEntryBlurb, sessionStartedLabel, type StatusFilter
 } from "./roomView";
 
 type Row = Parameters<typeof matchesStatusFilter>[0];
@@ -51,6 +51,27 @@ describe("matchesStatusFilter (F9.2)", () => {
     expect(matchesStatusFilter(row({ exam_started_at: "2026-06-10T09:00:00Z" }), "started")).toBe(true);
     expect(matchesStatusFilter(row({ status: "ended", exam_started_at: "2026-06-10T09:00:00Z" }), "started")).toBe(true);
     expect(matchesStatusFilter(row(), "started")).toBe(false);
+  });
+});
+
+describe("examStageLabel (F8 E2E live)", () => {
+  it("a stamped exam start always reads Started, whatever the gate or status", () => {
+    expect(examStageLabel(row({ exam_started_at: "2026-06-12T09:00:00Z" }), true)).toBe("Started");
+    expect(examStageLabel(row({ exam_started_at: "2026-06-12T09:00:00Z" }), false)).toBe("Started");
+    expect(examStageLabel(row({ status: "ended", exam_started_at: "2026-06-12T09:00:00Z" }), false)).toBe("Started");
+  });
+  it("a finished session is never Waiting", () => {
+    expect(examStageLabel(row({ status: "ended" }), true)).toBe("Finished");
+    expect(examStageLabel(row({ status: "ended" }), false)).toBe("Finished");
+  });
+  it("Waiting only while a start gate is actually holding candidates", () => {
+    expect(examStageLabel(row(), true)).toBe("Waiting");
+    expect(examStageLabel(row({ status: "locked" }), true)).toBe("Waiting");
+  });
+  it("with the gate disabled there is nothing to wait for — dash", () => {
+    expect(examStageLabel(row(), false)).toBe("—");
+    expect(examStageLabel(row({ status: "locked" }), false)).toBe("—");
+    expect(examStageLabel(row({ status: "pending_approval" }), false)).toBe("—");
   });
 });
 

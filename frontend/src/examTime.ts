@@ -34,6 +34,25 @@ export function formatRemaining(ms: number): string {
   return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+// F7 (e2e finding): client-epoch anchor for the candidate ELAPSED counter.
+// The counter must measure from the SESSION's server-side start (created_at),
+// not from the current recorder stint, so a recording restart (share-drop
+// recovery, refresh-resume) never resets it to 0:00. The server stamp is
+// mapped onto the client clock with the same skew correction the countdown
+// uses. Falls back to "now" (stint start — the old behavior) when created_at
+// is missing/unparseable (pre-F7 backend), and clamps to "now" so a skewed
+// future stamp can never render a negative elapsed time.
+export function sessionElapsedAnchorMs(
+  createdAtIso: string | undefined,
+  serverNowIso: string | undefined,
+  clientNowMs: number
+): number {
+  const createdMs = createdAtIso ? Date.parse(createdAtIso) : NaN;
+  if (!Number.isFinite(createdMs)) return clientNowMs;
+  const anchor = createdMs - computeClockSkewMs(serverNowIso, clientNowMs);
+  return Math.min(anchor, clientNowMs);
+}
+
 // D1 — which end_at does a Settings-form save actually persist? Mirrors the
 // backend adminSaveSettings rule (demo parity): once the exam-time endpoint has
 // adjusted the end (end_at_updated_at stamp) and the save keeps the SAME

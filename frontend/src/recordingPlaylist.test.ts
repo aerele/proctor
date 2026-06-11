@@ -100,6 +100,46 @@ describe("buildPlaylist", () => {
     const playlist = buildPlaylist(shuffled, "2026-06-05T09:00:00.000Z", testStartMs, "camera");
     expect(playlist.map((c) => c.index)).toEqual([1, 2]);
   });
+
+  // F1 (e2e finding): multi-stint sessions. With monotonic indexes every
+  // stint's chunks SURVIVE; the playlist places each at its true recorded
+  // time, leaving the restart window as an honest gap.
+  it("places a two-stint session chronologically with the real gap between stints", () => {
+    const twoStints = [
+      // Stint 1: chunks 1-2 (09:00:30 / 09:01:00 = offsets 0 / 30).
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.000Z"),
+      // Share drop + recovery → stint 2 CONTINUES at 3-4, ~5 minutes later.
+      file(`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:06:30.000Z"),
+      file(`${PREFIX}screen/chunk-00004.webm`, "2026-06-05T09:07:00.000Z")
+    ];
+    const playlist = buildPlaylist(twoStints, "2026-06-05T09:00:00.000Z", testStartMs, "screen");
+    expect(playlist.map((c) => c.index)).toEqual([1, 2, 3, 4]);
+    expect(playlist.map((c) => c.offsetSec)).toEqual([0, 30, 360, 390]);
+    // The restart window (60s..360s) is a real blank between chunk 2 and 3 —
+    // RecordingReview derives its gap summary from exactly these spans.
+    expect(playlist[2].offsetSec - playlist[1].endSec).toBe(300);
+  });
+
+  // Backward compat: a LEGACY overwritten session (recorded before the F1 fix)
+  // has early indexes carrying LATE bytes (the final stint overwrote them).
+  // The playlist orders by true recorded time, so offsets stay monotonic (the
+  // player's binary-search/auto-advance invariant) even though the index order
+  // disagrees.
+  it("orders a legacy overwritten session by recorded time, keeping offsets monotonic", () => {
+    const legacy = [
+      // chunk 1-2 were overwritten by the final stint (late timestamps)...
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:30:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:31:00.000Z"),
+      // ...while chunk 3-4 still carry the FIRST stint (early timestamps).
+      file(`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:01:30.000Z"),
+      file(`${PREFIX}screen/chunk-00004.webm`, "2026-06-05T09:02:00.000Z")
+    ];
+    const playlist = buildPlaylist(legacy, "2026-06-05T09:00:00.000Z", testStartMs, "screen");
+    expect(playlist.map((c) => c.index)).toEqual([3, 4, 1, 2]);
+    const offsets = playlist.map((c) => c.offsetSec);
+    expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
+  });
 });
 
 describe("hasCameraChunks", () => {
