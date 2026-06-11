@@ -4,12 +4,16 @@
 // App.tsx touchpoints stay minimal: import + tab + render branch.
 import { ClipboardList, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { deleteProblem, fetchProblemDetail, fetchProblems, fetchProctorSettings, saveProblem, saveProctorSettings } from "../api";
+import { deleteProblem, fetchContests, fetchProblemDetail, fetchProblems, fetchProctorSettings, saveProblem, saveProctorSettings } from "../api";
 import { draftFromDoc, draftToDoc, emptyProblemDraft, PROBLEM_LANGUAGES, validateProblemDraft, type ProblemDraft } from "../problems/problemDraft";
-import type { ProblemLanguage, ProblemSummary, ProblemTest } from "../types";
+import { liveContestsReferencingProblem, liveSaveConfirmMessage, shouldConfirmLiveSave } from "./saveGuard";
+import type { ContestSummary, ProblemLanguage, ProblemSummary, ProblemTest } from "../types";
 
 export function ProblemBankSection({ password }: { password: string }) {
   const [problems, setProblems] = useState<ProblemSummary[]>([]);
+  // D1: the contests list lets the save gate detect when an edited problem is
+  // referenced by an OPEN (running/active) contest and confirm before committing.
+  const [contests, setContests] = useState<ContestSummary[]>([]);
   const [activeProblemId, setActiveProblemId] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
@@ -22,11 +26,15 @@ export function ProblemBankSection({ password }: { password: string }) {
     setLoading(true);
     setError("");
     try {
-      const [list, settings] = await Promise.all([
+      const [list, settings, contestList] = await Promise.all([
         fetchProblems(password),
-        fetchProctorSettings(password).catch(() => null)
+        fetchProctorSettings(password).catch(() => null),
+        // D1: contests feed the live-save gate. A failed fetch must not block
+        // authoring — fall back to an empty list (gate simply won't prompt).
+        fetchContests(password).catch(() => [] as ContestSummary[])
       ]);
       setProblems(list);
+      setContests(contestList);
       setActiveProblemId(settings?.problem_id || "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -57,6 +65,14 @@ export function ProblemBankSection({ password }: { password: string }) {
     if (invalid) {
       setError(invalid);
       return;
+    }
+    // D1 (Karthi decision): warn-on-save. When the edited problem is referenced
+    // by an OPEN (running/active) contest, candidates may be sitting it right now
+    // — confirm before the edit reaches them. New drafts (blank id) and problems
+    // only draft/archived contests reference never prompt.
+    if (shouldConfirmLiveSave(draft.id, contests)) {
+      const live = liveContestsReferencingProblem(draft.id, contests);
+      if (!window.confirm(liveSaveConfirmMessage(draft.id, live))) return;
     }
     setSaving(true);
     setError("");
