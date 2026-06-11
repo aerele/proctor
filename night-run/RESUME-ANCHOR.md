@@ -10,7 +10,12 @@ _Last updated: 2026-06-11 (after F12). Maintainer: keep this current; archive, d
 - **Repo** `/home/karthi/arogara/proctor`, branch **master**, HEAD **49af4f1** (= product c762877 + 7 behavior-preserving decomposition commits B0/B1 on top; product behavior identical to the deployed rev 00006). ~156 local commits. **NEVER pushed** (see §4 push gate).
 - **Timeline:** the real 700-candidate exam runs on the **OLD proctor (HackerRank)**; THIS platform targets the **2026-06-12 live test** — that readiness is now the priority. **No rush, no rushed deploy.**
 - **⏸ Architecture decomposition PAUSED (Karthi TG 1837, 2026-06-11):** B0+B1 DONE + green (backend 705/705, tree clean, HEAD 49af4f1), rest **slated for AFTER the test** — restructuring isn't essential to it. Resume at **B2** (plan doc has a PAUSE/RESUME banner). Memory: `proctor_architecture_decomposition`.
-- **▶ NOW (TG 1839):** writing **F11 documentation + the exam-day ops runbook** in the background (NOT the triple-review yet — that comes after). Then awaiting Karthi's multipart backlog-prioritization.
+- **▶ NOW — live walkthrough-fix mode (TG 1839–1846):**
+  (1) F11 docs + ops runbook building in the **background** (workflow `wf_145b15ad-957`; docs-only; NOT the triple-review).
+  (2) **Karthi is doing a hands-on flow walkthrough and firing comments.** For each: log it in `night-run/WALKTHROUGH-FIXES.md` (id `W#`) → dispatch an Opus subagent to fix → verify (tests/build) → commit serially. He'll keep them coming.
+  **Priority = 2026-06-12 live-test readiness: a flawless flow, as smooth as HackerRank, zero glitches, clean keystroke/event data.** Everything else is deferred → `PRODUCT-BACKLOG.md`.
+- **Commit rule (active):** serialize commits — **no concurrent `git commit`** while the docs workflow is committing; the coordinator owns commits; **never push**.
+- **Compaction:** Karthi will compact BEFORE starting his walkthrough feedback. Post-compaction, resume in walkthrough-fix mode using `night-run/WALKTHROUGH-FIXES.md` (protocol + ledger) and this anchor.
 - **Mode:** Telegram (plain prose replies). Karthi stepped away 2026-06-11 ~05:30, unavailable a while — **work autonomously to completion**, ping Telegram only for a genuine blocker. No blockers outstanding.
 - **Mandate (TG 1789/1791/1795):** finish ALL build, then **persona-driven end-to-end browser test of EVERY feature + screenshot-document each** (= the docs), fix→redeploy→retest until a confidently-shippable product (happy path + obvious flows must obviously work). Truth bar: "if the docs say it works, it works." Full detail in memory `proctor_e2e_test_docs_mandate`.
 - **Tests green at HEAD:** backend **703/703**, frontend **625/625**, `npm run build` clean.
@@ -67,6 +72,8 @@ _Last updated: 2026-06-11 (after F12). Maintainer: keep this current; archive, d
 
 ## 6. LINKS (the rest lives here — not duplicated above)
 - **Feedback ledger** (every Karthi feedback round F1-F12, with decisions): [`../TODO-admin-polish.md`](../TODO-admin-polish.md)
+- **Product backlog** (deferred work — do later, NOT for the test): [`../PRODUCT-BACKLOG.md`](../PRODUCT-BACKLOG.md)
+- **Live walkthrough fixes ledger** (current working mode + protocol): [`WALKTHROUGH-FIXES.md`](WALKTHROUGH-FIXES.md)
 - **Build-target spec** (F10 product vision incl §10 answers): `docs/superpowers/specs/2026-06-10-f10-product-vision.md`; identity/lifecycle: `2026-06-10-f9-identity-data-lifecycle-design.md`; S-I detail: `2026-06-10-s-i-multiproblem-detail-spec.md`
 - **Deploy / GCP from-scratch setup:** [`GCP-SETUP-INSTRUCTIONS.md`](GCP-SETUP-INSTRUCTIONS.md)
 - **Evidence screenshots** (seed for docs): [`evidence/`](evidence/)
