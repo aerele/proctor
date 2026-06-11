@@ -825,7 +825,10 @@ export async function validateEndSession(params: { sessionId: string; assuranceA
   });
 }
 
-export async function fetchAdminSessions(username: string, password: string): Promise<AdminSessionsResponse> {
+// S-D (A1): the OPTIONAL contestSlug scopes the review/recordings username
+// search like every other admin GET — under person identity the same person_id
+// recurs across rounds by design, so an unscoped search would interleave them.
+export async function fetchAdminSessions(username: string, password: string, contestSlug?: string): Promise<AdminSessionsResponse> {
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
@@ -833,15 +836,20 @@ export async function fetchAdminSessions(username: string, password: string): Pr
     // Recording playback view: a fake recording dataset takes precedence so the
     // whole search → timeline → player flow is exercisable OFFLINE. Falls back to
     // the demo STUDENT session store (no evidence) for any other username.
-    const recording = demoRecordingSessionsFor(usernameNorm);
+    const recording = demoRecordingSessionsFor(usernameNorm)
+      .filter((item) => !contestSlug || item.contest_slug === contestSlug);
     if (recording.length) return { sessions: recording };
     const sessions = readDemoSessions()
       .filter((item) => item.username_norm === usernameNorm)
+      .filter((item) => !contestSlug || item.contest_slug === contestSlug)
       .map((item) => ({ ...item, evidence: [] as SessionEvidence[] }));
     return { sessions };
   }
 
-  return request<AdminSessionsResponse>(`/api/admin/sessions?username=${encodeURIComponent(username)}`, {
+  const query = new URLSearchParams();
+  query.set("username", username);
+  if (contestSlug) query.set("contest_slug", contestSlug);
+  return request<AdminSessionsResponse>(`/api/admin/sessions?${query.toString()}`, {
     method: "GET",
     headers: {
       "x-admin-password": password

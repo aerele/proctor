@@ -454,15 +454,21 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // ReviewModePanel can show its own "No recording found — score anyway" state.
   // `preferSessionId` (F6.3 deep link) selects that exact session when it is
   // among the loaded ones; otherwise the default newest-first pick applies.
+  // `contestScope` (S-D A1) restricts the search to one contest: BROWSE-mode
+  // call sites pass the global selector's slug (so the loaded sessions match
+  // the scoped picker), while REVIEW-mode calls stay unscoped — the review
+  // roster is server-driven and independent of the admin's selector.
+  const loadedScopeRef = useRef<string | undefined>(undefined);
   const loadUser = useCallback(
-    async (username: string, silentIfEmpty = false, preferSessionId?: string) => {
+    async (username: string, silentIfEmpty = false, preferSessionId?: string, contestScope?: string) => {
       const trimmed = username.trim();
       if (!trimmed) return;
       setLoadingUser(true);
       setError("");
       setRefreshNote("");
       try {
-        const response = await fetchAdminSessions(trimmed, password);
+        loadedScopeRef.current = contestScope;
+        const response = await fetchAdminSessions(trimmed, password, contestScope);
         const loaded = response.sessions ?? [];
         setSessions(loaded);
         // Default to the newest session (sessions arrive newest-first from the
@@ -507,7 +513,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   useEffect(() => {
     if (!deepLink) return;
     setMode("browse");
-    void loadUser(deepLink.username, false, deepLink.sessionId);
+    void loadUser(deepLink.username, false, deepLink.sessionId, contestSlug || undefined);
     onDeepLinkConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deepLink]);
@@ -676,13 +682,15 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // Refresh the signed evidence URLs (they expire ~1h) by re-calling
   // fetchAdminSessions, preserving the current selection/position. Returns the
   // fresh URL for the chunk at `posToKeep` so the caller can resume in place.
+  // Re-fetches with the SAME contest scope the current list was loaded under,
+  // so a URL refresh never changes which sessions are listed.
   const refreshUrls = useCallback(async (): Promise<string | null> => {
     if (refreshingRef.current || !activeSession) return null;
     const username = candidateIdOf(activeSession);
     if (!username) return null;
     refreshingRef.current = true;
     try {
-      const response = await fetchAdminSessions(username, password);
+      const response = await fetchAdminSessions(username, password, loadedScopeRef.current);
       const fresh = response.sessions ?? [];
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
@@ -1105,7 +1113,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     <button
                       key={s.session_id}
                       type="button"
-                      onClick={() => void loadUser(candidateIdOf(s))}
+                      onClick={() => void loadUser(candidateIdOf(s), false, undefined, contestSlug || undefined)}
                       className="focus-ring block w-full rounded-md border border-line bg-white/60 px-3 py-2 text-left hover:border-ink/40"
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -1140,14 +1148,14 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   value={manualUsername}
                   onChange={(event) => setManualUsername(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") void loadUser(manualUsername);
+                    if (event.key === "Enter") void loadUser(manualUsername, false, undefined, contestSlug || undefined);
                   }}
                 />
               </label>
               <button
                 type="button"
                 className="focus-ring inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
-                onClick={() => void loadUser(manualUsername)}
+                onClick={() => void loadUser(manualUsername, false, undefined, contestSlug || undefined)}
                 disabled={loadingUser || !manualUsername.trim()}
               >
                 <Search size={16} /> Load recording

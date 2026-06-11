@@ -3,9 +3,13 @@
 //        URLs + invigilator_key), §5 rows A2/A3/C1/I1, §7 row S-D, §10.3
 //        (typed access code).
 // Covers: invigilator_key minted at create + regenerate endpoint (access_code
-// too), the PUBLIC rate-limited POST /api/access-code resolver, per-contest
-// GET /api/exam-config?contest=, per-contest exam-time (extend/end-now), rooms
-// editing via contest-update, and invigilator per-contest key auth + scoping.
+// too), the PUBLIC rate-limited POST /api/access-code resolver (failures-only
+// budget — successful resolves are refunded so a NAT'd lab hall typing the
+// correct code is never throttled), per-contest GET /api/exam-config?contest=,
+// per-contest exam-time (extend/end-now), rooms editing via contest-update,
+// invigilator per-contest key auth + scoping, and the REVIEW-search
+// GET /api/admin/sessions?contest_slug= contest scoping (vision §5 A1:
+// "selector scopes every tab").
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -126,9 +130,16 @@ function makeFakeFirestore() {
 
 const ADMIN_HEADERS = { "x-admin-password": "sd-admin-pass" };
 
+// Minimal storage fake: GET /api/admin/sessions lists evidence under each
+// session's storage prefix; these tests assert SCOPING, not evidence, so an
+// empty listing suffices.
+function makeFakeStorage() {
+  return { bucket() { return { async getFiles() { return [[]]; } }; } };
+}
+
 function freshDb() {
   const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
   __setAccessCodeClockForTest(null);
   return firestore;
 }
@@ -256,11 +267,11 @@ test("access-code: malformed code -> 400 invalid_code; unknown code -> 404", asy
   assert.equal(unknown.statusCode, 404);
 });
 
-test("access-code rate limit: per-IP cap inside the window, 429 + retry hint; other IPs unaffected; window expiry resets", async () => {
+test("access-code rate limit: per-IP FAILURE cap (60/min) inside the window, 429 + retry hint; other IPs unaffected; window expiry resets", async () => {
   freshDb();
   let nowMs = 1_000_000;
   __setAccessCodeClockForTest(() => nowMs);
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 60; i++) {
     assert.equal((await call(codeReq("ZZZZZZ", "198.51.100.7"))).statusCode, 404);
   }
   const capped = await call(codeReq("ZZZZZZ", "198.51.100.7"));
@@ -272,6 +283,82 @@ test("access-code rate limit: per-IP cap inside the window, 429 + retry hint; ot
   nowMs += 61_000;
   assert.equal((await call(codeReq("ZZZZZZ", "198.51.100.7"))).statusCode, 404);
   __setAccessCodeClockForTest(null);
+});
+
+test("access-code rate limit: successful resolves are REFUNDED — a NAT'd lab hall typing the correct code is never throttled (vision §10.3)", async () => {
+  freshDb();
+  let nowMs = 2_000_000;
+  __setAccessCodeClockForTest(() => nowMs);
+  const contest = await createContest({ name: "Code Hall" });
+  await openContest(contest.slug);
+
+  // A synchronized hall behind ONE campus egress IP types the CORRECT code far
+  // past the failure cap — every resolve must succeed (successes don't count).
+  for (let i = 0; i < 80; i++) {
+    const res = await call(codeReq(contest.access_code, "198.51.100.20"));
+    assert.equal(res.statusCode, 200, `success #${i + 1}: ${JSON.stringify(res.body)}`);
+  }
+
+  // FAILED attempts from the same IP still consume the anti-enumeration budget…
+  for (let i = 0; i < 60; i++) {
+    assert.equal((await call(codeReq("ZZZZZZ", "198.51.100.20"))).statusCode, 404);
+  }
+  assert.equal((await call(codeReq("ZZZZZZ", "198.51.100.20"))).statusCode, 429);
+  // …and once exhausted even a valid code is blocked for the rest of the window
+  // (the check runs BEFORE resolution, so capped probes learn nothing).
+  assert.equal((await call(codeReq(contest.access_code, "198.51.100.20"))).statusCode, 429);
+  __setAccessCodeClockForTest(null);
+});
+
+// ---- GET /api/admin/sessions?contest_slug= (review search scoping, vision §5 A1) --
+
+function seedSession(firestore, { id, contestSlug, createdAt }) {
+  return firestore.collection("sd_sessions").doc(id).set({
+    session_id: id,
+    hackerrank_username: "21cs001",
+    username_norm: "21cs001",
+    contest_slug: contestSlug,
+    status: "ended",
+    created_at: createdAt,
+    storage_prefix: `contests/seeded/sessions/21cs001/${id}/`
+  });
+}
+
+test("admin sessions search: ?contest_slug= scopes the username search; absent stays cross-contest; legacy translates to the empty-slug filter; unknown slug filters literally", async () => {
+  const firestore = freshDb();
+  const round1 = await createContest({ name: "Scope Round 1" });
+  const round2 = await createContest({ name: "Scope Round 2" });
+  // Same person_id/username across rounds BY DESIGN (S-C person identity) —
+  // exactly the case the review search must keep apart.
+  await seedSession(firestore, { id: "s-r1", contestSlug: round1.slug, createdAt: "2026-06-10T01:00:00.000Z" });
+  await seedSession(firestore, { id: "s-r2", contestSlug: round2.slug, createdAt: "2026-06-10T02:00:00.000Z" });
+  await seedSession(firestore, { id: "s-legacy", contestSlug: "", createdAt: "2026-06-10T03:00:00.000Z" });
+  // Legacy settings doc with NO derivable slug -> synthesized "legacy" contest
+  // with legacy_empty_slug:true (F9 §6).
+  await firestore.collection("sd_settings").doc("active").set({ updated_at: "2026-06-09T00:00:00.000Z" });
+
+  const search = (query) => call(makeReq({
+    method: "GET", path: "/api/admin/sessions", headers: ADMIN_HEADERS, query
+  }));
+
+  const scoped = await search({ username: "21cs001", contest_slug: round2.slug });
+  assert.equal(scoped.statusCode, 200, JSON.stringify(scoped.body));
+  assert.deepEqual(scoped.body.sessions.map((s) => s.session_id), ["s-r2"]);
+
+  // No param -> ALL contests (today's behavior, explicit ALL_CONTESTS sentinel).
+  const all = await search({ username: "21cs001" });
+  assert.equal(all.statusCode, 200);
+  assert.equal(all.body.sessions.length, 3);
+
+  // Selecting the synthesized legacy contest matches legacy contest_slug:"" docs.
+  const legacy = await search({ username: "21cs001", contest_slug: "legacy" });
+  assert.equal(legacy.statusCode, 200);
+  assert.deepEqual(legacy.body.sessions.map((s) => s.session_id), ["s-legacy"]);
+
+  // Unknown slug filters literally -> empty list, never an error (F9 D10).
+  const ghost = await search({ username: "21cs001", contest_slug: "ghost" });
+  assert.equal(ghost.statusCode, 200);
+  assert.deepEqual(ghost.body.sessions, []);
 });
 
 // ---- GET /api/exam-config?contest= ----------------------------------------------

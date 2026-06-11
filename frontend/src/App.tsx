@@ -2499,11 +2499,14 @@ function AdminApp() {
     }
   };
 
-  const search = async () => {
+  // S-D (A1): the review search is scoped by the GLOBAL contest selector like
+  // every other tab. `filters` mirrors loadStats/loadAlerts — selectContest
+  // passes the NEXT filters explicitly because setState is async.
+  const search = async (filters?: AlertFilters) => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetchAdminSessions(username, password);
+      const response = await fetchAdminSessions(username, password, (filters ?? alertFilters).contest_slug);
       setResult(response.sessions);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -2867,6 +2870,9 @@ function AdminApp() {
     if (alertsLoaded) void loadAlerts(next);
     if (sessionsList !== null) void loadSessions(next);
     if (ipReport !== null) void loadIpReport(undefined, next);
+    // The review search re-runs under the new scope (same condition as
+    // runAction's refresh) so displayed results never outlive the selector.
+    if (view === "review" && username) void search(next);
   };
 
   if (!unlocked) {
@@ -3184,7 +3190,7 @@ function AdminApp() {
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
           <Field label="Candidate ID" value={username} onChange={setUsername} />
-          <button className="focus-ring mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={search} disabled={loading || !username || !password}>
+          <button className="focus-ring mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={() => void search()} disabled={loading || !username || !password}>
             <Search size={16} /> Search
           </button>
         </div>
