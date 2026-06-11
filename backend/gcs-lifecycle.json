@@ -1,11 +1,17 @@
 {
   "rule": [
     {
-      "action": {
-        "type": "Delete"
-      },
+      "action": { "type": "Delete" },
       "condition": {
-        "age": 3
+        "age": 3,
+        "matchesPrefix": ["contests/", "sessions/"]
+      }
+    },
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "age": 11,
+        "matchesPrefix": ["exports/"]
       }
     }
   ]

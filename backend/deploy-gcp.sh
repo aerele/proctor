@@ -52,6 +52,13 @@ if ! gcloud storage buckets describe "gs://${EVIDENCE_BUCKET}" >/dev/null 2>&1; 
 fi
 
 gcloud storage buckets update "gs://${EVIDENCE_BUCKET}" --cors-file=backend/gcs-cors.json
+# gcs-lifecycle.json has TWO prefix-scoped rules (GCS lifecycle supports
+# matchesPrefix): per-session evidence under contests/ + sessions/ deletes at 3
+# days; export zips under exports/ delete at 11 days. The split is load-bearing —
+# exports/ are the recovery anchor for an irreversible purge and the
+# retention-sweep endpoint owns their canonical 10-day deletion, so the GCS rule
+# is only a backstop (age:11) just past that window. A single blanket age:3 rule
+# would delete the export recovery archives 7 days early (Wave-7 review finding).
 gcloud storage buckets update "gs://${EVIDENCE_BUCKET}" --lifecycle-file=backend/gcs-lifecycle.json
 
 if ! gcloud artifacts repositories describe "$REPOSITORY" --location="$REGION" >/dev/null 2>&1; then

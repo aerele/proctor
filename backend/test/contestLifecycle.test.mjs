@@ -340,6 +340,80 @@ test("purge with include_evidence:false stamps evidence_prefixes on the tombston
   assert.ok([...storage._saved.keys()].some((k) => k.startsWith(prefix)), "evidence retained until the sweep");
 });
 
+// ---- PURGE: export-is-the-recovery-path (the stamp must point at a LIVE zip) -
+
+test("purge: rejected when last_export_at is stamped but the export zip is gone (export_missing)", async () => {
+  const { firestore, storage } = freshClients();
+  seedContest(firestore, storage, "kec-r1");
+  await call(makeReq({ method: "POST", path: "/api/admin/contest-export", headers: ADMIN_HEADERS, body: { contest: "kec-r1" } }));
+  // The recovery zip is auto-deleted (sweep / GCS lifecycle) but the stamp lingers.
+  const key = firestore._collections.get("cl_contests").get("kec-r1").last_export.gcs_key;
+  storage._saved.delete(key);
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/contest-purge", headers: ADMIN_HEADERS,
+    body: { contest: "kec-r1", confirm: true, slug: "kec-r1", include_evidence: true } }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "export_missing", "an irreversible purge cannot proceed once the recovery anchor is gone");
+  // NOTHING deleted — the contest's heavy data is fully intact.
+  assert.equal(firestore._collections.get("cl_sessions").has("sess-kec-r1"), true, "session intact (purge refused)");
+  assert.equal(firestore._collections.get("cl_contests").get("kec-r1").db_purged_at, null, "no tombstone written");
+});
+
+// ---- PURGE: crash-barrier tombstone scaffold is written BEFORE the deletes ---
+
+test("purge: tombstone scaffold (db_purged_at + evidence_prefixes) is persisted BEFORE the finalize, so a crash leaves a recoverable state", async () => {
+  const { firestore, storage } = freshClients();
+  const { prefix } = seedContest(firestore, storage, "kec-r1");
+  await call(makeReq({ method: "POST", path: "/api/admin/contest-export", headers: ADMIN_HEADERS, body: { contest: "kec-r1" } }));
+
+  // Simulate dying after the scaffold + deletes but before the tombstone is
+  // FINALIZED: count writes to the contest doc and throw on the 2nd one (the
+  // finalize). The 1st write is the crash-barrier scaffold and must persist.
+  const originalCollection = firestore.collection.bind(firestore);
+  let contestSetCount = 0;
+  firestore.collection = (name) => {
+    const col = originalCollection(name);
+    if (name === "cl_contests") {
+      const origDoc = col.doc.bind(col);
+      col.doc = (id) => {
+        const ref = origDoc(id);
+        if (id === "kec-r1") {
+          const origSet = ref.set.bind(ref);
+          ref.set = async (value, options) => {
+            // The export-stamp write already ran (pre-purge); only count the
+            // purge-time scaffold/finalize writes (they carry db_purged_at /
+            // purge_counts).
+            if (value && (value.db_purged_at || value.purge_counts)) {
+              contestSetCount += 1;
+              if (contestSetCount === 2) throw new Error("simulated crash before finalize");
+            }
+            return origSet(value, options);
+          };
+        }
+        return ref;
+      };
+    }
+    return col;
+  };
+
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/contest-purge", headers: ADMIN_HEADERS,
+    body: { contest: "kec-r1", confirm: true, slug: "kec-r1", include_evidence: false } }));
+  assert.notEqual(res.statusCode, 200, "the purge did not complete cleanly (crashed at finalize)");
+
+  firestore.collection = originalCollection; // restore
+
+  const contest = firestore._collections.get("cl_contests").get("kec-r1");
+  assert.ok(contest.purged_at, "purged_at scaffold stamped despite the crash → idempotent re-purge can finish");
+  assert.ok(contest.db_purged_at, "db_purged_at scaffold stamped before the finalize");
+  assert.ok(Array.isArray(contest.evidence_prefixes), "evidence_prefixes recorded up-front for the sweep");
+  assert.ok(contest.evidence_prefixes.includes(prefix), "the session prefix is on the scaffold for the later sweep");
+
+  // A re-POST is now an idempotent no-op (the scaffold tombstone short-circuits the gate).
+  const retry = await call(makeReq({ method: "POST", path: "/api/admin/contest-purge", headers: ADMIN_HEADERS,
+    body: { contest: "kec-r1", confirm: true, slug: "kec-r1", include_evidence: false } }));
+  assert.equal(retry.statusCode, 200, JSON.stringify(retry.body));
+  assert.equal(retry.body.already_purged, true, "tombstoned contest → idempotent re-purge");
+});
+
 // ---- RETENTION SWEEP --------------------------------------------------------
 
 test("retention-sweep: closed-by-default — wrong/missing scheduler key rejects", async () => {
@@ -384,6 +458,45 @@ test("retention-sweep: deletes export zips older than 10 days, keeps fresh ones"
   assert.ok(res.body.exports_deleted >= 1, "at least the stale zip deleted");
   assert.equal(storage._saved.has("exports/kec-r1/2026-05-01T00-00-00-000Z.zip"), false, "stale zip deleted");
   assert.equal(storage._saved.has("exports/kec-r1/2026-06-11T00-00-00-000Z.zip"), true, "fresh zip kept");
+});
+
+test("retention-sweep: clears last_export/last_export_at when it deletes the zip a contest's stamp points at (stamp never outlives its artifact)", async () => {
+  const { firestore, storage } = freshClients();
+  seedContest(firestore, storage, "kec-r1");
+  // Stamp the contest as exported, pointing at a STALE zip (created 2026-05-01).
+  const staleKey = "exports/kec-r1/2026-05-01T00-00-00-000Z.zip";
+  storage._saved.set(staleKey, { body: "old", created: "2026-05-01T00:00:00.000Z" });
+  firestore.collection("cl_contests").doc("kec-r1").set({
+    last_export_at: "2026-05-01T00:00:00.000Z",
+    last_export: { at: "2026-05-01T00:00:00.000Z", gcs_key: staleKey, counts: { sessions: 1 } }
+  }, { merge: true });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/retention-sweep",
+    headers: { "x-api-key": "cl-sweep-key" }, body: {} }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(storage._saved.has(staleKey), false, "the stale recovery zip was deleted");
+
+  const contest = firestore._collections.get("cl_contests").get("kec-r1");
+  assert.equal(contest.last_export_at, null, "last_export_at cleared so the purge gate can't pass on a gone artifact");
+  assert.equal(contest.last_export, null, "last_export cleared");
+});
+
+test("retention-sweep: leaves last_export intact when the stamped zip is still within retention", async () => {
+  const { firestore, storage } = freshClients();
+  seedContest(firestore, storage, "kec-r1");
+  const freshKey = "exports/kec-r1/2026-06-11T00-00-00-000Z.zip";
+  storage._saved.set(freshKey, { body: "new", created: "2026-06-11T00:00:00.000Z" });
+  firestore.collection("cl_contests").doc("kec-r1").set({
+    last_export_at: "2026-06-11T00:00:00.000Z",
+    last_export: { at: "2026-06-11T00:00:00.000Z", gcs_key: freshKey, counts: { sessions: 1 } }
+  }, { merge: true });
+
+  await call(makeReq({ method: "POST", path: "/api/admin/retention-sweep",
+    headers: { "x-api-key": "cl-sweep-key" }, body: {} }));
+  const contest = firestore._collections.get("cl_contests").get("kec-r1");
+  assert.equal(contest.last_export_at, "2026-06-11T00:00:00.000Z", "fresh export stamp untouched");
+  assert.ok(contest.last_export, "fresh last_export untouched");
+  assert.equal(storage._saved.has(freshKey), true, "fresh zip kept");
 });
 
 test("retention-sweep: admin password also authorizes (manual trigger)", async () => {

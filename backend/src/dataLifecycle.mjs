@@ -22,9 +22,15 @@
 // resolves a window.
 export const DEFAULT_RETENTION_DAYS = 4;
 
-// Vision §10.4: export zips in GCS auto-delete 10 days after creation. The
-// purge gate's "fresh export" notion (≤24h, enforced at the handler if Karthi
-// confirms F9 Q3) is far inside this window, so the two never collide.
+// Vision §10.4: export zips in GCS auto-delete 10 days after creation, owned by
+// the retention-sweep endpoint (selectExpiredExports). A GCS lifecycle rule is a
+// later backstop (age:11) just past this window. The handler ADDITIONALLY
+// re-verifies at purge time that the export object still LIVES in GCS
+// (exportObjectExists) and the sweep clears last_export_at when it deletes the
+// stamped zip — so the gate can never pass on a recovery anchor that is gone.
+// The D12 "≤24h fresh export" freshness window is a SEPARATE, still-deferred
+// strengthening (F9 Q3, awaiting Karthi); the existence check is the data-safety
+// floor that closes the stale-stamp hole in the meantime.
 export const EXPORT_RETENTION_DAYS = 10;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
