@@ -11,6 +11,7 @@ import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
 import { ContestsPanel } from "./admin/ContestsPanel";
 import { ResultsPanel } from "./admin/ResultsPanel";
+import { PeoplePanel } from "./admin/PeoplePanel";
 import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
 import { MultiProblemWorkspace } from "./coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "./coding/problemSwitch";
@@ -1819,7 +1820,7 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
   );
 }
 
-type AdminView = "stats" | "contests" | "alerts" | "sessions" | "attendance" | "results" | "review" | "recordings" | "problems" | "settings" | "ips";
+type AdminView = "stats" | "contests" | "alerts" | "sessions" | "attendance" | "results" | "people" | "review" | "recordings" | "problems" | "settings" | "ips";
 
 // A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
 // AdminStats card labels. "" = no status filter (the Total card). "disconnected"
@@ -2790,6 +2791,7 @@ function AdminApp() {
         <AdminTab active={view === "ips"} onClick={() => { setView("ips"); void loadIpReport(); }} icon={<Network size={16} />} label="IP report" />
         <AdminTab active={view === "attendance"} onClick={() => setView("attendance")} icon={<UserCheck size={16} />} label="Attendance" />
         <AdminTab active={view === "results"} onClick={() => setView("results")} icon={<Award size={16} />} label="Results" />
+        <AdminTab active={view === "people"} onClick={() => setView("people")} icon={<Users size={16} />} label="People" />
         <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
         <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
         <AdminTab active={view === "problems"} onClick={() => setView("problems")} icon={<ClipboardList size={16} />} label="Problems" />
@@ -2879,6 +2881,11 @@ function AdminApp() {
 
       {view === "results" ? (
         <ResultsPanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
+      ) : null}
+
+      {/* People tab is CROSS-ROUND by design — it ignores the contest selector. */}
+      {view === "people" ? (
+        <PeoplePanel password={password} />
       ) : null}
 
       {view === "ips" ? (
