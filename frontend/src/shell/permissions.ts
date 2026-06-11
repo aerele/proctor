@@ -81,6 +81,80 @@ export function permissionStatusLine(key: PermissionKey, status: PermissionStatu
 }
 
 
+// FIX-B3 #1: the clipboard primer (navigator.clipboard.readText()) is OPTIONAL
+// and must NEVER wedge onboarding. Some browsers/extensions leave the clipboard
+// grant prompt hanging indefinitely, which would freeze the "Requesting
+// permissions…" state forever. So we RACE the read against a short timeout and
+// treat a timeout exactly like a denial: recorded as not-granted, non-blocking.
+// The grant (if it ever resolves later) is moot — we never keep the clipboard
+// TEXT here anyway (M6), only the boolean grant. ~3.5 s is long enough for a
+// real prompt-accept yet short enough not to strand a candidate.
+export const CLIPBOARD_PRIMER_TIMEOUT_MS = 3500;
+
+export type ClipboardPrimerOutcome = "granted" | "denied" | "timeout";
+
+// Generic, dependency-free promise/timeout race. Resolves with the promise's
+// fulfilled value if it wins, rejects with its reason if it rejects first, and
+// resolves with `timeoutValue` once `timeoutMs` elapses with neither. Whichever
+// arm settles SECOND is ignored (a late settle can't flip an already-decided
+// race), so a slow clipboard read that resolves after the timeout is harmless.
+export function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutValue: T,
+  setTimeoutFn: (cb: () => void, ms: number) => unknown = setTimeout,
+  clearTimeoutFn: (handle: unknown) => void = clearTimeout
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeoutFn(() => {
+      if (settled) return;
+      settled = true;
+      resolve(timeoutValue);
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeoutFn(timer);
+        resolve(value);
+      },
+      (reason) => {
+        if (settled) return;
+        settled = true;
+        clearTimeoutFn(timer);
+        reject(reason);
+      }
+    );
+  });
+}
+
+// Run the clipboard primer with the timeout race. Returns the outcome the App
+// records on the checklist: "granted" if the read succeeds in time, "denied" if
+// it rejects (blocked), "timeout" if it neither resolves nor rejects in time.
+// The App maps BOTH "denied" and "timeout" to the non-blocking "denied" status,
+// so onboarding always proceeds. The read result TEXT is never inspected (M6).
+export async function primeClipboardWithTimeout(
+  readText: () => Promise<unknown>,
+  timeoutMs: number = CLIPBOARD_PRIMER_TIMEOUT_MS,
+  setTimeoutFn?: (cb: () => void, ms: number) => unknown,
+  clearTimeoutFn?: (handle: unknown) => void
+): Promise<ClipboardPrimerOutcome> {
+  const TIMED_OUT = "__clipboard_primer_timeout__";
+  try {
+    const result = await raceWithTimeout<string>(
+      readText().then(() => "granted"),
+      timeoutMs,
+      TIMED_OUT,
+      setTimeoutFn,
+      clearTimeoutFn
+    );
+    return result === TIMED_OUT ? "timeout" : "granted";
+  } catch {
+    return "denied";
+  }
+}
+
 // Map a classified screen-share failure onto the checklist: an unsupported
 // browser is a dead end; everything else is retryable.
 export function screenStatusFromErrorKind(kind: RecorderStartErrorKind): PermissionStatus {

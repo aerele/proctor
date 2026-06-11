@@ -134,6 +134,18 @@ export function formatExamElapsed(totalSeconds: number): string {
   return `${hours}:${pad(minutes)}:${pad(seconds)}`;
 }
 
+// Top-bar room label: the roster room value is free-text and is sometimes
+// already prefixed ("Room A"), sometimes bare ("A"). We render "Room <value>"
+// for bare values but DON'T double-prefix one that already begins with "room"
+// (case-insensitive) — so "Room A" stays "Room A", never "Room Room A". An
+// empty/whitespace value falls back to the em-dash placeholder.
+export function formatRoomLabel(room: string | null | undefined): string {
+  const value = String(room ?? "").trim();
+  if (!value) return "Room —";
+  if (/^room\b/i.test(value)) return value;
+  return `Room ${value}`;
+}
+
 // F5.7: the elapsed count-up ticks ONLY while actively recording AND the
 // session has not ended. The moment status or gate reports ended the interval
 // must stop and the last value freezes (the bar reflects the ended state —

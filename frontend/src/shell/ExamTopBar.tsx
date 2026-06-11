@@ -9,7 +9,7 @@
 // Its ABSENCE is the alarm — ExamShellChrome unmounts it entirely on anomaly.
 
 import { useEffect, useState } from "react";
-import { formatExamElapsed, formatWallClock, STAGE_META, type Stage } from "./examShell";
+import { formatExamElapsed, formatRoomLabel, formatWallClock, STAGE_META, type Stage } from "./examShell";
 
 export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCount, remainingLabel, timeUp }: {
   stage: Stage;
@@ -43,7 +43,7 @@ export function ExamTopBar({ stage, identity, elapsedSeconds, recording, flagCou
           <>
             <span className="truncate text-lg font-semibold">{identity.name}</span>
             <span className="truncate font-mono text-sm text-white/70">{identity.candidate_id}</span>
-            <span className="shrink-0 text-sm text-white/70">Room {identity.room || "—"}</span>
+            <span className="shrink-0 text-sm text-white/70">{formatRoomLabel(identity.room)}</span>
           </>
         ) : (
           <span className="text-sm text-white/60">Not signed in</span>

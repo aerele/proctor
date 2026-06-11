@@ -4,11 +4,12 @@
 // PermissionsGate (screen share + camera + microphone + clipboard, requested
 // BEFORE fullscreen so browser prompts can never kick the candidate out of
 // fullscreen mid-onboarding).
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   initialPermissionChecklist, PERMISSION_META, PERMISSION_ORDER,
   permissionsReady, allPermissionsGranted, permissionsAttempted, permissionRetryable,
   permissionStatusLine, screenStatusFromErrorKind, screenShareFailureMessage,
+  raceWithTimeout, primeClipboardWithTimeout, CLIPBOARD_PRIMER_TIMEOUT_MS,
   type PermissionChecklist, type PermissionKey, type PermissionStatus
 } from "./permissions";
 
@@ -129,5 +130,103 @@ describe("screenShareFailureMessage", () => {
   });
   it("unknown still offers a retry path", () => {
     expect(screenShareFailureMessage("unknown").length).toBeGreaterThan(0);
+  });
+});
+
+// FIX-B3 #1: clipboard primer must never wedge onboarding. A controllable timer
+// harness lets us drive the race deterministically — `fire()` runs the pending
+// timeout callback on demand instead of waiting real wall-clock time.
+function makeTimerHarness() {
+  let pending: (() => void) | null = null;
+  let cleared = false;
+  const setTimeoutFn = (cb: () => void) => {
+    pending = cb;
+    return 1;
+  };
+  const clearTimeoutFn = () => {
+    cleared = true;
+    pending = null;
+  };
+  return {
+    setTimeoutFn,
+    clearTimeoutFn,
+    fire: () => { pending?.(); },
+    get cleared() { return cleared; }
+  };
+}
+
+describe("raceWithTimeout", () => {
+  it("resolves with the promise value when it wins before the timeout", async () => {
+    const h = makeTimerHarness();
+    const result = await raceWithTimeout(Promise.resolve("ok"), 1000, "TIMEOUT", h.setTimeoutFn, h.clearTimeoutFn);
+    expect(result).toBe("ok");
+    expect(h.cleared).toBe(true); // timer cancelled once the promise won
+  });
+
+  it("rejects with the promise reason when it rejects before the timeout", async () => {
+    const h = makeTimerHarness();
+    await expect(
+      raceWithTimeout(Promise.reject(new Error("blocked")), 1000, "TIMEOUT", h.setTimeoutFn, h.clearTimeoutFn)
+    ).rejects.toThrow("blocked");
+    expect(h.cleared).toBe(true);
+  });
+
+  it("resolves with the timeout value when the timer fires first", async () => {
+    const h = makeTimerHarness();
+    // A promise that never settles — only the timeout can decide this race.
+    const never = new Promise<string>(() => {});
+    const raced = raceWithTimeout(never, 1000, "TIMEOUT", h.setTimeoutFn, h.clearTimeoutFn);
+    h.fire();
+    await expect(raced).resolves.toBe("TIMEOUT");
+  });
+
+  it("ignores a late promise settle after the timeout already won", async () => {
+    const h = makeTimerHarness();
+    let resolveLate: (v: string) => void = () => {};
+    const slow = new Promise<string>((r) => { resolveLate = r; });
+    const raced = raceWithTimeout(slow, 1000, "TIMEOUT", h.setTimeoutFn, h.clearTimeoutFn);
+    h.fire(); // timeout wins
+    resolveLate("too-late"); // must NOT flip the result
+    await expect(raced).resolves.toBe("TIMEOUT");
+  });
+});
+
+describe("primeClipboardWithTimeout", () => {
+  it("returns 'granted' when readText resolves in time", async () => {
+    const h = makeTimerHarness();
+    const outcome = await primeClipboardWithTimeout(
+      () => Promise.resolve("clipboard text"), 1000, h.setTimeoutFn, h.clearTimeoutFn
+    );
+    expect(outcome).toBe("granted");
+  });
+
+  it("returns 'denied' when readText rejects (blocked)", async () => {
+    const h = makeTimerHarness();
+    const outcome = await primeClipboardWithTimeout(
+      () => Promise.reject(new DOMException("denied")), 1000, h.setTimeoutFn, h.clearTimeoutFn
+    );
+    expect(outcome).toBe("denied");
+  });
+
+  it("returns 'timeout' when readText hangs past the timeout — onboarding proceeds", async () => {
+    const h = makeTimerHarness();
+    const hung = primeClipboardWithTimeout(
+      () => new Promise<string>(() => {}), 1000, h.setTimeoutFn, h.clearTimeoutFn
+    );
+    h.fire(); // grant prompt never answered → timeout decides
+    await expect(hung).resolves.toBe("timeout");
+  });
+
+  it("does not inspect the clipboard text on grant (only the boolean outcome)", async () => {
+    const read = vi.fn(() => Promise.resolve("SECRET COPIED TEXT"));
+    const h = makeTimerHarness();
+    const outcome = await primeClipboardWithTimeout(read, 1000, h.setTimeoutFn, h.clearTimeoutFn);
+    expect(outcome).toBe("granted");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes a short default timeout (3-4s) so a hung prompt can't strand setup", () => {
+    expect(CLIPBOARD_PRIMER_TIMEOUT_MS).toBeGreaterThanOrEqual(3000);
+    expect(CLIPBOARD_PRIMER_TIMEOUT_MS).toBeLessThanOrEqual(4000);
   });
 });
