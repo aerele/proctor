@@ -135,7 +135,13 @@ export async function createContest(body) {
     ? false
     : requireBoolean(body.room_gate_enabled, "room_gate_enabled");
   const rooms = normalizeContestRooms(body?.rooms);
-  const accessCode = await mintAccessCode();
+  // W4: an admin-ASSIGNED code is validated + clash-checked exactly like
+  // setContestAccessCode; absent/blank -> mint a random one (collision-checked
+  // against ALL contests, stricter than the open-only rule, kept as-is).
+  const hasCustomCode = body?.access_code !== undefined && body?.access_code !== null
+    && String(body.access_code).trim() !== "";
+  const accessCode = hasCustomCode ? normalizeCustomAccessCode(body.access_code) : await mintAccessCode();
+  if (hasCustomCode) await requireCodeFreeAmongOpenContests(accessCode, null);
   const legacy = await synthesizeLegacyContest();
   const now = new Date().toISOString();
 
@@ -216,7 +222,7 @@ async function slugCarriesOrphanedData(slug) {
 export async function updateContest(slugRaw, body) {
   const existing = await getRealContest(slugRaw);
   if (body?.identity_mode !== undefined) throw httpError(400, "identity_mode is immutable");
-  if (body?.access_code !== undefined) throw httpError(400, "access_code cannot be edited");
+  if (body?.access_code !== undefined) throw httpError(400, "use /api/admin/contest-set-code to change the test code");
   // S-D: secrets are mint-only — /api/admin/contest-regenerate is the ONLY
   // writer, so an admin typo can never plant a guessable key.
   if (body?.invigilator_key !== undefined) throw httpError(400, "invigilator_key cannot be edited");
@@ -269,7 +275,33 @@ export async function setContestStatus(slugRaw, statusRaw) {
   if (status === "open" && contestProblemEntries(existing).length === 0) {
     throw httpError(400, "contest_has_no_problems");
   }
+  // W4 activation gate: two OPEN contests must never share a test code (the
+  // public resolver would go ambiguous). The admin changes one code first
+  // (set-code or regenerate), then opens.
+  if (status === "open" && existing.access_code) {
+    const clash = await findOpenContestWithCode(existing.access_code, existing.slug);
+    if (clash) {
+      throw httpError(
+        409,
+        `Cannot open this contest: its test code ${existing.access_code} is already used by the open contest "${clash.name}" (${clash.slug}). Change this contest's test code first, then open it.`
+      );
+    }
+  }
   const item = { ...existing, status, updated_at: new Date().toISOString() };
+  await contestRef(item.slug).set(item);
+  return item;
+}
+
+// W4: set a CUSTOM test code (the admin's chosen handout code). Normalization
+// and shape mirror the minted codes — anything outside ACCESS_CODE_PATTERN
+// would be untypeable on the candidate landing page (candidateRouting.ts pins
+// the same 6-char alphabet client-side). The synthesized legacy contest 404s
+// via getRealContest like every other write path.
+export async function setContestAccessCode(slugRaw, codeRaw) {
+  const existing = await getRealContest(slugRaw);
+  const code = normalizeCustomAccessCode(codeRaw);
+  await requireCodeFreeAmongOpenContests(code, existing.slug);
+  const item = { ...existing, access_code: code, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
   return item;
 }
@@ -499,6 +531,38 @@ async function mintAccessCode() {
   // 34^6 ≈ 1.5B codes — exhausting 20 attempts means something is badly wrong;
   // fail loudly rather than loop.
   throw httpError(500, "access_code_mint_failed");
+}
+
+// W4: custom-code normalization — uppercase + strip ALL whitespace (the same
+// cleanup the landing page applies to what candidates type), then the mint
+// pattern: exactly 6 chars from A-Z / 2-9 (0 and 1 are never used).
+function normalizeCustomAccessCode(raw) {
+  const code = String(raw ?? "").toUpperCase().replace(/\s+/g, "");
+  if (!ACCESS_CODE_PATTERN.test(code)) {
+    throw httpError(400, "Test code must be exactly 6 characters using letters A-Z or digits 2-9 (0 and 1 are never used).");
+  }
+  return code;
+}
+
+// W4 uniqueness rule: a test code must be unique AMONG OPEN ("active")
+// contests — resolveAccessCode picks among status:"open" matches, so two open
+// holders would make the public resolver ambiguous. Draft/archived contests
+// MAY hold a clashing code; the OPEN transition re-checks (setContestStatus).
+// Status is filtered in memory (like resolveAccessCode) so no composite
+// Firestore index is needed.
+async function findOpenContestWithCode(code, exceptSlug) {
+  if (!code) return null;
+  const snapshot = await contestsCol().where("access_code", "==", code).limit(25).get();
+  return snapshot.docs
+    .map((doc) => doc.data())
+    .find((contest) => contest.status === "open" && contest.slug !== exceptSlug) || null;
+}
+
+async function requireCodeFreeAmongOpenContests(code, exceptSlug) {
+  const clash = await findOpenContestWithCode(code, exceptSlug);
+  if (clash) {
+    throw httpError(409, `Test code ${code} is already used by the open contest "${clash.name}" (${clash.slug}). Choose a different code.`);
+  }
 }
 
 // ---- field validators -------------------------------------------------------------------

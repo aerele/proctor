@@ -234,6 +234,122 @@ test("regenerate: unknown slug -> 404; bad field -> 400; legacy contest -> 404; 
   assert.equal((await make({ slug: contest.slug, field: "access_code" }, {})).statusCode, 401);
 });
 
+// ---- POST /api/admin/contest-set-code (W4: custom test code) -------------------
+
+function setCodeReq(body, headers = ADMIN_HEADERS) {
+  return makeReq({ method: "POST", path: "/api/admin/contest-set-code", headers, body });
+}
+
+test("set-code: happy path — normalizes case/whitespace, stores, and the public resolver finds it", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Custom Code" });
+  await openContest(contest.slug);
+  const res = await call(setCodeReq({ slug: contest.slug, access_code: " kec 2j6 " }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.contest.access_code, "KEC2J6");
+  assert.equal(res.body.contest.invigilator_key, contest.invigilator_key); // untouched
+  // Candidates type the custom code on the landing page like a minted one.
+  const hit = await call(codeReq("kec2j6", "203.0.113.77"));
+  assert.equal(hit.statusCode, 200, JSON.stringify(hit.body));
+  assert.equal(hit.body.slug, contest.slug);
+});
+
+test("set-code: format is the mint pattern — exactly 6 chars from A-Z / 2-9", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Code Format" });
+  for (const bad of ["ABC22", "ABCD223", "ABC10X", "ABC01X", "AB-C2X", "ABCDEé"]) {
+    const res = await call(setCodeReq({ slug: contest.slug, access_code: bad }));
+    assert.equal(res.statusCode, 400, `expected 400 for ${JSON.stringify(bad)}: ${JSON.stringify(res.body)}`);
+    assert.match(String(res.body.error), /6 characters/);
+  }
+});
+
+test("set-code: clash with an OPEN contest is refused (case-insensitive); self and draft holders are fine", async () => {
+  freshDb();
+  const open = await createContest({ name: "Open Holder" });
+  await openContest(open.slug);
+  assert.equal((await call(setCodeReq({ slug: open.slug, access_code: "QQQ222" }))).statusCode, 200);
+
+  // Another contest (draft OR open) may not take an open contest's code.
+  const draft = await createContest({ name: "Wants Same" });
+  const clash = await call(setCodeReq({ slug: draft.slug, access_code: "qqq222" }));
+  assert.equal(clash.statusCode, 409, JSON.stringify(clash.body));
+  assert.match(String(clash.body.error), /Open Holder/);
+  assert.match(String(clash.body.error), /different code/i);
+
+  // Re-setting a contest's OWN code is not a clash (self is excluded).
+  assert.equal((await call(setCodeReq({ slug: open.slug, access_code: "QQQ222" }))).statusCode, 200);
+
+  // Two DRAFT contests may hold the same code — uniqueness is among OPEN
+  // contests; the open transition re-checks (next test).
+  const draftB = await createContest({ name: "Draft B" });
+  assert.equal((await call(setCodeReq({ slug: draft.slug, access_code: "RRR333" }))).statusCode, 200);
+  assert.equal((await call(setCodeReq({ slug: draftB.slug, access_code: "RRR333" }))).statusCode, 200);
+});
+
+test("set-code: opening a contest is BLOCKED while its code clashes with an open contest; changing the code unblocks", async () => {
+  freshDb();
+  const first = await createContest({ name: "First Holder" });
+  assert.equal((await call(setCodeReq({ slug: first.slug, access_code: "ZZZ777" }))).statusCode, 200);
+  const second = await createContest({ name: "Second Holder" });
+  assert.equal((await call(setCodeReq({ slug: second.slug, access_code: "ZZZ777" }))).statusCode, 200); // both draft: allowed
+  await openContest(first.slug);
+
+  const refused = await call(makeReq({
+    method: "POST", path: "/api/admin/contest-status", headers: ADMIN_HEADERS,
+    body: { slug: second.slug, status: "open" }
+  }));
+  assert.equal(refused.statusCode, 409, JSON.stringify(refused.body));
+  assert.match(String(refused.body.error), /First Holder/);
+  assert.match(String(refused.body.error), /change this contest's test code/i);
+
+  // Change the code → open succeeds. Re-opening the holder itself stays fine.
+  assert.equal((await call(setCodeReq({ slug: second.slug, access_code: "YYY888" }))).statusCode, 200);
+  assert.equal((await openContest(second.slug)).status, "open");
+});
+
+test("set-code: regenerate still works after a custom code (mints a fresh random code)", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Regen After Custom" });
+  assert.equal((await call(setCodeReq({ slug: contest.slug, access_code: "PPP555" }))).statusCode, 200);
+  const res = await call(makeReq({
+    method: "POST", path: "/api/admin/contest-regenerate", headers: ADMIN_HEADERS,
+    body: { slug: contest.slug, field: "access_code" }
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.match(res.body.contest.access_code, /^[ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789]{6}$/);
+  assert.notEqual(res.body.contest.access_code, "PPP555");
+});
+
+test("set-code: create accepts an assigned code under the same format + uniqueness rules", async () => {
+  freshDb();
+  const created = await createContest({ name: "Created With Code", access_code: " mmm444 " });
+  assert.equal(created.access_code, "MMM444");
+  await openContest(created.slug);
+
+  const clashing = await call(makeReq({
+    method: "POST", path: "/api/admin/contests", headers: ADMIN_HEADERS,
+    body: { problems: [{ problem_id: "sum-two" }], name: "Clashing Create", access_code: "MMM444" }
+  }));
+  assert.equal(clashing.statusCode, 409, JSON.stringify(clashing.body));
+
+  const badFormat = await call(makeReq({
+    method: "POST", path: "/api/admin/contests", headers: ADMIN_HEADERS,
+    body: { problems: [{ problem_id: "sum-two" }], name: "Bad Format Create", access_code: "nope" }
+  }));
+  assert.equal(badFormat.statusCode, 400);
+});
+
+test("set-code: unknown slug → 404; legacy contest → 404; missing field → 400; admin auth required", async () => {
+  const firestore = freshDb();
+  await firestore.collection("sd_settings").doc("active").set({ contest_slug: "legacy-exam" });
+  assert.equal((await call(setCodeReq({ slug: "ghost", access_code: "AAA222" }))).statusCode, 404);
+  assert.equal((await call(setCodeReq({ slug: "legacy-exam", access_code: "AAA222" }))).statusCode, 404);
+  const contest = await createContest({ name: "Auth For Code" });
+  assert.equal((await call(setCodeReq({ slug: contest.slug }))).statusCode, 400);
+  assert.equal((await call(setCodeReq({ slug: contest.slug, access_code: "AAA222" }, {}))).statusCode, 401);
+});
+
 // ---- POST /api/access-code (PUBLIC, rate limited) ------------------------------
 
 function codeReq(code, ip = "203.0.113.9") {
