@@ -113,7 +113,11 @@ export function useExamShell(opts: {
       const event = makeShellEvent(type, detail, new Date().toISOString(), document.visibilityState);
       addEventRef.current(event);
       const sid = sessionIdRef.current;
-      if (sid) void sendEvents(sid, [event]); // fire-and-forget, like createUiEvent call sites
+      // F9: fire-and-forget, like createUiEvent call sites. A locked/ended
+      // session 403/409s these by design (fullscreen enter/exit keeps firing
+      // on the blocked screens) — swallow so expected rejections never hit
+      // the console as unhandled.
+      if (sid) void sendEvents(sid, [event]).catch(() => undefined);
       else bufferRef.current = appendToBuffer(bufferRef.current, event);
     };
   }, []);
@@ -193,7 +197,8 @@ export function useExamShell(opts: {
     if (!sessionId || bufferRef.current.length === 0) return;
     const buffered = bufferRef.current;
     bufferRef.current = [];
-    void sendEvents(sessionId, buffered);
+    // F9: best-effort flush — expected 403/409 when the session is blocked.
+    void sendEvents(sessionId, buffered).catch(() => undefined);
   }, [sessionId]);
 
   const stage = deriveStage({ permissionsReady, fullscreen, gate, status, examReleased });

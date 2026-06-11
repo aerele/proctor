@@ -665,6 +665,49 @@ test("contest-exam-time validations: exactly-one-of, window sanity, unconfigured
   assert.equal((await post({ slug: bare.slug, extend_minutes: 10 })).statusCode, 400);
 });
 
+// ---- F3 (E2E live): GET /api/admin/stats end_at follows the contest scope ----------
+// The Live exam-time card rides on the stats poll; a contest-scoped poll must
+// report THAT contest's window, not the legacy settings schedule (which said
+// "time is up" while the scoped contest had ~22h left).
+
+test("admin stats: contest_slug scope reports the CONTEST's end_at; unscoped keeps legacy; unknown slug reports none (F3)", async () => {
+  const firestore = freshDb();
+  const contest = await createContest({
+    name: "Stats Window",
+    start_at: "2026-06-12T03:00:00.000Z", end_at: "2026-06-12T16:00:00.000Z"
+  });
+  // Legacy settings schedule that already expired — the F3 bug surfaced this
+  // one on a scoped Live screen.
+  await firestore.collection("sd_settings").doc("active").set({
+    contest_slug: "legacy-exam",
+    start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T19:30:00.000Z"
+  });
+
+  const stats = (query) => call(makeReq({
+    method: "GET", path: "/api/admin/stats", headers: ADMIN_HEADERS, query
+  }));
+
+  const scoped = await stats({ contest_slug: contest.slug });
+  assert.equal(scoped.statusCode, 200, JSON.stringify(scoped.body));
+  assert.equal(scoped.body.end_at, "2026-06-12T16:00:00.000Z");
+
+  // Unscoped (All contests) keeps today's legacy schedule.
+  const unscoped = await stats({});
+  assert.equal(unscoped.statusCode, 200);
+  assert.equal(unscoped.body.end_at, "2026-06-10T19:30:00.000Z");
+
+  // The synthesized legacy contest mirrors the settings doc — same value.
+  const legacy = await stats({ contest_slug: "legacy-exam" });
+  assert.equal(legacy.statusCode, 200);
+  assert.equal(legacy.body.end_at, "2026-06-10T19:30:00.000Z");
+
+  // Unknown slug: contestScopeOf's literal fallback carries no window → ""
+  // (the card says "no schedule" instead of showing the wrong clock).
+  const ghost = await stats({ contest_slug: "ghost" });
+  assert.equal(ghost.statusCode, 200);
+  assert.equal(ghost.body.end_at, "");
+});
+
 // ---- rooms editing via contest-update -----------------------------------------------
 
 test("contest-update accepts rooms[]: sanitized, deduped, blanks dropped; non-array -> 400", async () => {

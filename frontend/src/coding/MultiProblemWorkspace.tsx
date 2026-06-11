@@ -100,7 +100,10 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   // rides the incoming batch; dispose flushes everything on unmount.
   const batchers = useMemo(() => new ProblemBatchers({
     maxSize: 40, maxMs: 4000,
-    onFlush: (problemId: string, events: EditorEvent[]) => { void sendEditorEvents(sessionId, problemId, events); }
+    // F9: best-effort flush — a locked/ended session 403/409s editor-event
+    // posts by design (e.g. the unmount flush after a lock); swallow so the
+    // expected rejection never surfaces as an unhandled promise error.
+    onFlush: (problemId: string, events: EditorEvent[]) => { void sendEditorEvents(sessionId, problemId, events).catch(() => undefined); }
   }), [sessionId]);
   useEffect(() => () => batchers.dispose(), [batchers]);
 

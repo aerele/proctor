@@ -6,7 +6,7 @@
 // visually-hidden datetime-local + showPicker().
 import { Calendar } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { formatDateTimeText, parseDateTimeText } from "./dateTimeText";
+import { formatDateTimeText, normalizeDateTimeText, parseDateTimeText } from "./dateTimeText";
 
 export function DateTimeField({ label, value, onChange, disabled = false, className = "" }: {
   /** Field caption; also names the calendar button for screen readers. */
@@ -66,6 +66,12 @@ export function DateTimeField({ label, value, onChange, disabled = false, classN
           value={text}
           disabled={disabled}
           onChange={(event) => handleText(event.target.value)}
+          // F10 (E2E live): a finished edit echoes the canonical form — typing
+          // "12/06/2026 9:30 pm" and clicking Save (the click blurs the field)
+          // leaves "2026-06-12 21:30" in the box, not the raw text. The parsed
+          // VALUE was already correct; only the display normalizes. Invalid /
+          // blank drafts stay untouched for correction.
+          onBlur={() => setText((current) => normalizeDateTimeText(current))}
         />
         <button
           type="button"

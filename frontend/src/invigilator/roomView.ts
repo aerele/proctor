@@ -58,6 +58,22 @@ export function alertExplanation(type: string): string {
   return ALERT_EXPLANATIONS[type] ?? GENERIC_ALERT_EXPLANATION;
 }
 
+// F8 (E2E live): the EXAM column. exam_started_at is only ever stamped by the
+// room START GATE — with the gate disabled (the default config) it never
+// exists, so the old `started ? "Started" : "Waiting"` rendered "Waiting" on
+// every row, even Finished ones. Reflect the actual stage instead: a stamped
+// start always wins; a finished session is never "waiting"; "Waiting" is only
+// truthful while a start gate is actually holding candidates; with no gate
+// there is nothing to wait for — show a dash.
+export function examStageLabel(
+  row: Pick<InvigilatorSessionRow, "status" | "exam_started_at">,
+  gateEnabled: boolean
+): string {
+  if (row.exam_started_at) return "Started";
+  if (row.status === "ended") return "Finished";
+  return gateEnabled ? "Waiting" : "—";
+}
+
 // FIX-B3 #4: the portal entry blurb must not promise a step that won't appear.
 // When the contest's room gate is ON the invigilator releases the start code /
 // starts the room (the GateCard renders). When it's OFF no start-code panel

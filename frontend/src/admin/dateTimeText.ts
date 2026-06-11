@@ -55,3 +55,16 @@ export function parseDateTimeText(raw: string): string | null {
 export function formatDateTimeText(localInput: string): string {
   return localInput ? localInput.slice(0, 16).replace("T", " ") : "";
 }
+
+/**
+ * F10 (E2E live): canonical echo for a finished edit (field blur / save).
+ * A parseable text snaps to the canonical display form
+ * ("12/06/2026 9:30 pm" → "2026-06-12 21:30"); blank or incomplete text is
+ * returned UNCHANGED so a draft the admin is still fixing never gets clobbered.
+ * Deliberately NOT applied while typing — mid-edit normalization would rewrite
+ * "12/06/2026 9:30" under the admin's cursor before they add " pm".
+ */
+export function normalizeDateTimeText(raw: string): string {
+  const parsed = parseDateTimeText(raw);
+  return parsed === null ? raw : formatDateTimeText(parsed);
+}

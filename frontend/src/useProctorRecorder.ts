@@ -1,12 +1,21 @@
 import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
 import type { ApiError } from "./api";
 import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
+import { writeChunkHwm } from "./chunkContinuity";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 type RecorderOptions = {
   sessionId: string;
   config: SessionStartResponse["upload_config"];
   heartbeatSeconds: number;
+  // F1 (e2e finding): per-kind chunk-index continuation bases. The recorder's
+  // first chunk of THIS instance is base+1, so a restarted recording (share-
+  // drop recovery, refresh-resume) continues the prior stint's count instead
+  // of re-counting from 1 and OVERWRITING its GCS objects. The host computes
+  // the base as max(server-reported count/hwm, sessionStorage hwm); absent →
+  // 0 (fresh session, identical to the old behavior). Chunk cadence, content
+  // and event semantics are unchanged — only where the indexes start.
+  chunkIndexBase?: { screen: number; camera: number };
   // F5.1 permissions-first onboarding: streams already acquired by the stage-1
   // PermissionsGate. start() claims and reuses them instead of re-prompting;
   // a stream the candidate killed between setup and start falls back to the
@@ -230,7 +239,8 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   let recorder: MediaRecorder | null = null;
   let segmentTimer: number | undefined;
   let stopping = false;
-  let chunkIndex = 0;
+  // F1: indexes continue from the prior stint's high-water mark (0 = fresh).
+  let chunkIndex = Math.max(0, Math.floor(options.chunkIndexBase?.screen ?? 0));
   let uploadQueue = Promise.resolve();
   let queueDepth = 0;
   let uploadedCount = 0;
@@ -256,7 +266,8 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   // and never touches the screen recording (no onFatalError, no retry loop).
   let cameraRecorder: MediaRecorder | null = null;
   let cameraSegmentTimer: number | undefined;
-  let cameraChunkIndex = 0;
+  // F1: same continuation rule as the screen series (independent counter).
+  let cameraChunkIndex = Math.max(0, Math.floor(options.chunkIndexBase?.camera ?? 0));
   let cameraUploadQueue = Promise.resolve();
   let cameraOnlyStream: MediaStream | null = null;
   let cameraRecordingFailed = false;
@@ -670,7 +681,12 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
             message: "Recorded video chunk is unusually small and may indicate a capture problem."
           });
         }
-        enqueueUpload(event.data, ++chunkIndex);
+        const index = ++chunkIndex;
+        // F1: persist the high-water mark at ALLOCATION time (not upload
+        // completion) so even an in-flight chunk's index is never reused by
+        // the next stint after a refresh in this tab.
+        writeChunkHwm(window.sessionStorage, options.sessionId, "screen", index);
+        enqueueUpload(event.data, index);
       }
     });
     recorder.addEventListener("error", (event) => {
@@ -761,7 +777,10 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       if (event.data.size > 0) {
         // Deliberately NO small-chunk anomaly here (screen-only signal): a
         // low-fps camera segment is legitimately tiny.
-        enqueueCameraUpload(event.data, ++cameraChunkIndex);
+        const index = ++cameraChunkIndex;
+        // F1: same allocation-time hwm persistence as the screen series.
+        writeChunkHwm(window.sessionStorage, options.sessionId, "camera", index);
+        enqueueCameraUpload(event.data, index);
       }
     });
     cameraRecorder.addEventListener("error", (event) => {
