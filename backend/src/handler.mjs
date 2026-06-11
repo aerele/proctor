@@ -4,6 +4,8 @@ import { makeExecQueue } from "./execQueue.mjs";
 import { bucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
 import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
 import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
+import { makeAuth } from "./lib/auth.mjs";
+import { makeSessionStore } from "./lib/sessionStore.mjs";
 import { loadConfig } from "./config.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
@@ -213,6 +215,28 @@ configureIdentityStore({
 // S-I §1.1: the proctor_templates collection (same getter pattern). The
 // system-check seed preset lives in code; a doc with the same slug shadows it.
 configureTemplateStore({ getFirestore, collection: TEMPLATES_COLLECTION });
+
+// Factory seam (decomp B0, A2): build the auth guards + the neutral session
+// store from ctx closing over THIS instance's credentials/collection names
+// (captured at load — per ?buster) and the live-client getter. Destructure the
+// instances at module scope so the route bodies call them byte-identically.
+const auth = makeAuth({
+  adminPassword: ADMIN_PASSWORD,
+  invigilatorPassword: INVIGILATOR_PASSWORD,
+  apiKey: ALERTS_INGEST_API_KEY,
+  sweepKey: RETENTION_SWEEP_API_KEY
+});
+const { requireAdmin, requireInvigilator, requireInvigilatorFor, requireApiKey, requireSweepAuth, adminActor } = auth;
+const sessionStore = makeSessionStore({
+  getFirestore,
+  sessionCollection: SESSION_COLLECTION,
+  settingsCollection: SETTINGS_COLLECTION,
+  settingsId: SETTINGS_ID
+});
+const {
+  sessionRef, settingsRef, getSession, getSessionOrNull, getSettings,
+  requireWritableSession, contestSlugFromUrl, buildStoragePrefix, sessionPrefix, candidateOf
+} = sessionStore;
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
@@ -531,16 +555,8 @@ async function startSession(req) {
 // back to the S-A interim "Candidate ID" (F9 §4.3 — the word "username" is
 // banned from rendered UI, so the F9 §1.2 literal "Username" fallback is
 // deliberately not used).
-function candidateOf(doc) {
-  return {
-    id: doc?.candidate_id || doc?.roster_unique_id || doc?.hackerrank_username || "",
-    id_norm: doc?.username_norm || "",
-    label: doc?.identity_label || "Candidate ID",
-    name: doc?.name || "",
-    roll_number: doc?.roll_number || "",
-    room: doc?.room || ""
-  };
-}
+// candidateOf moved to the makeSessionStore factory in lib/sessionStore.mjs
+// (decomp B0); destructured at module scope.
 
 // ---- S-C person-mode start (vision §2.4; F9 D2/D4/D6) ----------------------
 //
@@ -4301,13 +4317,7 @@ async function sweepContestEvidence(contest, actor) {
 
 // Sweep auth: the scheduler key (x-api-key === RETENTION_SWEEP_API_KEY) OR the
 // admin password. Closed-by-default — with neither configured nothing passes.
-function requireSweepAuth(req) {
-  const admin = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
-  if (ADMIN_PASSWORD && safeEqual(admin, ADMIN_PASSWORD)) return;
-  const key = req.get?.("x-api-key") || req.headers?.["x-api-key"] || "";
-  if (RETENTION_SWEEP_API_KEY && safeEqual(key, RETENTION_SWEEP_API_KEY)) return;
-  throw httpError(401, "Unauthorized");
-}
+// requireSweepAuth moved to the makeAuth factory in lib/auth.mjs (decomp B0).
 
 // ---- S-J §2.14 People tab (directory + cross-round scorecard) ----------------
 //
@@ -4448,13 +4458,7 @@ function summarizeScorecardIntegrity(raw) {
 
 // Honor-system admin actor for audit + selection_by attribution (the admin
 // console may send actor_name; ip/ua are captured automatically).
-function adminActor(req, body = {}) {
-  return {
-    name: String(body.actor_name || "").slice(0, 200),
-    ip: getClientIp(req),
-    userAgent: req.get?.("user-agent") || req.headers?.["user-agent"] || ""
-  };
-}
+// adminActor moved to the makeAuth factory in lib/auth.mjs (decomp B0).
 
 // Phase 2 (2.4 / Epic 4.3): remote admin actions, per-session (session_id) or in
 // bulk (usernames[] within a contest). Returns the updated docs so the console
@@ -6328,135 +6332,22 @@ function alertRef(alertId) {
   return getFirestore().collection(ALERTS_COLLECTION).doc(String(alertId));
 }
 
-async function getSession(sessionId) {
-  const doc = await sessionRef(sessionId).get();
-  if (!doc.exists) throw httpError(404, "Session not found");
-  return doc.data();
-}
-
-// H3: gate every client WRITE endpoint on session status so admin lock/end and
-// the pending-approval hold actually stop the browser instead of silently
-// accepting more evidence/heartbeats:
-//   ended  → 409 session_ended (the test is over; no further writes)
-//   locked → 403 session_locked (admin paused it; needs unlock)
-//   pending_approval → 403 waiting_for_approval (second device, not yet live)
-// active (and any unknown/legacy status) is allowed so happy paths are unchanged.
-function requireWritableSession(session) {
-  const status = session?.status;
-  if (status === "ended") throw httpError(409, "session_ended");
-  if (status === "locked") throw httpError(403, "session_locked");
-  if (status === "pending_approval") throw httpError(403, "waiting_for_approval");
-  return session;
-}
-
-// Like getSession but returns null instead of throwing — used by resume and
-// single-session reconciliation where "not found" is a normal control-flow path.
-async function getSessionOrNull(sessionId) {
-  const doc = await sessionRef(String(sessionId)).get();
-  return doc.exists ? doc.data() : null;
-}
-
-async function getSettings() {
-  const doc = await settingsRef().get();
-  return doc.exists ? doc.data() : null;
-}
-
-// ---- GCS contest-foldering (Phase 2, 2.1) ---------------------------------
-// ONE place that turns a contest_url into a path slug, and ONE place that
-// assembles the per-session GCS prefix. Every key-build site calls
-// sessionPrefix(session) so upload, signing, and admin-evidence listing always
-// agree. New shape: contests/<slug>/sessions/<username_norm>/<session_id>/...
-// Legacy fallback (no/invalid contest_url): sessions/<username_norm>/<session_id>/...
-
-// Extract the contest slug from a contest_url: last non-empty path segment, then
-// the existing sanitizeSegment. Empty/invalid url → "" (legacy, no contest folder).
-function contestSlugFromUrl(contestUrl) {
-  if (!contestUrl) return "";
-  let pathname;
-  try {
-    pathname = new URL(String(contestUrl)).pathname;
-  } catch {
-    return "";
-  }
-  const segments = String(pathname).split("/").filter(Boolean);
-  if (!segments.length) return "";
-  return sanitizeSegment(segments[segments.length - 1]);
-}
-
-// Build the per-session prefix from parts. Slug present → contest folder; absent
-// → legacy layout (and never a contests// double-slash).
-function buildStoragePrefix(contestSlug, usernameNorm, sessionId) {
-  if (contestSlug) {
-    return `contests/${contestSlug}/sessions/${usernameNorm}/${sessionId}/`;
-  }
-  return `sessions/${usernameNorm}/${sessionId}/`;
-}
-
-// The prefix for an existing session doc. Prefer the persisted storage_prefix
-// (zero extra reads); fall back to reconstructing from stored fields so legacy
-// docs written before Phase 2 still resolve to their original legacy path.
-function sessionPrefix(session) {
-  if (session && session.storage_prefix) return session.storage_prefix;
-  return buildStoragePrefix(session?.contest_slug, session?.username_norm, session?.session_id);
-}
+// getSession/getSessionOrNull/getSettings/requireWritableSession/sessionRef/
+// settingsRef + the GCS-prefix builders (contestSlugFromUrl/buildStoragePrefix/
+// sessionPrefix) + candidateOf moved to the makeSessionStore factory in
+// lib/sessionStore.mjs (decomp B0); the instances are destructured at module
+// scope (see the makeSessionStore(storeCtx) call near the top).
 
 // sanitizeRoom moved to lib/sanitize.mjs (decomp B0); imported at the top.
-
-function sessionRef(sessionId) {
-  return getFirestore().collection(SESSION_COLLECTION).doc(sessionId);
-}
-
-function settingsRef() {
-  return getFirestore().collection(SETTINGS_COLLECTION).doc(SETTINGS_ID);
-}
 
 // putJsonl/bucket moved to lib/clients.mjs (decomp B0); imported at the top.
 
 // parseBody/requireFields/requireValidEmail(+EMAIL_FORMAT) moved to lib/http.mjs
 // (decomp B0); imported at the top.
 
-function requireAdmin(req) {
-  // Timing-safe compare via safeEqual, matching requireApiKey / requireInvigilatorFor.
-  // Closed-by-default: with ADMIN_PASSWORD unset every admin request rejects.
-  const password = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
-  if (!ADMIN_PASSWORD || !safeEqual(password, ADMIN_PASSWORD)) {
-    throw httpError(401, "Unauthorized");
-  }
-}
-
-// S3: invigilator auth — x-invigilator-password vs INVIGILATOR_PASSWORD. The
-// ADMIN credential is accepted too, in EITHER header, so an admin can open the
-// portal (the portal client always sends x-invigilator-password). Comparisons
-// are timing-safe (match requireApiKey's discipline). Closed-by-default: with
-// INVIGILATOR_PASSWORD unset the invigilator path always rejects — only the
-// admin fallback can pass.
-let warnedMissingInvigilatorPassword = false;
-
-function requireInvigilator(req) {
-  requireInvigilatorFor(req, null);
-}
-
-// S-D (vision §2.7/I1): per-contest invigilator token auth. The portal sends
-// whatever credential it has in x-invigilator-password; it is accepted when it
-// is (a) the admin password, (b) THE NAMED CONTEST's invigilator_key, or
-// (c) the global INVIGILATOR_PASSWORD (demoted to Aerele-staff fallback).
-// A contest key never authenticates another contest (the compare runs against
-// the resolved contest only) and never authenticates the legacy no-param
-// portal. All compares are timing-safe via safeEqual.
-function requireInvigilatorFor(req, contest) {
-  const invig = req.get?.("x-invigilator-password") || req.headers?.["x-invigilator-password"] || "";
-  const admin = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
-  if (ADMIN_PASSWORD && (safeEqual(admin, ADMIN_PASSWORD) || safeEqual(invig, ADMIN_PASSWORD))) return;
-  if (contest && !contest.legacy && contest.invigilator_key && safeEqual(invig, contest.invigilator_key)) return;
-  if (!INVIGILATOR_PASSWORD) {
-    if (!warnedMissingInvigilatorPassword) {
-      console.warn("INVIGILATOR_PASSWORD is not set; rejecting invigilator-password requests.");
-      warnedMissingInvigilatorPassword = true;
-    }
-    throw httpError(401, "Unauthorized");
-  }
-  if (!safeEqual(invig, INVIGILATOR_PASSWORD)) throw httpError(401, "Unauthorized");
-}
+// requireAdmin/requireInvigilator/requireInvigilatorFor moved to the makeAuth
+// factory in lib/auth.mjs (decomp B0); the instances are destructured at module
+// scope (see the makeAuth(authCtx) call near the top).
 
 // S-D: the OPTIONAL ?contest=/body.contest param on invigilator endpoints.
 // Absent -> null (the legacy settings-driven portal, bit-for-bit). Present ->
@@ -6489,23 +6380,7 @@ async function requireGateEnabledFor(contest) {
   return await requireGateEnabledSettings();
 }
 
-let warnedMissingApiKey = false;
-
-function requireApiKey(req) {
-  // Closed-by-default: if no ingest key is configured, reject every request so
-  // a misconfigured deploy never accepts unauthenticated alert writes.
-  if (!ALERTS_INGEST_API_KEY) {
-    if (!warnedMissingApiKey) {
-      console.warn("ALERTS_INGEST_API_KEY is not set; rejecting all /api/alerts ingest requests.");
-      warnedMissingApiKey = true;
-    }
-    throw httpError(401, "Unauthorized");
-  }
-  const provided = req.get?.("x-api-key") || req.headers?.["x-api-key"] || "";
-  if (!safeEqual(provided, ALERTS_INGEST_API_KEY)) {
-    throw httpError(401, "Unauthorized");
-  }
-}
+// requireApiKey moved to the makeAuth factory in lib/auth.mjs (decomp B0).
 
 // safeEqual moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
