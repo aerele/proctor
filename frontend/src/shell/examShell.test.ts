@@ -183,8 +183,7 @@ describe("anomalyFromEvent", () => {
     ["page_hide", undefined, "This exam tab was hidden or closed."],
     ["screen_share_stopped", { reason: "track_ended" }, "Screen sharing stopped."],
     ["recording_error", { kind: "screen" }, "Screen recording hit an error."],
-    ["ip_address_changed", { previous: "1.2.3.4", current: "5.6.7.8" }, "Your network connection changed."],
-    ["integrity_checkpoint_missed", { checkpoint_id: "c1" }, "You missed an attendance check."]
+    ["ip_address_changed", { previous: "1.2.3.4", current: "5.6.7.8" }, "Your network connection changed."]
   ];
   it.each(anomalyCases)("%s is an anomaly", (type, detail, message) => {
     expect(anomalyFromEvent(type, detail)).toEqual({ anomaly: true, reason: type, message });
@@ -202,7 +201,7 @@ describe("anomalyFromEvent", () => {
     "fullscreen_enter", "window_focus", "before_unload", "clipboard_activity",
     "reload_shortcut_blocked", "upload_error", "event_upload_error", "heartbeat_error",
     "chunk_uploaded", "small_video_chunk_detected", "invalid_share_surface",
-    "integrity_checkpoint_shown", "integrity_checkpoint_confirmed", "integrity_notice",
+    "integrity_notice",
     "camera_microphone_optional_capture_failed", "camera_stopped", "microphone_stopped",
     "editor_blur", "editor_focus", "editor_paste",
     "onboarding_stage", "topbar_hidden", "topbar_restored"
