@@ -14,6 +14,8 @@ import { TemplatesPanel } from "./admin/TemplatesPanel";
 import { ResultsPanel } from "./admin/ResultsPanel";
 import { PeoplePanel } from "./admin/PeoplePanel";
 import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
+import { ADMIN_NAV_GROUPS, groupOfView, type AdminView } from "./admin/adminNav";
+import { DateTimeField } from "./admin/DateTimeField";
 import { MultiProblemWorkspace } from "./coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "./coding/problemSwitch";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
@@ -21,7 +23,7 @@ import * as studentCopy from "./studentCopy";
 import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
 import { enforcementSettingsFromForm } from "./enforcementSettings";
 import { autofillSuppressionProps } from "./shell/autofill";
-import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
+import { elapsedTimerActive, shellHeaderMode } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
@@ -266,9 +268,16 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [endFailed, setEndFailed] = useState(false);
   const [assuranceAccepted, setAssuranceAccepted] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  // Mirror for the attachCameraVideo callback ref (same pattern as statusRef).
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
   const [pipAvailable, setPipAvailable] = useState(false);
   const [pipMessage, setPipMessage] = useState("");
+  // W1: exam-view chrome state — the collapsible proctoring panel (its panels
+  // stay MOUNTED when collapsed; the collapse is CSS-only) and the floating
+  // camera dock's minimized state (the <video> host stays mounted in both).
+  const [proctorPanelOpen, setProctorPanelOpen] = useState(false);
+  const [cameraDockCollapsed, setCameraDockCollapsed] = useState(false);
   // S3 room gate: whether THIS session has been released into the exam (room
   // OTP / invigilator start-now / gate disabled). Starts false when the gate is
   // enabled; the poll effect corrects it (also after reload/resume).
@@ -311,6 +320,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     : normalizeCameraRecording(examConfig?.camera_recording).enabled;
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  cameraStreamRef.current = cameraStream;
   // F5.1 permissions-first onboarding (stage 1, before fullscreen): the
   // checklist mirrors the per-permission prompt results; the acquired streams
   // wait here until beginRecording hands them to the recorder (start() then
@@ -532,28 +542,30 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const examTimeUp = examRemainingMs !== null && examRemainingMs <= 0;
 
   // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
-  const shellChrome = (
-    <ExamShellChrome
-      shell={shell}
-      gate={gate}
-      status={status}
-      identity={identity}
-      elapsedSeconds={elapsedSeconds}
-      examReleased={!examGateActive}
-      permissionsReady={permissionsReady}
-      permissionsGate={{
-        checklist: permissions,
-        busy: permissionsBusy,
-        screenMessage: screenSetupMessage,
-        onRun: () => void runPermissionsSetup(),
-        onRetry: retryPermission,
-        onContinue: confirmPermissions
-      }}
-      ownEditor={hasProblem}
-      remainingLabel={examRemainingMs !== null ? formatRemaining(examRemainingMs) : null}
-      timeUp={examTimeUp}
-    />
-  );
+  // Kept as a props object so the W1 exam branch can render the same chrome
+  // with its extra strip actions + suppressed stage hint.
+  const shellChromeProps = {
+    shell,
+    gate,
+    status,
+    identity,
+    contestName: pinned?.config.contest_name ?? null,
+    elapsedSeconds,
+    examReleased: !examGateActive,
+    permissionsReady,
+    permissionsGate: {
+      checklist: permissions,
+      busy: permissionsBusy,
+      screenMessage: screenSetupMessage,
+      onRun: () => void runPermissionsSetup(),
+      onRetry: retryPermission,
+      onContinue: confirmPermissions
+    },
+    ownEditor: hasProblem,
+    remainingLabel: examRemainingMs !== null ? formatRemaining(examRemainingMs) : null,
+    timeUp: examTimeUp
+  };
+  const shellChrome = <ExamShellChrome {...shellChromeProps} />;
 
   // F5.3: the hard-block takeover renders ABOVE everything on every branch
   // (its own visibility rule already yields to the locked/ended screens).
@@ -569,8 +581,11 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       onEnterFullscreen={shell.enterFullscreen}
     />
   ) : null;
-  // The fixed bar needs page top padding only while it is actually rendered.
-  const shellPadTop = topBarVisible(shell.barHidden, gate);
+  // W2: page top padding follows which fixed header is rendered — the slim
+  // strip needs a small offset, the big alert banner a larger one, the locked
+  // screen none ("hidden").
+  const headerMode = shellHeaderMode(shell.barHidden, gate);
+  const shellPadTop: boolean | "alert" = headerMode === "alert" ? "alert" : headerMode === "strip";
 
   const speakIpChangeWarning = () => {
     const message = "Your IP is changing. Please be attended by our engineer at your institution.";
@@ -843,6 +858,23 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       void video.play().catch(() => undefined);
     }
   }, [cameraStream]);
+
+  // W1: the camera <video> host moves between layouts (sidebar self-view in
+  // the waiting/legacy views ↔ the floating dock in the exam view). The effect
+  // above only re-attaches the stream when cameraStream CHANGES, so a
+  // remounted element would stay black after a branch switch. This callback
+  // ref re-attaches the live stream whenever a new node mounts. The camera
+  // CAPTURE itself lives in the recorder (off-DOM) — this is preview-only.
+  const attachCameraVideo = useMemo(() => {
+    return (node: HTMLVideoElement | null) => {
+      cameraVideoRef.current = node;
+      const stream = cameraStreamRef.current;
+      if (node && node.srcObject !== stream) {
+        node.srcObject = stream;
+        if (stream) void node.play().catch(() => undefined);
+      }
+    };
+  }, []);
 
   const requestCameraPictureInPicture = async () => {
     const video = cameraVideoRef.current;
@@ -1433,6 +1465,109 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // gate === "form" (no session yet) or "running" (active session)
   const isFormStage = gate === "form" && status !== "recording" && status !== "ending";
 
+  // W1 — the exam itself: an own-editor session, actively recording, released
+  // into the exam. The coding workspace IS the page. Everything else tucks
+  // into the slim strip (W2 — proctoring-panel toggle + End test live there),
+  // the collapsible proctoring panel, and the floating camera dock. All
+  // capture/preview hosts stay MOUNTED — every collapse is CSS-only. Legacy
+  // (HackerRank-link) sessions and all waiting/error states keep the classic
+  // proctoring-first layout below.
+  if (hasProblem && status === "recording" && gate === "running" && !examGateActive) {
+    return (
+      <Shell padTop={shellPadTop} variant="exam">
+        <ExamShellChrome
+          {...shellChromeProps}
+          hideStageHint
+          actions={
+            <span className="flex items-center gap-2">
+              <button
+                className="focus-ring flex items-center gap-1 rounded-md border border-white/25 px-2.5 py-1 text-xs font-medium text-white/85 hover:bg-white/10"
+                aria-expanded={proctorPanelOpen}
+                onClick={() => {
+                  // The panel opens at the top of the content — surface it even
+                  // when the candidate is scrolled deep into a problem.
+                  setProctorPanelOpen((open) => !open);
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                <ShieldCheck size={13} /> Proctoring {proctorPanelOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              </button>
+              <button
+                className="focus-ring flex items-center gap-1 rounded-md bg-danger px-2.5 py-1 text-xs font-semibold text-white hover:bg-danger/90"
+                onClick={() => {
+                  setEndRequested(true);
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                <Square size={11} /> End test
+              </button>
+            </span>
+          }
+        />
+        {enforcementOverlay}
+
+        {/* Functional notices only — nothing else sits above the workspace. */}
+        {examTimeNotice ? (
+          <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-ink">{examTimeNotice}</div>
+        ) : null}
+        {examTimeUp ? (
+          <div className="mb-5 rounded-lg border border-danger/40 bg-danger/10 p-4">
+            <p className="text-sm font-semibold text-danger">Time is up</p>
+            <p className="mt-1 text-sm leading-6 text-ink">The exam has ended. Stop working now and end your test from this page — your recording continues until you end it.</p>
+          </div>
+        ) : null}
+        {reloadWarning ? (
+          <div className="mb-5 rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm font-medium text-warning">{reloadWarning}</div>
+        ) : null}
+        {error ? (
+          <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div>
+        ) : null}
+        {endRequested ? (
+          <div className="mb-5 [&>*]:mt-0">
+            <EndTestPanel
+              assuranceAccepted={assuranceAccepted}
+              hasProblem={hasProblem}
+              onAssuranceChange={setAssuranceAccepted}
+              onCancel={() => setEndRequested(false)}
+              onEnd={stop}
+            />
+          </div>
+        ) : null}
+
+        {/* The collapsible proctoring panel — ALWAYS MOUNTED (css-hidden when
+            collapsed) so no telemetry/preview host ever unmounts. */}
+        <div className={proctorPanelOpen ? "mb-5 space-y-5" : "hidden"}>
+          <div className="grid gap-5 lg:grid-cols-3">
+            <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
+            <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
+            <RulesPanel hasProblem={hasProblem} />
+          </div>
+          <RecentEventsPanel events={events} />
+        </div>
+
+        {/* S4/S-I: the workspace — THE page (W1). Same conditions as before
+            the redesign: own-editor problems, live session, recording. */}
+        <MultiProblemWorkspace
+          sessionId={sessionId}
+          problems={sessionProblems}
+          submissionsSummary={sessionConfig?.submissions_summary}
+          submitBudget={sessionConfig?.submit_budget ?? null}
+        />
+
+        <CameraDock
+          videoRef={attachCameraVideo}
+          mediaCapture={mediaCapture}
+          cameraRecorded={cameraRecordingOn}
+          collapsed={cameraDockCollapsed}
+          onToggle={() => setCameraDockCollapsed((collapsed) => !collapsed)}
+          onPopOut={requestCameraPictureInPicture}
+          pipAvailable={pipAvailable}
+          pipMessage={pipMessage}
+        />
+      </Shell>
+    );
+  }
+
   return (
     <Shell padTop={shellPadTop}>
       {shellChrome}
@@ -1669,7 +1804,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             <WhatIsRecordedPanel hasProblem={hasProblem} />
           ) : (
             <>
-              <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
+              <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
               <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
               <RulesPanel hasProblem={hasProblem} />
@@ -1694,34 +1829,13 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         </div>
       ) : null}
 
-      {/* S4: own coding workspace (Monaco + Run/Submit), live only while
-          recording so every editor event is tied to an actively recorded
-          session. The problems come from the server (contest problems[] or the
-          legacy settings problem_id alias); when assigned the workspace
-          REPLACES the contest_url Start-test surface. S3: held back while the
-          room gate is still active (candidate in the RoomCodePanel waiting
-          room above). S-I: multi-problem switcher when problems.length > 1;
-          a single problem renders the exact pre-S-I single-pane layout. */}
-      {sessionProblems.length > 0 && sessionId && status === "recording" && !examGateActive && (
-        <div className="mt-5">
-          <MultiProblemWorkspace
-            sessionId={sessionId}
-            problems={sessionProblems}
-            submissionsSummary={sessionConfig?.submissions_summary}
-            submitBudget={sessionConfig?.submit_budget ?? null}
-          />
-        </div>
-      )}
+      {/* S4/S-I: the own-editor workspace now renders in the dedicated W1
+          exam branch above (coding-central layout). This classic branch keeps
+          only the pre-start / waiting / legacy / error surfaces. */}
 
-      <section className="mt-5 rounded-lg border border-line bg-panel p-5">
-        <div className="mb-4 flex items-center gap-2">
-          <ClipboardList size={18} />
-          <h2 className="text-base font-semibold">Recent proctor events</h2>
-        </div>
-        <div className="space-y-2">
-          {events.length ? events.map((event, index) => <EventRow key={`${event.timestamp}-${index}`} event={event} />) : <p className="text-sm text-muted">Events will appear after recording starts.</p>}
-        </div>
-      </section>
+      <div className="mt-5">
+        <RecentEventsPanel events={events} />
+      </div>
     </Shell>
   );
 }
@@ -1856,7 +1970,7 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
   );
 }
 
-type AdminView = "stats" | "contests" | "templates" | "alerts" | "sessions" | "attendance" | "results" | "people" | "review" | "recordings" | "problems" | "settings" | "ips";
+// W3: AdminView + the grouped nav model live in admin/adminNav.ts.
 
 // A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
 // AdminStats card labels. "" = no status filter (the Total card). "disconnected"
@@ -2801,6 +2915,20 @@ function AdminApp() {
     if (view === "review" && username) void search(next);
   };
 
+  // W3: ONE navigation chokepoint for the grouped nav — carries the per-view
+  // load side effects the old flat tabs had inline. The per-group memory means
+  // switching sections returns to the view you were last on in that section
+  // (covers EVERY view change, including drill-downs, via the effect below).
+  const lastViewByGroup = useRef<Partial<Record<string, AdminView>>>({});
+  useEffect(() => {
+    lastViewByGroup.current[groupOfView(view).key] = view;
+  }, [view]);
+  const goTo = (next: AdminView) => {
+    setView(next);
+    if (next === "sessions") void loadSessions();
+    if (next === "ips") void loadIpReport();
+  };
+
   if (!unlocked) {
     return (
       <Shell>
@@ -2826,30 +2954,46 @@ function AdminApp() {
 
   return (
     <Shell>
-      <nav className="mb-5 flex flex-wrap gap-2" aria-label="Admin views">
-        <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
-        <AdminTab active={view === "contests"} onClick={() => setView("contests")} icon={<ListChecks size={16} />} label="Contests" />
-        <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
-        <AdminTab active={view === "sessions"} onClick={() => { setView("sessions"); void loadSessions(); }} icon={<Users size={16} />} label="Sessions" />
-        <AdminTab active={view === "ips"} onClick={() => { setView("ips"); void loadIpReport(); }} icon={<Network size={16} />} label="IP report" />
-        <AdminTab active={view === "attendance"} onClick={() => setView("attendance")} icon={<UserCheck size={16} />} label="Attendance" />
-        <AdminTab active={view === "results"} onClick={() => setView("results")} icon={<Award size={16} />} label="Results" />
-        <AdminTab active={view === "people"} onClick={() => setView("people")} icon={<Users size={16} />} label="People" />
-        <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
-        <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
-        <AdminTab active={view === "problems"} onClick={() => setView("problems")} icon={<ClipboardList size={16} />} label="Problems" />
-        <AdminTab active={view === "templates"} onClick={() => setView("templates")} icon={<LayoutTemplate size={16} />} label="Templates" />
-        <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
-      </nav>
-
-      {/* A1 (S-D): GLOBAL CONTEST SELECTOR — below the nav so it scopes EVERY
-          tab; the selection persists in this tab's URL ?contest= param. */}
-      <ContestSelectorBar
-        contests={adminContests}
-        contestSlug={alertFilters.contest_slug ?? ""}
-        onSelect={selectContest}
-        onManage={() => setView("contests")}
-      />
+      {/* W3: grouped admin nav. Top row: SECTIONS (left) + the global contest
+          scope (top-right — it scopes EVERY screen, so it sits ABOVE them all;
+          A1/S-D: the selection persists in this tab's URL ?contest= param).
+          Second row: the views of the active section (hidden for single-view
+          sections), so the header is never more than two slim rows. */}
+      <div className="mb-5 rounded-lg border border-line bg-panel shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-3 py-2">
+          <nav className="flex flex-wrap items-center gap-1" aria-label="Admin sections">
+            {ADMIN_NAV_GROUPS.map((group) => (
+              <GroupTab
+                key={group.key}
+                active={groupOfView(view).key === group.key}
+                onClick={() => goTo(lastViewByGroup.current[group.key] ?? group.views[0].view)}
+                icon={GROUP_ICONS[group.key]}
+                label={group.label}
+                badge={group.key === "live" ? alerts.length : undefined}
+              />
+            ))}
+          </nav>
+          <ContestScopePicker
+            contests={adminContests}
+            contestSlug={alertFilters.contest_slug ?? ""}
+            onSelect={selectContest}
+          />
+        </div>
+        {groupOfView(view).views.length > 1 ? (
+          <nav className="flex flex-wrap items-center gap-1 rounded-b-lg border-t border-line bg-paper/70 px-3 py-1.5" aria-label="Admin views">
+            {groupOfView(view).views.map((entry) => (
+              <AdminTab
+                key={entry.view}
+                active={view === entry.view}
+                onClick={() => goTo(entry.view)}
+                icon={VIEW_ICONS[entry.view]}
+                label={entry.label}
+                badge={entry.view === "alerts" ? alerts.length : undefined}
+              />
+            ))}
+          </nav>
+        ) : null}
+      </div>
 
       {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
       {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
@@ -2999,8 +3143,8 @@ function AdminApp() {
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr]">
-          <Field label="Start time" type="datetime-local" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
-          <Field label="End time" type="datetime-local" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
+          <DateTimeField label="Start time" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
+          <DateTimeField label="End time" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
           <Field label="Active problem ID" value={settings.problem_id ?? ""} onChange={(value) => setSettings({ ...settings, problem_id: value })} />
           <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
@@ -3858,48 +4002,47 @@ function ReviewRosterSection({
 // filters and persists in this tab's URL. A selected slug that is not in the
 // dropdown (deep link to an old/purged slug) renders as a literal option so
 // the URL state is never silently dropped.
-function ContestSelectorBar({ contests, contestSlug, onSelect, onManage }: {
+// W3: the global contest scope, compacted into the nav header's top-right
+// corner — it filters EVERY admin screen, so it sits above all of them.
+function ContestScopePicker({ contests, contestSlug, onSelect }: {
   contests: ContestSummary[] | null;
   contestSlug: string;
   onSelect: (slug: string) => void;
-  onManage: () => void;
 }) {
   const known = contests ?? [];
   const unknownSelection = contestSlug && !known.some((contest) => contest.slug === contestSlug);
   return (
-    <div className="mb-5 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel p-3 text-sm shadow-subtle">
-      <label className="flex items-center gap-2">
-        <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
-          <ListFilter size={13} /> Contest
-        </span>
-        <select
-          className="focus-ring h-9 min-w-[16rem] rounded-md border border-line bg-white px-3 text-sm"
-          value={contestSlug}
-          onChange={(event) => onSelect(event.target.value)}
-        >
-          <option value="">All contests</option>
-          {known.map((contest) => (
-            <option key={contest.slug} value={contest.slug}>
-              {contest.name} ({contest.slug}) — {contest.status}{contest.legacy ? " · legacy" : ""}
-            </option>
-          ))}
-          {unknownSelection ? <option value={contestSlug}>{contestSlug} (unknown slug)</option> : null}
-        </select>
-      </label>
+    <label
+      className="flex items-center gap-2"
+      title="Scopes every admin screen. The selection sticks to this browser tab's URL — open another tab for a second contest."
+    >
+      <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
+        <ListFilter size={13} /> Contest
+      </span>
+      <select
+        className="focus-ring h-8 max-w-[18rem] rounded-md border border-line bg-white px-2 text-sm"
+        value={contestSlug}
+        onChange={(event) => onSelect(event.target.value)}
+      >
+        <option value="">All contests</option>
+        {known.map((contest) => (
+          <option key={contest.slug} value={contest.slug}>
+            {contest.name} ({contest.slug}) — {contest.status}{contest.legacy ? " · legacy" : ""}
+          </option>
+        ))}
+        {unknownSelection ? <option value={contestSlug}>{contestSlug} (unknown slug)</option> : null}
+      </select>
       {contestSlug ? (
         <button
           type="button"
           onClick={() => onSelect("")}
-          className="focus-ring inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-white px-3 text-xs font-medium text-ink hover:border-ink/40"
+          className="focus-ring inline-flex h-8 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium text-ink hover:border-ink/40"
+          title="Back to all contests"
         >
-          <X size={14} /> Clear
+          <X size={13} /> Clear
         </button>
       ) : null}
-      <span className="ml-auto text-xs text-muted">
-        Scopes every tab · kept in this tab's URL (open another browser tab for a second contest) ·{" "}
-        <button type="button" className="focus-ring underline" onClick={onManage}>manage contests</button>
-      </span>
-    </div>
+    </label>
   );
 }
 
@@ -3945,10 +4088,7 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
           <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: 15 })}>+15 min</button>
           <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: 5 })}>+5 min</button>
           <button className={buttonClass} disabled={busy || !endAt} onClick={() => onAdjust({ extend_minutes: -5 })}>−5 min</button>
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted">New end time</span>
-            <input className="focus-ring mt-1 h-10 rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={absoluteInput} onChange={(event) => onAbsoluteInputChange(event.target.value)} />
-          </label>
+          <DateTimeField label="New end time" value={absoluteInput} onChange={onAbsoluteInputChange} className="w-64" />
           <button className={buttonClass} disabled={busy || !absoluteInput} onClick={() => onAdjust({ end_at: localInputToIso(absoluteInput) })}>Set</button>
           {endNowArmed ? (
             <>
@@ -5032,17 +5172,61 @@ function ReviewSessionCard({ session, onAction }: { session: Record<string, unkn
   );
 }
 
+// W3: nav icons. Group icons key the primary (sections) row; view icons key
+// the secondary row of the active section.
+const GROUP_ICONS: Record<string, React.ReactNode> = {
+  live: <ShieldCheck size={15} />,
+  contest: <ListChecks size={15} />,
+  evidence: <Film size={15} />,
+  authoring: <ClipboardList size={15} />,
+  people: <Users size={15} />,
+  settings: <Lock size={15} />
+};
+const VIEW_ICONS: Record<AdminView, React.ReactNode> = {
+  stats: <ShieldCheck size={15} />,
+  alerts: <Bell size={15} />,
+  sessions: <Users size={15} />,
+  ips: <Network size={15} />,
+  contests: <ListChecks size={15} />,
+  attendance: <UserCheck size={15} />,
+  results: <Award size={15} />,
+  review: <Search size={15} />,
+  recordings: <Film size={15} />,
+  problems: <ClipboardList size={15} />,
+  templates: <LayoutTemplate size={15} />,
+  people: <Users size={15} />,
+  settings: <Lock size={15} />
+};
+
+// W3 primary row: one tab per SECTION — active section is ink-filled.
+function GroupTab({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: number }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "true" : undefined}
+      className={`focus-ring inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ${active ? "bg-ink text-white" : "text-ink hover:bg-ink/5"}`}
+    >
+      {icon}
+      {label}
+      {badge ? <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none ${active ? "bg-white/20 text-white" : "bg-danger/10 text-danger"}`}>{badge}</span> : null}
+    </button>
+  );
+}
+
+// W3 secondary row: the active section's views as a segmented strip — active
+// view is a raised white pill.
 function AdminTab({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: number }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`focus-ring inline-flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium ${active ? "border-ink bg-ink text-white" : "border-line bg-panel text-ink hover:border-ink/40"}`}
+      className={`focus-ring inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm ${active ? "border-line bg-white font-semibold text-ink shadow-subtle" : "border-transparent font-medium text-muted hover:text-ink"}`}
     >
       {icon}
       {label}
-      {badge ? <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${active ? "bg-white/20 text-white" : "bg-ink/10 text-ink"}`}>{badge}</span> : null}
+      {badge ? <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none ${active ? "bg-danger/10 text-danger" : "bg-ink/10 text-ink"}`}>{badge}</span> : null}
     </button>
   );
 }
@@ -5523,19 +5707,26 @@ function AlertField({ label, value, mono = false }: { label: string; value: stri
 
 // padTop: StudentApp sets it while the fixed S1 ExamTopBar (64px) is rendered,
 // so the header/content start below the bar. AdminApp never passes it.
-function Shell({ children, padTop = false }: { children: React.ReactNode; padTop?: boolean }) {
+// padTop matches the fixed shell header (W2): true = slim strip, "alert" =
+// the taller anomaly banner. The "exam" variant (W1) widens the container and
+// drops the page header — the strip already carries the branding/identity, so
+// nothing distracts from the workspace.
+function Shell({ children, padTop = false, variant = "page" }: { children: React.ReactNode; padTop?: boolean | "alert"; variant?: "page" | "exam" }) {
+  const pad = padTop === "alert" ? "pt-40" : padTop ? "pt-14" : "";
   return (
-    <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${padTop ? "pt-20" : ""}`}>
-      <div className="mx-auto max-w-6xl">
-        <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
-          <div className="flex items-center gap-3">
-            <img src="/aerele-logo.png" alt="Aerele" className="h-9 w-9 rounded-md" />
-            <div>
-              <p className="text-sm font-semibold">Aerele Proctor</p>
-              <p className="text-xs text-muted">Evidence collection for coding assessments</p>
+    <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${pad}`}>
+      <div className={`mx-auto ${variant === "exam" ? "max-w-screen-2xl" : "max-w-6xl"}`}>
+        {variant === "exam" ? null : (
+          <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
+            <div className="flex items-center gap-3">
+              <img src="/aerele-logo.png" alt="Aerele" className="h-9 w-9 rounded-md" />
+              <div>
+                <p className="text-sm font-semibold">Aerele Proctor</p>
+                <p className="text-xs text-muted">Evidence collection for coding assessments</p>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
+        )}
         {children}
       </div>
     </main>
@@ -5700,7 +5891,7 @@ function StatusPill({ status }: { status: SessionStatus }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase ${styles[status]}`}>{status}</span>;
 }
 
-function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, onPopOut, pipAvailable }: { videoRef: React.RefObject<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean; pipMessage: string; onPopOut: () => void; pipAvailable: boolean }) {
+function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, onPopOut, pipAvailable }: { videoRef: React.Ref<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean; pipMessage: string; onPopOut: () => void; pipAvailable: boolean }) {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -5721,6 +5912,66 @@ function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, on
           <PictureInPicture2 size={14} /> Pop out
         </button>
         <span className="text-xs leading-5 text-muted">{pipMessage || (mediaCapture.camera === "unavailable" ? "No camera was detected. Screen recording continues." : "The camera preview stays here and can pop out over other tabs in supported browsers.")}</span>
+      </div>
+    </section>
+  );
+}
+
+// W1 — the floating camera dock for the exam view: a small bottom-right tile
+// (HackerRank-style) that keeps the rule-mandated self-view visible without
+// stealing layout space. The <video> host stays MOUNTED in BOTH visual states
+// (minimize is CSS-only) — the camera CAPTURE itself lives in the recorder and
+// never depends on this preview.
+function CameraDock({ videoRef, mediaCapture, cameraRecorded, collapsed, onToggle, onPopOut, pipAvailable, pipMessage }: {
+  videoRef: React.Ref<HTMLVideoElement>;
+  mediaCapture: MediaCaptureState;
+  cameraRecorded: boolean;
+  collapsed: boolean;
+  onToggle: () => void;
+  onPopOut: () => void;
+  pipAvailable: boolean;
+  pipMessage: string;
+}) {
+  const stateLabel = studentCopy.cameraStateLabel(mediaCapture.camera, cameraRecorded);
+  return (
+    <div className="fixed bottom-4 right-4 z-40">
+      <div className={collapsed ? "hidden" : "w-56 overflow-hidden rounded-lg border border-line bg-ink shadow-subtle"}>
+        <div className="flex items-center justify-between gap-2 px-2.5 py-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-white/80">
+            <Camera size={12} className="shrink-0" /> <span className="truncate">Camera · {stateLabel}</span>
+          </span>
+          <span className="flex shrink-0 items-center gap-0.5">
+            <button title="Pop out over other windows" className="focus-ring rounded p-1 text-white/70 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40" disabled={!pipAvailable} onClick={onPopOut}>
+              <PictureInPicture2 size={12} />
+            </button>
+            <button title="Minimize camera tile" className="focus-ring rounded p-1 text-white/70 hover:bg-white/10" onClick={onToggle}>
+              <ChevronDown size={14} />
+            </button>
+          </span>
+        </div>
+        <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
+        {pipMessage ? <p className="px-2.5 py-1.5 text-[10px] leading-4 text-white/60">{pipMessage}</p> : null}
+      </div>
+      {collapsed ? (
+        <button onClick={onToggle} className="focus-ring flex items-center gap-2 rounded-full bg-ink px-3 py-2 text-xs font-medium text-white shadow-subtle">
+          <Camera size={14} /> Camera · {stateLabel}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+// Recent proctor events — shared by the classic layout (bottom section) and
+// the exam view's collapsible proctoring panel.
+function RecentEventsPanel({ events }: { events: ProctorEvent[] }) {
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5">
+      <div className="mb-4 flex items-center gap-2">
+        <ClipboardList size={18} />
+        <h2 className="text-base font-semibold">Recent proctor events</h2>
+      </div>
+      <div className="space-y-2">
+        {events.length ? events.map((event, index) => <EventRow key={`${event.timestamp}-${index}`} event={event} />) : <p className="text-sm text-muted">Events will appear after recording starts.</p>}
       </div>
     </section>
   );

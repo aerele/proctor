@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   deriveStage, stageHint, topBarVisible, fullscreenGateVisible, permissionsGateVisible,
-  elapsedTimerActive, STAGE_META,
+  shellHeaderMode, elapsedTimerActive, STAGE_META,
   formatWallClock, formatExamElapsed, formatRoomLabel,
   anomalyFromEvent, topBarReducer, initialTopBarState,
   serializeShellState, deserializeShellState, shellStateStorageKey,
@@ -68,6 +68,33 @@ describe("topBarVisible", () => {
     expect(topBarVisible(false, "ended")).toBe(true);
     expect(topBarVisible(true, "running")).toBe(false);
     expect(topBarVisible(false, "locked")).toBe(false);
+  });
+});
+
+describe("shellHeaderMode (W2 flip)", () => {
+  it("healthy: the slim strip is the steady-state header on every non-locked gate", () => {
+    expect(shellHeaderMode(false, "form")).toBe("strip");
+    expect(shellHeaderMode(false, "running")).toBe("strip");
+    expect(shellHeaderMode(false, "pending_approval")).toBe("strip");
+    expect(shellHeaderMode(false, "ended")).toBe("strip");
+  });
+
+  it("anomaly episode active: the BIG alert banner replaces the strip and stays until restored", () => {
+    expect(shellHeaderMode(true, "running")).toBe("alert");
+    expect(shellHeaderMode(true, "form")).toBe("alert");
+  });
+
+  it("locked: no header at all — the locked screen owns the viewport, even mid-episode", () => {
+    expect(shellHeaderMode(false, "locked")).toBe("hidden");
+    expect(shellHeaderMode(true, "locked")).toBe("hidden");
+  });
+
+  it("agrees with topBarVisible: strip mode exactly when the bar used to render", () => {
+    for (const gate of ["form", "pending_approval", "locked", "ended", "running"] as const) {
+      for (const barHidden of [false, true]) {
+        expect(shellHeaderMode(barHidden, gate) === "strip").toBe(topBarVisible(barHidden, gate));
+      }
+    }
   });
 });
 

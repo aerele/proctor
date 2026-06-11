@@ -1,11 +1,15 @@
 // frontend/src/shell/AnomalyPanel.tsx
 //
-// S1 §7.3 — the red panel shown while the top bar is vanished. Lists the
-// episode's friendly reason(s) with timestamps; exactly ONE primary action
-// ("I have fixed this — restore my status bar") that stays disabled until
-// every restore precondition holds. Re-enter fullscreen gets its own button
-// (a fresh click is always a valid gesture). Share-restart is NEVER offered
-// here — that stays with the existing ScreenShareErrorPanel (no duplicate CTA).
+// W2 flip — the BIG problem-state banner. While an anomaly episode is active
+// it REPLACES the slim strip as a fixed, full-width red bar that stays pinned
+// to the viewport top until the episode is resolved (it used to be an in-flow
+// panel that could sit scrolled out of view while the candidate worked deep in
+// the workspace — "the alert doesn't show up"). Same episode semantics as
+// before: lists the episode's friendly reason(s) with timestamps; exactly ONE
+// primary action ("I have fixed this") that stays disabled until every restore
+// precondition holds. Re-enter fullscreen gets its own button (a fresh click
+// is always a valid gesture). Share-restart is NEVER offered here — that stays
+// with ScreenShareErrorPanel (no duplicate CTA).
 
 import { AlertTriangle } from "lucide-react";
 import { useState } from "react";
@@ -21,52 +25,51 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
   const ready = preconditions.fullscreen && preconditions.visible && preconditions.recording;
 
   const pending: string[] = [];
-  if (!preconditions.fullscreen) pending.push("Re-enter fullscreen.");
-  if (!preconditions.visible) pending.push("Keep this exam tab visible.");
-  if (!preconditions.recording) pending.push("Recording must be running — use the Try again / Resume button on this page to restart your screen share.");
+  if (!preconditions.fullscreen) pending.push("re-enter fullscreen");
+  if (!preconditions.visible) pending.push("keep this exam tab visible");
+  if (!preconditions.recording) pending.push("restart recording with the Resume / Try again button on this page");
 
   return (
-    <div role="alert" aria-live="assertive" className="mb-5 rounded-lg border-2 border-danger bg-danger/10 p-5">
-      <div className="flex items-start gap-3">
-        <AlertTriangle size={24} className="mt-0.5 shrink-0 text-danger" />
-        <div className="min-w-0 flex-1">
-          <p className="text-base font-bold uppercase tracking-wide text-danger">Status bar hidden — anomaly detected</p>
-          <ul className="mt-2 space-y-1 text-sm text-ink">
+    <div role="alert" aria-live="assertive" className="fixed inset-x-0 top-0 z-50 border-b-4 border-red-900 bg-red-700 px-4 py-3 text-white shadow-subtle md:px-8">
+      <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center gap-x-5 gap-y-2">
+        <span className="flex shrink-0 items-center gap-2 text-base font-bold uppercase tracking-wide">
+          <AlertTriangle size={20} className="shrink-0" /> Proctoring alert
+        </span>
+        <div className="min-w-0 flex-1 basis-64">
+          <ul className="max-h-14 space-y-0.5 overflow-y-auto text-sm font-semibold leading-5">
             {reasons.map((reason) => (
               <li key={reason.type}>
-                <span className="font-medium">{reason.message}</span>{" "}
-                <span className="font-mono text-xs text-muted">{new Date(reason.at).toLocaleTimeString()}</span>
+                {reason.message}{" "}
+                <span className="font-mono text-xs font-normal text-red-200">{new Date(reason.at).toLocaleTimeString()}</span>
               </li>
             ))}
           </ul>
-          {!ready ? (
-            <ul className="mt-3 list-inside list-disc text-sm text-danger">
-              {pending.map((line) => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
-          ) : null}
-          <div className="mt-4 flex flex-wrap gap-3">
-            {!preconditions.fullscreen ? (
-              <button
-                className="focus-ring rounded-md bg-ink px-4 py-2 text-sm font-medium text-white"
-                onClick={() => {
-                  setFsError("");
-                  void onEnterFullscreen().catch(() => setFsError("Your browser blocked fullscreen. Click again to retry."));
-                }}
-              >
-                Re-enter fullscreen
-              </button>
-            ) : null}
+          <p className="mt-1 text-xs leading-5 text-red-100">
+            {ready
+              ? "All clear — press “I have fixed this” to continue."
+              : `To continue: ${pending.join(" · ")}.`}
+          </p>
+          {fsError ? <p className="text-xs font-semibold text-red-100">{fsError}</p> : null}
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {!preconditions.fullscreen ? (
             <button
-              className="focus-ring rounded-md bg-danger px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!ready}
-              onClick={onRestore}
+              className="focus-ring rounded-md bg-white px-3.5 py-2 text-sm font-bold text-red-800"
+              onClick={() => {
+                setFsError("");
+                void onEnterFullscreen().catch(() => setFsError("Your browser blocked fullscreen. Click again to retry."));
+              }}
             >
-              I have fixed this — restore my status bar
+              Re-enter fullscreen
             </button>
-          </div>
-          {fsError ? <p className="mt-2 text-sm text-danger">{fsError}</p> : null}
+          ) : null}
+          <button
+            className="focus-ring rounded-md border-2 border-white/80 px-3.5 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!ready}
+            onClick={onRestore}
+          >
+            I have fixed this
+          </button>
         </div>
       </div>
     </div>

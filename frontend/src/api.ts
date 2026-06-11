@@ -3857,6 +3857,34 @@ export async function regenerateContestSecretApi(
   return response.contest;
 }
 
+// W4: set a CUSTOM test code. The server normalizes (uppercase, whitespace
+// stripped), enforces the 6-char mint alphabet, and refuses a code already
+// used by an OPEN contest (409 with a human message the panel shows inline).
+export async function setContestAccessCodeApi(password: string, slug: string, accessCode: string): Promise<ContestSummary> {
+  if (demoMode) {
+    await wait(150);
+    assertDemoAdmin(password);
+    findDemoContest(slug);
+    const cleaned = accessCode.toUpperCase().replace(/\s+/g, "");
+    if (!/^[A-Z2-9]{6}$/.test(cleaned)) {
+      throw demoApiError(400, "Test code must be exactly 6 characters using letters A-Z or digits 2-9 (0 and 1 are never used).");
+    }
+    const clash = demoContestsList().find(
+      (contest) => contest.status === "open" && contest.slug !== slug && contest.access_code === cleaned
+    );
+    if (clash) {
+      throw demoApiError(409, `Test code ${cleaned} is already used by the open contest "${clash.name}" (${clash.slug}). Choose a different code.`);
+    }
+    return updateDemoContest(slug, { access_code: cleaned });
+  }
+  const response = await request<{ contest: ContestSummary }>("/api/admin/contest-set-code", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ slug, access_code: accessCode })
+  });
+  return response.contest;
+}
+
 // S-D: the legacy S5 exam-time card semantics, per contest.
 export async function adjustContestExamTime(password: string, slug: string, body: ExamTimeRequest): Promise<ExamTimeResponse> {
   if (demoMode) {

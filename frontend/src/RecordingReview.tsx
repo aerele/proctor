@@ -24,6 +24,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
 import { describeRecordingContents } from "./admin/sessionDetail";
+import { DateTimeField } from "./admin/DateTimeField";
 import { candidateIdOf } from "./identity";
 import {
   CHUNK_SECONDS,
@@ -1226,15 +1227,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       ))}
                     </select>
                   </label>
-                  <label className="block">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted">Test start time</span>
-                    <input
-                      type="datetime-local"
-                      className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
-                      value={testStartInput}
-                      onChange={(event) => setTestStartInput(event.target.value)}
-                    />
-                  </label>
+                  <DateTimeField label="Test start time" value={testStartInput} onChange={setTestStartInput} />
                 </div>
                 <p className="mt-2 text-xs text-muted">
                   {activeSession.name ? `${activeSession.name} · ` : ""}

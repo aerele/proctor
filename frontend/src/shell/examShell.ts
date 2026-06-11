@@ -65,6 +65,23 @@ export function topBarVisible(barHidden: boolean, gate: ShellGate): boolean {
   return !barHidden && gate !== "locked";
 }
 
+// W2 flip — which fixed header the shell chrome renders. The PROMINENT
+// treatment now belongs to the problem state, not normal operation:
+//   "strip"  — everything healthy: the slim persistent proctoring strip (the
+//              subtle but uniquely-colored at-a-distance cue).
+//   "alert"  — an anomaly episode is active (barHidden): the BIG red alert
+//              banner takes the strip's place and stays until the episode is
+//              acknowledged + preconditions hold (the same reducer episode as
+//              before — only the presentation flipped, telemetry unchanged).
+//   "hidden" — locked screen: the blocked screen owns the viewport; neither
+//              header renders (same render rule the bar always had).
+export type ShellHeaderMode = "strip" | "alert" | "hidden";
+
+export function shellHeaderMode(barHidden: boolean, gate: ShellGate): ShellHeaderMode {
+  if (gate === "locked") return "hidden";
+  return barHidden ? "alert" : "strip";
+}
+
 // FullscreenGate overlay visibility. The overlay renders only at stage 2
 // (permissions done, fullscreen pending — stage 1 belongs to PermissionsGate)
 // and while no anomaly episode owns fullscreen re-entry (the AnomalyPanel has

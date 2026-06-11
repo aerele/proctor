@@ -19,6 +19,7 @@ import {
   purgeContest,
   regenerateContestSecretApi,
   runRetentionSweep,
+  setContestAccessCodeApi,
   setContestStatusApi,
   updateContestApi,
   type ApiError,
@@ -32,8 +33,11 @@ import {
   contestStatusTone,
   contestWindowLabel,
   invigilatorUrlFor,
-  sortContestsForList
+  normalizeTestCodeInput,
+  sortContestsForList,
+  testCodeIssue
 } from "./contestAdmin";
+import { DateTimeField } from "./DateTimeField";
 import { lifecyclePhase, purgeGateState, retentionStatus } from "./dataLifecycle";
 import type { ContestExportResponse, ContestStatus, ContestSummary, ProblemSummary } from "../types";
 
@@ -242,14 +246,8 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
                   ))}
                 </select>
               </label>
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">Start time (optional now, required to open)</span>
-                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={newStartAt} onChange={(event) => setNewStartAt(event.target.value)} />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">End time (template duration prefills when blank)</span>
-                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={newEndAt} onChange={(event) => setNewEndAt(event.target.value)} />
-              </label>
+              <DateTimeField label="Start time (optional now, required to open)" value={newStartAt} onChange={setNewStartAt} />
+              <DateTimeField label="End time (template duration prefills when blank)" value={newEndAt} onChange={setNewEndAt} />
             </div>
             <div className="mt-3 flex gap-2">
               <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={createNow} disabled={busy || !newName.trim()}>
@@ -359,6 +357,22 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
   const [problemRows, setProblemRows] = useState<ProblemRow[]>(() => problemRowsOf(contest));
   const [addProblemId, setAddProblemId] = useState("");
   const [endNowArmed, setEndNowArmed] = useState(false);
+  // W4: custom test code — error surfaces INLINE in the Candidate access box
+  // (the server's 400/409 messages are written for the admin verbatim).
+  const [codeInput, setCodeInput] = useState("");
+  const [codeError, setCodeError] = useState("");
+
+  const saveCustomCode = () => void runMutation(async () => {
+    try {
+      await setContestAccessCodeApi(password, contest.slug, codeInput);
+      setCodeInput("");
+      setCodeError("");
+    } catch (cause) {
+      // Swallow after capturing: the panel-level error stays clean and the
+      // list still reloads (runMutation's finally path).
+      setCodeError(cause instanceof Error ? cause.message : String(cause));
+    }
+  });
 
   const candidateUrl = candidateUrlFor(origin, contest.slug);
   const invigilatorUrl = invigilatorUrlFor(origin, contest.slug, contest.invigilator_key);
@@ -458,8 +472,27 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
                 <button className="focus-ring inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium" disabled={busy} onClick={() => { if (window.confirm("Regenerate the test code? The old code stops working immediately.")) void runMutation(async () => { await regenerateContestSecretApi(password, contest.slug, "access_code"); }); }}>
                   <RefreshCw size={12} /> Regenerate
                 </button>
+                {/* W4: set a CUSTOM code (unique among open contests — server-enforced). */}
+                <input
+                  className="focus-ring h-7 w-28 rounded-md border border-line bg-white px-2 font-mono text-sm tracking-widest"
+                  value={codeInput}
+                  placeholder="KEC226"
+                  maxLength={6}
+                  aria-label="Custom test code"
+                  onChange={(event) => { setCodeInput(normalizeTestCodeInput(event.target.value)); setCodeError(""); }}
+                  onKeyDown={(event) => { if (event.key === "Enter" && !busy && codeInput.length === 6 && !testCodeIssue(codeInput)) saveCustomCode(); }}
+                />
+                <button
+                  className="focus-ring inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium disabled:opacity-50"
+                  disabled={busy || codeInput.length !== 6 || testCodeIssue(codeInput) !== null}
+                  onClick={saveCustomCode}
+                >
+                  Set custom code
+                </button>
               </div>
-              <p className="mt-2 text-xs text-muted">Candidates open the link directly, or type the code on the landing page at {origin}/.</p>
+              {testCodeIssue(codeInput) ? <p className="mt-1 text-xs text-warning">{testCodeIssue(codeInput)}</p> : null}
+              {codeError ? <p className="mt-1 rounded-md border border-danger/30 bg-danger/10 px-2 py-1.5 text-xs text-danger">{codeError}</p> : null}
+              <p className="mt-2 text-xs text-muted">Candidates open the link directly, or type the code on the landing page at {origin}/. Codes are 6 characters (A-Z, 2-9) and must be unique across open contests.</p>
             </div>
             <div className="rounded-md border border-line bg-white/60 p-4">
               <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink"><KeyRound size={14} /> Invigilator access</h3>
@@ -478,14 +511,8 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
           <div className="mb-4 rounded-md border border-line bg-white/60 p-4">
             <h3 className="text-sm font-semibold text-ink">Exam window</h3>
             <div className="mt-2 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">Start</span>
-                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={startInput} onChange={(event) => setStartInput(event.target.value)} />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">End</span>
-                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="datetime-local" value={endInput} onChange={(event) => setEndInput(event.target.value)} />
-              </label>
+              <DateTimeField label="Start" value={startInput} onChange={setStartInput} />
+              <DateTimeField label="End" value={endInput} onChange={setEndInput} />
               <button className="focus-ring inline-flex h-10 items-center self-end rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await updateContestApi(password, { slug: contest.slug, start_at: startInput ? localInputToIso(startInput) : null, end_at: endInput ? localInputToIso(endInput) : null }); })}>
                 Save window
               </button>
