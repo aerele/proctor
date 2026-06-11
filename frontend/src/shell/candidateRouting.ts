@@ -141,7 +141,7 @@ type CandidateFormFields = {
 // Permissive email shape (F12 review gap): a non-space run, then @, then a
 // non-space run, then a dot, then a non-space run. Deliberately lenient — it
 // only catches obvious typos (missing @, missing domain dot), never tries to
-// be RFC-complete. Mirrored server-side in handler.mjs (isValidEmailFormat).
+// be RFC-complete. Mirrored server-side in handler.mjs (requireValidEmail).
 const EMAIL_FORMAT = /^\S+@\S+\.\S+$/;
 
 export function isCandidateEmailValid(email: string): boolean {

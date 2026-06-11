@@ -231,6 +231,36 @@ test("invigilator endpoints accept the ADMIN credential in either header", async
   assert.equal(viaInvigHeader.statusCode, 200);
 });
 
+// Wave7-E (security nit): requireAdmin must authenticate exactly like the other
+// credential gates — RIGHT password passes, WRONG/MISSING rejects with 401 — and
+// the compare is now timing-safe via safeEqual (same discipline as requireApiKey /
+// requireInvigilatorFor). These tests pin the observable behavior so the swap from
+// `!==` to `!safeEqual(...)` is verified end-to-end on a requireAdmin-gated route.
+test("requireAdmin: correct admin password passes an admin-only endpoint", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const ok = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings",
+    headers: { "x-admin-password": "invig-admin-pass" } }));
+  assert.equal(ok.statusCode, 200);
+});
+
+test("requireAdmin: wrong or missing admin password → 401 (timing-safe compare)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const missing = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings" }));
+  assert.equal(missing.statusCode, 401);
+  const wrong = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings",
+    headers: { "x-admin-password": "definitely-not-the-admin-password" } }));
+  assert.equal(wrong.statusCode, 401);
+  // A prefix of the real password must NOT pass (safeEqual hashes to fixed width,
+  // so length-mismatch is rejected, not short-circuited).
+  const prefix = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings",
+    headers: { "x-admin-password": "invig-admin-pas" } }));
+  assert.equal(prefix.statusCode, 401);
+});
+
 test("closed-by-default: INVIGILATOR_PASSWORD unset rejects the invigilator header, admin still passes", async () => {
   // A second cache-busted import reads env at ITS load time, so deleting the
   // var here yields a module instance with no invigilator password configured.

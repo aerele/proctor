@@ -388,7 +388,7 @@ export const api = async (req, res) => {
 };
 
 async function startSession(req) {
-  const body = parseBody(req);
+  let body = parseBody(req);
   // S-C: a start that names a REAL person-mode contest takes the person-layer
   // path (username_norm = person_id, server-side college resolution). Anything
   // else — no contest param, or the synthesized legacy contest — keeps today's
@@ -400,6 +400,18 @@ async function startSession(req) {
   // Phase 2 (0.1): the entry passcode is gone. Start is gated only by the
   // contest time window + complete details. `proctor_passcode` is no longer
   // required (a client may still send it harmlessly; it is ignored).
+  //
+  // S-E (F8.2): the candidate identifier is no longer named "hackerrank_username"
+  // as a REQUIRED input. The modern client sends `candidate_id`; older callers
+  // still send `hackerrank_username`. We accept EITHER and synthesize the FROZEN
+  // `hackerrank_username` field (vision §234: legacy read-only, never renamed —
+  // it is the session key embedded in doc ids and GCS paths) from candidate_id
+  // when only the modern field is present. This keeps legacy back-compat reads
+  // intact while dropping HackerRank as user-facing required terminology.
+  if ((body.hackerrank_username === undefined || body.hackerrank_username === null || body.hackerrank_username === "")
+    && body.candidate_id !== undefined && body.candidate_id !== null && body.candidate_id !== "") {
+    body = { ...body, hackerrank_username: body.candidate_id };
+  }
   requireFields(body, ["hackerrank_username", "name", "roll_number"]);
   if (body.consent_accepted !== true) {
     return badRequest("Consent is required");
@@ -6417,8 +6429,10 @@ function requireValidEmail(body) {
 }
 
 function requireAdmin(req) {
-  const password = req.get?.("x-admin-password") || req.headers?.["x-admin-password"];
-  if (!ADMIN_PASSWORD || password !== ADMIN_PASSWORD) {
+  // Timing-safe compare via safeEqual, matching requireApiKey / requireInvigilatorFor.
+  // Closed-by-default: with ADMIN_PASSWORD unset every admin request rejects.
+  const password = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
+  if (!ADMIN_PASSWORD || !safeEqual(password, ADMIN_PASSWORD)) {
     throw httpError(401, "Unauthorized");
   }
 }
