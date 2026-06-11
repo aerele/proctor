@@ -86,7 +86,9 @@ const EXEMPT_GETS = {
   "/api/admin/alert-settings": "GLOBAL alert-type config (F8 decision 5)",
   "/api/admin/sessions": "username search across contests BY DESIGN (F9 D10); person norms are contest-distinct so person data cannot collide",
   "/api/admin/session-detail": "keyed by unguessable session_id (the bearer token)",
-  "/api/admin/session-events": "keyed by unguessable session_id"
+  "/api/admin/session-events": "keyed by unguessable session_id",
+  "/api/admin/people": "S-J People directory — the ONE sanctioned cross-contest read (ALL_CONTESTS sentinel); persons are person-layer, never contest evidence (vision §2.14)",
+  "/api/admin/person": "S-J per-person cross-round scorecard — cross-contest BY DESIGN (the sentinel scans this person's enrollments; per-contest live reads inside are EACH scopedQuery-isolated, pinned by peopleDirectory.test.mjs)"
 };
 
 function makeReq({ method, path, headers = {}, body, query = {} }) {

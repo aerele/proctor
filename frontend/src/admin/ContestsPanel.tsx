@@ -5,11 +5,12 @@
 // actions, access code + invigilator key display/copy/regenerate, and the
 // per-contest roster section (passed in from App.tsx so S-C's panel is REUSED,
 // not duplicated). Self-contained section, ProblemBank conventions.
-import { ArrowDown, ArrowUp, Copy, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, KeyRound, Plus, RefreshCw, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   adjustContestExamTime,
+  adoptContestIntoPersonModel,
   createContestApi,
   fetchContests,
   fetchProblems,
@@ -20,6 +21,8 @@ import {
   type ApiError,
   type ContestTemplateSummary
 } from "../api";
+import { parseRoster, suggestMapping } from "../roster/parseRoster";
+import { buildCollegeResolutions } from "../roster/personRoster";
 import {
   candidateUrlFor,
   contestProblemsCount,
@@ -545,8 +548,131 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
 
           {/* Roster — REUSE of the S-C section, scoped to this contest. */}
           {renderRoster(contest.slug)}
+
+          {/* Legacy "Adopt into person model" (vision §2.15) — backfill a
+              contest that ran before the person layer into person_ids so it
+              shows up on cross-round scorecards. */}
+          <AdoptIntoPersonSection password={password} contest={contest} />
         </>
       )}
     </section>
+  );
+}
+
+// S-J §2.15 — the one-time legacy adoption action. Re-upload the contest's
+// roster WITH the college column; the backend mints persons/colleges/enrollments
+// and stamps person_id onto the existing sessions/submissions (username_norm
+// stays FROZEN). After adoption the contest appears on person scorecards and can
+// seed a carry-over Round 2. Reuses the S-C parseRoster + college map-or-confirm
+// gate, but POSTs to /api/admin/contest-adopt.
+function AdoptIntoPersonSection({ password, contest }: { password: string; contest: ContestSummary }) {
+  const [open, setOpen] = useState(false);
+  const [parsed, setParsed] = useState<ReturnType<typeof parseRoster> | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [uniqueIdColumn, setUniqueIdColumn] = useState("");
+  const [mapping, setMapping] = useState<ReturnType<typeof suggestMapping>["mapping"]>({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [collegeGate, setCollegeGate] = useState<{ new_colleges: { college_norm: string; name: string; rows: number }[] } | null>(null);
+  const [collegeDecisions, setCollegeDecisions] = useState<Record<string, string>>({});
+
+  const adoptedAt = (contest as ContestSummary & { adopted_into_person_model_at?: string }).adopted_into_person_model_at;
+
+  const onFile = async (file: File | null) => {
+    setMessage(""); setError(""); setCollegeGate(null);
+    if (!file) return;
+    const text = await file.text();
+    const result = parseRoster(text);
+    if (!result.columns.length || !result.rows.length) {
+      setParsed(null);
+      setError(result.errors[0] || "Could not read any rows from that file.");
+      return;
+    }
+    const suggestion = suggestMapping(result.columns);
+    setParsed(result);
+    setFileName(file.name);
+    setUniqueIdColumn(suggestion.uniqueIdColumn);
+    setMapping(suggestion.mapping);
+  };
+
+  const adopt = async (decisions?: Record<string, string>) => {
+    if (!parsed || !uniqueIdColumn) return;
+    setBusy(true); setMessage(""); setError("");
+    try {
+      const response = await adoptContestIntoPersonModel(password, {
+        contest: contest.slug,
+        unique_id_column: uniqueIdColumn,
+        columns: parsed.columns,
+        column_mapping: mapping,
+        rows: parsed.rows,
+        ...(decisions ? { college_resolutions: buildCollegeResolutions(decisions) } : {})
+      }) as Record<string, unknown>;
+      if (response.needs_college_confirmation) {
+        const newColleges = (response.new_colleges as { college_norm: string; name: string; rows: number }[]) ?? [];
+        setCollegeGate({ new_colleges: newColleges });
+        setCollegeDecisions(Object.fromEntries(newColleges.map((c) => [c.college_norm, ""])));
+        return;
+      }
+      setCollegeGate(null);
+      setMessage(
+        `Adopted into the person model: ${response.sessions_stamped ?? 0} session(s) and ${response.submissions_stamped ?? 0} submission(s) stamped, ` +
+        `${(response.persons as { created?: number })?.created ?? 0} person(s) created. This contest now appears on cross-round scorecards.`
+      );
+      setParsed(null); setFileName("");
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      if (apiError?.code === "duplicate_unique_ids") { setError("Duplicate candidates in the file — fix the rows and re-upload. Nothing was changed."); return; }
+      if (apiError?.code === "college_required") { setError("A college cell is blank — every row needs a college. Nothing was changed."); return; }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-md border border-line bg-white/60 p-4">
+      <button className="focus-ring flex w-full items-center justify-between text-left" onClick={() => setOpen((value) => !value)}>
+        <span className="inline-flex items-center gap-2 text-sm font-semibold text-ink"><UserPlus size={15} /> Adopt into person model</span>
+        <span className="text-xs text-muted">{adoptedAt ? "Adopted" : open ? "Hide" : "Backfill legacy data"}</span>
+      </button>
+      {open ? (
+        <div className="mt-3 space-y-3 text-sm">
+          <p className="text-xs text-muted">
+            For a contest that ran before the person model: re-upload its roster <b>with a college column</b>. The candidates' existing sessions and scores get linked to durable persons (keys stay frozen), so this contest shows up on cross-round scorecards and can seed a Round 2.
+          </p>
+          {adoptedAt ? (
+            <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent">Already adopted on {new Date(adoptedAt).toLocaleString()}. Re-uploading refreshes the link (safe, idempotent).</p>
+          ) : null}
+          <input className="block w-full text-xs" type="file" accept=".csv,text/csv" onChange={(event) => void onFile(event.target.files?.[0] ?? null)} />
+          {parsed ? (
+            <div className="space-y-2">
+              <p className="text-xs text-muted">Loaded <b>{fileName}</b>: {parsed.rows.length} row(s). ID column: <span className="font-mono">{uniqueIdColumn}</span>.</p>
+              {!collegeGate ? (
+                <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-xs font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void adopt()}>
+                  <UserPlus size={14} /> {busy ? "Adopting…" : "Adopt this roster"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {collegeGate ? (
+            <div className="space-y-2 rounded-md border border-warning/40 bg-warning/10 p-3">
+              <p className="text-xs font-medium text-warning">This upload introduces new college name(s). Map each to an existing college or create it, then adopt.</p>
+              {collegeGate.new_colleges.map((c) => (
+                <div key={c.college_norm} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-mono">{c.name} ({c.rows} row{c.rows === 1 ? "" : "s"})</span>
+                  <span className="text-muted">create as "{c.name}"</span>
+                </div>
+              ))}
+              <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-xs font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void adopt(collegeDecisions)}>
+                {busy ? "Adopting…" : "Confirm & adopt"}
+              </button>
+            </div>
+          ) : null}
+          {message ? <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent">{message}</p> : null}
+          {error ? <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</p> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

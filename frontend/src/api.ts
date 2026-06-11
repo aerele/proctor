@@ -75,6 +75,7 @@ import type {
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
 import type { ContestResultsResponse, ResultRow, SelectionStatus } from "./results/computeResults";
+import type { PeopleDirectoryResponse, PersonScorecardResponse, ScorecardRow } from "./people/computePeople";
 import { summarizeSubmissions, type StoredSubmission } from "./coding/problemSwitch";
 import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type PersonRosterState } from "./roster/personRoster";
 import { normalizeCameraRecording } from "./cameraRecording";
@@ -1811,6 +1812,177 @@ function demoMarkSelectionDone(contestSlug: string) {
   const now = new Date().toISOString();
   window.localStorage.setItem(demoSelectionDoneKey, now);
   return { ok: true, selection_done_at: now, enrollments_snapshotted: DEMO_RESULT_SEEDS.length };
+}
+
+// ---- S-J People tab (directory + cross-round scorecard, vision §2.14) -------
+
+// GET /api/admin/people — the person directory (search by college/id/name).
+export async function fetchPeople(
+  password: string,
+  filters: { search?: string; college?: string } = {}
+): Promise<PeopleDirectoryResponse | null> {
+  if (demoMode) {
+    await wait(140);
+    assertDemoAdmin(password);
+    return demoPeopleDirectory(filters);
+  }
+  const params = new URLSearchParams();
+  if (filters.search) params.set("search", filters.search);
+  if (filters.college) params.set("college", filters.college);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  try {
+    return await request<PeopleDirectoryResponse>(`/api/admin/people${query}`, {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// GET /api/admin/person?person_id= — one person's cross-round scorecard.
+export async function fetchPersonScorecard(
+  password: string,
+  personId: string
+): Promise<PersonScorecardResponse | null> {
+  if (demoMode) {
+    await wait(160);
+    assertDemoAdmin(password);
+    return demoPersonScorecard(personId);
+  }
+  try {
+    return await request<PersonScorecardResponse>(`/api/admin/person?person_id=${encodeURIComponent(personId)}`, {
+      method: "GET",
+      headers: { "x-admin-password": password }
+    });
+  } catch (cause) {
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
+// POST /api/admin/contest-adopt — legacy "Adopt into person model" backfill
+// (vision §2.15). Same roster-upload body shape; may return the college-
+// confirmation preview (needs_college_confirmation) which the caller re-posts
+// with college_resolutions, exactly like a normal roster upload.
+export async function adoptContestIntoPersonModel(
+  password: string,
+  body: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (demoMode) {
+    await wait(200);
+    assertDemoAdmin(password);
+    return demoAdoptIntoPersonModel(body);
+  }
+  return request("/api/admin/contest-adopt", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+}
+
+// ---- demo People dataset (parity for the NEW tab — acceptance bar S4) -------
+// Two demo persons with CROSS-ROUND rows: a Round-1 LIVE row + a Round-2 PURGED
+// row (read from a frozen final_snapshot, marked from a purged contest, vision
+// §10.2). Plus a directory of all demo persons for the search surface.
+
+type DemoPersonSeed = {
+  person_id: string; unique_id: string; name: string; college_norm: string; college: string;
+  rows: ScorecardRow[];
+};
+
+function snapshotRow(over: Partial<ScorecardRow>): ScorecardRow {
+  return {
+    contest_slug: "", contest_name: "", contest_status: "archived", contest_purged: false,
+    total: 0, per_problem: null,
+    integrity: { alerts_by_severity: { critical: 0, warning: 0, info: 0 }, total_alerts: 0, has_critical: false, review_verdict: "none" },
+    selection_status: "none", source: "csv", from_snapshot: false, last_improvement_at: null, selection_done_at: null,
+    ...over
+  };
+}
+
+const DEMO_PEOPLE: DemoPersonSeed[] = [
+  {
+    person_id: "kec~21cs017", unique_id: "21CS017", name: "Asha Ramanathan", college_norm: "kec", college: "KEC",
+    rows: [
+      snapshotRow({
+        contest_slug: "demo-drive-r1", contest_name: "Aptitude Drive — Round 1", contest_status: "archived",
+        total: 300, integrity: { alerts_by_severity: { critical: 0, warning: 0, info: 0 }, total_alerts: 0, has_critical: false, review_verdict: "cleared" },
+        selection_status: "selected", from_snapshot: false, selection_done_at: "2026-05-20T09:00:00.000Z"
+      }),
+      snapshotRow({
+        contest_slug: "demo-drive-r2", contest_name: "Tech Round 2 (purged)", contest_status: "archived", contest_purged: true,
+        total: 180, source: "carry_over", from_snapshot: true,
+        integrity: { alerts_by_severity: { critical: 0, warning: 1, info: 0 }, total_alerts: 1, has_critical: false, review_verdict: "cleared" },
+        selection_status: "selected", selection_done_at: "2026-06-02T09:00:00.000Z"
+      })
+    ]
+  },
+  {
+    person_id: "psg~22it019", unique_id: "22IT019", name: "Deepak Rao", college_norm: "psg", college: "PSG Tech",
+    rows: [
+      snapshotRow({
+        contest_slug: "demo-drive-r1", contest_name: "Aptitude Drive — Round 1", contest_status: "archived",
+        total: 250, integrity: { alerts_by_severity: { critical: 1, warning: 2, info: 0 }, total_alerts: 3, has_critical: true, review_verdict: "flagged" },
+        selection_status: "rejected", from_snapshot: false, selection_done_at: "2026-05-20T09:00:00.000Z"
+      })
+    ]
+  },
+  {
+    person_id: "kec~21cs033", unique_id: "21CS033", name: "Chitra Nair", college_norm: "kec", college: "KEC",
+    rows: [
+      snapshotRow({
+        contest_slug: "demo-drive-r1", contest_name: "Aptitude Drive — Round 1", contest_status: "archived",
+        total: 250, selection_status: "shortlisted", from_snapshot: false, selection_done_at: "2026-05-20T09:00:00.000Z",
+        integrity: { alerts_by_severity: { critical: 0, warning: 0, info: 0 }, total_alerts: 0, has_critical: false, review_verdict: "none" }
+      })
+    ]
+  }
+];
+
+const DEMO_COLLEGES = [
+  { college_norm: "kec", name: "KEC" },
+  { college_norm: "psg", name: "PSG Tech" }
+];
+
+function demoPeopleDirectory(filters: { search?: string; college?: string }): PeopleDirectoryResponse {
+  const needle = (filters.search ?? "").trim().toLowerCase();
+  const college = (filters.college ?? "").trim();
+  const people = DEMO_PEOPLE
+    .filter((p) => (!college || p.college_norm === college)
+      && (!needle || p.unique_id.toLowerCase().includes(needle) || p.name.toLowerCase().includes(needle)))
+    .map((p) => ({
+      person_id: p.person_id, unique_id: p.unique_id, name: p.name,
+      college_norm: p.college_norm, college: p.college, contest_count: p.rows.length
+    }))
+    .sort((a, b) => a.college_norm.localeCompare(b.college_norm) || a.unique_id.localeCompare(b.unique_id));
+  return { configured: true, people, colleges: DEMO_COLLEGES, total: people.length };
+}
+
+function demoPersonScorecard(personId: string): PersonScorecardResponse {
+  const seed = DEMO_PEOPLE.find((p) => p.person_id === personId);
+  if (!seed) return { configured: false };
+  return {
+    configured: true,
+    person: { person_id: seed.person_id, unique_id: seed.unique_id, name: seed.name, college_norm: seed.college_norm, college: seed.college, email: "" },
+    rows: seed.rows,
+    generated_at: new Date().toISOString()
+  };
+}
+
+function demoAdoptIntoPersonModel(body: Record<string, unknown>) {
+  const rows = Array.isArray(body.rows) ? body.rows.length : 0;
+  return {
+    ok: true,
+    contest: String(body.contest ?? body.contest_slug ?? "demo"),
+    adopted_at: new Date().toISOString(),
+    sessions_stamped: rows,
+    submissions_stamped: rows,
+    persons: { created: rows, updated: 0 },
+    enrollments: { created: rows, reactivated: 0, removed: 0 },
+    count: rows
+  };
 }
 
 // S7 — GET /api/admin/ip-report: IP-wise counts of logged-in users (the

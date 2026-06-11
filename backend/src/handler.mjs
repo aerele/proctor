@@ -5,10 +5,11 @@ import { makeJudge0Adapter } from "./judge0Adapter.mjs";
 import { makeExecQueue } from "./execQueue.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestStatus, slugify, updateContest } from "./contests.mjs";
-import { applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonsByIds, identityNorm, listColleges, listEnrollments, saveContestRoster, stampSelectionDone } from "./identity.mjs";
+import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, saveContestRoster, stampSelectionDone } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
-import { buildResultsCsv, buildResultsRows, computeSessionSummary } from "./scoreboard.mjs";
+import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
+import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people.mjs";
 import { buildIpReport } from "./ipReport.mjs";
 
 let firestore = new Firestore();
@@ -165,6 +166,10 @@ const SESSIONS_QUERY_LIMIT = 2000;
 // stays comfortably under this cap; bounded so a pathological contest can't
 // blow the request.
 const SUBMISSIONS_RESULTS_LIMIT = 50000;
+// S-J People directory: max persons we fan out per-person enrollment counts for
+// in ONE directory response (the admin narrows with search/college first; a
+// person page reads ONE person's full cross-round scorecard unbounded by this).
+const PEOPLE_DIRECTORY_LIMIT = 500;
 // Max rows per sessions-list response page (the drill-down/status-join list).
 const SESSIONS_LIST_PAGE_LIMIT = 500;
 const SETTINGS_ID = "active";
@@ -217,6 +222,7 @@ configureIdentityStore({
     audit: ADMIN_AUDIT_COLLECTION,
     roster: ROSTER_COLLECTION,
     sessions: SESSION_COLLECTION,
+    submissions: SUBMISSIONS_COLLECTION,
     alerts: ALERTS_COLLECTION,
     settings: SETTINGS_COLLECTION,
     contests: CONTESTS_COLLECTION
@@ -313,6 +319,9 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/contest-results") return send(res, 200, await adminContestResults(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection") return send(res, 200, await adminContestSelection(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection-done") return send(res, 200, await adminContestSelectionDone(req));
+    if (req.method === "POST" && path === "/api/admin/contest-adopt") return send(res, 200, await adminContestAdopt(req));
+    if (req.method === "GET" && path === "/api/admin/people") return send(res, 200, await adminPeople(req));
+    if (req.method === "GET" && path === "/api/admin/person") return send(res, 200, await adminPerson(req));
     if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
@@ -3766,6 +3775,166 @@ async function adminContestSelectionDone(req) {
     });
   }
   return stampSelectionDone(contest, snapshotByPerson, adminActor(req, body));
+}
+
+// POST /api/admin/contest-adopt — legacy "Adopt into person model" (vision
+// §2.15). Re-upload this contest's roster WITH the college column; the identity
+// module mints persons/colleges/enrollments and stamps person_id onto the
+// contest's existing sessions/submissions (username_norm + all keys FROZEN).
+// The college-confirmation preview rides straight back to the admin UI. The
+// target may be a legacy/F9-era contest, so we resolve it WITHOUT the
+// person-mode filter (resolveContest, not personContestForFilter).
+async function adminContestAdopt(req) {
+  requireAdmin(req);
+  const body = parseBody(req);
+  const slug = body.contest ?? body.contest_slug;
+  if (slug === undefined || slug === null || String(slug).trim() === "") {
+    return badRequest("contest is required");
+  }
+  let contest;
+  try {
+    contest = await resolveContest(String(slug).trim(), { requireOpen: false });
+  } catch {
+    return badRequest("unknown contest");
+  }
+  return adoptContestIntoPersonModel(contest, body, adminActor(req, body));
+}
+
+// ---- S-J §2.14 People tab (directory + cross-round scorecard) ----------------
+//
+// The People tab is the ONE sanctioned cross-contest surface. The directory +
+// the per-person enrollment scan use the explicit ALL_CONTESTS sentinel
+// (listAllPersons / listEnrollmentsForPerson, identity.mjs). The per-contest
+// score/integrity reads the scorecard fans out are EACH contest-scoped through
+// scopedQuery on the RESOLVED contest — so the F9 no-bleed invariant holds (the
+// sentinel is for the person/enrollment axis only, never contest evidence).
+
+// GET /api/admin/people?search=&college= — the directory. ADMIN-ONLY. Returns
+// the (capped) person list filtered by college/id/name, each with a contest
+// count, plus the college options for the filter dropdown.
+async function adminPeople(req) {
+  requireAdmin(req);
+  const people = await listAllPersons();
+  const collegeNames = await getCollegeNameMap();
+  const filtered = filterDirectory(people, {
+    search: req.query?.search ?? "",
+    college: req.query?.college ?? ""
+  });
+
+  // Per-person contest count: ONE bounded cross-contest enrollment scan, grouped
+  // by person_id (the directory needs the "attempted N rounds" badge). Capped to
+  // the filtered set so an empty search doesn't fan out unboundedly.
+  const rows = await mapWithConcurrency(filtered.slice(0, PEOPLE_DIRECTORY_LIMIT), 20, async (person) => {
+    const enrollments = await listEnrollmentsForPerson(person.person_id);
+    const active = enrollments.filter((e) => String(e.status || "active") !== "removed");
+    return {
+      person_id: person.person_id,
+      unique_id: person.unique_id || "",
+      name: person.name || "",
+      college_norm: person.college_norm || "",
+      college: collegeNames.get(person.college_norm) || person.college_norm || "",
+      contest_count: active.length
+    };
+  });
+  rows.sort((a, b) => String(a.college_norm).localeCompare(String(b.college_norm)) || String(a.unique_id).localeCompare(String(b.unique_id)));
+
+  return {
+    configured: true,
+    people: rows,
+    colleges: [...collegeNames.entries()].map(([college_norm, name]) => ({ college_norm, name }))
+      .sort((a, b) => a.college_norm.localeCompare(b.college_norm)),
+    total: rows.length
+  };
+}
+
+// GET /api/admin/person?person_id=&format= — one person's cross-round scorecard.
+// ADMIN-ONLY. Reads LIVE data per contest where it exists, falls back to the
+// frozen enrollment.final_snapshot after purge (vision §2.9 purge-survivor;
+// §10.2 snapshot scores VISIBLE, marked from a purged contest). CSV export when
+// format=csv.
+async function adminPerson(req) {
+  requireAdmin(req);
+  const personId = String(req.query?.person_id ?? req.query?.id ?? "").trim();
+  if (!personId) return badRequest("person_id is required");
+  const person = await getPersonById(personId);
+  if (!person) return { configured: false };
+
+  const data = await computePersonScorecard(person);
+  if (String(req.query?.format || "").toLowerCase() === "csv") {
+    return { csv: buildScorecardCsv(data.person, data.rows) };
+  }
+  return data;
+}
+
+// The cross-round join. ONE sanctioned cross-contest enrollment scan (sentinel)
+// gives the contests this person attempted; for EACH contest we resolve the
+// contest doc and read its LIVE submissions/alerts/reviews SCOPED to that
+// contest (the no-bleed guarantee — the sentinel never touches contest
+// evidence). buildScorecardRows (pure) does the live-vs-snapshot fallback.
+async function computePersonScorecard(person) {
+  const personId = person.person_id;
+  const enrollments = await listEnrollmentsForPerson(personId);
+  const activeEnrollments = enrollments.filter((e) => String(e.status || "active") !== "removed");
+
+  const liveByContest = {};
+  const liveIntegrityByContest = {};
+  const contests = {};
+  const collegeNames = await getCollegeNameMap();
+
+  await mapWithConcurrency(activeEnrollments, 8, async (enrollment) => {
+    const slug = String(enrollment.contest_slug || "");
+    if (!slug) return;
+    let contest;
+    try {
+      contest = await resolveContest(slug, { requireOpen: false });
+    } catch {
+      contest = { slug, name: slug };
+    }
+    contests[slug] = contest;
+
+    // A purged contest has no live data — skip the per-contest reads entirely
+    // (the pure builder reads its final_snapshot). Otherwise read this person's
+    // LIVE score + integrity, each SCOPED to this contest.
+    if (contest.db_purged_at) return;
+
+    const problemEntries = contestProblemEntries(contest);
+    const problemOrder = problemEntries.map((entry) => entry.problem_id);
+
+    const submissionsSnap = await scopedQuery(firestore.collection(SUBMISSIONS_COLLECTION), contest)
+      .where("person_id", "==", personId)
+      .limit(SUBMISSIONS_RESULTS_LIMIT)
+      .get();
+    const submissions = submissionsSnap.docs.map((doc) => doc.data());
+    liveByContest[slug] = computeScoreboard(submissions, problemOrder);
+
+    const integrity = await integrityByPersonFor(contest, [personId]);
+    const summary = integrity.get(personId);
+    liveIntegrityByContest[slug] = { [personId]: summarizeScorecardIntegrity(summary) };
+  });
+
+  const rows = buildScorecardRows({ enrollments: activeEnrollments, liveByContest, liveIntegrityByContest, contests });
+
+  return {
+    configured: true,
+    person: {
+      person_id: personId,
+      unique_id: person.unique_id || "",
+      name: person.name || "",
+      college_norm: person.college_norm || "",
+      college: collegeNames.get(person.college_norm) || person.college_norm || "",
+      email: person.email || ""
+    },
+    rows,
+    generated_at: new Date().toISOString()
+  };
+}
+
+// integrityByPersonFor returns raw { alerts:[], reviews:[] } per person; the
+// scorecard builder wants the SAME folded shape the Results table uses. Reuse
+// the pure summarizer so a person's integrity reads identically on both surfaces.
+function summarizeScorecardIntegrity(raw) {
+  const folded = summarizeIntegrity(raw || {});
+  return { alerts_by_severity: folded.alerts_by_severity, review_verdict: folded.review_verdict };
 }
 
 // Honor-system admin actor for audit + selection_by attribution (the admin

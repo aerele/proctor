@@ -24,7 +24,7 @@
 // GLOBAL RULE (vision §2.1): composite ids are NEVER parsed back apart — their
 // components are always stored as fields alongside them.
 import { randomUUID } from "node:crypto";
-import { scopedQuery } from "./contests.mjs";
+import { ALL_CONTESTS, scopedQuery } from "./contests.mjs";
 
 // Wave-4 review fix: a single char OUTSIDE the sanitized component charset
 // [a-zA-Z0-9._-], so personIdOf is injective BY CONSTRUCTION — no
@@ -41,6 +41,10 @@ const ROSTER_COLUMNS_LIMIT = 30;
 const ROSTER_CELL_MAX = 200;
 const COLLEGES_QUERY_LIMIT = 500;
 const ENROLLMENTS_QUERY_LIMIT = 20000;
+// People directory (the cross-contest person scan, vision §2.14). Bounded — the
+// directory is a paged search surface, not an export; the admin narrows with
+// search/college before drilling into a person page.
+const PERSONS_QUERY_LIMIT = 2000;
 const ROSTER_ENTRY_LOOKUP_LIMIT = 10;
 const WRITE_CONCURRENCY = 20;
 
@@ -529,6 +533,109 @@ async function clearContestRoster(contest) {
   return { ok: true, configured: false, contest: contest.slug, count: 0, skipped: [] };
 }
 
+// ---- S-J §2.15 legacy "Adopt into person model" -------------------------------
+//
+// A contest already run under legacy/F9-era norms (username_norm = bare
+// identityNorm, NO college component, person_id absent) gets a ONE-TIME backfill:
+//   1. re-upload its roster WITH the college column → saveContestRoster mints
+//      persons + colleges + roster entries + enrollments (source:"csv", the
+//      multi-round spine), exactly like any person-mode upload;
+//   2. match the contest's EXISTING sessions/submissions to those persons via
+//      the contest's OWN identity lookup (the typed unique id → identityNorm,
+//      which IS the legacy username_norm) → STAMP person_id + college_norm as
+//      DENORMALIZED fields onto those docs.
+// username_norm and every other key stay FROZEN (never renamed) — adoption adds
+// fields, it never rewrites identity (vision §2.15 / §3 frozen internals). After
+// adoption the contest appears on person scorecards (live score, since the docs
+// were stamped not deleted) and can seed a carry-over Round 2.
+//
+// The roster upload runs FIRST (it may return the college-confirmation preview —
+// passed straight through so the admin maps-or-confirms, then re-posts); only a
+// successful upload proceeds to the stamping pass.
+export async function adoptContestIntoPersonModel(contest, body, actor = {}) {
+  // Re-use the FULL person-mode upload pipeline (canonicalization gate, dup
+  // reject, person upsert, enrollment materialization). Its preview response
+  // (needs_college_confirmation) rides straight back to the admin.
+  const upload = await saveContestRoster(contest, body, actor);
+  if (upload && upload.needs_college_confirmation) return upload;
+
+  // Build the legacy-norm → person_id map from the freshly-written active
+  // roster: under person mode the entry's unique_id_norm IS the legacy
+  // username_norm a pre-person session/submission carries.
+  const meta = await getContestRosterMeta(contest);
+  const entriesSnap = meta?.version
+    ? await col("roster").where("roster_version", "==", meta.version).limit(ROSTER_LIMIT).get()
+    : { docs: [] };
+  const personByLegacyNorm = new Map();
+  for (const doc of entriesSnap.docs) {
+    const entry = doc.data();
+    if (entry.roster_version !== meta.version) continue;
+    // The legacy session's username_norm == identityNorm(typed id) == the
+    // entry's unique_id_norm. Map it to the resolved person.
+    personByLegacyNorm.set(String(entry.unique_id_norm || ""), {
+      person_id: entry.person_id, college_norm: entry.college_norm
+    });
+    // Also accept the raw-id norm in case a legacy session stored a differently-
+    // shaped candidate_id; both fold to the same key under identityNorm.
+    personByLegacyNorm.set(identityNorm(entry.unique_id), {
+      person_id: entry.person_id, college_norm: entry.college_norm
+    });
+  }
+
+  // Resolve a doc's identity the way the contest itself did at exam time: prefer
+  // the bare username_norm (legacy norm), else the typed candidate_id/roster id.
+  const resolvePerson = (docData) => {
+    const norm = String(docData.username_norm || "");
+    if (personByLegacyNorm.has(norm)) return personByLegacyNorm.get(norm);
+    const typed = docData.candidate_id ?? docData.roster_unique_id ?? docData.hackerrank_username;
+    if (typed != null) {
+      const key = identityNorm(String(typed));
+      if (personByLegacyNorm.has(key)) return personByLegacyNorm.get(key);
+    }
+    return null;
+  };
+
+  const stamp = async (collectionName) => {
+    const snapshot = await scopedQuery(col(collectionName), contest).limit(ENROLLMENTS_QUERY_LIMIT).get();
+    let stamped = 0;
+    // Stamp via the doc's OWN ref (the universal way to update a queried doc —
+    // works whether the doc id is a randomUUID submission id or the session_id):
+    // we only MERGE person_id + college_norm; every existing field/key is frozen.
+    await mapWithConcurrency(snapshot.docs, WRITE_CONCURRENCY, async (doc) => {
+      const resolved = resolvePerson(doc.data());
+      if (!resolved) return;
+      await doc.ref.set({ person_id: resolved.person_id, college_norm: resolved.college_norm }, { merge: true });
+      stamped += 1;
+    });
+    return stamped;
+  };
+
+  const sessionsStamped = await stamp("sessions");
+  const submissionsStamped = await stamp("submissions");
+
+  const now = new Date().toISOString();
+  await col("contests").doc(contest.slug).set({ adopted_into_person_model_at: now, updated_at: now }, { merge: true });
+  await writeAudit({
+    action: "adopt_into_person_model",
+    contest_slug: contest.slug,
+    sessions_stamped: sessionsStamped,
+    submissions_stamped: submissionsStamped,
+    persons: upload.persons,
+    enrollments: upload.enrollments
+  }, actor, now);
+
+  return {
+    ok: true,
+    contest: contest.slug,
+    adopted_at: now,
+    sessions_stamped: sessionsStamped,
+    submissions_stamped: submissionsStamped,
+    persons: upload.persons,
+    enrollments: upload.enrollments,
+    count: upload.count
+  };
+}
+
 // ---- S-J §2.9/§2.14 enrollment selection + final_snapshot --------------------
 // proctor_enrollments is owned HERE (the per-contest person × contest spine).
 // The Results endpoint drives bulk selection transitions and "Mark selection
@@ -563,6 +670,44 @@ export async function getPersonsByIds(personIds) {
 export async function getCollegeNameMap() {
   const colleges = await listColleges();
   return new Map(colleges.map((c) => [c.college_norm, c.name]));
+}
+
+// ---- People DIRECTORY + per-person enrollment scan (vision §2.14) ------------
+// The People tab is the ONE sanctioned cross-contest surface. These two reads
+// use the explicit ALL_CONTESTS sentinel through the SAME scopedQuery
+// chokepoint as every per-contest read — so the F9 no-bleed canary stays intact
+// (the sentinel does not weaken scopedQuery's per-contest guarantee; it is just
+// the one place that deliberately skips the filter, and only over persons /
+// enrollments which are person-layer, never contest evidence).
+
+// The person directory: ALL persons (bounded). persons live in their OWN
+// collection (not contest-scoped data) — there is no contest_slug field to
+// scope on; ALL_CONTESTS makes that explicit at the chokepoint rather than
+// reaching past it with a raw collection ref.
+export async function listAllPersons() {
+  const snapshot = await scopedQuery(col("persons"), ALL_CONTESTS).limit(PERSONS_QUERY_LIMIT).get();
+  return snapshot.docs.map((doc) => doc.data());
+}
+
+// One person by id (the scorecard page header). Direct doc read.
+export async function getPersonById(personId) {
+  const id = String(personId || "");
+  if (!id) return null;
+  const doc = await col("persons").doc(id).get();
+  return doc.exists ? doc.data() : null;
+}
+
+// EVERY enrollment for one person, ACROSS contests (the cross-round scorecard
+// spine). enrollments are keyed {contest_slug}::{person_id}; the cross-contest
+// read filters on person_id and uses ALL_CONTESTS for the contest axis — the
+// sanctioned sentinel read. Returns active + removed (the builder drops removed).
+export async function listEnrollmentsForPerson(personId) {
+  const id = String(personId || "");
+  if (!id) return [];
+  const snapshot = await scopedQuery(col("enrollments").where("person_id", "==", id), ALL_CONTESTS)
+    .limit(ENROLLMENTS_QUERY_LIMIT)
+    .get();
+  return snapshot.docs.map((doc) => doc.data());
 }
 
 // Bulk selection transition with a from_status PRECONDITION (cheap race guard,
