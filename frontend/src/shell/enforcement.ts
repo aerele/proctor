@@ -218,6 +218,25 @@ export function enforcementRemainingSeconds(state: EnforcementState, nowMs: numb
   return Math.max(0, Math.ceil((state.deadlineMs - nowMs) / 1000));
 }
 
+// W5 fix: the overlay headline must tell the truth about the CURRENT state.
+// It used to read "You left fullscreen" for the whole episode — including
+// after the candidate had already returned to fullscreen and only the typed
+// phrase was missing, which read as a stuck/looping alert ("I came back, why
+// is it still shouting?"). Pure so the wording is vitest-tested.
+export function enforcementHeadline(phase: EnforcementPhase, fullscreen: boolean): string {
+  if (phase === "locking") return "Test disabled";
+  return fullscreen ? "Finish the steps to continue" : "You left fullscreen";
+}
+
+// W5 fix (same truthfulness rule for the sub-line): once back in fullscreen,
+// point at the remaining step instead of repeating the exit instruction.
+export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean, exitCount: number): string {
+  if (phase === "locking") return "Your test is being locked. Raise your hand and call your room proctor.";
+  return fullscreen
+    ? `Fullscreen exit #${exitCount} was recorded. You are back in fullscreen — finish the remaining step below to continue your exam.`
+    : `Fullscreen exit #${exitCount} was recorded. Complete BOTH steps below to continue your exam.`;
+}
+
 // Wave-3 fix: the alert_hold banner used to claim "Time expired" even when the
 // hold was reached through the EXIT LIMIT — word it by the violation that
 // tripped. null (legacy persisted state with no violation) keeps the time

@@ -8,8 +8,10 @@ import {
   contestWindowLabel,
   defaultContestSelection,
   invigilatorUrlFor,
+  normalizeTestCodeInput,
   searchWithContestParam,
-  sortContestsForList
+  sortContestsForList,
+  testCodeIssue
 } from "./contestAdmin";
 import type { ContestSummary } from "../types";
 
@@ -117,5 +119,25 @@ describe("sortContestsForList", () => {
     expect(sortContestsForList(contests).map((c) => c.slug)).toEqual([
       "open-new", "open-old", "legacy-exam", "draft-1", "arch"
     ]);
+  });
+});
+
+describe("custom test code helpers (W4)", () => {
+  it("normalizeTestCodeInput uppercases, strips whitespace, caps at 6", () => {
+    expect(normalizeTestCodeInput(" kec 2j6 ")).toBe("KEC2J6");
+    expect(normalizeTestCodeInput("qqq222extra")).toBe("QQQ222");
+    expect(normalizeTestCodeInput("")).toBe("");
+  });
+
+  it("testCodeIssue is null for empty (button stays disabled) and for a valid code", () => {
+    expect(testCodeIssue("")).toBeNull();
+    expect(testCodeIssue("KEC2J6")).toBeNull();
+    expect(testCodeIssue("ABCDEF")).toBeNull();
+  });
+
+  it("testCodeIssue explains 0/1, bad characters, and wrong length", () => {
+    expect(testCodeIssue("KEC101")).toMatch(/0 and 1/);
+    expect(testCodeIssue("KEC-2J")).toMatch(/A-Z and digits 2-9/);
+    expect(testCodeIssue("KEC2J")).toMatch(/exactly 6/);
   });
 });

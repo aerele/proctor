@@ -57,6 +57,29 @@ export function sortContestsForList(contests: ContestSummary[]): ContestSummary[
   );
 }
 
+// ---- custom test code (W4) ----------------------------------------------------
+
+// Mirror of the backend mint alphabet (contests.mjs ACCESS_CODE_ALPHABET) and
+// the candidate landing box (candidateRouting.ts): A-Z plus 2-9, 6 chars.
+const TEST_CODE_PATTERN = /^[A-Z2-9]{6}$/;
+
+/** Uppercase + strip whitespace as the admin types (server does the same). */
+export function normalizeTestCodeInput(raw: string): string {
+  return raw.toUpperCase().replace(/\s+/g, "").slice(0, 6);
+}
+
+/**
+ * Client-side pre-flight for a custom test code: null when submittable,
+ * otherwise the inline hint to show. The server re-validates (and owns the
+ * uniqueness check against open contests).
+ */
+export function testCodeIssue(value: string): string | null {
+  if (!value || TEST_CODE_PATTERN.test(value)) return null;
+  if (/[01]/.test(value)) return "0 and 1 are never used in test codes (lookalikes of O and I) — use digits 2-9.";
+  if (/[^A-Z2-9]/.test(value)) return "Use letters A-Z and digits 2-9 only.";
+  return "Test codes are exactly 6 characters.";
+}
+
 // ---- selector ---------------------------------------------------------------------
 
 /**

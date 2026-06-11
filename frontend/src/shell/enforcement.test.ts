@@ -9,6 +9,8 @@ import {
   FULLSCREEN_ACK_PHRASE,
   REPORT_RETRY_MS,
   alertHoldMessage,
+  enforcementHeadline,
+  enforcementSubline,
   initialEnforcementState,
   enforcementReducer,
   enforcementOverlayVisible,
@@ -330,6 +332,28 @@ describe("overlay visibility + countdown helpers", () => {
 // Wave-3 fix: the alert_hold banner used to claim "Time expired" even when the
 // hold was reached through the EXIT LIMIT — the copy must name the violation
 // that actually tripped.
+describe("enforcementHeadline / enforcementSubline (W5 — overlay tells the live truth)", () => {
+  it("out of fullscreen: the classic exit wording", () => {
+    expect(enforcementHeadline("blocking", false)).toBe("You left fullscreen");
+    expect(enforcementHeadline("alert_hold", false)).toBe("You left fullscreen");
+    expect(enforcementSubline("blocking", false, 1)).toContain("Complete BOTH steps");
+    expect(enforcementSubline("blocking", false, 1)).toContain("exit #1");
+  });
+
+  it("back in fullscreen (phrase still missing): points at the remaining step instead of re-shouting the exit", () => {
+    expect(enforcementHeadline("blocking", true)).toBe("Finish the steps to continue");
+    expect(enforcementHeadline("alert_hold", true)).toBe("Finish the steps to continue");
+    expect(enforcementSubline("alert_hold", true, 2)).toContain("back in fullscreen");
+    expect(enforcementSubline("alert_hold", true, 2)).toContain("exit #2");
+  });
+
+  it("locking reads as the lock regardless of fullscreen state", () => {
+    expect(enforcementHeadline("locking", false)).toBe("Test disabled");
+    expect(enforcementHeadline("locking", true)).toBe("Test disabled");
+    expect(enforcementSubline("locking", true, 3)).toContain("locked");
+  });
+});
+
 describe("alertHoldMessage", () => {
   it("countdown expiry reads as time expired", () => {
     expect(alertHoldMessage("countdown_expired")).toMatch(/^Time expired/);

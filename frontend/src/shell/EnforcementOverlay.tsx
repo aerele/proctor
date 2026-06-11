@@ -13,7 +13,7 @@
 
 import { AlertTriangle, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, type EnforcementPhase, type ViolationPhase } from "./enforcement";
+import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, enforcementHeadline, enforcementSubline, type EnforcementPhase, type ViolationPhase } from "./enforcement";
 
 export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, onAckChange, onEnterFullscreen }: {
   phase: EnforcementPhase;
@@ -41,6 +41,23 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   // with an empty box (the phrase is per-episode by construction).
   const locking = phase === "locking";
 
+  // W5 FIX (stuck-state bug): the reducer resets ackOk on every violate()
+  // transition (blocking → locking/alert_hold), but the typed text lived only
+  // in this component's local state. After the transition the box still showed
+  // the full phrase while Step 1 read "not done" — and since onAckChange only
+  // fires on EDITS, a candidate who then re-entered fullscreen could never
+  // resolve the hold without realizing they had to retype. Keep the box in
+  // lockstep with the reducer: any phase change while this overlay stays
+  // mounted clears the box (and tells the hook, keeping ackOk honest).
+  const prevPhaseRef = useRef(phase);
+  useEffect(() => {
+    if (prevPhaseRef.current === phase) return;
+    prevPhaseRef.current = phase;
+    setText("");
+    onAckChange("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+
   return (
     <div
       role="alertdialog"
@@ -52,13 +69,14 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
         <div className="flex items-center gap-4">
           <AlertTriangle size={44} className="shrink-0 text-red-300" />
           <div>
+            {/* W5: headline + sub-line reflect the LIVE state — once the
+                candidate is back in fullscreen the overlay points at the
+                remaining step instead of repeating "You left fullscreen". */}
             <h1 id="enforcement-title" className="text-3xl font-extrabold uppercase tracking-wide">
-              {locking ? "Test disabled" : "You left fullscreen"}
+              {enforcementHeadline(phase, fullscreen)}
             </h1>
             <p className="mt-1 text-base font-medium text-red-200">
-              {locking
-                ? "Your test is being locked. Raise your hand and call your room proctor."
-                : `Fullscreen exit #${exitCount} was recorded. Complete BOTH steps below to continue your exam.`}
+              {enforcementSubline(phase, fullscreen, exitCount)}
             </p>
           </div>
         </div>
