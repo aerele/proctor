@@ -10,7 +10,8 @@ process.env.ROSTER_COLLECTION = "roster_entries";
 process.env.ADMIN_PASSWORD = "roster-admin-pass";
 
 const handler = await import("../src/handler.mjs?roster");
-const { api, __setClientsForTest } = handler;
+const { api, __setClientsForTest, __setRosterLookupClockForTest,
+  __resetRosterLookupRateLimitForTest, checkRosterLookupRateLimit } = handler;
 
 // Inline req/res + fakes, copied from editorEvents.test.mjs (NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -167,6 +168,9 @@ function freshClients() {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
+  // M3: the roster-lookup rate-limit map is module-global; reset it per test so
+  // unrelated lookups across tests don't accumulate toward the per-IP cap.
+  __resetRosterLookupRateLimitForTest();
   return { firestore, storage };
 }
 
@@ -420,6 +424,65 @@ test("re-upload window: version-N entries stay resolvable while version-N+1 entr
   const res = await call(makeReq({ method: "POST", path: "/api/roster/lookup", body: { unique_id: "21CS001" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.name, "Asha Raman"); // version-N data, not "Overwriter"
+});
+
+// ---- M3: roster-lookup enumeration mitigation (best-effort per-IP rate limit) -
+
+// Pure-function limiter: a fixed window per client IP. The Nth+1 attempt inside
+// one window throws a 429 (statusCode + retry_after_seconds); a fresh window
+// (clock advanced past the window) resets the count; distinct IPs are independent.
+test("checkRosterLookupRateLimit: fixed-window cap per IP; window roll-over resets; IPs independent", () => {
+  __resetRosterLookupRateLimitForTest();
+  let now = 1_000_000;
+  __setRosterLookupClockForTest(() => now);
+  // Under the cap: no throw.
+  for (let i = 0; i < 30; i++) checkRosterLookupRateLimit("10.0.0.1");
+  // The 31st attempt in the same window trips the cap.
+  let threw = null;
+  try { checkRosterLookupRateLimit("10.0.0.1"); } catch (e) { threw = e; }
+  assert.ok(threw, "31st attempt in-window must be rejected");
+  assert.equal(threw.statusCode, 429);
+  assert.equal(threw.message, "rate_limited");
+  assert.ok(Number(threw.retry_after_seconds) > 0);
+  // A DIFFERENT IP has its own independent budget.
+  assert.doesNotThrow(() => checkRosterLookupRateLimit("10.0.0.2"));
+  // Advancing past the window resets the original IP's count.
+  now += 61_000;
+  assert.doesNotThrow(() => checkRosterLookupRateLimit("10.0.0.1"));
+  __setRosterLookupClockForTest(null);
+});
+
+test("POST /api/roster/lookup: over-limit returns 429 with a minimal masked body (no roster fields)", async () => {
+  freshClients();
+  await uploadSampleRoster();
+  let now = 2_000_000;
+  __setRosterLookupClockForTest(() => now);
+  const ip = { "x-forwarded-for": "203.0.113.55" };
+  // Burn the whole window with VALID lookups (every attempt counts — found or
+  // not — because both are enumeration steps; there is no success refund here).
+  let last = null;
+  for (let i = 0; i < 30; i++) {
+    last = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "21CS001" } }));
+    assert.equal(last.statusCode, 200);
+  }
+  const blocked = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "21CS001" } }));
+  assert.equal(blocked.statusCode, 429);
+  assert.equal(blocked.body.error, "rate_limited");
+  assert.ok(Number(blocked.body.retry_after_seconds) > 0);
+  // Minimal/masked: the 429 must NOT leak any roster confirmation fields.
+  const raw = JSON.stringify(blocked.body);
+  assert.equal(raw.includes("Asha"), false);
+  assert.equal(raw.includes("example.com"), false);
+  assert.equal("name" in blocked.body, false);
+  assert.equal("email_masked" in blocked.body, false);
+  // A different IP is unaffected; window roll-over frees the throttled IP.
+  const otherIp = await call(makeReq({ method: "POST", path: "/api/roster/lookup",
+    headers: { "x-forwarded-for": "198.51.100.9" }, body: { unique_id: "21CS001" } }));
+  assert.equal(otherIp.statusCode, 200);
+  now += 61_000;
+  const afterWindow = await call(makeReq({ method: "POST", path: "/api/roster/lookup", headers: ip, body: { unique_id: "21CS001" } }));
+  assert.equal(afterWindow.statusCode, 200);
+  __setRosterLookupClockForTest(null);
 });
 
 // ---- Task 3: roster gate on /api/session/start ------------------------------
