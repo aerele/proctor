@@ -158,8 +158,7 @@ const ANOMALY_MESSAGES: Record<string, string> = {
   page_hide: "This exam tab was hidden or closed.",
   screen_share_stopped: "Screen sharing stopped.",
   recording_error: "Screen recording hit an error.",
-  ip_address_changed: "Your network connection changed.",
-  integrity_checkpoint_missed: "You missed an attendance check."
+  ip_address_changed: "Your network connection changed."
 };
 
 export function anomalyFromEvent(type: string, detail?: Record<string, unknown>): AnomalyVerdict {
