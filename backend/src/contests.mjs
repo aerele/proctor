@@ -330,7 +330,10 @@ export async function regenerateContestSecret(slugRaw, fieldRaw) {
 export async function resolveAccessCode(codeRaw) {
   const code = String(codeRaw ?? "").trim().toUpperCase();
   if (!ACCESS_CODE_PATTERN.test(code)) throw httpError(400, "invalid_code");
-  const snapshot = await contestsCol().where("access_code", "==", code).limit(2).get();
+  // limit(25) not limit(2): W4 lets draft/archived contests legitimately share a code
+  // (uniqueness is enforced among OPEN only), so the open holder is no longer
+  // guaranteed to be in the 2 lowest doc-IDs (code review H1, 2026-06-12).
+  const snapshot = await contestsCol().where("access_code", "==", code).limit(25).get();
   const match = snapshot.docs.map((doc) => doc.data()).find((contest) => contest.status === "open");
   if (!match) throw httpError(404, "code_not_found");
   return { slug: match.slug, name: match.name || match.slug };
