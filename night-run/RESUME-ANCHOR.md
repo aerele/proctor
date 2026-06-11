@@ -17,6 +17,7 @@ _Last updated: 2026-06-11 (after F12). Maintainer: keep this current; archive, d
   (4) **Triple review** (code + UX + security/PII) + **morning summary** in night-run/.
   (5) **Stretch ONLY after 1–4 green:** F2/F2.1 OMR overlay-detection (PRODUCT-BACKLOG.md, task #62).
   (6) **Post-goal (Karthi TG 1857): permission to KEEP WORKING after the goal completes** — resume the paused architecture decomposition at B2 (or other product work), with the every-step-is-a-working-step discipline (tests green at every commit). No reason to stop working on this project tonight.
+- **✅ GOAL COMPLETE (2026-06-12 ~07:15 IST):** steps 1–4 done+verified (rev 00010, 3× GO, retest clean, summary written). **Stretch (5): OMR design + P1 COMMITTED `4e0b89c` (flag OFF, NOT deployed); P2/P3 BLOCKED on Karthi's design-doc §12 calls.** Suites at HEAD: backend 740/740, frontend 708/708, build clean. ⚠️ Do NOT deploy anything further before the live test without Karthi — the verified stack is rev 00010; HEAD has undeployed P1 (safe-by-flag but unverified visually).
   F11 docs DONE (committed `eeddfb9`, workflow finished). Keep a **morning-discussion list** of uncertain calls (§1b).
 - **Agents in flight:** candidate agent (W1+W2+W5) + admin agent (W3+W4+M0), both relaunched after a 529-Overloaded API incident killed the first attempts (tree was verified clean, zero partial edits). If an agent dies abnormally again: verify via `git status` + JSONL tail, never trust completion claims.
 - **Commit rule (active):** coordinator owns commits, serialized; **never push**.

@@ -64,4 +64,13 @@ triple review (code **GO** · UX **GO** · security/PII **GO**). Both services r
 - **E2E evidence:** `night-run/evidence/e2e-live/` (46 screenshots + FINDINGS.md with the retest section)
 - **Backlog (incl. tonight's triaged review items):** `PRODUCT-BACKLOG.md`
 - **Paused:** architecture decomposition at B2 (untouched tonight, still green underneath)
-- **OMR stretch (F2/F2.1):** status in the anchor — started only after everything above was locked
+- **OMR stretch (F2/F2.1): design + P1 BUILT** (after everything above was locked):
+  - Design doc `docs/superpowers/plans/2026-06-12-omr-overlay-detection.md` — 16 fiducial markers,
+    review-time local CV (no cloud billing), focus-correlation severity, honest threat model (catches
+    ordinary overlay windows incl. no-focus-change; does NOT catch capture-excluded tools)
+  - **P1 committed (`4e0b89c`), NOT deployed**: marker layer behind a contest flag (default OFF —
+    flag-off responses pinned BYTE-identical in tests) + `marker_layout`/`camera_pip` events.
+    Backend 740/740, frontend 708/708.
+  - **P2 (detection) + P3 (correlation) wait on your 4 calls** — design doc §12: interior-marker
+    visibility, review-time vs real-time, alert vs review-tag severity, flag-only v1. Markers not yet
+    eyeballed visually (unit-verified only) — flag it on in demo/local and judge OQ1 when you're up.
