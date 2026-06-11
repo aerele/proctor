@@ -6,7 +6,7 @@
 //
 // Env-derived configuration (the evidence bucket name, signed-URL expiry, and
 // the Judge0 connection params) is INJECTED by handler.mjs via configureClients
-// — this module never reads process.env, so the "?buster" re-evaluation
+// — this module never reads the environment, so the "?buster" re-evaluation
 // semantics and the env-lint guard both hold.
 import { Firestore } from "@google-cloud/firestore";
 import { Storage } from "@google-cloud/storage";
