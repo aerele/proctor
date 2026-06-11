@@ -572,6 +572,129 @@ test("a problem UNPUBLISHED after assignment degrades to problem: null (no dead 
   assert.equal(res.body.problem, null);
 });
 
+// ---- F12.2: per-problem per-language starter stubs ----------------------------
+// Optional `stubs` rides the authoring roundtrip, persists, and surfaces in the
+// candidate problems[] payload (incl. a template-instantiated contest). A
+// problem WITHOUT stubs is byte-identical to today (no `stubs` key anywhere).
+
+const STUBS_FIXTURE = {
+  python: "def solve():\n    pass\n",
+  cpp: "int main() { return 0; }\n"
+};
+
+test("F12.2: author a problem WITH stubs -> stored on the doc and echoed on save", async () => {
+  const { firestore } = freshClients();
+  const created = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: STUBS_FIXTURE }) }));
+  assert.equal(created.statusCode, 200);
+  assert.deepEqual(created.body.problem.stubs, STUBS_FIXTURE);
+  // Persisted verbatim on the Firestore doc.
+  assert.deepEqual(firestore._collections.get("problems_bank").get("rev-str").stubs, STUBS_FIXTURE);
+});
+
+test("F12.2: stubs validation — non-object, unsupported language, and non-string value all 400", async () => {
+  freshClients();
+  const notObject = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: "print('hi')" }) }));
+  assert.equal(notObject.statusCode, 400);
+  assert.match(notObject.body.error, /stubs/);
+
+  const badLang = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: { ruby: "puts 1" } }) }));
+  assert.equal(badLang.statusCode, 400);
+  assert.match(badLang.body.error, /ruby/);
+
+  const badValue = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: { python: 42 } }) }));
+  assert.equal(badValue.statusCode, 400);
+  assert.match(badValue.body.error, /python/);
+});
+
+test("F12.2: a problem WITHOUT stubs stores NO stubs field (byte-compat) and authors fine", async () => {
+  const { firestore } = freshClients();
+  const created = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  assert.equal(created.statusCode, 200);
+  assert.equal(created.body.problem.stubs, undefined);
+  assert.equal(Object.hasOwn(firestore._collections.get("problems_bank").get("rev-str"), "stubs"), false);
+
+  // An all-absent/empty stub map is treated as "no stubs" — no field stored.
+  const empty = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: {} }) }));
+  assert.equal(empty.statusCode, 200);
+  assert.equal(empty.body.problem.stubs, undefined);
+});
+
+test("F12.2: stubs ride the candidate problems[] payload for a contest session", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: STUBS_FIXTURE }) }));
+  firestore.collection("proctor_contests").doc("kec-r1").set({
+    slug: "kec-r1", status: "open", problems: [{ problem_id: "rev-str", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("st1").set({
+    session_id: "st1", status: "active", username_norm: "alice", contest_slug: "kec-r1",
+    storage_prefix: "contests/kec-r1/sessions/alice/st1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "st1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.problems[0].stubs, STUBS_FIXTURE);
+  // The one-release `problem` alias mirrors it.
+  assert.deepEqual(res.body.problem.stubs, STUBS_FIXTURE);
+  // hiddenTests/status stay locked — stubs do not leak them.
+  assert.equal(res.body.problems[0].hiddenTests, undefined);
+});
+
+test("F12.2: a problem WITHOUT stubs serves NO stubs key in problems[] (byte-compat payload)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  firestore.collection("proctor_contests").doc("kec-r2").set({
+    slug: "kec-r2", status: "open", problems: [{ problem_id: "rev-str", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("st2").set({
+    session_id: "st2", status: "active", username_norm: "bob", contest_slug: "kec-r2",
+    storage_prefix: "contests/kec-r2/sessions/bob/st2/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "st2" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(Object.hasOwn(res.body.problems[0], "stubs"), false);
+  assert.equal(Object.hasOwn(res.body.problem, "stubs"), false);
+});
+
+test("F12.2: stubs flow through a TEMPLATE-instantiated contest's candidate payload", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ stubs: STUBS_FIXTURE }) }));
+  // Author a template that references the stubbed problem, then instantiate it.
+  const tpl = await call(makeReq({ method: "POST", path: "/api/admin/templates", headers: ADMIN,
+    body: { name: "Stub tpl", description: "", problems: [{ problem_id: "rev-str", points: null, order: 0 }] } }));
+  assert.equal(tpl.statusCode, 200);
+  const inst = await call(makeReq({ method: "POST", path: "/api/admin/contests", headers: ADMIN,
+    body: { name: "Stub contest", template_slug: tpl.body.template.slug, start_at: GATE.start_at, end_at: GATE.end_at } }));
+  assert.equal(inst.statusCode, 200);
+  const contestSlug = inst.body.contest.slug;
+  // The template snapshot copies only the problem REFERENCE onto the contest —
+  // stubs are NOT denormalized into the template/contest doc.
+  assert.equal(firestore._collections.get("proctor_contests").get(contestSlug).problems[0].stubs, undefined);
+  // Open it so resume serves problems; seed a session inside it.
+  firestore._collections.get("proctor_contests").set(contestSlug,
+    { ...firestore._collections.get("proctor_contests").get(contestSlug), status: "open" });
+  firestore.collection("problems_sessions").doc("st3").set({
+    session_id: "st3", status: "active", username_norm: "carol", contest_slug: contestSlug,
+    storage_prefix: `contests/${contestSlug}/sessions/carol/st3/`
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "st3" } }));
+  assert.equal(res.statusCode, 200);
+  // …yet the instantiated contest's candidate payload still carries them, read
+  // LIVE from the bank at serve time (the §1.4 "list frozen, content live" rule).
+  assert.deepEqual(res.body.problems[0].stubs, STUBS_FIXTURE);
+});
+
 // ---- Task 4: exec-from-bank + scoring ----------------------------------------
 
 // Deterministic clock for the per-session exec rate limiter (the exec.test.mjs

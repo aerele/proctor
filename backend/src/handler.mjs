@@ -824,6 +824,7 @@ async function contestProblemsPublic(contestOrSettings) {
     const intersected = contestLanguages
       ? ownLanguages.filter((language) => contestLanguages.includes(language))
       : ownLanguages;
+    const stubs = publicStubsFor(problem);
     problems.push({
       id: problem.id,
       title: problem.title,
@@ -833,10 +834,29 @@ async function contestProblemsPublic(contestOrSettings) {
       cpuTimeLimit: problem.cpuTimeLimit,
       memoryLimit: problem.memoryLimit,
       sampleTests: (problem.sampleTests || []).map((t) => ({ input: t.input, expected: t.expected })),
+      // F12.2: per-language starter stubs ride the candidate payload (omitted
+      // when the problem has none — back-compat for stub-less problems).
+      ...(stubs ? { stubs } : {}),
       order: entry.order
     });
   }
   return problems;
+}
+
+// F12.2: project a stored problem's stubs into the candidate-safe map — own
+// keys only, allow-listed languages, string values. Returns a fresh object or
+// null when there's nothing to serve (legacy/stub-less problems → null, so the
+// `stubs` field is omitted and the payload stays byte-identical to today).
+function publicStubsFor(problem) {
+  const raw = problem?.stubs;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const stubs = {};
+  for (const language of Object.keys(LANGUAGE_IDS)) {
+    if (Object.hasOwn(raw, language) && typeof raw[language] === "string") {
+      stubs[language] = raw[language];
+    }
+  }
+  return Object.keys(stubs).length ? stubs : null;
 }
 
 // This session's stored submissions -> per-problem summary (≤50×n docs, fine).

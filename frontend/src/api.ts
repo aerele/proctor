@@ -4014,7 +4014,11 @@ export async function unlockEnforcementGate(sessionId: string, code: string): Pr
 
 // ---- S4: problem bank (admin authoring) -------------------------------------
 
-const demoProblemsKey = "aerele-proctor-demo-problems";
+// v2 (F12.2): the demo SEED problems gained per-language starter stubs. The
+// seed is read LIVE (not persisted), but any problems blob an admin authored in
+// an earlier demo session would shadow the seed without stubs — a fresh key
+// drops those so demo mode reliably surfaces the new stubs.
+const demoProblemsKey = "aerele-proctor-demo-problems-v2";
 
 // Demo mirror of the backend's built-in seed (problems.mjs SEED_PROBLEMS).
 // S-I §6: 3 published problems (with tags) so the multi-problem workspace
@@ -4027,6 +4031,14 @@ const DEMO_SEED_PROBLEMS: ProblemDoc[] = [{
   languages: ["python", "cpp", "java", "javascript"],
   cpuTimeLimit: 5, memoryLimit: 128000, points: 100,
   scoring: "per_test", status: "published", tags: ["math", "warmup"],
+  // F12.2: example per-language starter stubs so demo mode shows the feature —
+  // a read-the-input skeleton with the logic left as a TODO.
+  stubs: {
+    python: "a, b = map(int, input().split())\n# TODO: print a + b\n",
+    cpp: "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    long long a, b;\n    cin >> a >> b;\n    // TODO: print a + b\n    return 0;\n}\n",
+    java: "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        long a = sc.nextLong(), b = sc.nextLong();\n        // TODO: print a + b\n    }\n}\n",
+    javascript: "const [a, b] = require(\"fs\").readFileSync(0, \"utf8\").trim().split(/\\s+/).map(Number);\n// TODO: print a + b\n"
+  },
   sampleTests: [{ input: "2 3\n", expected: "5" }, { input: "10 20\n", expected: "30" }],
   hiddenTests: [
     { input: "0 0\n", expected: "0" }, { input: "-5 5\n", expected: "0" },
@@ -4039,6 +4051,10 @@ const DEMO_SEED_PROBLEMS: ProblemDoc[] = [{
   languages: ["python", "cpp", "java", "javascript"],
   cpuTimeLimit: 5, memoryLimit: 128000, points: 150,
   scoring: "per_test", status: "published", tags: ["strings"],
+  stubs: {
+    python: "words = input().split()\n# TODO: print the words in reverse order\n",
+    javascript: "const words = require(\"fs\").readFileSync(0, \"utf8\").trim().split(/\\s+/);\n// TODO: print the words in reverse order\n"
+  },
   sampleTests: [{ input: "hello world\n", expected: "world hello" }, { input: "a b c\n", expected: "c b a" }],
   hiddenTests: [
     { input: "one\n", expected: "one" }, { input: "to be or not\n", expected: "not or be to" },
@@ -4051,6 +4067,9 @@ const DEMO_SEED_PROBLEMS: ProblemDoc[] = [{
   languages: ["python", "cpp", "java", "javascript"],
   cpuTimeLimit: 5, memoryLimit: 128000, points: 50,
   scoring: "per_test", status: "published", tags: ["arrays", "sliding-window"],
+  stubs: {
+    python: "n, k = map(int, input().split())\nnums = list(map(int, input().split()))\n# TODO: print the maximum sum over any k consecutive integers\n"
+  },
   sampleTests: [{ input: "5 2\n1 2 3 4 5\n", expected: "9" }],
   hiddenTests: [
     { input: "3 1\n-1 -2 -3\n", expected: "-1" }, { input: "4 4\n1 1 1 1\n", expected: "4" },
@@ -4103,7 +4122,11 @@ function demoContestProblems(contest: ContestSummary | null): PublicProblem[] {
     problems.push({
       id: p.id, title: p.title, statement: p.statement, languages: p.languages,
       points: entry.points ?? p.points ?? 100, cpuTimeLimit: p.cpuTimeLimit, memoryLimit: p.memoryLimit,
-      sampleTests: p.sampleTests, order: entry.order
+      sampleTests: p.sampleTests,
+      // F12.2: carry per-language stubs into the demo candidate payload (omitted
+      // when the problem has none — mirrors the backend's contestProblemsPublic).
+      ...(p.stubs && Object.keys(p.stubs).length ? { stubs: p.stubs } : {}),
+      order: entry.order
     });
   }
   return problems;
