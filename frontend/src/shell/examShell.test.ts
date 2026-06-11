@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   deriveStage, stageHint, topBarVisible, fullscreenGateVisible, permissionsGateVisible,
   elapsedTimerActive, STAGE_META,
-  formatWallClock, formatExamElapsed,
+  formatWallClock, formatExamElapsed, formatRoomLabel,
   anomalyFromEvent, topBarReducer, initialTopBarState,
   serializeShellState, deserializeShellState, shellStateStorageKey,
   makeShellEvent, appendToBuffer,
@@ -173,6 +173,30 @@ describe("formatExamElapsed", () => {
   });
   it("clamps negatives to zero", () => {
     expect(formatExamElapsed(-5)).toBe("0:00:00");
+  });
+});
+
+describe("formatRoomLabel", () => {
+  it("prefixes 'Room ' onto a bare value", () => {
+    expect(formatRoomLabel("A")).toBe("Room A");
+    expect(formatRoomLabel("12")).toBe("Room 12");
+  });
+  it("does NOT double-prefix a value that already starts with 'Room'", () => {
+    expect(formatRoomLabel("Room A")).toBe("Room A");
+    expect(formatRoomLabel("room a")).toBe("room a");
+    expect(formatRoomLabel("ROOM 3")).toBe("ROOM 3");
+  });
+  it("treats 'Roomy' (no word boundary) as a bare value", () => {
+    // \b after "room" means only "Room"/"Room " etc. are recognized, not
+    // an unrelated word that merely starts with those letters.
+    expect(formatRoomLabel("Roomy Hall")).toBe("Room Roomy Hall");
+  });
+  it("trims and falls back to an em-dash placeholder when empty", () => {
+    expect(formatRoomLabel("")).toBe("Room —");
+    expect(formatRoomLabel("   ")).toBe("Room —");
+    expect(formatRoomLabel(null)).toBe("Room —");
+    expect(formatRoomLabel(undefined)).toBe("Room —");
+    expect(formatRoomLabel("  B  ")).toBe("Room B");
   });
 });
 

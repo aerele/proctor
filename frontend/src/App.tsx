@@ -24,7 +24,7 @@ import { autofillSuppressionProps } from "./shell/autofill";
 import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
-import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
+import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
 import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, rosterLookupErrorMessage, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
@@ -419,17 +419,25 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       recordSetupEvent("setup_clipboard_permission_failed", { message: "Clipboard read is not supported by this browser." });
       return;
     }
-    try {
-      // Permission primer only: the read triggers the browser grant so the
-      // recorder can log in-exam copy/cut/paste once the session starts. The
-      // pre-session clipboard CONTENT is outside the disclosed monitoring scope
-      // (M6), so we keep neither the text nor its length — only the grant.
-      await navigator.clipboard.readText();
+    // Permission primer only: the read triggers the browser grant so the
+    // recorder can log in-exam copy/cut/paste once the session starts. The
+    // pre-session clipboard CONTENT is outside the disclosed monitoring scope
+    // (M6), so we keep neither the text nor its length — only the grant.
+    // FIX-B3 #1: clipboard is OPTIONAL and must never wedge onboarding. Race
+    // readText() against a short timeout so a hung/slow grant prompt can't
+    // strand the "Requesting permissions…" state forever — a timeout is
+    // recorded identically to a denial (not-granted, non-blocking).
+    const outcome = await primeClipboardWithTimeout(() => navigator.clipboard.readText());
+    if (outcome === "granted") {
       setPermissions((c) => ({ ...c, clipboard: "granted" }));
       recordSetupEvent("setup_clipboard_permission_granted", {});
-    } catch (cause) {
+    } else {
       setPermissions((c) => ({ ...c, clipboard: "denied" }));
-      recordSetupEvent("setup_clipboard_permission_failed", { message: cause instanceof Error ? cause.message : String(cause) });
+      recordSetupEvent("setup_clipboard_permission_failed", {
+        message: outcome === "timeout"
+          ? "Clipboard grant prompt did not respond in time — recorded as not granted (non-blocking)."
+          : "Clipboard read was blocked."
+      });
     }
   };
 
