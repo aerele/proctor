@@ -185,7 +185,9 @@ type Props = {
   // candidate's recording on mount, preferring this exact session over the
   // default newest-first pick. One-shot: consumed via onDeepLinkConsumed so a
   // later manual visit to the tab starts blank as before.
-  deepLink?: { username: string; sessionId?: string } | null;
+  // FIX-B1: `usernameNorm` is the session's exact stored key (person/legacy);
+  // when present the player resolves by it, not the display `username`.
+  deepLink?: { username: string; usernameNorm?: string; sessionId?: string } | null;
   onDeepLinkConsumed?: () => void;
 };
 
@@ -459,16 +461,28 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // the scoped picker), while REVIEW-mode calls stay unscoped — the review
   // roster is server-driven and independent of the admin's selector.
   const loadedScopeRef = useRef<string | undefined>(undefined);
+  // FIX-B1: the player resolves a candidate's sessions by the EXACT stored key
+  // (username_norm) when the caller knows it (picker rows + the Sessions deep
+  // link carry it). For PERSON-mode sessions username_norm = person_id
+  // ("{college_norm}~{uid_norm}"), which the candidate_id NEVER re-normalizes
+  // to — so the old candidate_id lookup returned nothing. `username` stays the
+  // DISPLAY label (candidate_id); `lookupNorm`, when given, is the lookup key
+  // and is held so a signed-URL refresh re-resolves the same session.
+  const loadedNormRef = useRef<string | undefined>(undefined);
   const loadUser = useCallback(
-    async (username: string, silentIfEmpty = false, preferSessionId?: string, contestScope?: string) => {
+    async (username: string, silentIfEmpty = false, preferSessionId?: string, contestScope?: string, lookupNorm?: string) => {
       const trimmed = username.trim();
-      if (!trimmed) return;
+      const norm = lookupNorm?.trim() || undefined;
+      // A caller may pass an empty display label as long as it supplies the
+      // exact stored key (person rows whose candidate_id is blank still resolve).
+      if (!trimmed && !norm) return;
       setLoadingUser(true);
       setError("");
       setRefreshNote("");
       try {
         loadedScopeRef.current = contestScope;
-        const response = await fetchAdminSessions(trimmed, password, contestScope);
+        loadedNormRef.current = norm;
+        const response = await fetchAdminSessions(trimmed, password, contestScope, norm);
         const loaded = response.sessions ?? [];
         setSessions(loaded);
         // Default to the newest session (sessions arrive newest-first from the
@@ -485,7 +499,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
         setCurrentPos(0);
         setCurrentTestTime(0);
         setPlaying(false);
-        if (!loaded.length && !silentIfEmpty) setError(`No sessions found for "${trimmed}".`);
+        if (!loaded.length && !silentIfEmpty) setError(`No sessions found for "${trimmed || norm}".`);
 
         // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the chosen
         // session's contest so the markers line up with that test; a 404 (or
@@ -513,7 +527,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   useEffect(() => {
     if (!deepLink) return;
     setMode("browse");
-    void loadUser(deepLink.username, false, deepLink.sessionId, contestSlug || undefined);
+    void loadUser(deepLink.username, false, deepLink.sessionId, contestSlug || undefined, deepLink.usernameNorm);
     onDeepLinkConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deepLink]);
@@ -686,11 +700,16 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // so a URL refresh never changes which sessions are listed.
   const refreshUrls = useCallback(async (): Promise<string | null> => {
     if (refreshingRef.current || !activeSession) return null;
+    // FIX-B1: re-resolve by the SAME stored key the session was loaded under
+    // (works for person + legacy), falling back to the candidate_id lookup.
     const username = candidateIdOf(activeSession);
-    if (!username) return null;
+    const norm = (typeof activeSession.username_norm === "string" && activeSession.username_norm)
+      || loadedNormRef.current
+      || undefined;
+    if (!username && !norm) return null;
     refreshingRef.current = true;
     try {
-      const response = await fetchAdminSessions(username, password, loadedScopeRef.current);
+      const response = await fetchAdminSessions(username, password, loadedScopeRef.current, norm);
       const fresh = response.sessions ?? [];
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
@@ -1113,7 +1132,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     <button
                       key={s.session_id}
                       type="button"
-                      onClick={() => void loadUser(candidateIdOf(s), false, undefined, contestSlug || undefined)}
+                      onClick={() => void loadUser(candidateIdOf(s), false, undefined, contestSlug || undefined, s.username_norm || undefined)}
                       className="focus-ring block w-full rounded-md border border-line bg-white/60 px-3 py-2 text-left hover:border-ink/40"
                     >
                       <div className="flex items-center justify-between gap-2">

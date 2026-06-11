@@ -2846,15 +2846,26 @@ async function contestScopeOf(slugRaw) {
 
 async function adminSessions(req) {
   requireAdmin(req);
+  // FIX-B1: the recording-review player resolves a session by its STORED key.
+  // An EXACT `username_norm` (no re-normalization) is the authoritative lookup —
+  // it matches BOTH legacy docs (username_norm = normalized candidate) AND
+  // person-mode docs (username_norm = person_id = "{college_norm}~{uid_norm}").
+  // The legacy `username` param re-normalizes the value and is kept for full
+  // back-compat (older callers, manual candidate-id entry). When both are sent,
+  // the exact `username_norm` wins. A normalized `username` can NEVER equal a
+  // college-prefixed person_id, which is exactly why person sessions were dead.
+  const usernameNormExact = req.query?.username_norm;
   const username = req.query?.username;
-  if (!username) return badRequest("username is required");
+  if (!usernameNormExact && !username) return badRequest("username is required");
 
   // S-D (A1: "selector scopes every tab"): the review search honours the
   // OPTIONAL global contest filter like every other admin GET. Under person
   // identity the same person_id recurs across rounds BY DESIGN, so an unscoped
   // username search would interleave Round-1 sessions into a Round-2 review.
   const scope = await contestScopeOf(req.query?.contest_slug);
-  const usernameNorm = normalizeUsername(username);
+  const usernameNorm = usernameNormExact
+    ? String(usernameNormExact)
+    : normalizeUsername(username);
   const snapshot = await scopedQuery(firestore.collection(SESSION_COLLECTION), scope)
     .where("username_norm", "==", usernameNorm)
     .limit(50)
@@ -2928,6 +2939,11 @@ async function adminRecordingSessions(req) {
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
       candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
+      // FIX-B1: the EXACT stored lookup key. The player keys loadUser on this
+      // (NOT candidate_id) so person-mode rows — username_norm = person_id =
+      // "{college_norm}~{uid_norm}" — resolve via adminSessions; candidate_id
+      // remains the human display label only.
+      username_norm: doc.username_norm || "",
       name: doc.name || "",
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",
@@ -2996,6 +3012,9 @@ async function adminSessionsList(req) {
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
       candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
+      // FIX-B1: stored lookup key so the "View recording" deep link from this
+      // drill-down can resolve person-mode sessions (username_norm = person_id).
+      username_norm: doc.username_norm || "",
       name: doc.name || "",
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",

@@ -233,6 +233,12 @@ export type RecordingSession = {
   hackerrank_username: string;
   /** S-A accept-both (see SessionStartResponse.candidate_id). */
   candidate_id?: string;
+  /** FIX-B1: the session's STORED Firestore key (username_norm = normalized
+   *  candidate for legacy docs, person_id "{college_norm}~{uid_norm}" for
+   *  person-mode docs). The recording-review player resolves a session by THIS
+   *  exact key, not candidate_id, so person-mode recordings load. Absent on
+   *  older backends (the lookup then falls back to candidate_id). */
+  username_norm?: string;
   name: string;
   room: string;
   contest_slug: string;
@@ -403,6 +409,9 @@ export type AdminSessionDetail = {
   hackerrank_username?: string;
   /** S-A accept-both (see SessionStartResponse.candidate_id). */
   candidate_id?: string;
+  /** FIX-B1: the session's stored Firestore key — used to re-resolve the same
+   *  session on a signed-URL refresh (works for legacy AND person-mode docs). */
+  username_norm?: string;
   name?: string;
   room?: string;
   contest_slug?: string;
