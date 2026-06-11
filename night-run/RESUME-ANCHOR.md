@@ -1,29 +1,59 @@
-# RESUME ANCHOR — DAY 2 (written 2026-06-11 ~01:25 IST, pre-compaction)
+# PROCTOR — SINGLE SOURCE OF TRUTH (resume anchor)
 
-**EXAM TODAY 2026-06-11: 700 candidates, 1 hour. REAL DATA (KEC 386632, exactly 700 users): ~13 submits/candidate (mean 12.8, median 10, max 169) — Karthi's "130" was the contest-wide peak MINUTE (137/min). Projection: 6.4k-9k submits, peak 10-17 submits/s, with runs 20-70 batch calls/s burst. Cost on the metered key ≈ $22-60. CAPACITY VERDICT: stay on RapidAPI (self-host DEAD, no IAM grant needed). Load probe RUN+PASSED 2026-06-11 ~08:0x IST (580 calls ≈ $0.99; 0 errors at 10/30/60 calls/s; verdict p90 11-19s even at 720 exec/s offered — 2.4x worst burst). Deploy-time tuning still wanted: EXEC_SUBMIT_COOLDOWN_SECONDS≈20, EXEC_MAX_SUBMISSIONS_PER_SESSION≈200, generous lanes.**
+**This is the ONE place. Read this first after any break/compaction.** Everything else is either the feedback ledger, deploy reference, evidence, or archived history — all linked at the bottom. No other "todo"/"resume"/"status" doc is authoritative.
 
-Repo: /home/karthi/arogara/proctor, branch master, ~120 local commits ahead. **NO PUSH EVER until Karthi's PII history scrub (see TODO-admin-polish.md).** Telegram mode was last active; Karthi compacts and continues. (Day-1 anchor content is in git history of this file.)
+_Last updated: 2026-06-11 (after F12). Maintainer: keep this current; archive, don't duplicate._
 
-## State at compaction
-- Master HEAD aafb72d. Last full gate (a08abbc): backend 563/563, frontend 430/430, build clean.
-- **DEPLOYED (aerele-proctor-dev)**: wave-3 state (camera recording, F5 enforcement, F6 admin, F8/F9 small) — api rev 00003 + web rev 00003, min-instances=1/max 100+50 set, Judge0 RapidAPI env live, smoke incl live run/submit PASSED. Admin pw + invigilator pw in .env.deploy.local. Seeded problem "sum-of-two-numbers" published+active. **Dev settings exam window EXPIRED 2026-06-10T18:00Z — set a fresh window before any candidate test.**
-- **WAVE 5 IN FLIGHT** (resumed run wf_f2e51b97-1ed, bg task wmv35r3l2): S-D slices 1-2 COMMITTED (bbc717f backend plumbing: invigilator_key+regenerate, public access-code resolver, per-contest exam-config/exam-time, rooms edit, token auth; aafb72d Contests tab + detail + global selector). Remaining in-run (UPDATE ~08:4x IST): S-D slices 1-4 DONE + S-I-FE workspace DONE (tasks #44-48) — only the 2-lens review, fix agent, and final gate are left in the run. If it dies (window limits!): check git status (reset uncommitted), then Workflow({scriptPath: "/home/karthi/.claude/projects/-home-karthi-arogara-proctor/d1d95247-a2f0-4d67-a73c-a24d64c7473f/workflows/scripts/wave5-sd-si-frontend-wf_f2e51b97-1ed.js", resumeFromRunId: "wf_f2e51b97-1ed"}).
+---
 
-## Pipeline after wave 5 (in order)
-1. **Wave 6**: S-J (Results tab: rank/per-problem/integrity/bulk selection + selection-done; carry-over roster; People tab + cross-round scorecard; legacy person backfill — vision §2.14-2.15, §7 S-J) + **decisions batch task #43** (checkpoint REMOVAL entirely; D1 → save-time confirm dialog; invigilator alerts per-type "Share with invigilator" checkbox DEFAULT ALL OFF; M3 roster-lookup rate-limit; M6 verify+close) + wave-4/5 review minors (see wave-4 result: exec in-flight guard race, resume slug translation, alerts scoped-branch orderBy caveat, roster PII orphans, zero-problem edit guard, demo cross-contamination, language allowlist at exec).
-2. **Wave 7**: S-G/S-H lifecycle UI (export → gated purge → tombstone; selection-done + retention sweep + 10-DAY EXPORT-ZIP auto-delete per vision §10.4; Cloud Scheduler) + S-E HR cleanup if time. S-F contest-eval adapter LAST (Karthi approved deferring).
-3. **Full demo-browser walkthrough** (stubs via initScript per NIGHT-LOG ~00:15; Monaco via editor.trigger) — student multi-problem + contests admin + invigilator-by-key.
-4. **DEPLOY both images** (source .env.deploy.local; frontend build needs VITE_API_BASE_URL + VITE_ADMIN_PASSWORD_HASH + VITE_INVIGILATOR_PASSWORD_HASH = sha256 of the two passwords; gcloud builds submit backend|frontend --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/{api|web}:latest --async; gcloud run deploy with sandbox-off). Smoke: exam-config?contest, contests list, live exec run/submit. THEN set up the real contest for the team (template → contest → window → roster → rooms → access code + invigilator links).
-5. **Ops runbook (#40)** — 1-pager for the team + **morning summary to Karthi**.
+## 0. RIGHT NOW (state)
+- **Repo** `/home/karthi/arogara/proctor`, branch **master**, HEAD **12f2b93** (F12 done). ~125 local commits. **NEVER pushed** (see §4 push gate).
+- **Timeline:** deadline shifted +1 day (Karthi TG 2026-06-11). The real 700-candidate exam TODAY runs on the **OLD proctor (HackerRank)** — THIS platform is **not needed today**; target ~2026-06-12. **No rush, no rushed deploy.**
+- **Mode:** Telegram (plain prose replies). Karthi stepped away 2026-06-11 ~05:30, unavailable a while — **work autonomously to completion**, ping Telegram only for a genuine blocker. No blockers outstanding.
+- **Mandate (TG 1789/1791/1795):** finish ALL build, then **persona-driven end-to-end browser test of EVERY feature + screenshot-document each** (= the docs), fix→redeploy→retest until a confidently-shippable product (happy path + obvious flows must obviously work). Truth bar: "if the docs say it works, it works." Full detail in memory `proctor_e2e_test_docs_mandate`.
+- **Tests green at HEAD:** backend **594/594**, frontend **531/531**, `npm run build` clean.
+- **Deployed (aerele-proctor-dev):** api/web are **STALE** (≈ wave-3 / rev 00003 code) vs current 12f2b93 → **redeploy needed before any real testing**. min-instances=1 (api max 100 / web max 50). Judge0 RapidAPI env live. Dev exam window EXPIRED 2026-06-10T18:00Z → set fresh before candidate testing.
 
-## Judge0 capacity — RESOLVED (2026-06-11 morning): STAY ON THE RAPIDAPI KEY
-- Billing EMPIRICALLY CONFIRMED per batch CALL ($0.0017; 2/3/10-sub batches each −1 on the counter; poll GETs free). Real-data load (KEC, 700 users): ~13 submits/candidate → event ≈ **$22-60**.
-- Load probe RUN + PASSED (580 calls ≈ $0.99): 0 errors at 10/30/60 calls/s; POST p99 ≤4s; verdict completion p50 8-11s, p90 11-19s even at ~720 offered exec/s (2.4× worst projected burst) — their cluster queues gracefully, never rejects.
-- SELF-HOST DEAD. NO IAM grant needed (the compute.admin ask to Karthi is WITHDRAWN; Compute API got enabled on the project, harmless). Probe script kept at /tmp/j0probe.py.
-- Deploy-time tuning remains: EXEC_SUBMIT_COOLDOWN_SECONDS≈20, EXEC_MAX_SUBMISSIONS_PER_SESSION≈200, generous lane concurrency; hidden tests ≤12 advised. Karthi may sanity-check his RapidAPI billing dashboard (~600 units today from probes/smokes ≈ $1.05).
+## 1. EXACT PLAN (ordered — this is the remaining work)
+1. **Doc cleanup** — DONE 2026-06-11 (this consolidation; you're reading the result).
+2. **Wave 6** — S-J (Results tab: rank/per-problem/integrity/bulk-select + selection-done; carry-over roster; People tab + cross-round scorecard; legacy person backfill — vision §2.14-15, §7) **+ decisions batch #43** (checkpoint REMOVAL; D1 → save-time confirm dialog; invigilator alerts per-type "Share with invigilator" checkbox DEFAULT ALL OFF; M3 roster-lookup rate-limit; M6 verify+close) **+ email-format validation** (F12 review low-finding: candidate email currently unvalidated — add a lightweight regex gate client `candidateFormReady` + server start handler) **+ accumulated review minors** (exec in-flight guard race, resume slug translation, alerts scoped-branch orderBy caveat, roster PII orphans, zero-problem edit guard, demo cross-contamination, language allowlist at exec, F12 orphan-stub one-liner).
+3. **Wave 7** — S-G/S-H lifecycle UI (export → triple-gated purge → tombstone; selection-done + retention sweep + 10-DAY export-zip auto-delete per vision §10.4; Cloud Scheduler) + S-E HR field cleanup. **S-F contest-eval adapter LAST** (Karthi approved deferring).
+4. **Deploy + seed a REAL test contest** — build+deploy both images at current HEAD to aerele-proctor-dev with exam env config (#49: EXEC_SUBMIT_COOLDOWN_SECONDS≈20, EXEC_MAX_SUBMISSIONS_PER_SESSION≈200, generous lanes), set a fresh exam window, then template → contest → fabricated roster (with college column) → rooms → access code + invigilator links → author a few real questions with hidden tests (easy+medium).
+5. **E2E persona browser testing + docs** — drive the DEPLOYED stack in a real browser as Admin / Candidate / Invigilator (serial — one Chrome on :9222), screenshot + truthfully document EVERY feature (= F11 docs #39). Fix anything broken → redeploy → retest until clean. Personas/flows detailed in memory `proctor_e2e_test_docs_mandate`.
+6. **Finale** — triple review (repo code review + independent UX lens + security/PII) + **#40 1-page ops runbook** + **#39 full docs/README** + morning summary to Karthi (incl. judgment calls + the one item needing him: email-autofill confirm on his browser).
 
-## Other open Karthi items
-Jun-8 TG texts 1574/1575 eyeball; push gate (PII scrub); F7 encoding implementation (discuss-first, LAST); F11 full docs at END (task #39).
+## 2. WHAT'S DONE (high level; detail in git log + feedback ledger)
+- **Day 1 (2026-06-09→10):** own-editor slices S1-S7 — candidate Monaco workspace + Judge0 swap-able adapter (Run/Submit, verdicts) + full event capture to GCS; roster + unique-ID login; fullscreen-first onboarding; invigilator portal (OTP/start-now/room stats/selective alerts); problem authoring; dynamic time + end-now; attendance stats; IP report. Admin-polish batch. First deploy to aerele-proctor-dev + live Judge0 smoke.
+- **Day 2 (2026-06-10→11):** F5 exam-shell enforcement rework (permissions-first stages, hard-block ladder, switch-away debounce, status-bound timer); F6 admin batch (bulk select/archive + grouping, session detail card, recordings timeline, action rework); F7 encoding research (discuss-first, deferred); F8 (IP drill-down, roster template CSV, multi-test); F9 invigilator UX + identity/data-lifecycle design; F10 camera recording (separate low-res stream, default ON) + product-vision spec (BUILD TARGET); entity spine **S-A** (candidate-id rename) / **S-B** (contests collection) / **S-C** (person identity: colleges/persons/enrollments, person_id="{college}~{uid}") / **S-D** (Contests tab, global selector, ?contest= routing, access-code landing, tokenized invigilator portal) / **S-I** (multi-problem workspace, per-problem exec/cooldowns/scoring); capacity RESOLVED (stay on RapidAPI, load probe passed $0.99, self-host dead); **F12** (email-autofill→fullscreen fix, per-problem per-language stubs, curated editor autocomplete).
 
-## Environment facts
-gcloud at ~/google-cloud-sdk/bin authed proctor-deployer (Compute API enabled, NO compute role yet). Secrets: .env.deploy.local + monitoring/.data/judge0.env + gcp-dev.env (all gitignored). Suites: backend `cd backend && npm test`; frontend `cd frontend && npx vitest run && npm run build`. Specs in docs/superpowers/specs/2026-06-10-*.md (the F10 product vision = BUILD TARGET incl §10 answers). Leftover merged worktrees under .claude/worktrees (branches worktree-wf_b5890940-415-1, feat/s-b-contests — safe to prune+delete once released). uiStrings CI test bans rendered "username". Browser testing: chrome-devtools MCP on :9222, media stubs via navigate_page initScript, Monaco typing ONLY via editor.trigger.
+## 3. CAPACITY — RESOLVED (stay on the RapidAPI key)
+- Billing EMPIRICALLY per batch CALL ($0.0017; poll GETs free). Real KEC data (700 users): ~13 submits/candidate → event ≈ **$22-60**.
+- Load probe RUN+PASSED (580 calls ≈ $0.99): 0 errors at 10/30/60 calls/s; verdict p90 11-19s even at ~720 offered exec/s (2.4× worst burst). SELF-HOST DEAD; no IAM grant needed.
+- Deploy-time knobs (env, not code): EXEC_SUBMIT_COOLDOWN_SECONDS≈20, EXEC_MAX_SUBMISSIONS_PER_SESSION≈200, generous lane concurrency; hidden tests ≤12 advised.
+
+## 4. STANDING RULES
+- **NO git push EVER** until Karthi runs the PII history scrub (verdict-queue PII in history at acdba86 — see archived `AUDIT-REPORT.md`). Local commits only. Deploy does NOT need push.
+- **Deploy is authorized** (proctor-deployer). Deploy when testing requires; no surprise redeploys otherwise.
+- Telegram mode = plain prose, no headers/bullets, reference items by bare number.
+- Build process: spec → TDD → local commit per slice → adversarial review → browser walkthrough → demo-mode parity. Workflow orchestration with serial builders on hot files (App.tsx, handler.mjs), parallel review fan-out.
+- **Email-autofill fix (F12.1) needs Karthi's own browser** (saved autofill data) for definitive confirm — document as fixed+self-verified, pending his one click.
+
+## 5. ENVIRONMENT / FACTS
+- gcloud `~/google-cloud-sdk/bin`, authed `proctor-deployer@aerele-proctor-dev.iam.gserviceaccount.com`.
+- Secrets (gitignored): `.env.deploy.local` (ADMIN_PASSWORD, INVIGILATOR_PASSWORD, API_URL), `monitoring/.data/judge0.env`, `monitoring/.data/gcp-dev.env`.
+- Deployed URLs: web `https://proctor-web-238846959672.asia-south1.run.app`, api `https://proctor-api-238846959672.asia-south1.run.app` (api `/` returns 404 by design; routes are `/api/*`).
+- Frontend deploy build needs `VITE_API_BASE_URL` + `VITE_ADMIN_PASSWORD_HASH` + `VITE_INVIGILATOR_PASSWORD_HASH` (sha256 hex lowercase of the two passwords).
+- Image build/deploy: `gcloud builds submit backend|frontend --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/{api|web}:latest --async` then `gcloud run deploy`.
+- Tests: backend `cd backend && npm test`; frontend `cd frontend && npx vitest run && npm run build`.
+- Browser testing: chrome-devtools MCP on :9222 (Chrome 149 up); media-API stubs via `navigate_page` initScript; Monaco typing ONLY via `editor.trigger('keyboard','type',{text})`.
+- CI guard: `frontend/src/uiStrings.test.ts` bans the rendered word "username".
+
+## 6. LINKS (the rest lives here — not duplicated above)
+- **Feedback ledger** (every Karthi feedback round F1-F12, with decisions): [`../TODO-admin-polish.md`](../TODO-admin-polish.md)
+- **Build-target spec** (F10 product vision incl §10 answers): `docs/superpowers/specs/2026-06-10-f10-product-vision.md`; identity/lifecycle: `2026-06-10-f9-identity-data-lifecycle-design.md`; S-I detail: `2026-06-10-s-i-multiproblem-detail-spec.md`
+- **Deploy / GCP from-scratch setup:** [`GCP-SETUP-INSTRUCTIONS.md`](GCP-SETUP-INSTRUCTIONS.md)
+- **Evidence screenshots** (seed for docs): [`evidence/`](evidence/)
+- **E2E test+docs mandate** (personas, flows, venue decision): memory `proctor_e2e_test_docs_mandate`
+- **GCP dev project facts:** memory `proctor_gcp_dev_project`
+- **Archived day-1 (2026-06-09) build docs** (GOAL, TODO checklist, NIGHT-LOG, MORNING-NOTES, root RESUME, consolidated AUDIT-REPORT): [`archive-2026-06-09-build/`](archive-2026-06-09-build/)
+- **Unrelated leftover** (different project, ignore): `archive-2026-06-05-sshgate-v12/`
