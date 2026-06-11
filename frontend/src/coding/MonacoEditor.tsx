@@ -1,6 +1,7 @@
 // frontend/src/coding/MonacoEditor.tsx
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { mapContentChange, mapPaste, mapCursor, mapSelection, coalesceCursor } from "./editorEvents";
+import { registerCuratedCompletions } from "./completionProviders";
 import type { EditorEvent } from "../types";
 
 const MONACO_LANG: Record<string, string> = { python: "python", cpp: "cpp", java: "java", javascript: "javascript" };
@@ -13,7 +14,10 @@ export function MonacoEditor({ language, value, onChange, onEvent }: {
 }) {
   let lastCursor: { line: number; col: number } | null = null;
 
-  const handleMount: OnMount = (editor) => {
+  const handleMount: OnMount = (editor, monaco) => {
+    // F12.3: curated per-language library autocomplete. Idempotent — safe to
+    // call on every pane mount; built-in word suggestions stay on alongside it.
+    registerCuratedCompletions(monaco);
     editor.onDidChangeModelContent((ev) => {
       for (const c of ev.changes) {
         onEvent(mapContentChange(
