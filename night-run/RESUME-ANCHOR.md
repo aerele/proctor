@@ -16,6 +16,7 @@ _Last updated: 2026-06-11 (after F12). Maintainer: keep this current; archive, d
   (3) **Exhaustive browser E2E of the DEPLOYED product** via Chromium **:9222 (Karthi opened the port)** — candidate flow above all (onboarding → fullscreen → problems → editor → run/submit → fullscreen-exit/alert behavior → verify keystroke+event data lands in the backend), plus admin + invigilator sanity. Every bug → fix → verify → commit → redeploy → retest until one full clean pass. "I don't want any surprises."
   (4) **Triple review** (code + UX + security/PII) + **morning summary** in night-run/.
   (5) **Stretch ONLY after 1–4 green:** F2/F2.1 OMR overlay-detection (PRODUCT-BACKLOG.md, task #62).
+  (6) **Post-goal (Karthi TG 1857): permission to KEEP WORKING after the goal completes** — resume the paused architecture decomposition at B2 (or other product work), with the every-step-is-a-working-step discipline (tests green at every commit). No reason to stop working on this project tonight.
   F11 docs DONE (committed `eeddfb9`, workflow finished). Keep a **morning-discussion list** of uncertain calls (§1b).
 - **Agents in flight:** candidate agent (W1+W2+W5) + admin agent (W3+W4+M0), both relaunched after a 529-Overloaded API incident killed the first attempts (tree was verified clean, zero partial edits). If an agent dies abnormally again: verify via `git status` + JSONL tail, never trust completion claims.
 - **Commit rule (active):** coordinator owns commits, serialized; **never push**.
