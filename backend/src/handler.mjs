@@ -1148,7 +1148,10 @@ async function createUploadUrl(req) {
     return badRequest("kind must be screen or camera");
   }
   const chunkIndex = Number(body.chunk_index);
-  if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+  // Security M1 (2026-06-12 review): cap the index — unsafe-integer values (e.g. 1e21)
+  // pass Number.isInteger, break the %05d key convention, and push the hwm past 2^53
+  // where hwm+1 === hwm, silently re-enabling the very overwrites the guard prevents.
+  if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex > 100000) {
     return badRequest("Invalid chunk_index");
   }
 
