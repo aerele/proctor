@@ -1977,7 +1977,7 @@ function AdminApp() {
   // F6.3 state-based deep link Sessions → Recordings: load this candidate (and
   // prefer this exact session) when the Recordings tab mounts; one-shot (the
   // RecordingReview consumes it and we clear it).
-  const [recordingDeepLink, setRecordingDeepLink] = useState<{ username: string; sessionId?: string } | null>(null);
+  const [recordingDeepLink, setRecordingDeepLink] = useState<{ username: string; usernameNorm?: string; sessionId?: string } | null>(null);
   // F6.3 one-shot client-side candidate filter for the alerts console ("View
   // alerts" on the detail card). "" = off; cleared via the chip in the console.
   const [alertCandidateFilter, setAlertCandidateFilter] = useState("");
@@ -2560,7 +2560,14 @@ function AdminApp() {
   // "View recording" — jump to the Recordings tab pre-scoped to this candidate
   // and session (state-based deep link; RecordingReview consumes + clears it).
   const jumpToRecording = (session: RecordingSession) => {
-    setRecordingDeepLink({ username: candidateIdOf(session), sessionId: session.session_id });
+    // FIX-B1: carry the STORED key (username_norm) so the player resolves
+    // person-mode sessions; candidate_id stays the display label. Older
+    // backends omit username_norm → loadUser falls back to candidate_id.
+    setRecordingDeepLink({
+      username: candidateIdOf(session),
+      usernameNorm: session.username_norm || undefined,
+      sessionId: session.session_id
+    });
     setDetailSession(null);
     setView("recordings");
   };

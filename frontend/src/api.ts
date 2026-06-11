@@ -833,26 +833,41 @@ export async function validateEndSession(params: { sessionId: string; assuranceA
 // S-D (A1): the OPTIONAL contestSlug scopes the review/recordings username
 // search like every other admin GET — under person identity the same person_id
 // recurs across rounds by design, so an unscoped search would interleave them.
-export async function fetchAdminSessions(username: string, password: string, contestSlug?: string): Promise<AdminSessionsResponse> {
+// FIX-B1: `usernameNorm` (when provided) is the EXACT stored Firestore key the
+// recording-review player resolves a session by — it matches BOTH legacy docs
+// (username_norm = normalized candidate) AND person-mode docs (username_norm =
+// person_id "{college_norm}~{uid_norm}"). The plain `username` is the display
+// candidate_id, re-normalized server-side (the legacy lookup, kept for callers
+// that only know the candidate id). When `usernameNorm` is set it wins.
+export async function fetchAdminSessions(
+  username: string,
+  password: string,
+  contestSlug?: string,
+  usernameNorm?: string
+): Promise<AdminSessionsResponse> {
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
-    const usernameNorm = normalizeUsername(username);
+    // The exact stored key (person/legacy) when given; otherwise normalize the
+    // typed candidate id (the legacy path) — same precedence as the backend.
+    const lookupNorm = usernameNorm ? usernameNorm : normalizeUsername(username);
     // Recording playback view: a fake recording dataset takes precedence so the
     // whole search → timeline → player flow is exercisable OFFLINE. Falls back to
     // the demo STUDENT session store (no evidence) for any other username.
-    const recording = demoRecordingSessionsFor(usernameNorm)
+    const recording = demoRecordingSessionsFor(lookupNorm)
       .filter((item) => !contestSlug || item.contest_slug === contestSlug);
     if (recording.length) return { sessions: recording };
     const sessions = readDemoSessions()
-      .filter((item) => item.username_norm === usernameNorm)
+      .filter((item) => item.username_norm === lookupNorm)
       .filter((item) => !contestSlug || item.contest_slug === contestSlug)
       .map((item) => ({ ...item, evidence: [] as SessionEvidence[] }));
     return { sessions };
   }
 
   const query = new URLSearchParams();
-  query.set("username", username);
+  // Prefer the exact stored key; fall back to the re-normalized candidate id.
+  if (usernameNorm) query.set("username_norm", usernameNorm);
+  else query.set("username", username);
   if (contestSlug) query.set("contest_slug", contestSlug);
   return request<AdminSessionsResponse>(`/api/admin/sessions?${query.toString()}`, {
     method: "GET",
@@ -874,6 +889,8 @@ export async function fetchRecordingSessions(password: string, contestSlug?: str
     return list.map((s) => ({
       session_id: s.session_id,
       hackerrank_username: s.hackerrank_username,
+      // FIX-B1: the stored lookup key the player keys loadUser on (demo parity).
+      username_norm: s.username_norm,
       name: s.name,
       room: s.room,
       contest_slug: s.contest_slug,
@@ -959,6 +976,9 @@ export async function fetchSessionsList(
       .map((session) => ({
         session_id: session.session_id,
         hackerrank_username: session.hackerrank_username || "",
+        // FIX-B1: stored key for the "View recording" deep link. The demo admin
+        // population is legacy-shaped, so username_norm = normalized candidate.
+        username_norm: normalizeUsername(session.hackerrank_username || ""),
         name: session.name || "",
         room: session.room || "",
         contest_slug: session.contest_slug || "",
