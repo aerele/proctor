@@ -68,3 +68,42 @@ export class EventBatcher {
   }
   dispose() { this.flush(); }
 }
+
+// S-I §3.5: the switch marker — sent in the INCOMING problem's batch so the
+// post-spine code-replay scrubber can stitch per-problem timelines.
+export function problemSwitchedEvent(fromProblemId: string, toProblemId: string, timestamp: string): EditorEvent {
+  return {
+    type: "problem_switched",
+    timestamp,
+    detail: { from_problem_id: fromProblemId, to_problem_id: toProblemId }
+  };
+}
+
+// S-I §3.5: one EventBatcher per problem, created lazily — batches stay
+// problem-homogeneous by construction (the backend stores one problem_id per
+// NDJSON batch). switchTo() flushes the OUTGOING problem's batcher on every
+// switch and queues the problem_switched marker on the incoming one; dispose()
+// flushes everything (workspace unmount loses nothing).
+export class ProblemBatchers {
+  private batchers = new Map<string, EventBatcher>();
+  constructor(private opts: { maxSize: number; maxMs: number; onFlush: (problemId: string, events: EditorEvent[]) => void }) {}
+  private batcherFor(problemId: string): EventBatcher {
+    let batcher = this.batchers.get(problemId);
+    if (!batcher) {
+      batcher = new EventBatcher({
+        maxSize: this.opts.maxSize,
+        maxMs: this.opts.maxMs,
+        onFlush: (events) => this.opts.onFlush(problemId, events)
+      });
+      this.batchers.set(problemId, batcher);
+    }
+    return batcher;
+  }
+  add(problemId: string, event: EditorEvent) { this.batcherFor(problemId).add(event); }
+  flush(problemId: string) { this.batchers.get(problemId)?.flush(); }
+  switchTo(fromProblemId: string, toProblemId: string, timestamp: string) {
+    this.batchers.get(fromProblemId)?.flush();
+    this.add(toProblemId, problemSwitchedEvent(fromProblemId, toProblemId, timestamp));
+  }
+  dispose() { for (const batcher of this.batchers.values()) batcher.dispose(); }
+}

@@ -1,6 +1,6 @@
 // frontend/src/coding/editorEvents.test.ts
 import { describe, it, expect } from "vitest";
-import { mapContentChange, mapPaste, mapCursor, mapSelection, coalesceCursor, EventBatcher } from "./editorEvents";
+import { mapContentChange, mapPaste, mapCursor, mapSelection, coalesceCursor, EventBatcher, ProblemBatchers, problemSwitchedEvent } from "./editorEvents";
 
 const ts = () => "2026-06-09T10:00:00.000Z";
 
@@ -125,5 +125,74 @@ describe("EventBatcher", () => {
     expect(flushed.length).toBe(1);
     expect(flushed[0].length).toBe(2);
     b.dispose();
+  });
+});
+
+// S-I §3.5: one batcher per problem (problem-homogeneous batches by
+// construction), flush the OUTGOING problem's batcher on every switch, and a
+// problem_switched marker rides the INCOMING problem's batch.
+describe("problemSwitchedEvent", () => {
+  it("carries from/to problem ids in detail", () => {
+    expect(problemSwitchedEvent("a", "b", ts())).toEqual({
+      type: "problem_switched",
+      timestamp: ts(),
+      detail: { from_problem_id: "a", to_problem_id: "b" }
+    });
+  });
+});
+
+describe("ProblemBatchers", () => {
+  const make = () => {
+    const flushed: Array<{ problemId: string; events: any[] }> = [];
+    const registry = new ProblemBatchers({
+      maxSize: 100, maxMs: 100000,
+      onFlush: (problemId, events) => flushed.push({ problemId, events })
+    });
+    return { registry, flushed };
+  };
+
+  it("routes events to a per-problem batcher (batches stay problem-homogeneous)", () => {
+    const { registry, flushed } = make();
+    registry.add("a", { type: "editor_insert", timestamp: ts() });
+    registry.add("b", { type: "editor_insert", timestamp: ts() });
+    registry.flush("a");
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].problemId).toBe("a");
+    expect(flushed[0].events).toHaveLength(1);
+    registry.dispose();
+  });
+
+  it("switchTo flushes the outgoing problem and queues problem_switched on the incoming one", () => {
+    const { registry, flushed } = make();
+    registry.add("a", { type: "editor_insert", timestamp: ts() });
+    registry.switchTo("a", "b", ts());
+    // Outgoing batch flushed immediately, homogeneous to problem a.
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].problemId).toBe("a");
+    expect(flushed[0].events.map((e) => e.type)).toEqual(["editor_insert"]);
+    // The marker rides problem b's NEXT batch.
+    registry.flush("b");
+    expect(flushed).toHaveLength(2);
+    expect(flushed[1].problemId).toBe("b");
+    expect(flushed[1].events.map((e) => e.type)).toEqual(["problem_switched"]);
+    expect(flushed[1].events[0].detail).toEqual({ from_problem_id: "a", to_problem_id: "b" });
+    registry.dispose();
+  });
+
+  it("dispose flushes every problem's pending events (nothing lost on unmount)", () => {
+    const { registry, flushed } = make();
+    registry.add("a", { type: "editor_insert", timestamp: ts() });
+    registry.add("b", { type: "editor_cursor", timestamp: ts() });
+    registry.dispose();
+    expect(flushed.map((f) => f.problemId).sort()).toEqual(["a", "b"]);
+  });
+
+  it("switchTo without a prior batcher still tags the incoming problem", () => {
+    const { registry, flushed } = make();
+    registry.switchTo("a", "b", ts());
+    registry.flush("b");
+    expect(flushed).toHaveLength(1);
+    expect(flushed[0].events[0].type).toBe("problem_switched");
+    registry.dispose();
   });
 });
