@@ -5,17 +5,20 @@
 // actions, access code + invigilator key display/copy/regenerate, and the
 // per-contest roster section (passed in from App.tsx so S-C's panel is REUSED,
 // not duplicated). Self-contained section, ProblemBank conventions.
-import { ArrowDown, ArrowUp, Copy, KeyRound, Plus, RefreshCw, Trash2, UserPlus } from "lucide-react";
+import { Archive, ArrowDown, ArrowUp, Copy, Download, KeyRound, Plus, RefreshCw, ShieldAlert, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   adjustContestExamTime,
   adoptContestIntoPersonModel,
   createContestApi,
+  exportContest,
   fetchContests,
   fetchProblems,
   fetchTemplates,
+  purgeContest,
   regenerateContestSecretApi,
+  runRetentionSweep,
   setContestStatusApi,
   updateContestApi,
   type ApiError,
@@ -31,7 +34,8 @@ import {
   invigilatorUrlFor,
   sortContestsForList
 } from "./contestAdmin";
-import type { ContestStatus, ContestSummary, ProblemSummary } from "../types";
+import { lifecyclePhase, purgeGateState, retentionStatus } from "./dataLifecycle";
+import type { ContestExportResponse, ContestStatus, ContestSummary, ProblemSummary } from "../types";
 
 const STATUS_CHIP_CLASSES: Record<ReturnType<typeof contestStatusTone>, string> = {
   open: "bg-accent/15 text-accent border-accent/30",
@@ -51,6 +55,29 @@ function LegacyBadge() {
   return (
     <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
       legacy
+    </span>
+  );
+}
+
+// Derived lifecycle-phase badge (vision §7 ladder). The purged phase reads as a
+// tombstone (heavy data deleted; Results/People still read via final_snapshot).
+const PHASE_CLASSES: Record<string, string> = {
+  draft: "bg-neutral-100 text-muted border-line",
+  scheduled: "bg-sky-50 text-sky-700 border-sky-200",
+  live: "bg-accent/15 text-accent border-accent/30",
+  ended: "bg-neutral-100 text-ink border-line",
+  selection_done: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  evidence_purged: "bg-amber-50 text-amber-700 border-amber-300",
+  purged: "bg-rose-50 text-rose-700 border-rose-300",
+  archived: "bg-neutral-200 text-muted border-line opacity-80"
+};
+
+function LifecycleBadge({ contest }: { contest: ContestSummary }) {
+  const phase = lifecyclePhase(contest, new Date().toISOString());
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${PHASE_CLASSES[phase.key] ?? PHASE_CLASSES.draft}`} title={phase.tombstone ? "Heavy data deleted; scores and selection are retained" : undefined}>
+      {phase.tombstone ? <Archive size={11} /> : null}
+      {phase.label}
     </span>
   );
 }
@@ -264,7 +291,7 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
                     <td className="py-2 pr-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <StatusChip status={contest.status} />
-                        {contest.legacy ? <LegacyBadge /> : null}
+                        {contest.legacy ? <LegacyBadge /> : <LifecycleBadge contest={contest} />}
                       </div>
                     </td>
                     <td className="py-2 pr-3 text-xs text-muted">{contestWindowLabel(contest.start_at, contest.end_at)}</td>
@@ -382,10 +409,10 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
     <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="flex items-center gap-2 text-xl font-semibold text-ink">
+          <h2 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-ink">
             {contest.name}
             <StatusChip status={contest.status} />
-            {isLegacy ? <LegacyBadge /> : null}
+            {isLegacy ? <LegacyBadge /> : <LifecycleBadge contest={contest} />}
           </h2>
           <p className="mt-1 font-mono text-xs text-muted">{contest.slug}{contest.template_slug ? ` · from template ${contest.template_slug}` : ""}</p>
         </div>
@@ -549,6 +576,10 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
           {/* Roster — REUSE of the S-C section, scoped to this contest. */}
           {renderRoster(contest.slug)}
 
+          {/* Data lifecycle (S-G/S-H, vision §2.16): export → triple-gated purge
+              → tombstone + the evidence-retention countdown. */}
+          <DataLifecycleSection password={password} contest={contest} busy={busy} runMutation={runMutation} />
+
           {/* Legacy "Adopt into person model" (vision §2.15) — backfill a
               contest that ran before the person layer into person_ids so it
               shows up on cross-round scorecards. */}
@@ -556,6 +587,167 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
         </>
       )}
     </section>
+  );
+}
+
+// S-G/S-H Data lifecycle (vision §2.16): EXPORT → triple-gated PURGE → tombstone,
+// + the evidence-RETENTION countdown and an on-demand sweep. The gate-enable and
+// countdown logic are pure (./dataLifecycle, unit-tested); this component only
+// renders + dispatches. The server re-enforces every gate — the UI mirrors it so
+// a request the server would reject can never be fired.
+function DataLifecycleSection({ password, contest, busy, runMutation }: {
+  password: string;
+  contest: ContestSummary;
+  busy: boolean;
+  runMutation: (fn: () => Promise<void>) => Promise<void>;
+}) {
+  const now = new Date().toISOString();
+  const phase = lifecyclePhase(contest, now);
+  const retention = retentionStatus({ contest, now });
+  const [confirmed, setConfirmed] = useState(false);
+  const [typedSlug, setTypedSlug] = useState("");
+  const [includeEvidence, setIncludeEvidence] = useState(false);
+  const [exportResult, setExportResult] = useState<ContestExportResponse | null>(null);
+
+  const gate = purgeGateState({ contest, confirmed, typedSlug });
+  const purged = gate.alreadyPurged;
+  const lastExportAt = contest.last_export_at ?? null;
+
+  // runMutation owns error surfacing (panel-level) + the post-mutation reload.
+  const doExport = () => runMutation(async () => {
+    const result = await exportContest(password, contest.slug);
+    setExportResult(result);
+  });
+
+  const doPurge = () => runMutation(async () => {
+    await purgeContest(password, { contest: contest.slug, confirm: confirmed, slug: typedSlug.trim(), include_evidence: includeEvidence });
+    // Reset the gate inputs so the purged state can't be re-fired by stale UI.
+    setConfirmed(false);
+    setTypedSlug("");
+  });
+
+  const doSweep = () => runMutation(async () => {
+    await runRetentionSweep(password);
+  });
+
+  // TOMBSTONE display: a purged contest reads clearly as purged; its heavy data
+  // is gone but scores + selection are retained (Results/People read the snapshot).
+  if (purged) {
+    return (
+      <div className="mt-4 rounded-md border border-rose-300 bg-rose-50/60 p-4">
+        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-rose-800"><Archive size={15} /> Data lifecycle — purged</h3>
+        <p className="mt-2 text-sm text-rose-800">
+          This contest was <b>purged</b>{contest.purged_at ? ` on ${new Date(contest.purged_at).toLocaleString()}` : ""}. Heavy data (sessions, submissions, recordings) was permanently deleted; <b>scores and selection are retained</b> — its Results and People scorecards still read from the frozen snapshot.
+        </p>
+        {contest.purge_counts ? (
+          <p className="mt-2 text-xs text-rose-700">
+            Deleted: {Object.entries(contest.purge_counts).filter(([, v]) => v > 0).map(([k, v]) => `${v} ${k}`).join(", ") || "no heavy data"}.
+          </p>
+        ) : null}
+        <p className="mt-2 text-xs text-rose-700">
+          {contest.evidence_purged_at
+            ? `Evidence recordings deleted on ${new Date(contest.evidence_purged_at).toLocaleString()}.`
+            : "Recordings are scheduled for deletion by the next retention sweep."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-line bg-white/60 p-4">
+      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink"><ShieldAlert size={15} /> Data lifecycle</h3>
+      <p className="mt-1 text-xs text-muted">Export the contest to a downloadable archive, then permanently purge its heavy data once you no longer need it. Scores and selection always survive a purge.</p>
+
+      {/* EXPORT */}
+      <div className="mt-3 rounded-md border border-line bg-white p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-medium text-ink">Export</p>
+            <p className="text-xs text-muted">
+              {lastExportAt ? `Last exported ${new Date(lastExportAt).toLocaleString()}.` : "Not exported yet."}
+              {" "}Export zips auto-delete after 10 days.
+            </p>
+          </div>
+          <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={doExport}>
+            <Download size={14} /> {lastExportAt ? "Re-export" : "Export"}
+          </button>
+        </div>
+        {exportResult?.signed_url ? (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <a className="focus-ring inline-flex h-8 items-center gap-1 rounded-md border border-accent/40 bg-accent/5 px-3 font-medium text-accent" href={exportResult.signed_url} target="_blank" rel="noreferrer">
+              <Download size={12} /> Download archive
+            </a>
+            <span className="text-muted">{Object.entries(exportResult.counts ?? {}).filter(([, v]) => v > 0).map(([k, v]) => `${v} ${k}`).join(" · ")}</span>
+          </div>
+        ) : null}
+      </div>
+
+      {/* RETENTION status */}
+      <div className="mt-3 rounded-md border border-line bg-white p-3">
+        <p className="text-sm font-medium text-ink">Evidence retention</p>
+        {contest.selection_done_at ? (
+          <p className="text-xs text-muted">Selection marked done {new Date(contest.selection_done_at).toLocaleString()} · {retention.retentionDays}-day window.</p>
+        ) : null}
+        <p className={`mt-1 text-sm ${retention.purged ? "text-emerald-700" : retention.due ? "text-amber-700" : "text-ink"}`}>
+          {retention.purged ? <Archive size={13} className="mr-1 inline" /> : null}
+          {retention.label}
+        </p>
+        {retention.started && !retention.purged && retention.deleteAt ? (
+          <p className="mt-1 text-xs text-muted">Recordings become eligible for deletion on {new Date(retention.deleteAt).toLocaleString()}.</p>
+        ) : null}
+        <button className="focus-ring mt-2 inline-flex h-8 items-center gap-1 rounded-md border border-line bg-white px-3 text-xs font-medium disabled:opacity-50" disabled={busy} onClick={doSweep} title="Runs the same daily Cloud Scheduler sweep on demand">
+          <RefreshCw size={12} /> Run retention sweep now
+        </button>
+      </div>
+
+      {/* PURGE — triple gate */}
+      <div className="mt-3 rounded-md border border-rose-200 bg-rose-50/40 p-3">
+        <p className="text-sm font-semibold text-rose-800">Purge heavy data</p>
+        <p className="mt-1 text-xs text-rose-700">Permanently deletes sessions, submissions and recordings. Scores and selection are kept. This cannot be undone.</p>
+
+        {/* Gate 1 */}
+        {!gate.exportDone ? (
+          <p className="mt-2 rounded-md border border-rose-200 bg-white px-3 py-2 text-xs text-rose-700">Export the contest first — purge is disabled until a successful export exists.</p>
+        ) : (
+          <div className="mt-2 space-y-2">
+            {/* Gate 2 */}
+            <label className="flex items-start gap-2 text-xs leading-5 text-rose-800">
+              <input type="checkbox" className="mt-0.5 h-4 w-4 accent-rose-600" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+              <span>I understand this <b>permanently deletes</b> sessions, submissions and recordings; <b>scores and selection are kept</b>.</span>
+            </label>
+            {/* Gate 3 */}
+            <label className="block text-xs text-rose-800">
+              Type the contest slug <code className="font-semibold">{contest.slug}</code> to confirm:
+              <input
+                className="focus-ring mt-1 h-9 w-full max-w-xs rounded-md border border-rose-300 bg-white px-3 font-mono text-sm"
+                value={typedSlug}
+                placeholder={contest.slug}
+                onChange={(event) => setTypedSlug(event.target.value)}
+                aria-label="Type the contest slug to confirm purge"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs text-rose-800">
+              <input type="checkbox" className="h-4 w-4 accent-rose-600" checked={includeEvidence} onChange={(event) => setIncludeEvidence(event.target.checked)} />
+              Also delete recordings now (otherwise the retention sweep handles them on schedule).
+            </label>
+            <button
+              className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-rose-600 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={busy || !gate.canPurge}
+              onClick={doPurge}
+            >
+              <Trash2 size={14} /> Purge this contest
+            </button>
+            {!gate.canPurge ? (
+              <p className="text-xs text-rose-600">
+                {gate.nextStep === "confirm" ? "Tick the confirmation to continue." : gate.nextStep === "slug" ? "The typed slug must match exactly." : ""}
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      <p className="mt-2 text-[11px] text-muted">Lifecycle phase: <b>{phase.label}</b></p>
+    </div>
   );
 }
 

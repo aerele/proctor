@@ -15,9 +15,12 @@ import type {
   EnforcementViolationResponse,
   ContestCreateRequest,
   ContestExamConfig,
+  ContestExportResponse,
+  ContestPurgeResponse,
   ContestStatus,
   ContestSummary,
   ContestUpdateRequest,
+  RetentionSweepResponse,
   ExamConfig,
   ExamTimeRequest,
   ExamTimeResponse,
@@ -1697,6 +1700,60 @@ export async function markSelectionDone(
   });
 }
 
+// ---- Data lifecycle: export / triple-gated purge / retention sweep (Wave7-H) -
+// Backend: Wave7-G handlers; gates re-enforced server-side (the UI mirrors them).
+
+// POST /api/admin/contest-export — assemble the archive, write it to GCS,
+// return a signed download URL + stamp last_export_at on the contest doc.
+export async function exportContest(password: string, contestSlug: string): Promise<ContestExportResponse> {
+  if (demoMode) {
+    await wait(220);
+    assertDemoAdmin(password);
+    return demoExportContest(contestSlug);
+  }
+  return request("/api/admin/contest-export", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ contest: contestSlug })
+  });
+}
+
+// POST /api/admin/contest-purge — the TRIPLE-GATED irreversible purge. `confirm`
+// is the explicit "I understand" flag; `slug` is the typed contest slug echo.
+// `include_evidence` deletes recordings now (default false: keep them for the
+// retention sweep so Recordings Review still works during the window).
+export async function purgeContest(
+  password: string,
+  body: { contest: string; confirm: boolean; slug: string; include_evidence?: boolean }
+): Promise<ContestPurgeResponse> {
+  if (demoMode) {
+    await wait(260);
+    assertDemoAdmin(password);
+    return demoPurgeContest(body);
+  }
+  return request("/api/admin/contest-purge", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+}
+
+// POST /api/admin/retention-sweep — the daily Cloud Scheduler job, run on demand
+// from the admin UI (authed by the admin password). Deletes due-contest evidence
+// + export zips older than 10 days; reports what it purged.
+export async function runRetentionSweep(password: string): Promise<RetentionSweepResponse> {
+  if (demoMode) {
+    await wait(300);
+    assertDemoAdmin(password);
+    return demoRetentionSweep();
+  }
+  return request("/api/admin/retention-sweep", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({})
+  });
+}
+
 // ---- demo Results dataset (parity for the NEW tab — acceptance bar S4) ------
 // Deterministic ranked rows for the demo contest (demo-drive-r1), with
 // selection_status persisted in localStorage so the bulk-selection UI + "Mark
@@ -1812,6 +1869,69 @@ function demoMarkSelectionDone(contestSlug: string) {
   const now = new Date().toISOString();
   window.localStorage.setItem(demoSelectionDoneKey, now);
   return { ok: true, selection_done_at: now, enrollments_snapshotted: DEMO_RESULT_SEEDS.length };
+}
+
+// ---- demo Data-lifecycle (parity for the NEW section — acceptance bar S4) ----
+// Stamps the same lifecycle fields the backend writes onto the contest doc so the
+// Data-lifecycle section's export → triple-gated purge → tombstone flow behaves
+// like production (mutations persist via the demo contest store).
+
+function demoExportContest(contestSlug: string): ContestExportResponse {
+  const contest = findDemoContest(contestSlug);
+  if (contest.legacy) throw demoApiError(400, "contest must name a person-mode contest");
+  const at = new Date().toISOString();
+  const gcs_key = `exports/${contestSlug}/${at.replace(/[:.]/g, "-")}.zip`;
+  const counts = { sessions: 18, submissions: 24, enrollments: 18, persons: 18, colleges: 2 };
+  updateDemoContest(contestSlug, { last_export_at: at, last_export: { at, gcs_key, counts } });
+  return { ok: true, gcs_key, signed_url: `https://storage.example/demo/${gcs_key}?sig=demo`, counts, exported_at: at };
+}
+
+function demoPurgeContest(body: { contest: string; confirm: boolean; slug: string; include_evidence?: boolean }): ContestPurgeResponse {
+  const contest = findDemoContest(body.contest);
+  if (contest.legacy) throw demoApiError(400, "contest must name a person-mode contest");
+  // Idempotent re-purge: a tombstoned contest is a flagged no-op (mirrors server).
+  if (contest.purged_at || contest.db_purged_at) return { ok: true, contest: contest.slug, already_purged: true };
+  // Server-enforced triple gate (the UI mirrors it; the server is the authority).
+  if (!contest.last_export_at) throw demoApiError(400, "export_required");
+  if (body.confirm !== true) throw demoApiError(400, "confirm_required");
+  if ((body.slug ?? "").trim() !== contest.slug) throw demoApiError(400, "slug_mismatch");
+
+  const now = new Date().toISOString();
+  const includeEvidence = body.include_evidence === true;
+  const counts = { sessions: 18, submissions: 24, alerts: 4, reviews: 1 };
+  updateDemoContest(body.contest, {
+    db_purged_at: now,
+    purged_at: now,
+    purge_counts: counts,
+    ...(includeEvidence ? { evidence_purged_at: now } : {})
+  });
+  return {
+    ok: true,
+    contest: contest.slug,
+    counts,
+    evidence_deleted: includeEvidence ? 36 : 0,
+    evidence_retained: !includeEvidence,
+    enrollments_retained: true
+  };
+}
+
+function demoRetentionSweep(): RetentionSweepResponse {
+  const now = new Date().toISOString();
+  const nowMs = Date.parse(now);
+  const evidence_purged: RetentionSweepResponse["evidence_purged"] = [];
+  // Mirror the server selection: any non-purged contest whose retention window
+  // has elapsed gets its evidence swept (evidence_purged_at stamped).
+  for (const contest of readDemoContests()) {
+    if (contest.evidence_purged_at) continue;
+    const doneMs = Date.parse(String(contest.selection_done_at || ""));
+    if (!Number.isFinite(doneMs)) continue;
+    const days = contest.evidence_retention_days && contest.evidence_retention_days > 0 ? contest.evidence_retention_days : 4;
+    if (nowMs > doneMs + days * 24 * 60 * 60 * 1000) {
+      updateDemoContest(contest.slug, { evidence_purged_at: now });
+      evidence_purged.push({ contest: contest.slug, objects_deleted: 36, completed: true });
+    }
+  }
+  return { ok: true, swept_at: now, evidence_purged, exports_deleted: 0 };
 }
 
 // ---- S-J People tab (directory + cross-round scorecard, vision §2.14) -------
@@ -3408,7 +3528,10 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
 // v2: S-I reseeded demo-drive-r1 with THREE ordered problems (sum-two,
 // reverse-words ×150 pts, max-window-sum ×50 pts) so the multi-problem
 // workspace demos meaningfully — the key bump discards stale v1 stores.
-const demoContestsKey = "aerele-proctor-demo-contests-v2";
+// v3 (Wave7-H): + two lifecycle-state demo contests (a mid-retention archived
+// round to exercise export → triple-gated purge → tombstone, and an already-
+// tombstoned round) so the Data-lifecycle section has visible states in demo.
+const demoContestsKey = "aerele-proctor-demo-contests-v3";
 export const DEMO_ACCESS_CODE = "DEMO42";
 const DEMO_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
 
@@ -3418,31 +3541,94 @@ function randomDemoCode(length: number, alphabet = DEMO_CODE_ALPHABET): string {
   return out;
 }
 
+const DAY_MS_DEMO = 24 * 60 * 60 * 1000;
+
 function seedDemoContests(): ContestSummary[] {
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
-  return [{
-    slug: "demo-drive-r1",
-    name: "Demo Drive — Round 1",
-    status: "open",
-    legacy: false,
-    listed: true,
-    identity_label: "Roll Number",
-    access_code: DEMO_ACCESS_CODE,
-    invigilator_key: "demo-invigilator-key-001",
-    start_at: new Date(nowMs - 60 * 60_000).toISOString(),
-    end_at: new Date(nowMs + 6 * 60 * 60_000).toISOString(),
-    problems: [
-      { problem_id: "sum-two", points: null, order: 0 },
-      { problem_id: "reverse-words", points: null, order: 1 },
-      { problem_id: "max-window-sum", points: null, order: 2 }
-    ],
-    rooms: ["Lab 1", "Lab 2"],
-    room_gate_enabled: false,
-    template_slug: "demo-aptitude-r1",
-    created_at: now,
-    updated_at: now
-  }];
+  return [
+    {
+      slug: "demo-drive-r1",
+      name: "Demo Drive — Round 1",
+      status: "open",
+      legacy: false,
+      listed: true,
+      identity_label: "Roll Number",
+      access_code: DEMO_ACCESS_CODE,
+      invigilator_key: "demo-invigilator-key-001",
+      start_at: new Date(nowMs - 60 * 60_000).toISOString(),
+      end_at: new Date(nowMs + 6 * 60 * 60_000).toISOString(),
+      problems: [
+        { problem_id: "sum-two", points: null, order: 0 },
+        { problem_id: "reverse-words", points: null, order: 1 },
+        { problem_id: "max-window-sum", points: null, order: 2 }
+      ],
+      rooms: ["Lab 1", "Lab 2"],
+      room_gate_enabled: false,
+      template_slug: "demo-aptitude-r1",
+      created_at: now,
+      updated_at: now
+    },
+    // Mid-retention archived round (Wave7-H demo): selection is done, an export
+    // already exists (so the purge gate's first gate is satisfied to demo), the
+    // evidence retention clock is running — the Data-lifecycle section shows the
+    // "recordings auto-delete in N days" countdown and the full export → purge UI.
+    {
+      slug: "demo-drive-r0",
+      name: "Demo Drive — Pilot (mid-retention)",
+      status: "archived",
+      legacy: false,
+      listed: true,
+      identity_label: "Roll Number",
+      access_code: null,
+      invigilator_key: "demo-invigilator-key-000",
+      start_at: new Date(nowMs - 10 * DAY_MS_DEMO).toISOString(),
+      end_at: new Date(nowMs - 10 * DAY_MS_DEMO + 3 * 60 * 60_000).toISOString(),
+      problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+      rooms: ["Lab 1"],
+      room_gate_enabled: false,
+      template_slug: "demo-aptitude-r1",
+      last_export_at: new Date(nowMs - 60 * 60_000).toISOString(),
+      last_export: { at: new Date(nowMs - 60 * 60_000).toISOString(), gcs_key: "exports/demo-drive-r0/demo.zip", counts: { sessions: 18, submissions: 24 } },
+      selection_done_at: new Date(nowMs - 1 * DAY_MS_DEMO).toISOString(), // 1 day in → 3 left of 4
+      evidence_retention_days: 4,
+      evidence_purged_at: null,
+      db_purged_at: null,
+      purged_at: null,
+      created_at: new Date(nowMs - 11 * DAY_MS_DEMO).toISOString(),
+      updated_at: now
+    },
+    // Already-tombstoned round (Wave7-H demo): heavy data purged, scores +
+    // selection retained. Reads clearly as Purged; its Results/People still show
+    // via final_snapshot (the People-tab demo references this same slug).
+    {
+      slug: "demo-drive-r2",
+      name: "Tech Round 2 (purged)",
+      status: "archived",
+      legacy: false,
+      listed: true,
+      identity_label: "Roll Number",
+      access_code: null,
+      invigilator_key: null,
+      start_at: new Date(nowMs - 20 * DAY_MS_DEMO).toISOString(),
+      end_at: new Date(nowMs - 20 * DAY_MS_DEMO + 3 * 60 * 60_000).toISOString(),
+      problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+      rooms: ["Lab 1"],
+      room_gate_enabled: false,
+      template_slug: "demo-tech-r2",
+      previous_contest_slug: "demo-drive-r1",
+      last_export_at: new Date(nowMs - 9 * DAY_MS_DEMO).toISOString(),
+      last_export: { at: new Date(nowMs - 9 * DAY_MS_DEMO).toISOString(), gcs_key: "exports/demo-drive-r2/demo.zip", counts: { sessions: 12, submissions: 12 } },
+      selection_done_at: new Date(nowMs - 8 * DAY_MS_DEMO).toISOString(),
+      evidence_retention_days: 4,
+      evidence_purged_at: new Date(nowMs - 4 * DAY_MS_DEMO).toISOString(),
+      db_purged_at: new Date(nowMs - 4 * DAY_MS_DEMO).toISOString(),
+      purged_at: new Date(nowMs - 4 * DAY_MS_DEMO).toISOString(),
+      purge_counts: { sessions: 12, submissions: 12, alerts: 3 },
+      created_at: new Date(nowMs - 21 * DAY_MS_DEMO).toISOString(),
+      updated_at: now
+    }
+  ];
 }
 
 function readDemoContests(): ContestSummary[] {
