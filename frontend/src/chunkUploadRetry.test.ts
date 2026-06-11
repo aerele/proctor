@@ -5,12 +5,14 @@
 // exhaustion fall through to the existing honest-gap path unchanged.
 import { describe, expect, it } from "vitest";
 import {
+  advanceUploadChain,
   isTransientUploadError,
   runUploadWithRetry,
   UPLOAD_RETRY_BACKOFF_MS,
   uploadErrorStatus,
   type UploadRetryInfo
 } from "./chunkUploadRetry";
+import { fatalStatusFromError } from "./useProctorRecorder";
 
 /** ApiError shape thrown by api.ts request() (getUploadUrl rejections). */
 function apiError(status: number, code: string): Error & { status: number; code: string } {
@@ -189,5 +191,126 @@ describe("runUploadWithRetry", () => {
 
   it("uses the real backoff schedule by default (2 retries max)", () => {
     expect(UPLOAD_RETRY_BACKOFF_MS).toEqual([2000, 5000]);
+  });
+});
+
+// ---- RT-4: poison-proof serial chain advance --------------------------------
+//
+// One exhausted screen-chunk failure used to leave the per-kind chain rejected,
+// so every LATER chunk skipped its own upload and emitted upload_error with the
+// INHERITED error (the consecutive failures 5,6,7 / 9,10 in the rev-00008
+// retest). The chain must still sequence (serial, one in flight) but only a
+// FATAL-status rejection (lock/pending/ended) may stay on the chain — stop()'s
+// `await uploadQueue.catch(...)` → onFatalError depends on that, unchanged.
+
+// First pin the B1 fatal classification itself (today's behavior), then drive
+// the chain with the recorder's EXACT predicate composed from it.
+describe("fatalStatusFromError (B1 — pinned)", () => {
+  it("maps lock-window / pending / ended rejections to their fatal status", () => {
+    expect(fatalStatusFromError(apiError(403, "session_locked"))).toBe("locked");
+    expect(fatalStatusFromError(apiError(403, "waiting_for_approval"))).toBe("pending_approval");
+    expect(fatalStatusFromError(apiError(409, "session_ended"))).toBe("ended");
+    // Bare statuses without a known code still classify by status.
+    expect(fatalStatusFromError(apiError(403, "other"))).toBe("locked");
+    expect(fatalStatusFromError(apiError(409, "other"))).toBe("ended");
+  });
+
+  it("returns null for transient failures AND for a GCS-side PUT 403 (status only in the message — deliberate, see uploadErrorStatus)", () => {
+    expect(fatalStatusFromError(networkError())).toBeNull();
+    expect(fatalStatusFromError(apiError(503, "x"))).toBeNull();
+    expect(fatalStatusFromError(apiError(429, "x"))).toBeNull();
+    expect(fatalStatusFromError(putError(403))).toBeNull();
+  });
+});
+
+describe("advanceUploadChain (RT-4)", () => {
+  // The recorder's exact screen-chain predicate (useProctorRecorder enqueueUpload).
+  const screenIsFatal = (error: unknown) => fatalStatusFromError(error) !== null;
+
+  type SlotLog = {
+    ran: number[];
+    errors: Array<{ index: number; error: unknown }>;
+    settled: number[];
+  };
+  const newLog = (): SlotLog => ({ ran: [], errors: [], settled: [] });
+
+  // One chunk's slot wired exactly like the recorder's: run = own upload work,
+  // onError = upload_error audit (+handleFatalStatus), onSettled = queue depth.
+  const chunkSlot = (log: SlotLog, index: number, run: () => Promise<void>) => ({
+    run: () => {
+      log.ran.push(index);
+      return run();
+    },
+    onError: (error: unknown) => log.errors.push({ index, error }),
+    isFatal: screenIsFatal,
+    onSettled: () => log.settled.push(index)
+  });
+
+  it("a NON-fatal exhausted failure does not poison the chain — the next chunk attempts its OWN upload and succeeds", async () => {
+    const log = newLog();
+    const gap = networkError(); // what retry exhaustion rejects with
+    let queue: Promise<void> = Promise.resolve();
+    queue = advanceUploadChain(queue, chunkSlot(log, 5, () => Promise.reject(gap)));
+    queue = advanceUploadChain(queue, chunkSlot(log, 6, () => Promise.resolve()));
+
+    await queue; // resolves: the chain recovered after chunk 5's honest gap
+    expect(log.ran).toEqual([5, 6]); // chunk 6 ATTEMPTED its own upload
+    expect(log.errors).toEqual([{ index: 5, error: gap }]); // chunk 6 emitted NO upload_error
+    expect(log.settled).toEqual([5, 6]);
+  });
+
+  it("consecutive non-fatal failures each carry their OWN error, then the chain still recovers", async () => {
+    const log = newLog();
+    const gap5 = networkError();
+    const gap6 = putError(503);
+    let queue: Promise<void> = Promise.resolve();
+    queue = advanceUploadChain(queue, chunkSlot(log, 5, () => Promise.reject(gap5)));
+    queue = advanceUploadChain(queue, chunkSlot(log, 6, () => Promise.reject(gap6)));
+    queue = advanceUploadChain(queue, chunkSlot(log, 7, () => Promise.resolve()));
+
+    await queue;
+    expect(log.ran).toEqual([5, 6, 7]); // every chunk attempted, none inherited
+    expect(log.errors).toEqual([
+      { index: 5, error: gap5 },
+      { index: 6, error: gap6 } // its OWN error — not chunk 5's
+    ]);
+    expect(log.settled).toEqual([5, 6, 7]);
+  });
+
+  it("a fatal 403 keeps today's semantics: onError gets the 403, the chain STAYS rejected for stop(), and a later queued chunk is skipped with the inherited error", async () => {
+    const log = newLog();
+    const locked = apiError(403, "session_locked");
+    let queue: Promise<void> = Promise.resolve();
+    queue = advanceUploadChain(queue, chunkSlot(log, 8, () => Promise.reject(locked)));
+    queue = advanceUploadChain(queue, chunkSlot(log, 9, () => Promise.resolve()));
+
+    // stop()'s `await uploadQueue.catch(...)` sees this rejection → onFatalError.
+    await expect(queue).rejects.toBe(locked);
+    expect(log.ran).toEqual([8]); // chunk 9 never attempted (the recorder is self-stopping)
+    expect(log.errors).toEqual([
+      { index: 8, error: locked },
+      { index: 9, error: locked } // inherited — byte-identical to pre-RT-4 fatal behavior
+    ]);
+    expect(log.settled).toEqual([8, 9]); // queue-depth bookkeeping still ran for both
+  });
+
+  it("ordering stays serial — chunk N+1 does not start before chunk N settles", async () => {
+    const log = newLog();
+    let releaseN!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      releaseN = resolve;
+    });
+    let queue: Promise<void> = Promise.resolve();
+    queue = advanceUploadChain(queue, chunkSlot(log, 10, () => inFlight));
+    queue = advanceUploadChain(queue, chunkSlot(log, 11, () => Promise.resolve()));
+
+    await new Promise((resolve) => setTimeout(resolve, 0)); // drain microtasks
+    expect(log.ran).toEqual([10]); // 11 has NOT started while 10 is in flight
+    expect(log.settled).toEqual([]);
+
+    releaseN();
+    await queue;
+    expect(log.ran).toEqual([10, 11]);
+    expect(log.settled).toEqual([10, 11]);
   });
 });

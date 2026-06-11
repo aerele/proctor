@@ -102,3 +102,46 @@ export async function runUploadWithRetry<T>(
     }
   }
 }
+
+// ---- RT-4: poison-proof serial chain advance --------------------------------
+//
+// RT-4 (e2e-live retest rev 00008, 2026-06-12): the screen chain used to
+// re-throw EVERY slot failure, so one exhausted transient failure left
+// `uploadQueue` rejected — every LATER chunk's .then was skipped, its .catch
+// fired with the INHERITED error (an upload_error that never attempted its own
+// upload) and re-threw again, until the next recorder restart reset the chain
+// (the consecutive screen failures 5,6,7 and 9,10 in tonight's retest). This
+// helper is the chain advance for the recorder's SCREEN chain: it still
+// SEQUENCES (serial, ordered, one slot in flight per kind) but a rejection
+// stays on the chain ONLY when `isFatal` says so (401/403/409 → lock/pending/
+// ended — stop()'s `await uploadQueue.catch(...)` must keep surfacing those
+// via onFatalError exactly as before). A NON-fatal exhausted failure is that
+// one chunk's honest gap: onError audits it, the rejection is swallowed, and
+// the NEXT chunk's slot attempts its own upload normally. The camera chain
+// keeps its own swallow-everything inline form (unchanged).
+
+export type UploadChainSlotHooks = {
+  /** This chunk's own upload work (retry runner + manifest + chunk_uploaded). */
+  run: () => Promise<void>;
+  /** This chunk's failure path (upload_error audit + handleFatalStatus). When
+   * a FATAL rejection was inherited from an earlier slot, `run` is skipped and
+   * this receives the inherited error — same as before RT-4. */
+  onError: (error: unknown) => void;
+  /** True → keep the chain rejected after onError (fatal-status semantics). */
+  isFatal: (error: unknown) => boolean;
+  /** Always runs once the slot settles (queue-depth bookkeeping). */
+  onSettled: () => void;
+};
+
+/** Append one chunk's slot to a serial per-kind upload chain; returns the new
+ * chain tail the next chunk must sequence behind. */
+export function advanceUploadChain(queue: Promise<void>, hooks: UploadChainSlotHooks): Promise<void> {
+  return queue
+    .then(hooks.run)
+    .catch((error) => {
+      hooks.onError(error);
+      if (hooks.isFatal(error)) throw error;
+    })
+    .finally(hooks.onSettled);
+}
+
