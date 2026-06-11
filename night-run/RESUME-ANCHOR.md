@@ -7,8 +7,10 @@ _Last updated: 2026-06-11 (after F12). Maintainer: keep this current; archive, d
 ---
 
 ## 0. RIGHT NOW (state)
-- **Repo** `/home/karthi/arogara/proctor`, branch **master**, HEAD **c762877** (build complete + E2E-tested + E2E fix wave done). ~148 local commits. **NEVER pushed** (see §4 push gate).
-- **Timeline:** deadline shifted +1 day (Karthi TG 2026-06-11). The real 700-candidate exam TODAY runs on the **OLD proctor (HackerRank)** — THIS platform is **not needed today**; target ~2026-06-12. **No rush, no rushed deploy.**
+- **Repo** `/home/karthi/arogara/proctor`, branch **master**, HEAD **49af4f1** (= product c762877 + 7 behavior-preserving decomposition commits B0/B1 on top; product behavior identical to the deployed rev 00006). ~156 local commits. **NEVER pushed** (see §4 push gate).
+- **Timeline:** the real 700-candidate exam runs on the **OLD proctor (HackerRank)**; THIS platform targets the **2026-06-12 live test** — that readiness is now the priority. **No rush, no rushed deploy.**
+- **⏸ Architecture decomposition PAUSED (Karthi TG 1837, 2026-06-11):** B0+B1 DONE + green (backend 705/705, tree clean, HEAD 49af4f1), rest **slated for AFTER the test** — restructuring isn't essential to it. Resume at **B2** (plan doc has a PAUSE/RESUME banner). Memory: `proctor_architecture_decomposition`.
+- **▶ NOW (TG 1839):** writing **F11 documentation + the exam-day ops runbook** in the background (NOT the triple-review yet — that comes after). Then awaiting Karthi's multipart backlog-prioritization.
 - **Mode:** Telegram (plain prose replies). Karthi stepped away 2026-06-11 ~05:30, unavailable a while — **work autonomously to completion**, ping Telegram only for a genuine blocker. No blockers outstanding.
 - **Mandate (TG 1789/1791/1795):** finish ALL build, then **persona-driven end-to-end browser test of EVERY feature + screenshot-document each** (= the docs), fix→redeploy→retest until a confidently-shippable product (happy path + obvious flows must obviously work). Truth bar: "if the docs say it works, it works." Full detail in memory `proctor_e2e_test_docs_mandate`.
 - **Tests green at HEAD:** backend **703/703**, frontend **625/625**, `npm run build` clean.

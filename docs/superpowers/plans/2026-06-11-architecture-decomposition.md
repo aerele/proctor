@@ -1,5 +1,13 @@
 # Architecture decomposition plan (2026-06-11) — behavior-preserving god-file split
 
+> ## ⏸ PAUSED 2026-06-11 (Karthi TG 1837) — slated for LATER, NOT abandoned
+> **Reason:** tomorrow's (2026-06-12) live test is the priority; restructuring is not essential to it. Resume after the test.
+> **Done + locked (working state, tests green, tree clean):**
+> - **B0** — `lib/{http,sanitize,clients,auth,sessionStore}.mjs` + `config.mjs` + recursive scopingLint + env-lint guard + factory seam (`makeAuth`/`makeSessionStore`). 6 commits (`1755887`..`252cedf`).
+> - **B1** — `routes/invigilator.mjs` factory (`makeInvigilatorRoutes(ctx)`) + routesAuthLint guard; proven against the 3-buster invigilator test + canary. 1 commit (`49af4f1`).
+> - HEAD at pause: **`49af4f1`**. handler.mjs 6892 → ~6464 LOC. Behavior-preserving (no route/api/data-model change); dispatch table verbatim; scopingLint allowlist unchanged `{handler.mjs:4, contests.mjs:1}`.
+> **RESUME AT B2** (next un-started phase) per §AMENDMENTS (v2). The v2 sequencing (A8) + the load-bearing guards below are unchanged. Nothing else has moved.
+
 Karthi-approved (no approval gate; behavior-preserving; suite green at EVERY step). Execute AFTER the E2E green baseline. Goals (priority): (1) easy for AI to code, (2) maintainability, (3) performance, (4) security. Scope = the 3 god-files only; leave the already-organized domain modules/folders alone.
 
 > **READ §AMENDMENTS (v2, Fable-5 review) FIRST — it is AUTHORITATIVE and supersedes the v1 body below wherever they conflict.** v1 (Opus design) is the skeleton; v2 fixes two plan-breaking issues (W1 recursive-lint, W2 factory seam) and adds the real front-end/UI-hierarchy + new guards.
