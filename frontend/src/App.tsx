@@ -11,7 +11,8 @@ import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
 import { ContestsPanel } from "./admin/ContestsPanel";
 import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
-import { CodingWorkspace } from "./coding/CodingWorkspace";
+import { MultiProblemWorkspace } from "./coding/MultiProblemWorkspace";
+import { clearSessionDrafts } from "./coding/problemSwitch";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
 import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
@@ -303,7 +304,11 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [rosterMatch, setRosterMatch] = useState<RosterLookupResult | null>(null);
   // S4: the assigned problem rides in on the start/resume response. hasProblem
   // drives every own-editor-vs-HackerRank copy fork (studentCopy.ts, stageHint).
-  const activeProblem = sessionConfig?.problem ?? null;
+  // S-I: newer backends serve the ORDERED problems[]; `problem` is the
+  // one-release alias (= problems[0]) older payloads still carry. Either one
+  // makes this an own-editor session.
+  const sessionProblems = sessionConfig?.problems ?? (sessionConfig?.problem ? [sessionConfig.problem] : []);
+  const activeProblem = sessionConfig?.problem ?? sessionProblems[0] ?? null;
   const hasProblem = activeProblem !== null;
   // F10.1: is the separate low-res camera RECORDING enabled? Pre-session the
   // public exam-config carries it (the consent disclosure renders before any
@@ -677,10 +682,12 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         if (serverStatus === "ended") {
           setStatus("ended");
           window.localStorage.removeItem(sessionKey);
+          clearSessionDrafts(stored, window.localStorage);
         }
       } catch {
         // Unknown/expired token — drop it and fall back to the form.
         window.localStorage.removeItem(sessionKey);
+        clearSessionDrafts(stored, window.localStorage);
       } finally {
         if (!cancelled) setResuming(false);
       }
@@ -989,6 +996,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           setStatus("ended");
           setGate("ended");
           window.localStorage.removeItem(sessionKey);
+          clearSessionDrafts(session.session_id, window.localStorage);
         } else if (serverStatus === "locked") {
           setStatus("idle");
           setGate("locked");
@@ -1177,7 +1185,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         setStatus("idle");
-        if (serverStatus === "ended") window.localStorage.removeItem(sessionKey);
+        if (serverStatus === "ended") {
+          window.localStorage.removeItem(sessionKey);
+          clearSessionDrafts(sessionConfig.session_id, window.localStorage);
+        }
         return;
       }
     } catch (cause) {
@@ -1214,6 +1225,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       if (serverStatus === "ended") {
         setStatus("ended");
         window.localStorage.removeItem(sessionKey);
+        clearSessionDrafts(sessionConfig.session_id, window.localStorage);
       }
       // Wave-3 walkthrough residue: a release back to ACTIVE must not carry a
       // red error line from the lock episode into the running view — the
@@ -1354,6 +1366,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         await endSession({ sessionId, manifest: uploads, assuranceAccepted });
       }
       window.localStorage.removeItem(sessionKey);
+      if (sessionId) clearSessionDrafts(sessionId, window.localStorage);
       setStatus("ended");
       setGate("ended");
       setEndRequested(false);
@@ -1384,6 +1397,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         await endSession({ sessionId, manifest, assuranceAccepted });
       }
       window.localStorage.removeItem(sessionKey);
+      if (sessionId) clearSessionDrafts(sessionId, window.localStorage);
       setEndFailed(false);
       setStatus("ended");
       setGate("ended");
@@ -1763,13 +1777,20 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
       {/* S4: own coding workspace (Monaco + Run/Submit), live only while
           recording so every editor event is tied to an actively recorded
-          session. The problem comes from the server (settings.problem_id);
-          when assigned it REPLACES the contest_url Start-test surface. S3:
-          held back while the room gate is still active (candidate in the
-          RoomCodePanel waiting room above). */}
-      {activeProblem && sessionId && status === "recording" && !examGateActive && (
+          session. The problems come from the server (contest problems[] or the
+          legacy settings problem_id alias); when assigned the workspace
+          REPLACES the contest_url Start-test surface. S3: held back while the
+          room gate is still active (candidate in the RoomCodePanel waiting
+          room above). S-I: multi-problem switcher when problems.length > 1;
+          a single problem renders the exact pre-S-I single-pane layout. */}
+      {sessionProblems.length > 0 && sessionId && status === "recording" && !examGateActive && (
         <div className="mt-5">
-          <CodingWorkspace sessionId={sessionId} problem={activeProblem} />
+          <MultiProblemWorkspace
+            sessionId={sessionId}
+            problems={sessionProblems}
+            submissionsSummary={sessionConfig?.submissions_summary}
+            submitBudget={sessionConfig?.submit_budget ?? null}
+          />
         </div>
       )}
 

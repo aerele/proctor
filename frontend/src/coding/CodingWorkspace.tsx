@@ -1,8 +1,11 @@
 // frontend/src/coding/CodingWorkspace.tsx
-import { lazy, Suspense, useMemo, useRef, useState } from "react";
-import { execRun, execSubmit, sendEditorEvents } from "../api";
-import { EventBatcher } from "./editorEvents";
-import { runJudgeAttempt } from "./judgeAttempt";
+//
+// S-I §4: the former single-problem CodingWorkspace body, now the
+// PRESENTATIONAL ProblemPane — statement + Monaco + Run/Submit for ONE
+// problem. All exec calls, per-problem state, cooldowns and drafts live in
+// MultiProblemWorkspace (the container) so a response always lands in the
+// originating problem's state slot even when the candidate switched away.
+import { lazy, Suspense } from "react";
 import { presentSubmitResult, type SubmitTone } from "./submitVerdict";
 import type { EditorEvent, RunResult, SubmitResult } from "../types";
 
@@ -18,53 +21,53 @@ const SUBMIT_TONE_CLASSES: Record<SubmitTone, string> = {
 
 // Generic read-stdin/print-stdout scaffolds. Problem-specific starter code is
 // deliberately NOT a thing yet (see the S4 spec, OUT of scope).
-const STARTERS: Record<string, string> = {
+export const STARTERS: Record<string, string> = {
   python: "# Read from standard input, print the answer to standard output.\n",
   cpp: "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    // Read from stdin, print the answer to stdout.\n    return 0;\n}\n",
   java: "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        // Read from System.in, print the answer to System.out.\n    }\n}\n",
   javascript: "// Read from stdin, print the answer to stdout.\nconst input = require(\"fs\").readFileSync(0, \"utf8\");\n"
 };
 
-export function CodingWorkspace({ sessionId, problem }: {
-  sessionId: string;
-  problem: {
-    id: string; title: string; statement: string;
-    languages: readonly ("python"|"cpp"|"java"|"javascript")[];
-    sampleTests?: readonly { input: string; expected: string }[];
-  };
+export type PaneProblem = {
+  id: string; title: string; statement: string;
+  languages: readonly ("python"|"cpp"|"java"|"javascript")[];
+  sampleTests?: readonly { input: string; expected: string }[];
+};
+
+export function ProblemPane({
+  problem, language, code, run, submit, judgeError,
+  busyKind, anyBusy, busyNote,
+  runCooldownSeconds, submitCooldownSeconds,
+  attempts, submitBudget,
+  onLanguageChange, onCodeChange, onEvent, onRun, onSubmit
+}: {
+  problem: PaneProblem;
+  language: "python"|"cpp"|"java"|"javascript";
+  code: string;
+  run: RunResult | null;
+  submit: SubmitResult | null;
+  judgeError: string;
+  /** Exec in flight FOR THIS problem ("" when idle or busy elsewhere). */
+  busyKind: "" | "run" | "submit";
+  /** ANY exec in flight for this session — every exec button disables
+   * (mirrors the server's one-in-flight-per-session guard honestly). */
+  anyBusy: boolean;
+  /** "Running Q2…" note when the in-flight exec belongs to ANOTHER problem. */
+  busyNote: string;
+  /** Server-driven cooldown countdowns (0 = none) — spec §4.3. */
+  runCooldownSeconds: number;
+  submitCooldownSeconds: number;
+  attempts: number;
+  submitBudget: number | null;
+  onLanguageChange: (language: "python"|"cpp"|"java"|"javascript") => void;
+  onCodeChange: (code: string) => void;
+  onEvent: (e: EditorEvent) => void;
+  onRun: () => void;
+  onSubmit: () => void;
 }) {
-  const [language, setLanguage] = useState(problem.languages[0]);
-  const [code, setCode] = useState(STARTERS[language]);
-  const [run, setRun] = useState<RunResult | null>(null);
-  const [submit, setSubmit] = useState<SubmitResult | null>(null);
-  const [busy, setBusy] = useState<"" | "run" | "submit">("");
-  // M9: a failed Run/Submit must surface an inline error, cleared on next attempt.
-  const [judgeError, setJudgeError] = useState("");
-
-  const batcher = useMemo(() => new EventBatcher({
-    maxSize: 40, maxMs: 4000,
-    onFlush: (events: EditorEvent[]) => { void sendEditorEvents(sessionId, problem.id, events); }
-  }), [sessionId, problem.id]);
-  const lastCode = useRef(code);
-
-  const onEvent = (e: EditorEvent) => batcher.add(e);
-
-  const doRun = async () => {
-    setBusy("run"); setJudgeError(""); onEvent({ type: "code_run", timestamp: new Date().toISOString(), detail: { language } }); batcher.flush();
-    try {
-      const outcome = await runJudgeAttempt(() => execRun({ session_id: sessionId, problem_id: problem.id, language, source_code: code }));
-      if (outcome.ok) setRun(outcome.value);
-      else setJudgeError(outcome.error);
-    } finally { setBusy(""); }
-  };
-  const doSubmit = async () => {
-    setBusy("submit"); setJudgeError(""); onEvent({ type: "code_submit", timestamp: new Date().toISOString(), detail: { language } }); batcher.flush();
-    try {
-      const outcome = await runJudgeAttempt(() => execSubmit({ session_id: sessionId, problem_id: problem.id, language, source_code: code }));
-      if (outcome.ok) setSubmit(outcome.value);
-      else setJudgeError(outcome.error);
-    } finally { setBusy(""); }
-  };
+  const atCap = submitBudget !== null && attempts >= submitBudget;
+  const runLabel = busyKind === "run" ? "Running…" : runCooldownSeconds > 0 ? `Run (${runCooldownSeconds}s)` : "Run";
+  const submitLabel = busyKind === "submit" ? "Submitting…" : submitCooldownSeconds > 0 ? `Submit (${submitCooldownSeconds}s)` : "Submit";
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
@@ -86,21 +89,31 @@ export function CodingWorkspace({ sessionId, problem }: {
         ) : null}
       </section>
       <section className="space-y-3">
-        <div className="flex items-center gap-3">
-          <select value={language} onChange={(e) => { const l = e.target.value as typeof language; setLanguage(l); if (lastCode.current === STARTERS[language]) { setCode(STARTERS[l]); lastCode.current = STARTERS[l]; } }}
+        <div className="flex flex-wrap items-center gap-3">
+          <select value={language} onChange={(e) => onLanguageChange(e.target.value as "python"|"cpp"|"java"|"javascript")}
                   className="rounded-md border border-line px-2 py-1 text-sm">
             {problem.languages.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>
-          <button onClick={doRun} disabled={!!busy} className="rounded-md border border-line px-3 py-1.5 text-sm">{busy==="run"?"Running…":"Run"}</button>
-          <button onClick={doSubmit} disabled={!!busy} className="rounded-md bg-ink px-3 py-1.5 text-sm text-white">{busy==="submit"?"Submitting…":"Submit"}</button>
+          <button onClick={onRun} disabled={anyBusy || runCooldownSeconds > 0} className="rounded-md border border-line px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50">{runLabel}</button>
+          <button onClick={onSubmit} disabled={anyBusy || submitCooldownSeconds > 0 || atCap} className="rounded-md bg-ink px-3 py-1.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50">{submitLabel}</button>
+          {/* §4.3 attempts meter: live count vs the server's stored-submission budget. */}
+          {submitBudget !== null && attempts > 0 ? (
+            <span className="text-xs text-muted">Attempt {attempts} / {submitBudget}</span>
+          ) : null}
+          {busyNote ? <span className="text-xs text-muted">{busyNote}</span> : null}
         </div>
+        {atCap ? (
+          <div className="rounded-md border border-line bg-panel p-3 text-sm text-muted">
+            Submission limit reached for this problem — your best score so far is kept.
+          </div>
+        ) : null}
         {judgeError && (
           <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-700">
             {judgeError}
           </div>
         )}
         <Suspense fallback={<div className="text-sm text-muted">Loading editor…</div>}>
-          <MonacoEditor language={language} value={code} onChange={(v) => { setCode(v); lastCode.current = v; }} onEvent={onEvent} />
+          <MonacoEditor language={language} value={code} onChange={onCodeChange} onEvent={onEvent} />
         </Suspense>
         {run && (
           <div className="rounded-md border border-line bg-panel p-3 text-sm">
