@@ -83,6 +83,15 @@ export function selectionCounts(rows: ResultRow[]): Record<SelectionStatus, numb
   return counts;
 }
 
+// FIX-B3 #3: "Mark selection done" freezes each candidate's final-selection
+// snapshot, so it only makes sense once a FINAL decision exists for at least one
+// candidate. A final decision is a persisted "selected" OR "rejected" mark —
+// "shortlisted" is a working state, not a final verdict, and "none" is unset.
+// The disabled-button tooltip states exactly this precondition.
+export function canMarkSelectionDone(rows: ResultRow[]): boolean {
+  return rows.some((row) => row.selection_status === "selected" || row.selection_status === "rejected");
+}
+
 // Same column contract + injection guard as the backend buildResultsCsv (the
 // frontend exports what it renders; the backend path exists for API callers).
 export function buildResultsCsv(rows: ResultRow[], problems: ResultProblem[]): string {
