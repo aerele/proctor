@@ -181,6 +181,12 @@ test("invigilatorRoom: alert feed survives an all-archived first scan window", a
     start_at: "2026-01-01T00:00:00.000Z", end_at: "2099-01-01T00:00:00.000Z",
     contest_url: "", contest_slug: "", room_gate_enabled: false
   });
+  // Wave6: nothing is shared with invigilators by default — opt recording_stopped
+  // IN so the live alert reaches the feed and this test exercises the SCAN-WINDOW
+  // behavior (not the share filter).
+  firestore.collection(process.env.SETTINGS_COLLECTION).doc("alert_settings").set({
+    proctor: { recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: true } }
+  });
   seedArchivedPile(firestore);
   const liveId = seedLiveAlert(firestore);
 
