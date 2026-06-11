@@ -2,7 +2,7 @@
 // The Results tab has no jsdom render harness, so the table's filter + CSV
 // logic is extracted here and unit-tested directly (vision §2.14).
 import { describe, it, expect } from "vitest";
-import { filterResultRows, buildResultsCsv, selectionCounts, type ResultRow } from "./computeResults";
+import { filterResultRows, buildResultsCsv, selectionCounts, canMarkSelectionDone, type ResultRow } from "./computeResults";
 
 function row(over: Partial<ResultRow> = {}): ResultRow {
   return {
@@ -67,6 +67,25 @@ describe("filterResultRows", () => {
 describe("selectionCounts", () => {
   it("tallies every selection bucket including none", () => {
     expect(selectionCounts(ROWS)).toEqual({ none: 1, shortlisted: 1, selected: 1, rejected: 0 });
+  });
+});
+
+describe("canMarkSelectionDone", () => {
+  it("true when at least one row is persisted Selected", () => {
+    // ROWS has one 'selected' (c).
+    expect(canMarkSelectionDone(ROWS)).toBe(true);
+  });
+  it("true when at least one row is persisted Rejected", () => {
+    expect(canMarkSelectionDone([row({ selection_status: "rejected" })])).toBe(true);
+  });
+  it("false when no row has a final verdict (only none/shortlisted)", () => {
+    expect(canMarkSelectionDone([
+      row({ person_id: "x", selection_status: "none" }),
+      row({ person_id: "y", selection_status: "shortlisted" })
+    ])).toBe(false);
+  });
+  it("false for an empty result set", () => {
+    expect(canMarkSelectionDone([])).toBe(false);
   });
 });
 

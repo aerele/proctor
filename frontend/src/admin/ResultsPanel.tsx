@@ -11,7 +11,7 @@ import { AlertTriangle, Award, CheckCircle2, Download, Flag, RefreshCw, ShieldAl
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchContestResults, markSelectionDone, setContestSelection } from "../api";
 import {
-  buildResultsCsv, filterResultRows, selectionCounts,
+  buildResultsCsv, canMarkSelectionDone, filterResultRows, selectionCounts,
   type ContestResultsResponse, type ResultFilters, type ResultRow, type SelectionStatus
 } from "../results/computeResults";
 
@@ -151,7 +151,10 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
     URL.revokeObjectURL(url);
   };
 
-  const selectedScored = configured ? rows.filter((r) => r.selection_status === "selected").length : 0;
+  // FIX-B3 #3: gate "Mark selection done" on at least one persisted final
+  // verdict (Selected OR Rejected) — the precondition the disabled tooltip now
+  // states. "Shortlisted"/unset don't count as a final decision.
+  const canFinalizeSelection = configured && canMarkSelectionDone(rows);
 
   return (
     <section className="space-y-5">
@@ -262,9 +265,9 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
               <span className="ml-auto" />
               <button
                 className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-accent px-4 text-sm font-medium text-white disabled:opacity-50"
-                disabled={busy || selectedScored === 0}
+                disabled={busy || !canFinalizeSelection}
                 onClick={() => void onMarkSelectionDone()}
-                title={selectedScored === 0 ? "Select at least one candidate before marking selection done" : "Freeze snapshots + start the retention clock"}
+                title={!canFinalizeSelection ? "Mark at least one candidate Selected or Rejected first" : "Freeze snapshots + start the retention clock"}
               >
                 <CheckCircle2 size={14} /> Mark selection done
               </button>
