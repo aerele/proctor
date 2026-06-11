@@ -19,8 +19,9 @@ const SUBMIT_TONE_CLASSES: Record<SubmitTone, string> = {
   neutral: "border-line bg-panel text-muted"
 };
 
-// Generic read-stdin/print-stdout scaffolds. Problem-specific starter code is
-// deliberately NOT a thing yet (see the S4 spec, OUT of scope).
+// Generic read-stdin/print-stdout scaffolds — the FALLBACK when a problem ships
+// no per-language stub. F12.2 layers problem-specific stubs on top (see
+// starterFor); these stay the floor every problem inherits.
 export const STARTERS: Record<string, string> = {
   python: "# Read from standard input, print the answer to standard output.\n",
   cpp: "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    // Read from stdin, print the answer to stdout.\n    return 0;\n}\n",
@@ -28,11 +29,43 @@ export const STARTERS: Record<string, string> = {
   javascript: "// Read from stdin, print the answer to stdout.\nconst input = require(\"fs\").readFileSync(0, \"utf8\");\n"
 };
 
+export type StarterLanguage = "python"|"cpp"|"java"|"javascript";
+
 export type PaneProblem = {
   id: string; title: string; statement: string;
-  languages: readonly ("python"|"cpp"|"java"|"javascript")[];
+  languages: readonly StarterLanguage[];
   sampleTests?: readonly { input: string; expected: string }[];
+  /** F12.2: optional per-language starter stubs (author-supplied). */
+  stubs?: Partial<Record<StarterLanguage, string>>;
 };
+
+// F12.2: THE single source of truth for a candidate editor's initial code in a
+// given language. A problem-specific stub wins; otherwise fall back to the
+// generic STARTERS scaffold. ONE resolver used by BOTH the initial-code pick
+// and the untouched-swap-on-language-change check, so "is it untouched?" and
+// "what do we replace it with?" can never drift apart.
+export function starterFor(
+  problem: { stubs?: Partial<Record<StarterLanguage, string>> } | null | undefined,
+  language: StarterLanguage
+): string {
+  const stub = problem?.stubs?.[language];
+  return typeof stub === "string" ? stub : STARTERS[language];
+}
+
+// F12.2: the pure language-switch transition. The candidate's code is replaced
+// with the next language's starter ONLY when it is still the previous
+// language's untouched starter (so we never clobber real work). Both sides use
+// starterFor, so a problem's per-language stub is honored on each end. Returns
+// `null` when the code must be preserved (no replacement).
+export function nextCodeOnLanguageSwitch(
+  problem: { stubs?: Partial<Record<StarterLanguage, string>> } | null | undefined,
+  code: string,
+  prev: StarterLanguage,
+  next: StarterLanguage
+): string | null {
+  const untouched = code === starterFor(problem, prev);
+  return untouched ? starterFor(problem, next) : null;
+}
 
 export function ProblemPane({
   problem, language, code, run, submit, judgeError,

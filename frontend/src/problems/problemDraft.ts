@@ -19,9 +19,30 @@ export type ProblemDraft = {
   points: string;
   scoring: ProblemScoring;
   status: ProblemStatus;
+  /** F12.2: per-language starter stubs, kept as a full keyed map of raw
+   * <textarea> strings (blank = no stub for that language). Serialized to the
+   * doc with the blanks dropped. */
+  stubs: Record<ProblemLanguage, string>;
   sampleTests: ProblemTest[];
   hiddenTests: ProblemTest[];
 };
+
+function emptyStubs(): Record<ProblemLanguage, string> {
+  return { python: "", cpp: "", java: "", javascript: "" };
+}
+
+// F12.2: lift a doc's sparse stubs map into the full keyed draft map (missing
+// languages become blank textareas).
+function stubsFromDoc(stubs: ProblemDoc["stubs"]): Record<ProblemLanguage, string> {
+  const draft = emptyStubs();
+  if (stubs) {
+    for (const lang of PROBLEM_LANGUAGES) {
+      const value = stubs[lang];
+      if (typeof value === "string") draft[lang] = value;
+    }
+  }
+  return draft;
+}
 
 export function emptyProblemDraft(): ProblemDraft {
   return {
@@ -29,6 +50,7 @@ export function emptyProblemDraft(): ProblemDraft {
     languages: [...PROBLEM_LANGUAGES],
     cpuTimeLimit: "5", memoryLimit: "128000", points: "100",
     scoring: "per_test", status: "draft",
+    stubs: emptyStubs(),
     sampleTests: [{ input: "", expected: "" }],
     hiddenTests: [{ input: "", expected: "" }]
   };
@@ -40,9 +62,21 @@ export function draftFromDoc(doc: ProblemDoc): ProblemDraft {
     languages: [...doc.languages],
     cpuTimeLimit: String(doc.cpuTimeLimit), memoryLimit: String(doc.memoryLimit), points: String(doc.points),
     scoring: doc.scoring, status: doc.status,
+    stubs: stubsFromDoc(doc.stubs),
     sampleTests: doc.sampleTests.map((t) => ({ ...t })),
     hiddenTests: doc.hiddenTests.map((t) => ({ ...t }))
   };
+}
+
+// F12.2: collapse the full keyed draft map back to a sparse doc map — blank
+// stubs are dropped so a stub-less problem stays byte-identical (no `stubs`
+// field at all, mirroring the backend's empty-map-is-absent rule).
+export function stubsToDoc(stubs: Record<ProblemLanguage, string>): ProblemDoc["stubs"] {
+  const out: Partial<Record<ProblemLanguage, string>> = {};
+  for (const lang of PROBLEM_LANGUAGES) {
+    if (stubs[lang] !== "") out[lang] = stubs[lang];
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function validateTests(tests: ProblemTest[], max: number, label: string): string | null {
@@ -75,13 +109,17 @@ export function validateProblemDraft(d: ProblemDraft): string | null {
   return validateTests(d.hiddenTests, 50, "Hidden");
 }
 
-// Serialize a VALIDATED draft into the API payload.
+// Serialize a VALIDATED draft into the API payload. `stubs` is omitted entirely
+// when every language is blank (back-compat: a stub-less problem is identical
+// to today).
 export function draftToDoc(d: ProblemDraft): ProblemDoc {
+  const stubs = stubsToDoc(d.stubs);
   return {
     id: d.id, title: d.title.trim(), statement: d.statement,
     languages: [...d.languages],
     cpuTimeLimit: Number(d.cpuTimeLimit), memoryLimit: Number(d.memoryLimit), points: Number(d.points),
     scoring: d.scoring, status: d.status,
+    ...(stubs ? { stubs } : {}),
     sampleTests: d.sampleTests.map((t) => ({ ...t })),
     hiddenTests: d.hiddenTests.map((t) => ({ ...t }))
   };

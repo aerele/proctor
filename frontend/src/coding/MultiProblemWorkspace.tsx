@@ -26,7 +26,7 @@ import {
   showProblemSidebar,
   workspaceTotals
 } from "./problemSwitch";
-import { ProblemPane, STARTERS } from "./CodingWorkspace";
+import { ProblemPane, nextCodeOnLanguageSwitch, starterFor } from "./CodingWorkspace";
 import type { EditorEvent, ProblemSubmissionSummary, PublicProblem, RunResult, SubmitResult } from "../types";
 
 type Language = "python" | "cpp" | "java" | "javascript";
@@ -61,7 +61,9 @@ function initialPane(sessionId: string, problem: PublicProblem): PaneState {
   const language = (draft?.language as Language) ?? problem.languages[0];
   return {
     language,
-    code: draft?.code ?? STARTERS[language],
+    // F12.2: a saved draft still wins (resume precedence); else the problem's
+    // per-language stub, falling back to the generic STARTERS scaffold.
+    code: draft?.code ?? starterFor(problem, language),
     run: null,
     submit: null,
     judgeError: "",
@@ -150,9 +152,14 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   const onLanguageChange = (problemId: string, next: Language) => {
     const state = panesRef.current[problemId];
     if (!state) return;
-    // Today's only-replace-if-untouched starter rule, per problem.
-    const untouched = state.code === STARTERS[state.language];
-    updatePane(problemId, { language: next, ...(untouched ? { code: STARTERS[next] } : {}) });
+    // Only-replace-if-untouched starter rule, per problem. F12.2: the pure
+    // transition resolves BOTH the "is it untouched?" check and the replacement
+    // through starterFor, so a problem's per-language stub (or the generic
+    // fallback) is honored consistently — the two sides can never disagree
+    // about what "the starter" is for a language.
+    const problem = problems.find((p) => p.id === problemId) ?? activeProblem;
+    const replacement = nextCodeOnLanguageSwitch(problem, state.code, state.language, next);
+    updatePane(problemId, { language: next, ...(replacement !== null ? { code: replacement } : {}) });
     scheduleDraft(problemId);
   };
 

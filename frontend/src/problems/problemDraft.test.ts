@@ -42,4 +42,26 @@ describe("draft <-> doc round trip", () => {
   it("doc -> draft -> doc preserves every field", () => {
     expect(draftToDoc(draftFromDoc(DOC))).toEqual(DOC);
   });
+
+  // F12.2: a doc WITHOUT stubs round-trips with NO stubs key (byte-compat).
+  it("a stub-less doc gains no stubs field on round-trip", () => {
+    const out = draftToDoc(draftFromDoc(DOC));
+    expect("stubs" in out).toBe(false);
+  });
+
+  // F12.2: per-language stubs survive the round-trip; blank languages drop.
+  it("preserves authored stubs and drops blank-language stubs", () => {
+    const doc: ProblemDoc = { ...DOC, stubs: { python: "def solve():\n    pass\n", cpp: "int main(){}\n" } };
+    const draft = draftFromDoc(doc);
+    // The draft lifts to a FULL keyed map (java/javascript become blank).
+    expect(draft.stubs).toEqual({ python: "def solve():\n    pass\n", cpp: "int main(){}\n", java: "", javascript: "" });
+    // Serializing drops the blanks -> the original sparse map.
+    expect(draftToDoc(draft)).toEqual(doc);
+  });
+
+  it("an all-blank stub draft serializes to NO stubs field", () => {
+    const draft = { ...emptyProblemDraft(), id: "x", title: "T", statement: "S",
+      sampleTests: DOC.sampleTests, hiddenTests: DOC.hiddenTests };
+    expect("stubs" in draftToDoc(draft)).toBe(false);
+  });
 });

@@ -913,6 +913,10 @@ export type ProblemDoc = {
   status: ProblemStatus;
   /** S-I §1.2: bank tags (picker/filter chips). Absent on older backends. */
   tags?: string[];
+  /** F12.2: optional per-language starter-code stubs (author-supplied). Each
+   * value is the prefilled editor code for that language. Absent = generic
+   * STARTERS scaffold (back-compat with stub-less problems). */
+  stubs?: Partial<Record<ProblemLanguage, string>>;
   sampleTests: ProblemTest[];
   hiddenTests: ProblemTest[];
   created_at?: string;
@@ -946,6 +950,9 @@ export type PublicProblem = {
   cpuTimeLimit: number;
   memoryLimit: number;
   sampleTests: ProblemTest[];
+  /** F12.2: optional per-language starter-code stubs. Absent = fall back to the
+   * generic STARTERS scaffold (back-compat with stub-less problems). */
+  stubs?: Partial<Record<ProblemLanguage, string>>;
   /** S-I §3.4: position in the contest's ordered problems[] (absent on the
    * one-release legacy `problem` alias and on older backends). */
   order?: number;

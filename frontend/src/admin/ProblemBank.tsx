@@ -6,7 +6,7 @@ import { ClipboardList, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { deleteProblem, fetchProblemDetail, fetchProblems, fetchProctorSettings, saveProblem, saveProctorSettings } from "../api";
 import { draftFromDoc, draftToDoc, emptyProblemDraft, PROBLEM_LANGUAGES, validateProblemDraft, type ProblemDraft } from "../problems/problemDraft";
-import type { ProblemSummary, ProblemTest } from "../types";
+import type { ProblemLanguage, ProblemSummary, ProblemTest } from "../types";
 
 export function ProblemBankSection({ password }: { password: string }) {
   const [problems, setProblems] = useState<ProblemSummary[]>([]);
@@ -248,6 +248,7 @@ function ProblemEditor({ draft, editingExisting, saving, onChange, onSave, onCan
       </div>
       <TestsEditor label="Sample tests (shown to candidates, echoed by Run)" tests={draft.sampleTests} max={10} onChange={(tests) => set({ sampleTests: tests })} />
       <TestsEditor label="Hidden tests (graded on Submit — never shown)" tests={draft.hiddenTests} max={50} onChange={(tests) => set({ hiddenTests: tests })} />
+      <StubsEditor stubs={draft.stubs} languages={draft.languages} onChange={(stubs) => set({ stubs })} />
       <div className="flex gap-3">
         <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onSave} disabled={saving}>
           {saving ? "Saving…" : "Save problem"}
@@ -257,6 +258,46 @@ function ProblemEditor({ draft, editingExisting, saving, onChange, onSave, onCan
         </button>
       </div>
     </div>
+  );
+}
+
+// F12.2: per-language starter-code stubs — one optional monospace textarea per
+// language the problem supports. Tucked inside a collapsed <details> so it
+// stays unobtrusive in the existing authoring layout. Blank textareas serialize
+// away (no stub stored), so a problem with no stubs is byte-identical to today.
+function StubsEditor({ stubs, languages, onChange }: {
+  stubs: Record<ProblemLanguage, string>;
+  languages: ProblemLanguage[];
+  onChange: (stubs: Record<ProblemLanguage, string>) => void;
+}) {
+  // Show stub fields only for the languages this problem offers; preserve any
+  // stored stubs for now-unselected languages (they just don't render).
+  const shown = PROBLEM_LANGUAGES.filter((lang) => languages.includes(lang));
+  const filled = PROBLEM_LANGUAGES.filter((lang) => stubs[lang] !== "").length;
+  return (
+    <details className="rounded-md border border-line bg-white">
+      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium uppercase tracking-wide text-muted">
+        Starter stubs (optional, per language){filled ? ` · ${filled} set` : ""}
+      </summary>
+      <div className="space-y-3 px-3 pb-3">
+        <p className="text-xs text-muted">
+          Prefilled editor code the candidate starts from, per language. Leave blank to use the generic read-stdin / print-stdout scaffold.
+        </p>
+        {shown.length ? shown.map((lang) => (
+          <label key={lang} className="block">
+            <span className="text-xs font-medium text-muted">{lang}</span>
+            <textarea
+              className="focus-ring mt-1 w-full rounded-md border border-line bg-white px-2 py-1 font-mono text-xs"
+              rows={5}
+              spellCheck={false}
+              placeholder={`Starter code for ${lang} (optional)`}
+              value={stubs[lang]}
+              onChange={(e) => onChange({ ...stubs, [lang]: e.target.value })}
+            />
+          </label>
+        )) : <p className="text-xs text-muted">Select at least one language above to author its stub.</p>}
+      </div>
+    </details>
   );
 }
 

@@ -192,12 +192,42 @@ export function validateProblemInput(body) {
     }
   }
 
+  // F12.2: optional per-language STARTER STUBS. An object keyed by SUPPORTED
+  // language; each value is the prefilled starter code (a string). Absent is
+  // fine — a problem without stubs is byte-identical to today (the field is
+  // omitted, never stored as {}). A bad shape is a hard 400, not silent drop.
+  const stubsResult = cleanStubs(body?.stubs);
+  if (!stubsResult.ok) return stubsResult;
+
   return {
     ok: true,
     problem: {
       id, title, statement, languages,
       cpuTimeLimit, memoryLimit, points, scoring, status, tags,
-      sampleTests: samples.tests, hiddenTests: hidden.tests
+      sampleTests: samples.tests, hiddenTests: hidden.tests,
+      ...(stubsResult.stubs ? { stubs: stubsResult.stubs } : {})
     }
   };
+}
+
+// F12.2: validate + normalize the optional per-language stub map. Allow-listed
+// keys (subset of SUPPORTED_LANGUAGES), string values bounded by STATEMENT_MAX.
+// Returns {ok:true, stubs} where stubs is undefined when absent/empty (so the
+// field is omitted from storage and back-compat holds byte-for-byte), or a
+// fresh object built key-by-key (client input is never spread into storage).
+export function cleanStubs(raw) {
+  if (raw === undefined || raw === null) return { ok: true, stubs: undefined };
+  if (typeof raw !== "object" || Array.isArray(raw)) return invalid("stubs must be an object keyed by language");
+  const stubs = {};
+  for (const [language, value] of Object.entries(raw)) {
+    if (!SUPPORTED_LANGUAGES.includes(language)) return invalid(`stubs: unsupported language ${language}`);
+    if (typeof value !== "string") return invalid(`stubs.${language} must be a string`);
+    if (value.length > PROBLEM_BOUNDS.STATEMENT_MAX) {
+      return invalid(`stubs.${language}: max ${PROBLEM_BOUNDS.STATEMENT_MAX} chars`);
+    }
+    stubs[language] = value;
+  }
+  // An empty object carries no information — treat it as absent so a problem
+  // authored with an all-blank stub map stays back-compat (no `stubs` field).
+  return { ok: true, stubs: Object.keys(stubs).length ? stubs : undefined };
 }
