@@ -74,7 +74,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
-import { emptyPersonRosterState, evaluatePersonRosterUpload, type PersonRosterState } from "./roster/personRoster";
+import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type PersonRosterState } from "./roster/personRoster";
 import { normalizeCameraRecording } from "./cameraRecording";
 import { sessionStartPayload } from "./identity";
 import { resolveSavedEndAt } from "./examTime";
@@ -277,7 +277,7 @@ function demoCameraRecording() {
   return normalizeCameraRecording(getDemoSettings()?.camera_recording);
 }
 
-function demoSessionResponse(session: DemoSession, contestUrl: string): SessionStartResponse {
+function demoSessionResponse(session: DemoSession, contestUrl: string, contest?: ContestSummary | null): SessionStartResponse {
   return {
     session_id: session.session_id,
     status: session.status,
@@ -291,7 +291,11 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
     contest_url: contestUrl,
     // S3: mirror the backend startResponse — the candidate client needs the
     // gate flag to know whether to hold at the room-code screen (demo parity).
-    room_gate_enabled: getDemoSettings()?.room_gate_enabled === true,
+    // S-D: person-contest sessions read the gate flag from the CONTEST doc
+    // (backend startResponse parity: the contest owns its snapshot fields).
+    room_gate_enabled: contest && !contest.legacy
+      ? contest.room_gate_enabled === true
+      : getDemoSettings()?.room_gate_enabled === true,
     // F5.3/F5.5: enforcement knobs + exemptions + lock reason (backend parity).
     enforcement: demoEnforcement(),
     enforcement_exemptions: session.enforcement_exemptions ?? {},
@@ -311,14 +315,140 @@ function demoSessionResponse(session: DemoSession, contestUrl: string): SessionS
     },
     heartbeat_interval_seconds: 15,
     // S5: demo sessions read the exam end time from the demo settings store.
-    end_at: getDemoSettings()?.end_at || "",
+    // S-D: person-contest sessions read the exam end time from the CONTEST doc.
+    end_at: (contest && !contest.legacy ? contest.end_at : getDemoSettings()?.end_at) || "",
     server_now: new Date().toISOString()
   };
 }
 
-export async function startSession(form: StudentForm, existingSessionId?: string): Promise<SessionStartResponse> {
+// S-D demo parity for the PINNED person-contest start (backend
+// startPersonSession): contest window gates the start, the contest roster
+// resolves identity server-side (403 roster_id_required / not_on_roster,
+// 409 college_choices on genuine ambiguity, body.college picks), mapped
+// roster fields override typed ones, username_norm = "{college}~{id}".
+function demoPersonStart(
+  form: StudentForm,
+  contest: ContestSummary,
+  college: string | undefined,
+  existingSessionId?: string
+): SessionStartResponse {
+  if (contest.status !== "open") throw demoApiError(403, "contest_not_open");
+  if (!contest.start_at || !contest.end_at) {
+    throw demoApiError(403, "Proctoring is not configured yet. Ask the administrator to set the schedule.");
+  }
+  const now = Date.now();
+  if (now < Date.parse(contest.start_at)) throw demoApiError(403, "Proctoring has not started yet.");
+  if (now > Date.parse(contest.end_at)) throw demoApiError(403, "Proctoring has ended.");
+
+  const roster = getDemoPersonRoster(contest.slug);
+  let identity: {
+    username_norm: string;
+    candidate_id: string;
+    roster_unique_id: string;
+    name: string;
+  };
+  if (roster) {
+    const typed = (form.roster_unique_id || form.candidate_id).trim();
+    if (!typed) throw demoApiError(403, "roster_id_required");
+    const columns = roster.columns ?? [];
+    const mapping = roster.column_mapping ?? {};
+    const collegeColumn =
+      (roster.college_column && columns.includes(roster.college_column) && roster.college_column) ||
+      (mapping.college && columns.includes(mapping.college) && mapping.college) ||
+      columns.find((column) => column.toLowerCase() === "college") || "";
+    const matches = roster.rows.filter(
+      (row) => identityNorm(row[roster.unique_id_column] ?? "") === identityNorm(typed)
+    );
+    if (!matches.length) throw demoApiError(403, "not_on_roster");
+    // Group by college_norm — 2+ colleges is GENUINE ambiguity (vision §2.4).
+    const byCollege = new Map<string, Record<string, string>>();
+    for (const row of matches) {
+      const norm = identityNorm((row[collegeColumn] ?? "").trim());
+      if (!byCollege.has(norm)) byCollege.set(norm, row);
+    }
+    let chosenNorm = [...byCollege.keys()][0];
+    if (byCollege.size > 1) {
+      const picked = (college ?? "").trim().toLowerCase();
+      if (!picked || !byCollege.has(picked)) {
+        const known = getDemoPersonState().colleges;
+        throw demoApiError(409, "college_choices", {
+          college_choices: [...byCollege.keys()].map((norm) => ({
+            college_norm: norm,
+            name: known[norm] || (byCollege.get(norm)![collegeColumn] ?? norm),
+            college: byCollege.get(norm)![collegeColumn] ?? ""
+          }))
+        });
+      }
+      chosenNorm = picked;
+    }
+    const row = byCollege.get(chosenNorm)!;
+    const displayId = (row[roster.unique_id_column] ?? "").trim();
+    // A MAPPED field is authoritative even when blank (backend rule).
+    const mappedOrTyped = (field: "name") =>
+      mapping[field] ? (row[mapping[field]!] ?? "").trim() : form[field].trim();
+    identity = {
+      username_norm: `${chosenNorm}~${identityNorm(typed)}`,
+      candidate_id: displayId,
+      roster_unique_id: displayId,
+      name: mappedOrTyped("name")
+    };
+  } else {
+    // No-roster person contest (vision §2.4): typed id + name + email.
+    const typed = form.candidate_id.trim();
+    if (!form.name.trim() || !form.email.trim()) throw demoApiError(400, "name and email are required");
+    if (!typed) throw demoApiError(400, "candidate_id is required");
+    identity = {
+      username_norm: identityNorm(typed),
+      candidate_id: typed,
+      roster_unique_id: "",
+      name: form.name.trim()
+    };
+  }
+
+  // Replay + single-live-session reconciliation — same mechanics as the
+  // legacy demo branch, keyed on (username_norm, contest slug).
+  if (existingSessionId) {
+    const replay = readDemoSessions().find((item) => item.session_id === existingSessionId);
+    if (replay && replay.username_norm === identity.username_norm && replay.contest_slug === contest.slug) {
+      return demoSessionResponse(replay, "", contest);
+    }
+  }
+  const existingLive = readDemoSessions().find(
+    (item) => item.username_norm === identity.username_norm && item.contest_slug === contest.slug && item.status !== "ended"
+  );
+  const sessionId = crypto.randomUUID();
+  const session: DemoSession = {
+    session_id: sessionId,
+    status: existingLive ? "pending_approval" : "active",
+    hackerrank_username: identity.candidate_id,
+    username_norm: identity.username_norm,
+    name: identity.name,
+    roster_unique_id: identity.roster_unique_id,
+    room: form.room.trim(),
+    contest_slug: contest.slug,
+    storage_prefix: demoStoragePrefix(contest.slug, identity.username_norm, sessionId),
+    blocked_by_session_id: existingLive ? existingLive.session_id : null,
+    start_ip: "demo.local"
+  };
+  upsertDemoSession(session);
+  return demoSessionResponse(session, "", contest);
+}
+
+export async function startSession(
+  form: StudentForm,
+  existingSessionId?: string,
+  opts?: { contest?: string; college?: string }
+): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(250);
+    // S-D: a pinned NON-legacy contest takes the person-layer start; the
+    // pinned legacy contest (or no pin) keeps the legacy branch bit-for-bit
+    // (backend resolvePersonContestForStart parity).
+    if (opts?.contest) {
+      const pinned = demoContestsList().find((contest) => contest.slug === opts.contest);
+      if (!pinned) throw demoApiError(400, "unknown_contest");
+      if (!pinned.legacy) return demoPersonStart(form, pinned, opts.college, existingSessionId);
+    }
     const settings = getDemoSettings();
     // Phase 3: no passcode. Start is gated by configured-and-valid time window only.
     if (!settings?.start_at || !settings?.end_at) {
@@ -386,13 +516,23 @@ export async function startSession(form: StudentForm, existingSessionId?: string
 
   // S-A: dual-field body — candidate_id AND the frozen hackerrank_username
   // carry the same value (identity.ts) so the current backend is unchanged.
+  // S-D: a pinned contest rides as `contest` (routes person contests down the
+  // person-layer start) and a college pick resolves a 409 college_choices.
   return request<SessionStartResponse>("/api/session/start", {
     method: "POST",
-    body: JSON.stringify(sessionStartPayload(form, existingSessionId))
+    body: JSON.stringify({
+      ...sessionStartPayload(form, existingSessionId),
+      ...(opts?.contest ? { contest: opts.contest } : {}),
+      ...(opts?.college ? { college: opts.college } : {})
+    })
   });
 }
 
-export async function resumeSession(sessionId: string, candidateId?: string): Promise<SessionStartResponse> {
+export async function resumeSession(
+  sessionId: string,
+  candidateId?: string,
+  opts?: { contest?: string }
+): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(150);
     const session = readDemoSessions().find((item) => item.session_id === sessionId);
@@ -400,17 +540,28 @@ export async function resumeSession(sessionId: string, candidateId?: string): Pr
     if (candidateId && session.username_norm !== normalizeUsername(candidateId)) {
       throw new Error("Session not found");
     }
-    const contestUrl = getDemoSettings()?.contest_url || "";
-    return demoSessionResponse(session, contestUrl);
+    // S-D (F9 D8 parity): a contest-pinned resume only returns sessions of
+    // THAT contest — a token from another contest is indistinguishable from
+    // an unknown one.
+    if (opts?.contest && session.contest_slug !== opts.contest) {
+      throw demoApiError(404, "session_not_found");
+    }
+    const pinned = opts?.contest
+      ? demoContestsList().find((contest) => contest.slug === opts.contest) ?? null
+      : null;
+    const contestUrl = pinned && !pinned.legacy ? "" : getDemoSettings()?.contest_url || "";
+    return demoSessionResponse(session, contestUrl, pinned);
   }
 
   // S-A: when an identity value rides resume, send it dual-field (candidate_id
   // + the frozen hackerrank_username) — same contract as session/start.
+  // S-D: the pinned contest rides as `contest` (contest-pinned resume, F9 D8).
   return request<SessionStartResponse>("/api/session/resume", {
     method: "POST",
     body: JSON.stringify({
       session_id: sessionId,
-      ...(candidateId ? { candidate_id: candidateId, hackerrank_username: candidateId } : {})
+      ...(candidateId ? { candidate_id: candidateId, hackerrank_username: candidateId } : {}),
+      ...(opts?.contest ? { contest: opts.contest } : {})
     })
   });
 }
@@ -3098,6 +3249,7 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
         contest_slug: contest.slug,
         contest_name: contest.name,
         identity_label: contest.identity_label,
+        identity_mode: "legacy_username",
         roster_required: Boolean(roster),
         unique_id_label: roster?.unique_id_column ?? "",
         rooms: getDemoSettings()?.rooms ?? [],
@@ -3113,6 +3265,7 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
       contest_slug: contest.slug,
       contest_name: contest.name,
       identity_label: contest.identity_label,
+      identity_mode: "person",
       roster_required: Boolean(getDemoPersonRoster(contest.slug)),
       unique_id_label: contest.identity_label,
       rooms: contest.rooms,
@@ -3125,6 +3278,17 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
     };
   }
   return request<ContestExamConfig>(`/api/exam-config?contest=${encodeURIComponent(slug)}`, { method: "GET" });
+}
+
+// S-D candidate routing: does the LEGACY settings-driven exam exist? Decides
+// form-vs-landing for the NO-?contest= candidate URL. THROWS on failure — the
+// router fails OPEN to the legacy flow (candidateRouting.routeForNoParam).
+export async function fetchCandidateRoute(): Promise<{ legacy_configured: boolean }> {
+  if (demoMode) {
+    await wait(80);
+    return { legacy_configured: Boolean(getDemoSettings()) };
+  }
+  return request<{ legacy_configured: boolean }>("/api/candidate-route", { method: "GET" });
 }
 
 // ---- S-D: templates list (the create-from-template picker) -------------------
@@ -3204,14 +3368,37 @@ export const invigilatorPassword = import.meta.env.VITE_INVIGILATOR_PASSWORD ?? 
 export const invigilatorPasswordHash = (import.meta.env.VITE_INVIGILATOR_PASSWORD_HASH ?? "").trim().toLowerCase();
 const demoRoomGatesKey = "aerele-proctor-demo-room-gates";
 
-function assertDemoInvigilator(password: string) {
+// S-D (vision I1): resolve the OPTIONAL invigilator ?contest= in demo mode.
+// null = the legacy settings-driven portal (today's behavior, bit-for-bit).
+function demoInvigilatorContest(contest?: string): ContestSummary | null {
+  if (!contest) return null;
+  const hit = demoContestsList().find((item) => item.slug === contest);
+  if (!hit) throw demoApiError(400, "unknown_contest");
+  return hit;
+}
+
+// S-D parity with backend requireInvigilatorFor: the credential may be the
+// global invigilator password, the admin password, or — for a NAMED non-legacy
+// contest — that contest's own invigilator_key. A key never authenticates
+// another contest or the legacy (no-contest) portal.
+function assertDemoInvigilator(password: string, contest?: ContestSummary | null) {
   if (invigilatorPassword && password === invigilatorPassword) return;
   if (adminPassword && password === adminPassword) return;
+  if (contest && !contest.legacy && contest.invigilator_key && password === contest.invigilator_key) return;
   throw new Error("Invalid invigilator password.");
 }
 
 function invigilatorHeaders(password: string) {
   return { "x-invigilator-password": password };
+}
+
+// S-D: with a body/query contest the real backend scopes everything to it.
+function invigilatorContestQuery(contest?: string) {
+  return contest ? `&contest=${encodeURIComponent(contest)}` : "";
+}
+
+function invigilatorContestBody(contest?: string) {
+  return contest ? { contest } : {};
 }
 
 type DemoRoomGateStore = Record<string, RoomGate>;
@@ -3229,10 +3416,39 @@ function writeDemoRoomGates(store: DemoRoomGateStore) {
   window.localStorage.setItem(demoRoomGatesKey, JSON.stringify(store));
 }
 
-export async function fetchInvigilatorOverview(password: string): Promise<InvigilatorOverviewResponse> {
+// Backend gate docs are keyed gate:{contest}:{room}. The demo store mirrors
+// that for NON-legacy contests; the legacy portal keeps the historical bare
+// roomKey so existing demo state survives.
+function demoGateKey(contest: ContestSummary | null, roomKey: string): string {
+  return contest && !contest.legacy ? `${contest.slug}:${roomKey}` : roomKey;
+}
+
+// Is the room start gate enabled for this portal view? Contest mode reads the
+// CONTEST doc (S-I snapshot field); legacy reads the demo settings.
+function demoGateEnabled(contest: ContestSummary | null): boolean {
+  if (contest && !contest.legacy) return contest.room_gate_enabled === true;
+  return getDemoSettings()?.room_gate_enabled === true;
+}
+
+export async function fetchInvigilatorOverview(password: string, contest?: string): Promise<InvigilatorOverviewResponse> {
   if (demoMode) {
     await wait(120);
-    assertDemoInvigilator(password);
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
+    if (pinned && !pinned.legacy) {
+      // Backend parity: the CONFIGURED contest rooms union the rooms its
+      // sessions actually carry (demo person sessions live in localStorage).
+      const sessionRooms = readDemoSessions()
+        .filter((s) => s.contest_slug === pinned.slug)
+        .map((s) => String(s.room || "").trim())
+        .filter(Boolean);
+      return {
+        contest_slug: pinned.slug,
+        room_gate_enabled: pinned.room_gate_enabled === true,
+        rooms: [...new Set([...pinned.rooms, ...sessionRooms])].sort((a, b) => a.localeCompare(b)),
+        has_unassigned: false
+      };
+    }
     const rooms = [
       ...new Set(DEMO_ALL_SESSIONS.map((s) => String(s.room || "").trim()).filter(Boolean))
     ].sort((a, b) => a.localeCompare(b));
@@ -3243,27 +3459,74 @@ export async function fetchInvigilatorOverview(password: string): Promise<Invigi
       has_unassigned: false
     };
   }
-  return request<InvigilatorOverviewResponse>("/api/invigilator/overview", {
-    method: "GET",
-    headers: invigilatorHeaders(password)
-  });
+  return request<InvigilatorOverviewResponse>(
+    `/api/invigilator/overview${contest ? `?contest=${encodeURIComponent(contest)}` : ""}`,
+    { method: "GET", headers: invigilatorHeaders(password) }
+  );
 }
 
-export async function fetchInvigilatorRoom(password: string, room: string): Promise<InvigilatorRoomResponse> {
+export async function fetchInvigilatorRoom(password: string, room: string, contest?: string): Promise<InvigilatorRoomResponse> {
   if (demoMode) {
     await wait(120);
-    assertDemoInvigilator(password);
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
     const roomKey = roomKeyForLabel(room);
     const roomLabel = roomKey === "_" ? "" : room;
-    const docs = DEMO_ALL_SESSIONS.filter((s) => String(s.room || "") === roomLabel);
-    const gate = readDemoRoomGates()[roomKey] || null;
+    const personContest = pinned && !pinned.legacy ? pinned : null;
+    const gate = readDemoRoomGates()[demoGateKey(personContest, roomKey)] || null;
+    // S-D scoping: a pinned NON-legacy contest sees ITS OWN sessions — the
+    // person sessions this browser's demo candidate flow created — never the
+    // legacy demo population (and vice versa).
+    type DemoRoomDoc = {
+      session_id: string; status: ServerSessionStatus; name: string;
+      hackerrank_username: string; roll_number: string; roster_unique_id: string;
+      stale: boolean; exam_started_at: string | null;
+      enforcement_exemptions: EnforcementExemptions; locked_reason: string | null;
+      created_at: string;
+    };
+    const docs: DemoRoomDoc[] = personContest
+      ? readDemoSessions()
+          .filter((s) => s.contest_slug === personContest.slug && String(s.room || "") === roomLabel)
+          .map((s) => ({
+            session_id: s.session_id,
+            status: s.status,
+            name: s.name,
+            hackerrank_username: s.hackerrank_username,
+            roll_number: s.roster_unique_id,
+            roster_unique_id: s.roster_unique_id,
+            stale: false,
+            exam_started_at: s.exam_started_at ?? null,
+            enforcement_exemptions: { ...(s.enforcement_exemptions ?? {}) },
+            locked_reason: s.locked_reason ?? null,
+            created_at: new Date().toISOString()
+          }))
+      : DEMO_ALL_SESSIONS
+          .filter((s) => String(s.room || "") === roomLabel)
+          .map((s) => ({
+            // M13 parity: NO session_id leaves via the row projection below.
+            // Roll number / roster id mirror the session-card demo derivation
+            // (the demo roster's unique column IS the roll number).
+            session_id: s.session_id,
+            status: s.status,
+            name: s.name,
+            hackerrank_username: s.hackerrank_username,
+            roll_number: `R-${s.session_id.slice(-4).toUpperCase()}`,
+            roster_unique_id: `R-${s.session_id.slice(-4).toUpperCase()}`,
+            stale: s.status === "active" && s.stale === true,
+            exam_started_at: gate?.mode === "open" ? gate.opened_at ?? null : null,
+            enforcement_exemptions: { ...s.enforcement_exemptions },
+            // F5.6 wave-2 parity: demo convention treats a locked row as an
+            // enforcement lock (mirrors the demo sessions-list derivation).
+            locked_reason: s.status === "locked" ? "fullscreen_enforcement" : null,
+            created_at: s.created_at
+          }));
     const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, started: 0, total: 0 };
     for (const s of docs) {
       stats.total += 1;
-      if (gate?.mode === "open") stats.started += 1; // demo approximation
+      if (s.exam_started_at || gate?.mode === "open") stats.started += 1; // demo approximation
       if (s.status === "active") {
         stats.live += 1;
-        if (s.stale === true) stats.disconnected += 1;
+        if (s.stale) stats.disconnected += 1;
       } else if (s.status === "locked") stats.locked += 1;
       else if (s.status === "pending_approval") stats.pending_approval += 1;
       else if (s.status === "ended") stats.finished += 1;
@@ -3272,28 +3535,24 @@ export async function fetchInvigilatorRoom(password: string, room: string): Prom
       .slice()
       .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
       .map((s) => ({
-        // M13 parity: NO session_id on invigilator rows (it is the candidate's
-        // bearer token). Roll number / roster id mirror the session-card demo
-        // derivation (the demo roster's unique column IS the roll number).
         name: s.name,
         hackerrank_username: s.hackerrank_username,
-        roll_number: `R-${s.session_id.slice(-4).toUpperCase()}`,
-        roster_unique_id: `R-${s.session_id.slice(-4).toUpperCase()}`,
+        roll_number: s.roll_number,
+        roster_unique_id: s.roster_unique_id,
         status: s.status,
-        stale: s.status === "active" && s.stale === true,
-        exam_started_at: gate?.mode === "open" ? gate.opened_at : null,
+        stale: s.stale,
+        exam_started_at: s.exam_started_at,
         // F5.5: drives the room dashboard's per-student exemption toggles.
-        enforcement_exemptions: { ...s.enforcement_exemptions },
-        // F5.6 wave-2 parity: demo convention treats a locked row as an
-        // enforcement lock (mirrors the demo sessions-list derivation).
-        locked_reason: s.status === "locked" ? "fullscreen_enforcement" : null,
+        enforcement_exemptions: s.enforcement_exemptions,
+        locked_reason: s.locked_reason,
         created_at: s.created_at
       }));
     // F9.3 parity: honour show_to_invigilator per type (catalog-unknown types
     // fall back to severity — critical shown). M12/M13 parity: NO detail, NO
-    // session_id on the projected alert rows.
+    // session_id on the projected alert rows. The demo alert store belongs to
+    // the LEGACY population — a pinned contest's feed starts empty.
     const alertSettings = readDemoAlertSettings();
-    const alerts: InvigilatorAlert[] = readDemoAlerts()
+    const alerts: InvigilatorAlert[] = personContest ? [] : readDemoAlerts()
       .filter((a) => String(a.room || "") === roomLabel && !a.archived)
       .filter((a) => {
         const config = alertSettings.proctor[a.type];
@@ -3306,32 +3565,36 @@ export async function fetchInvigilatorRoom(password: string, room: string): Prom
         title: a.title, hackerrank_username: a.hackerrank_username
       }));
     return {
-      contest_slug: DEMO_CONTEST_SLUG,
+      contest_slug: personContest ? personContest.slug : DEMO_CONTEST_SLUG,
       room: roomLabel || null,
       room_key: roomKey,
-      room_gate_enabled: getDemoSettings()?.room_gate_enabled === true,
+      room_gate_enabled: demoGateEnabled(personContest),
       stats, sessions, gate, alerts,
       disconnected_staleness_ms: 45000
     };
   }
-  return request<InvigilatorRoomResponse>(`/api/invigilator/room?room=${encodeURIComponent(room)}`, {
-    method: "GET",
-    headers: invigilatorHeaders(password)
-  });
+  return request<InvigilatorRoomResponse>(
+    `/api/invigilator/room?room=${encodeURIComponent(room)}${invigilatorContestQuery(contest)}`,
+    { method: "GET", headers: invigilatorHeaders(password) }
+  );
 }
 
 export async function releaseRoomCode(
-  password: string, room: string, invigilatorName: string, regenerate = false
+  password: string, room: string, invigilatorName: string, regenerate = false, contest?: string
 ): Promise<RoomGateActionResponse> {
   if (demoMode) {
     await wait(150);
-    assertDemoInvigilator(password);
-    if (getDemoSettings()?.room_gate_enabled !== true) throw new Error("room_gate_disabled");
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
+    const personContest = pinned && !pinned.legacy ? pinned : null;
+    if (!demoGateEnabled(personContest)) throw new Error("room_gate_disabled");
     const store = readDemoRoomGates();
     const roomKey = roomKeyForLabel(room);
-    const existing = store[roomKey];
+    const storeKey = demoGateKey(personContest, roomKey);
+    const existing = store[storeKey];
+    const contestSlug = personContest ? personContest.slug : DEMO_CONTEST_SLUG;
     if (existing && existing.mode === "otp" && existing.otp && !regenerate) {
-      return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate: existing };
+      return { ok: true, contest_slug: contestSlug, gate: existing };
     }
     const now = new Date().toISOString();
     const gate: RoomGate = {
@@ -3349,25 +3612,28 @@ export async function releaseRoomCode(
       unlock_released_by: existing?.unlock_released_by ?? "",
       updated_at: now
     };
-    store[roomKey] = gate;
+    store[storeKey] = gate;
     writeDemoRoomGates(store);
-    return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate };
+    return { ok: true, contest_slug: contestSlug, gate };
   }
   return request<RoomGateActionResponse>("/api/invigilator/release-code", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...(regenerate ? { regenerate: true } : {}) })
+    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...(regenerate ? { regenerate: true } : {}), ...invigilatorContestBody(contest) })
   });
 }
 
-export async function openRoom(password: string, room: string, invigilatorName: string): Promise<RoomGateActionResponse> {
+export async function openRoom(password: string, room: string, invigilatorName: string, contest?: string): Promise<RoomGateActionResponse> {
   if (demoMode) {
     await wait(150);
-    assertDemoInvigilator(password);
-    if (getDemoSettings()?.room_gate_enabled !== true) throw new Error("room_gate_disabled");
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
+    const personContest = pinned && !pinned.legacy ? pinned : null;
+    if (!demoGateEnabled(personContest)) throw new Error("room_gate_disabled");
     const store = readDemoRoomGates();
     const roomKey = roomKeyForLabel(room);
-    const existing = store[roomKey];
+    const storeKey = demoGateKey(personContest, roomKey);
+    const existing = store[storeKey];
     const now = new Date().toISOString();
     const gate: RoomGate = {
       room: roomKey === "_" ? "" : room,
@@ -3384,14 +3650,14 @@ export async function openRoom(password: string, room: string, invigilatorName: 
       unlock_released_by: existing?.unlock_released_by ?? "",
       updated_at: now
     };
-    store[roomKey] = gate;
+    store[storeKey] = gate;
     writeDemoRoomGates(store);
-    return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate };
+    return { ok: true, contest_slug: personContest ? personContest.slug : DEMO_CONTEST_SLUG, gate };
   }
   return request<RoomGateActionResponse>("/api/invigilator/open-room", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, invigilator_name: invigilatorName })
+    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...invigilatorContestBody(contest) })
   });
 }
 
@@ -3402,16 +3668,20 @@ export async function openRoom(password: string, room: string, invigilatorName: 
 // this is the room proctor's only code path. Demo mode mirrors the backend
 // against the shared room-gate store.
 export async function releaseUnlockCode(
-  password: string, room: string, invigilatorName: string, regenerate = false
+  password: string, room: string, invigilatorName: string, regenerate = false, contest?: string
 ): Promise<RoomGateActionResponse> {
   if (demoMode) {
     await wait(150);
-    assertDemoInvigilator(password);
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
+    const personContest = pinned && !pinned.legacy ? pinned : null;
     const store = readDemoRoomGates();
     const roomKey = roomKeyForLabel(room);
-    const existing = store[roomKey];
+    const storeKey = demoGateKey(personContest, roomKey);
+    const existing = store[storeKey];
+    const contestSlug = personContest ? personContest.slug : DEMO_CONTEST_SLUG;
     if (existing?.unlock_otp && !regenerate) {
-      return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate: existing };
+      return { ok: true, contest_slug: contestSlug, gate: existing };
     }
     const now = new Date().toISOString();
     const gate: RoomGate = {
@@ -3429,14 +3699,14 @@ export async function releaseUnlockCode(
       unlock_released_by: invigilatorName,
       updated_at: now
     };
-    store[roomKey] = gate;
+    store[storeKey] = gate;
     writeDemoRoomGates(store);
-    return { ok: true, contest_slug: DEMO_CONTEST_SLUG, gate };
+    return { ok: true, contest_slug: contestSlug, gate };
   }
   return request<RoomGateActionResponse>("/api/invigilator/unlock-code", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...(regenerate ? { regenerate: true } : {}) })
+    body: JSON.stringify({ room, invigilator_name: invigilatorName, ...(regenerate ? { regenerate: true } : {}), ...invigilatorContestBody(contest) })
   });
 }
 
@@ -3446,12 +3716,24 @@ export async function releaseUnlockCode(
 // (not_enforcement_locked). Demo mode mutates the shared admin population row
 // (demo convention: a locked demo row is an enforcement lock).
 export async function invigilatorUnlock(
-  password: string, room: string, username: string
+  password: string, room: string, username: string, contest?: string
 ): Promise<{ ok: boolean; username: string; status: string }> {
   if (demoMode) {
     await wait(120);
-    assertDemoInvigilator(password);
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
     const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
+    if (pinned && !pinned.legacy) {
+      // Person sessions live in the localStorage demo store — release the
+      // newest locked one for this candidate display id in this room.
+      const locked = readDemoSessions()
+        .filter((s) => s.contest_slug === pinned.slug && String(s.room || "") === roomLabel)
+        .filter((s) => s.status === "locked" && (s.hackerrank_username === username || s.roster_unique_id === username));
+      if (!locked.length) throw demoApiError(404, "no_locked_session_in_room");
+      const session = locked[locked.length - 1];
+      upsertDemoSession({ ...session, status: "active", locked_reason: null });
+      return { ok: true, username: session.hackerrank_username, status: "active" };
+    }
     const usernameNorm = normalizeUsername(username);
     const locked = DEMO_ALL_SESSIONS
       .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status === "locked")
@@ -3465,7 +3747,7 @@ export async function invigilatorUnlock(
   return request<{ ok: boolean; username: string; status: string }>("/api/invigilator/unlock", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, username })
+    body: JSON.stringify({ room, username, ...invigilatorContestBody(contest) })
   });
 }
 
@@ -3477,12 +3759,24 @@ export async function invigilatorExempt(
   password: string,
   room: string,
   username: string,
-  exemptions: EnforcementExemptions
+  exemptions: EnforcementExemptions,
+  contest?: string
 ): Promise<{ ok: boolean; username: string; enforcement_exemptions: EnforcementExemptions }> {
   if (demoMode) {
     await wait(120);
-    assertDemoInvigilator(password);
+    const pinned = demoInvigilatorContest(contest);
+    assertDemoInvigilator(password, pinned);
     const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
+    if (pinned && !pinned.legacy) {
+      const live = readDemoSessions()
+        .filter((s) => s.contest_slug === pinned.slug && String(s.room || "") === roomLabel)
+        .filter((s) => s.status !== "ended" && (s.hackerrank_username === username || s.roster_unique_id === username));
+      if (!live.length) throw demoApiError(404, "no_live_session_in_room");
+      const session = live[live.length - 1];
+      const merged = { ...sanitizeDemoExemptions(session.enforcement_exemptions), ...sanitizeDemoExemptions(exemptions) };
+      upsertDemoSession({ ...session, enforcement_exemptions: merged });
+      return { ok: true, username: session.hackerrank_username, enforcement_exemptions: { ...merged } };
+    }
     const usernameNorm = normalizeUsername(username);
     const live = DEMO_ALL_SESSIONS
       .filter((row) => normalizeUsername(row.hackerrank_username) === usernameNorm && row.status !== "ended")
@@ -3496,7 +3790,7 @@ export async function invigilatorExempt(
   return request<{ ok: boolean; username: string; enforcement_exemptions: EnforcementExemptions }>("/api/invigilator/exempt", {
     method: "POST",
     headers: invigilatorHeaders(password),
-    body: JSON.stringify({ room, username, exemptions })
+    body: JSON.stringify({ room, username, exemptions, ...invigilatorContestBody(contest) })
   });
 }
 
@@ -3505,14 +3799,18 @@ export async function invigilatorExempt(
 export async function pollRoomGate(sessionId: string, code?: string): Promise<RoomGatePollResponse> {
   if (demoMode) {
     await wait(100);
-    const settings = getDemoSettings();
-    if (settings?.room_gate_enabled !== true) return { gate_enabled: false, exam_started: true };
     const session = readDemoSessions().find((item) => item.session_id === sessionId);
     if (!session) throw new Error("Session not found");
+    // S-D: a person-contest session reads the gate flag from ITS contest doc
+    // and its gate from the per-contest store (legacy keeps today's path).
+    const sessionContest = demoContestsList().find(
+      (item) => item.slug === session.contest_slug && !item.legacy
+    ) ?? null;
+    if (!demoGateEnabled(sessionContest)) return { gate_enabled: false, exam_started: true };
     if (session.exam_started_at) {
       return { gate_enabled: true, exam_started: true, exam_started_at: session.exam_started_at };
     }
-    const gate = readDemoRoomGates()[roomKeyForLabel(session.room)];
+    const gate = readDemoRoomGates()[demoGateKey(sessionContest, roomKeyForLabel(session.room))];
     const now = new Date().toISOString();
     if (gate?.mode === "open") {
       upsertDemoSession({ ...session, exam_started_at: now });

@@ -1084,8 +1084,21 @@ export type ContestExamConfig = ExamConfig & {
   contest_slug: string;
   contest_name: string;
   identity_label: string;
+  /**
+   * Forks the pinned candidate identity UX (S-D): "person" = typed id is
+   * resolved server-side at start (college picker on 409 college_choices);
+   * "legacy_username" = today's roster-lookup confirm flow.
+   */
+  identity_mode: "person" | "legacy_username";
   room_gate_enabled: boolean;
   start_at: string | null;
   end_at: string | null;
   server_now: string;
+};
+
+/** One 409 college_choices option from /api/session/start (person contests). */
+export type CollegeChoice = {
+  college_norm: string;
+  name: string;
+  college: string;
 };

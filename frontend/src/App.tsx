@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchContests, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
@@ -20,10 +20,11 @@ import { elapsedTimerActive, topBarVisible } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { allPermissionsGranted, initialPermissionChecklist, screenShareFailureMessage, screenStatusFromErrorKind, skipEntryClipboardRead, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
+import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ContestSummary, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, CollegeChoice, ContestExamConfig, ContestSummary, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
 import { buildCollegeResolutions } from "./roster/personRoster";
@@ -47,8 +48,6 @@ const ADMIN_POLL_INTERVAL_MS = 5000;
 // Read-only reference list — contest-eval alert types are configured in
 // monitoring/alert-config.json, NOT through this console.
 const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_paste", "first_attempt_solve", "tough_first_attempt"] as const;
-
-const sessionStorageKey = "aerele-proctor-session-id";
 
 const initialForm: StudentForm = {
   candidate_id: "",
@@ -78,14 +77,162 @@ export function App() {
   // S3: the invigilator portal lives on its own path, like /admin.
   if (window.location.pathname.startsWith("/invigilator")) return <InvigilatorApp />;
   const isAdmin = window.location.pathname.startsWith("/admin");
-  return isAdmin ? <AdminApp /> : <StudentApp />;
+  return isAdmin ? <AdminApp /> : <CandidateRouter />;
+}
+
+// S-D candidate routing (vision C1 + §10.3). ?contest=<slug> pins the student
+// app to that contest's exam-config; a present-but-bad param shows the
+// access-code landing page; an ABSENT param keeps today's legacy flow while
+// the legacy settings doc exists (the /api/candidate-route probe fails OPEN
+// to legacy so today's deployment can never strand on the code box).
+// Decisions are pure (shell/candidateRouting.ts); this component only fetches.
+function CandidateRouter() {
+  const slug = useMemo(() => contestParamOf(window.location.search), []);
+  const [route, setRoute] = useState<CandidateRoute | null>(null);
+  const [pinnedConfig, setPinnedConfig] = useState<ContestExamConfig | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (slug) {
+        try {
+          const config = await fetchContestExamConfig(slug);
+          if (cancelled) return;
+          setPinnedConfig(config);
+          setRoute(routeForPinnedOutcome(slug, { ok: true }));
+        } catch (cause) {
+          const error = cause as ApiError;
+          if (!cancelled) setRoute(routeForPinnedOutcome(slug, { ok: false, status: error?.status, code: error?.code }));
+        }
+        return;
+      }
+      try {
+        const probe = await fetchCandidateRoute();
+        if (!cancelled) setRoute(routeForNoParam({ ok: true, legacy_configured: probe.legacy_configured }));
+      } catch {
+        if (!cancelled) setRoute(routeForNoParam({ ok: false }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, retryNonce]);
+
+  if (!route) {
+    return (
+      <main className="flex min-h-screen items-center justify-center">
+        <p className="text-sm text-muted">Loading…</p>
+      </main>
+    );
+  }
+  if (route.kind === "landing") return <AccessCodeLanding notice={route.notice} />;
+  if (route.kind === "config_error") {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-4">
+        <section className="w-full max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
+          <AlertTriangle size={24} className="mx-auto text-warning" />
+          <h1 className="mt-3 text-lg font-semibold text-ink">Could not load this test</h1>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            The test link looks right, but the configuration could not be loaded. Check that you are online, then try again.
+          </p>
+          <button
+            className="focus-ring mt-4 inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white"
+            onClick={() => {
+              setRoute(null);
+              setRetryNonce((nonce) => nonce + 1);
+            }}
+          >
+            <RefreshCw size={16} /> Try again
+          </button>
+        </section>
+      </main>
+    );
+  }
+  if (route.kind === "contest" && pinnedConfig) {
+    return <StudentApp pinned={{ slug: route.slug, config: pinnedConfig }} />;
+  }
+  return <StudentApp pinned={null} />;
+}
+
+// S-D §10.3: the BARE access-code landing page — weak lab machines type a
+// 6-char code instead of a slug URL. Resolves via the public (rate-limited)
+// POST /api/access-code and redirects to the pinned ?contest= URL.
+function AccessCodeLanding(props: { notice: string }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (!accessCodeReady(code) || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const resolved = await resolveAccessCodeApi(code);
+      window.location.assign(contestUrlFor(resolved.slug));
+      // No setBusy(false): the page is navigating away.
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      setError(landingErrorMessage(apiError?.status, apiError?.code));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="flex min-h-screen items-center justify-center px-4">
+      <section className="w-full max-w-md rounded-lg border border-line bg-panel p-8 text-center shadow-subtle">
+        <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
+        <h1 className="mt-2 text-2xl font-semibold text-ink">Enter your test code</h1>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          Type the 6-character code your invigilator gave you.
+        </p>
+        {props.notice ? (
+          <p className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">{props.notice}</p>
+        ) : null}
+        <input
+          className="focus-ring mt-5 h-14 w-full rounded-md border border-line bg-white text-center font-mono text-3xl font-bold uppercase tracking-[0.35em] text-ink"
+          autoFocus
+          aria-label="Test code"
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={6}
+          value={code}
+          onChange={(event) => setCode(normalizeAccessCodeInput(event.target.value))}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void submit();
+          }}
+        />
+        <button
+          className="focus-ring mt-4 inline-flex h-11 w-full items-center justify-center rounded-md bg-ink text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!accessCodeReady(code) || busy}
+          onClick={() => void submit()}
+        >
+          {busy ? "Checking…" : "Continue"}
+        </button>
+        {error ? <p className="mt-3 text-sm font-medium text-danger">{error}</p> : null}
+      </section>
+    </main>
+  );
 }
 
 // Student gate state — the server-reported lifecycle status, separate from the
 // recorder UI status. "form" is the very first screen (no session yet).
 type StudentGate = "form" | "pending_approval" | "locked" | "ended" | "running";
 
-function StudentApp() {
+// S-D: the candidate app pinned to ONE contest by ?contest= (null = legacy).
+type PinnedContest = { slug: string; config: ContestExamConfig };
+
+function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
+  const pinnedSlug = pinned?.slug ?? "";
+  // Person contests take the person-layer start/resume (contest rides the
+  // body); a pinned LEGACY contest keeps the legacy wire calls untouched —
+  // legacy_empty_slug deployments stamp sessions contest_slug:"" so a pinned
+  // resume would 404 a perfectly valid token.
+  const personPinned = pinned?.config.identity_mode === "person";
+  // Per-contest resume token: person contests are keyed by slug so two browser
+  // tabs can run two contests; legacy keeps the historical bare key so
+  // already-deployed sessions survive this release.
+  const sessionKey = sessionStorageKeyFor(personPinned ? pinnedSlug : "");
   const [form, setForm] = useState<StudentForm>(initialForm);
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [gate, setGate] = useState<StudentGate>("form");
@@ -183,21 +330,23 @@ function StudentApp() {
 
   const rosterRequired = Boolean(examConfig?.roster_required);
   const rosterConfirmed = Boolean(form.roster_unique_id);
-  // S2: while a roster is required and unconfirmed, the details form stays
-  // hidden behind the identity-confirm step.
-  const rosterGateActive = rosterRequired && !rosterConfirmed;
+  // S-D: which identity form this candidate sees — legacy (lookup-confirm),
+  // person_roster (typed id resolved SERVER-side at start) or person_open
+  // (no-roster person contest: id + details). Pure (candidateRouting.ts).
+  const formMode = candidateFormMode(pinned?.config ?? null, rosterRequired);
+  // S2: while a LEGACY roster is required and unconfirmed, the details form
+  // stays hidden behind the identity-confirm step. Person contests have no
+  // lookup step — the server resolves the typed id at start.
+  const rosterGateActive = formMode === "legacy" && rosterRequired && !rosterConfirmed;
+  // S-C/S-D: a person-contest start can 409 with college_choices — the picker
+  // renders those choices and the pick rides the retried start as `college`.
+  const [collegeChoices, setCollegeChoices] = useState<CollegeChoice[] | null>(null);
+  const [collegeChoice, setCollegeChoice] = useState("");
 
-  const canStart = useMemo(() => {
-    return Boolean(
-      (!rosterRequired || form.roster_unique_id) &&
-      form.candidate_id.trim() &&
-      form.name.trim() &&
-      form.roll_number.trim() &&
-      form.email.trim() &&
-      form.room.trim() &&
-      form.consent_accepted
-    );
-  }, [form, rosterRequired]);
+  const canStart = useMemo(
+    () => candidateFormReady(formMode, form, rosterRequired) && (!collegeChoices || Boolean(collegeChoice)),
+    [form, rosterRequired, formMode, collegeChoices, collegeChoice]
+  );
 
   // S1 exam shell: EVERY proctor event (recorder onEvent + createUiEvent call
   // sites) already flows through this single funnel, so the shell taps it here
@@ -510,7 +659,7 @@ function StudentApp() {
   // details (Epic 2). Recording itself is not auto-restarted (getDisplayMedia
   // needs a fresh user gesture) — the student presses "Resume recording".
   useEffect(() => {
-    const stored = window.localStorage.getItem(sessionStorageKey);
+    const stored = window.localStorage.getItem(sessionKey);
     if (!stored) {
       setResuming(false);
       return;
@@ -518,18 +667,20 @@ function StudentApp() {
     let cancelled = false;
     void (async () => {
       try {
-        const session = await resumeSession(stored);
+        // S-D: person-contest resumes are CONTEST-PINNED (F9 D8) — a token
+        // from another contest is indistinguishable from an unknown one.
+        const session = await resumeSession(stored, undefined, personPinned ? { contest: pinnedSlug } : undefined);
         if (cancelled) return;
         const serverStatus = applyServerStatus(session);
         setStartIp(session.start_ip || "unavailable");
         setCurrentIp(session.start_ip || "unavailable");
         if (serverStatus === "ended") {
           setStatus("ended");
-          window.localStorage.removeItem(sessionStorageKey);
+          window.localStorage.removeItem(sessionKey);
         }
       } catch {
         // Unknown/expired token — drop it and fall back to the form.
-        window.localStorage.removeItem(sessionStorageKey);
+        window.localStorage.removeItem(sessionKey);
       } finally {
         if (!cancelled) setResuming(false);
       }
@@ -545,7 +696,14 @@ function StudentApp() {
   // at /api/session/start; a fetch failure only degrades the form UI.
   // F5.3: the same payload seeds the enforcement knobs pre-session (start/
   // resume + heartbeat overwrite them later).
+  // S-D: a PINNED contest already carries its exam-config (the router fetched
+  // it via ?contest=) — no second fetch, the contest doc is authoritative.
   useEffect(() => {
+    if (pinned) {
+      setExamConfig(pinned.config);
+      if (pinned.config.enforcement) setEnforcementPayload((current) => current ?? pinned.config.enforcement ?? null);
+      return;
+    }
     let cancelled = false;
     void fetchExamConfig().then((config) => {
       if (cancelled) return;
@@ -555,6 +713,7 @@ function StudentApp() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -829,7 +988,7 @@ function StudentApp() {
         if (serverStatus === "ended") {
           setStatus("ended");
           setGate("ended");
-          window.localStorage.removeItem(sessionStorageKey);
+          window.localStorage.removeItem(sessionKey);
         } else if (serverStatus === "locked") {
           setStatus("idle");
           setGate("locked");
@@ -945,16 +1104,24 @@ function StudentApp() {
     setStatus("starting");
     let session: SessionStartResponse;
     try {
-      session = await startSession({
-        ...form,
-        candidate_id: form.candidate_id.trim(),
-        name: form.name.trim(),
-        roll_number: form.roll_number.trim(),
-        email: form.email.trim(),
-        room: form.room.trim()
-      });
+      session = await startSession(
+        {
+          ...form,
+          candidate_id: form.candidate_id.trim(),
+          name: form.name.trim(),
+          roll_number: form.roll_number.trim(),
+          email: form.email.trim(),
+          room: form.room.trim()
+        },
+        undefined,
+        // S-D: a pinned PERSON contest rides the start body (server-side
+        // identity resolution); a college pick answers a 409 college_choices.
+        personPinned ? { contest: pinnedSlug, college: collegeChoice || undefined } : undefined
+      );
+      setCollegeChoices(null);
+      setCollegeChoice("");
       // Persist the token so a reload resumes the same session (Epic 2).
-      window.localStorage.setItem(sessionStorageKey, session.session_id);
+      window.localStorage.setItem(sessionKey, session.session_id);
       applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
@@ -965,10 +1132,22 @@ function StudentApp() {
     } catch (cause) {
       // Registration/gate failure (time window, roster, network, ...). Roster
       // codes get a specific human message; everything else stays generic.
-      const code = (cause as ApiError)?.code;
+      const apiError = cause as ApiError;
+      const code = apiError?.code;
+      // S-C/S-D: GENUINE ambiguity — the same id exists under two colleges.
+      // Render the picker; the next Start retries with the pick as `college`.
+      if (code === "college_choices" && Array.isArray(apiError.body?.college_choices)) {
+        setCollegeChoices(apiError.body.college_choices as CollegeChoice[]);
+        setCollegeChoice("");
+        setError("");
+        setStatus("idle");
+        return;
+      }
       setError(
         code === "not_on_roster" || code === "roster_id_required"
-          ? "Your ID was not matched on the student list. Use “Not you? Re-enter ID” to redo the identity step, or call an invigilator."
+          ? formMode === "person_roster"
+            ? `Your ${examConfig?.unique_id_label || "ID"} was not found on the list for this test. Check it and try again, or call an invigilator.`
+            : "Your ID was not matched on the student list. Use “Not you? Re-enter ID” to redo the identity step, or call an invigilator."
           : cause instanceof Error ? cause.message : String(cause)
       );
       setStatus("idle");
@@ -993,12 +1172,12 @@ function StudentApp() {
     setStatus("starting");
     let session: SessionStartResponse;
     try {
-      session = await resumeSession(sessionConfig.session_id);
+      session = await resumeSession(sessionConfig.session_id, undefined, personPinned ? { contest: pinnedSlug } : undefined);
       applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         setStatus("idle");
-        if (serverStatus === "ended") window.localStorage.removeItem(sessionStorageKey);
+        if (serverStatus === "ended") window.localStorage.removeItem(sessionKey);
         return;
       }
     } catch (cause) {
@@ -1029,12 +1208,12 @@ function StudentApp() {
     if (!sessionConfig) return;
     setError("");
     try {
-      const session = await resumeSession(sessionConfig.session_id);
+      const session = await resumeSession(sessionConfig.session_id, undefined, personPinned ? { contest: pinnedSlug } : undefined);
       applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus === "ended") {
         setStatus("ended");
-        window.localStorage.removeItem(sessionStorageKey);
+        window.localStorage.removeItem(sessionKey);
       }
       // Wave-3 walkthrough residue: a release back to ACTIVE must not carry a
       // red error line from the lock episode into the running view — the
@@ -1174,7 +1353,7 @@ function StudentApp() {
       if (sessionId) {
         await endSession({ sessionId, manifest: uploads, assuranceAccepted });
       }
-      window.localStorage.removeItem(sessionStorageKey);
+      window.localStorage.removeItem(sessionKey);
       setStatus("ended");
       setGate("ended");
       setEndRequested(false);
@@ -1204,7 +1383,7 @@ function StudentApp() {
       if (sessionId) {
         await endSession({ sessionId, manifest, assuranceAccepted });
       }
-      window.localStorage.removeItem(sessionStorageKey);
+      window.localStorage.removeItem(sessionKey);
       setEndFailed(false);
       setStatus("ended");
       setGate("ended");
@@ -1345,7 +1524,9 @@ function StudentApp() {
         <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+                Aerele Proctor{pinned ? ` — ${pinned.config.contest_name}` : ""}
+              </p>
               <h1 className="mt-2 text-2xl font-semibold text-ink">
                 {isFormStage ? "Register and start recording" : activeProblem ? "Proctored coding test" : "HackerRank companion recording"}
               </h1>
@@ -1362,7 +1543,10 @@ function StudentApp() {
 
           {isFormStage ? (
             <>
-              {rosterRequired ? (
+              {/* S2 (legacy contests only): the roster-lookup confirm flow.
+                  Person contests resolve the typed id SERVER-side at start —
+                  there is no public per-contest lookup endpoint by design. */}
+              {formMode === "legacy" && rosterRequired ? (
                 <IdentityLookupPanel
                   label={examConfig?.unique_id_label ?? ""}
                   value={uniqueIdInput}
@@ -1382,12 +1566,68 @@ function StudentApp() {
                 <>
                   <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
                   <div className="grid gap-4 md:grid-cols-2">
-                    <Field label="Candidate ID" value={form.candidate_id} disabled={rosterConfirmed && Boolean(candidateIdOf(rosterMatch))} onChange={(value) => setForm({ ...form, candidate_id: value })} />
-                    <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
-                    <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
-                    <Field label="Email" type="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
-                    <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                    {formMode === "person_roster" ? (
+                      <>
+                        {/* S-D label-driven identity (F9 §1.5): ONE typed id —
+                            the server resolves the rest from the contest
+                            roster at start (name/roll/email never typed). */}
+                        <Field
+                          label={examConfig?.unique_id_label || "Candidate ID"}
+                          value={form.roster_unique_id}
+                          onChange={(value) => setForm({ ...form, roster_unique_id: value, candidate_id: value })}
+                        />
+                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                      </>
+                    ) : formMode === "person_open" ? (
+                      <>
+                        {/* No-roster person contest (F9 §1.4): id + name +
+                            email — no separate roll field (the identity label
+                            is often "Roll Number" itself). */}
+                        <Field label={examConfig?.unique_id_label || "Candidate ID"} value={form.candidate_id} onChange={(value) => setForm({ ...form, candidate_id: value })} />
+                        <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+                        <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                      </>
+                    ) : (
+                      <>
+                        <Field label="Candidate ID" value={form.candidate_id} disabled={rosterConfirmed && Boolean(candidateIdOf(rosterMatch))} onChange={(value) => setForm({ ...form, candidate_id: value })} />
+                        <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
+                        <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
+                        <Field label="Email" type="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
+                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                      </>
+                    )}
                   </div>
+                  {formMode === "person_roster" ? (
+                    <p className="mt-2 text-xs text-muted">
+                      Your name and details come from the official list — type your {examConfig?.unique_id_label || "ID"} exactly as registered.
+                    </p>
+                  ) : null}
+
+                  {/* S-C/S-D: genuine ambiguity — the typed id exists under
+                      more than one college. The pick rides the retried start. */}
+                  {collegeChoices ? (
+                    <div className="mt-5 rounded-lg border border-warning/40 bg-warning/10 p-4">
+                      <p className="text-sm font-semibold text-ink">Select your college</p>
+                      <p className="mt-1 text-sm leading-6 text-muted">
+                        Your {examConfig?.unique_id_label || "ID"} is registered under more than one college. Pick yours, then press Start again.
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {collegeChoices.map((choice) => (
+                          <label key={choice.college_norm} className="flex items-center gap-3 rounded-md border border-line bg-white/60 px-3 py-2 text-sm">
+                            <input
+                              type="radio"
+                              name="college-choice"
+                              className="h-4 w-4 accent-accent"
+                              checked={collegeChoice === choice.college_norm}
+                              onChange={() => setCollegeChoice(choice.college_norm)}
+                            />
+                            <span className="font-medium text-ink">{choice.name || choice.college || choice.college_norm}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
                   <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
                     <input
