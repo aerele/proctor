@@ -285,6 +285,11 @@ test("no-roster person contest: person_id null, username_norm = identityNorm(can
   // id + name + email are required on the no-roster path (F9 §1.4).
   const noName = await call(startReq({ contest: contest.slug, candidate_id: "G2", email: "g@x.com", consent_accepted: true }));
   assert.equal(noName.statusCode, 400);
+
+  // F12 email-format gap: a typed-but-malformed email on the no-roster path is a 400.
+  const badEmail = await call(startReq({ contest: contest.slug, candidate_id: "G3", name: "Gee", email: "gee@nowhere", consent_accepted: true }));
+  assert.equal(badEmail.statusCode, 400);
+  assert.match(badEmail.body.error, /email/i);
 });
 
 test("H1 live-lock on person norms: same person same contest → pending; same roll different colleges → both active; same person two contests → both active", async () => {

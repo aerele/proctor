@@ -11,6 +11,7 @@ import {
   candidateFormReady,
   contestParamOf,
   contestUrlFor,
+  isCandidateEmailValid,
   landingErrorMessage,
   normalizeAccessCodeInput,
   routeForNoParam,
@@ -142,6 +143,12 @@ describe("candidateFormReady", () => {
     expect(candidateFormReady("legacy", { ...full, roll_number: " " }, false)).toBe(false);
   });
 
+  it("legacy: a malformed email blocks the button (F12 email-format gap)", () => {
+    expect(candidateFormReady("legacy", { ...full, email: "asha-at-example" }, false)).toBe(false);
+    expect(candidateFormReady("legacy", { ...full, email: "asha@example" }, false)).toBe(false);
+    expect(candidateFormReady("legacy", { ...full, email: "asha@example.com" }, false)).toBe(true);
+  });
+
   it("person_roster: typed id + room + consent — the roster supplies the rest server-side", () => {
     const minimal = { ...full, candidate_id: "", name: "", roll_number: "", email: "" };
     expect(candidateFormReady("person_roster", minimal, true)).toBe(true);
@@ -154,8 +161,33 @@ describe("candidateFormReady", () => {
     const noRoll = { ...full, roll_number: "", roster_unique_id: "" };
     expect(candidateFormReady("person_open", noRoll, false)).toBe(true);
     expect(candidateFormReady("person_open", { ...noRoll, email: "" }, false)).toBe(false);
+    expect(candidateFormReady("person_open", { ...noRoll, email: "asha@example" }, false)).toBe(false);
     expect(candidateFormReady("person_open", { ...noRoll, name: "" }, false)).toBe(false);
     expect(candidateFormReady("person_open", { ...noRoll, candidate_id: "" }, false)).toBe(false);
+  });
+
+  it("person_roster: email is roster-supplied, so its format never gates the button", () => {
+    // person_roster never types an email — a blank/garbage email must NOT block.
+    const minimal = { ...full, candidate_id: "", name: "", roll_number: "", email: "" };
+    expect(candidateFormReady("person_roster", minimal, true)).toBe(true);
+    expect(candidateFormReady("person_roster", { ...minimal, email: "not-an-email" }, true)).toBe(true);
+  });
+});
+
+describe("isCandidateEmailValid", () => {
+  it("accepts a permissive non-space@non-space.non-space shape", () => {
+    expect(isCandidateEmailValid("a@b.co")).toBe(true);
+    expect(isCandidateEmailValid("asha.k+tag@mail.example.com")).toBe(true);
+    expect(isCandidateEmailValid("  trim@me.io  ")).toBe(true);
+  });
+
+  it("rejects obvious typos (no @, no domain dot, spaces)", () => {
+    expect(isCandidateEmailValid("")).toBe(false);
+    expect(isCandidateEmailValid("plainstring")).toBe(false);
+    expect(isCandidateEmailValid("missing-at.example.com")).toBe(false);
+    expect(isCandidateEmailValid("nodot@example")).toBe(false);
+    expect(isCandidateEmailValid("has space@example.com")).toBe(false);
+    expect(isCandidateEmailValid("@example.com")).toBe(false);
   });
 });
 

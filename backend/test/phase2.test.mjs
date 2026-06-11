@@ -256,6 +256,26 @@ test("slug: valid contest_url → prefixed contest layout (full segment kept)", 
   assert.ok(res.body.storage_prefix.endsWith("/"));
 });
 
+test("start: a malformed candidate email → 400 (F12 email-format gap)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // No @, no domain dot, and an embedded space all fail the permissive gate.
+  for (const email of ["asha-at-example", "asha@example", "has space@example.com"]) {
+    const res = await start(firestore, storage, { email });
+    assert.equal(res.statusCode, 400, `expected 400 for ${email}`);
+    assert.match(res.body.error, /email/i);
+  }
+});
+
+test("start: a well-formed candidate email → 200 (gate is permissive, not RFC-strict)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, { email: "asha.k+tag@mail.example.co" });
+  assert.equal(res.statusCode, 200);
+});
+
 test("slug: empty contest_url → LEGACY layout, no contests// double slash", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
