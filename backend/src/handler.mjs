@@ -4045,6 +4045,18 @@ async function adminContestPurge(req) {
     return { ok: true, already_purged: true, contest: contest.slug };
   }
 
+  // EXPORT-IS-THE-RECOVERY-PATH (F9 D12): the gate proved a `last_export_at`
+  // stamp exists, but a stamp is not an artifact. The retention-sweep deletes
+  // export zips after 10 days WITHOUT clearing the stamp on a slow path, and a
+  // GCS lifecycle backstop can remove them at day 11 — so a stale stamp can
+  // outlive the only recovery archive for this IRREVERSIBLE purge. Re-verify the
+  // backing object still LIVES in GCS before deleting anything; if it is gone,
+  // refuse (the admin must re-export to restore a real recovery anchor).
+  const exportKey = contest.last_export?.gcs_key || "";
+  if (!(await exportObjectExists(exportKey))) {
+    throw httpError(400, "export_missing");
+  }
+
   const includeEvidence = body.include_evidence === true;
   const now = new Date().toISOString();
 
@@ -4077,9 +4089,25 @@ async function adminContestPurge(req) {
   // Write the tombstone audit row BEFORE deletion starts (F9 §3.2).
   await writeAudit({ action: "contest_purge_start", contest_slug: contest.slug, include_evidence: includeEvidence }, adminActor(req, body), now);
 
+  // CRASH BARRIER (F9 §3.2): persist the tombstone SCAFFOLD before any
+  // destructive delete. This stamps `purged_at`/`db_purged_at` (so a mid-purge
+  // crash — timeout/OOM/GCS throttle on a 50k-doc contest — lands on a
+  // tombstoned contest that the gate's idempotent re-purge picks up and
+  // finishes) and ALWAYS records `evidence_prefixes` up-front (so the later
+  // sweep can finish evidence cleanup even if the run dies before sessions are
+  // deleted, when the per-session prefixes would no longer be derivable). The
+  // counts and the evidence-handled stamp are filled in AFTER the deletes.
+  await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set({
+    db_purged_at: now,
+    purged_at: now,
+    evidence_prefixes: evidencePrefixes,
+    updated_at: now
+  }, { merge: true });
+
   // Evidence: if include_evidence, delete the GCS objects NOW via per-session
   // storage_prefix iteration (the only legacy-correct path; exports/ excluded).
-  // Otherwise persist the prefixes onto the tombstone for the later sweep (D13).
+  // Otherwise the prefixes already persisted on the scaffold drive the later
+  // sweep (D13).
   let evidenceDeleted = 0;
   if (includeEvidence) {
     for (const prefix of evidencePrefixes) {
@@ -4104,19 +4132,16 @@ async function adminContestPurge(req) {
   // Sessions LAST (so evidence-prefix capture above already happened).
   counts.sessions = await deleteDocsByIds(SESSION_COLLECTION, sessions);
 
-  // TOMBSTONE: kept contest doc + db_purged_at + counts + (if evidence retained)
-  // the prefix list the sweep will use.
+  // TOMBSTONE FINALIZE: record the removed counts and (when evidence was deleted
+  // inline) stamp evidence_purged_at + clear the now-consumed prefix list. The
+  // scaffold above already stamped db_purged_at/purged_at/evidence_prefixes.
   const tombstone = {
-    db_purged_at: now,
-    purged_at: now,
     purge_counts: counts,
-    updated_at: now
+    updated_at: new Date().toISOString()
   };
   if (includeEvidence) {
     tombstone.evidence_purged_at = now;
     tombstone.evidence_prefixes = null;
-  } else {
-    tombstone.evidence_prefixes = evidencePrefixes;
   }
   await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set(tombstone, { merge: true });
 
@@ -4136,6 +4161,27 @@ async function adminContestPurge(req) {
     evidence_retained: !includeEvidence,
     enrollments_retained: true
   };
+}
+
+// Does the export recovery archive still LIVE in GCS? The purge gate proves a
+// `last_export_at` stamp exists; this proves the artifact behind it does too
+// (the stamp can outlive the zip after the 10-day sweep / day-11 lifecycle
+// backstop). Lists the exact object key as a prefix — keys are unique zip names,
+// so a non-empty listing == the object exists. A blank key (legacy/garbage
+// stamp with no recorded path) is treated as MISSING — fail closed: an
+// irreversible purge must never proceed on an unverifiable recovery anchor.
+async function exportObjectExists(gcsKey) {
+  const key = String(gcsKey || "").trim();
+  if (!key) return false;
+  try {
+    const [files] = await bucket().getFiles({ prefix: key, maxResults: 1 });
+    return Array.isArray(files) && files.some((f) => f.name === key);
+  } catch (err) {
+    // A listing error is NOT proof of existence — fail closed (refuse the purge)
+    // so a transient GCS error can never green-light deleting the only backup.
+    console.error(`export existence check failed for ${key}: ${err?.message || err}`);
+    return false;
+  }
 }
 
 // Idempotent per-doc deletes for a list of {_id, ...} docs in a collection.
@@ -4189,6 +4235,7 @@ async function adminRetentionSweep(req) {
   // Export-zip retention (vision §10.4): list every exports/ object, delete the
   // ones older than 10 days. ONE bucket listing under the shared exports/ prefix.
   let exportsDeleted = 0;
+  const deletedExportKeys = new Set();
   try {
     const [files] = await bucket().getFiles({ prefix: "exports/" });
     const listed = files.map((file) => ({
@@ -4198,10 +4245,27 @@ async function adminRetentionSweep(req) {
     }));
     const expired = selectExpiredExports(listed, now);
     await mapWithConcurrency(expired, 20, async (item) => {
-      try { await item._file.delete(); exportsDeleted += 1; } catch { /* retried next sweep */ }
+      try { await item._file.delete(); exportsDeleted += 1; deletedExportKeys.add(item.name); } catch { /* retried next sweep */ }
     });
   } catch (err) {
     console.error(`export-zip sweep failed: ${err?.message || err}`);
+  }
+
+  // STAMP NEVER OUTLIVES ITS ARTIFACT (data-safety): when we delete the very zip
+  // a contest's `last_export` points at, clear that contest's export stamp so the
+  // purge gate can't later pass on a recovery anchor that no longer exists. The
+  // contests were already read for the evidence sweep above — no extra listing.
+  if (deletedExportKeys.size) {
+    for (const contest of contests) {
+      const key = contest?.last_export?.gcs_key;
+      if (key && deletedExportKeys.has(key)) {
+        await firestore.collection(CONTESTS_COLLECTION).doc(contest.slug).set({
+          last_export: null,
+          last_export_at: null,
+          updated_at: now
+        }, { merge: true }).catch(() => {});
+      }
+    }
   }
 
   await writeAudit({
