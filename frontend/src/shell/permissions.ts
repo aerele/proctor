@@ -98,12 +98,12 @@ export type ClipboardPrimerOutcome = "granted" | "denied" | "timeout";
 // resolves with `timeoutValue` once `timeoutMs` elapses with neither. Whichever
 // arm settles SECOND is ignored (a late settle can't flip an already-decided
 // race), so a slow clipboard read that resolves after the timeout is harmless.
-export function raceWithTimeout<T>(
+export function raceWithTimeout<T, Handle = ReturnType<typeof setTimeout>>(
   promise: Promise<T>,
   timeoutMs: number,
   timeoutValue: T,
-  setTimeoutFn: (cb: () => void, ms: number) => unknown = setTimeout,
-  clearTimeoutFn: (handle: unknown) => void = clearTimeout
+  setTimeoutFn: (cb: () => void, ms: number) => Handle = setTimeout as unknown as (cb: () => void, ms: number) => Handle,
+  clearTimeoutFn: (handle: Handle) => void = clearTimeout as unknown as (handle: Handle) => void
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let settled = false;
@@ -134,15 +134,15 @@ export function raceWithTimeout<T>(
 // it rejects (blocked), "timeout" if it neither resolves nor rejects in time.
 // The App maps BOTH "denied" and "timeout" to the non-blocking "denied" status,
 // so onboarding always proceeds. The read result TEXT is never inspected (M6).
-export async function primeClipboardWithTimeout(
+export async function primeClipboardWithTimeout<Handle = ReturnType<typeof setTimeout>>(
   readText: () => Promise<unknown>,
   timeoutMs: number = CLIPBOARD_PRIMER_TIMEOUT_MS,
-  setTimeoutFn?: (cb: () => void, ms: number) => unknown,
-  clearTimeoutFn?: (handle: unknown) => void
+  setTimeoutFn?: (cb: () => void, ms: number) => Handle,
+  clearTimeoutFn?: (handle: Handle) => void
 ): Promise<ClipboardPrimerOutcome> {
   const TIMED_OUT = "__clipboard_primer_timeout__";
   try {
-    const result = await raceWithTimeout<string>(
+    const result = await raceWithTimeout<string, Handle>(
       readText().then(() => "granted"),
       timeoutMs,
       TIMED_OUT,

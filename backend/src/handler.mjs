@@ -5251,6 +5251,15 @@ function isAlertShownToInvigilator(settings, alert) {
   return false;
 }
 
+// FIX-B3 #6: does ANY proctor alert type have show_to_invigilator on? Drives the
+// invigilator empty-feed copy: when nothing is shared, the empty alerts panel
+// says so explicitly ("No alert types are shared…") instead of a bare "No open
+// alerts" that reads as broken. Pure projection over the merged alert settings.
+function anyAlertSharedWithInvigilator(settings) {
+  const proctor = settings?.proctor || {};
+  return Object.values(proctor).some((entry) => entry && entry.show_to_invigilator === true);
+}
+
 // Recorder states that mean "not recording" for the heartbeat sure-shot.
 const STOPPED_RECORDING_STATES = new Set(["stopped", "inactive", "ended", "error"]);
 
@@ -6342,6 +6351,9 @@ async function invigilatorRoom(req) {
     sessions,
     gate,
     alerts,
+    // FIX-B3 #6: lets the portal tell "empty because nothing fired" apart from
+    // "empty because the admin shares no alert types with invigilators".
+    alerts_shared: anyAlertSharedWithInvigilator(alertSettings),
     disconnected_staleness_ms: DISCONNECTED_STALENESS_MS
   };
 }
