@@ -7,7 +7,8 @@
 // originating problem's state slot even when the candidate switched away.
 import { lazy, Suspense } from "react";
 import { presentSubmitResult, type SubmitTone } from "./submitVerdict";
-import type { EditorEvent, RunResult, SubmitResult } from "../types";
+import { StatementView } from "../problems/StatementView";
+import type { EditorEvent, RunResult, StatementFormat, SubmitResult } from "../types";
 
 const MonacoEditor = lazy(() => import("./MonacoEditor").then((m) => ({ default: m.MonacoEditor })));
 
@@ -33,6 +34,8 @@ export type StarterLanguage = "python"|"cpp"|"java"|"javascript";
 
 export type PaneProblem = {
   id: string; title: string; statement: string;
+  /** W6: statement render format — absent (older payloads) = plain. */
+  statement_format?: StatementFormat;
   languages: readonly StarterLanguage[];
   sampleTests?: readonly { input: string; expected: string }[];
   /** F12.2: optional per-language starter stubs (author-supplied). */
@@ -106,7 +109,9 @@ export function ProblemPane({
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
       <section className="rounded-lg border border-line bg-panel p-5">
         <h2 className="text-lg font-semibold">{problem.title}</h2>
-        <p className="mt-2 whitespace-pre-wrap text-sm text-muted">{problem.statement}</p>
+        {/* W6: the shared statement renderer — plain problems keep the exact
+            pre-W6 <p> path; markdown problems opt into react-markdown. */}
+        <StatementView statement={problem.statement} format={problem.statement_format} className="mt-2" />
         {problem.sampleTests?.length ? (
           <div className="mt-4 space-y-2">
             <div className="text-xs font-semibold uppercase tracking-wide text-muted">Sample tests</div>

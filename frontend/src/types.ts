@@ -944,12 +944,17 @@ export type ProblemLanguage = "python" | "cpp" | "java" | "javascript";
 export type ProblemTest = { input: string; expected: string };
 export type ProblemScoring = "per_test" | "all_or_nothing";
 export type ProblemStatus = "draft" | "published";
+/** W6: how the statement renders. Absent everywhere == "plain" (pre-W6 docs
+ * and payloads carry no field; "markdown" opts into the shared renderer). */
+export type StatementFormat = "plain" | "markdown";
 
 // Full authored problem (admin-only surfaces; includes hidden tests).
 export type ProblemDoc = {
   id: string;
   title: string;
   statement: string;
+  /** W6: statement render format. Stored only when "markdown"; absent = plain. */
+  statement_format?: StatementFormat;
   languages: ProblemLanguage[];
   cpuTimeLimit: number;
   memoryLimit: number;
@@ -990,6 +995,8 @@ export type PublicProblem = {
   id: string;
   title: string;
   statement: string;
+  /** W6: statement render format. Served only when "markdown"; absent = plain. */
+  statement_format?: StatementFormat;
   languages: ProblemLanguage[];
   points: number;
   cpuTimeLimit: number;

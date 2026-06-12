@@ -6,7 +6,8 @@ import { ClipboardList, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { deleteProblem, fetchContests, fetchProblemDetail, fetchProblems, fetchProctorSettings, saveProblem, saveProctorSettings } from "../api";
 import { draftFromDoc, draftToDoc, emptyProblemDraft, PROBLEM_LANGUAGES, validateProblemDraft, type ProblemDraft } from "../problems/problemDraft";
-import { liveContestsReferencingProblem, liveSaveConfirmMessage, shouldConfirmLiveSave } from "./saveGuard";
+import { StatementView } from "../problems/StatementView";
+import { liveContestsReferencingProblem, liveEditConfirmMessage, liveEditGuardFromError, liveEditRetryBody, liveSaveConfirmMessage, shouldConfirmLiveSave } from "./saveGuard";
 import type { ContestSummary, ProblemLanguage, ProblemSummary, ProblemTest } from "../types";
 
 export function ProblemBankSection({ password }: { password: string }) {
@@ -76,8 +77,24 @@ export function ProblemBankSection({ password }: { password: string }) {
     }
     setSaving(true);
     setError("");
+    const doc = draftToDoc(draft);
     try {
-      await saveProblem(password, draftToDoc(draft));
+      // W7 guard-aware save (ContestsPanel saveProblems pattern): hidden-test
+      // edits on a problem an OPEN contest references 409 with
+      // live_edit_confirmation_required until the body confirms with the
+      // problem id. Catch exactly THAT 409, confirm with the admin (naming the
+      // open contests the SERVER reported), and resend the same save with
+      // confirm_live_edit. Cancel leaves the editor untouched (no data loss);
+      // any other error — including a different failure on the resend — falls
+      // through to the normal error banner.
+      try {
+        await saveProblem(password, doc);
+      } catch (cause) {
+        const guard = liveEditGuardFromError(cause);
+        if (!guard) throw cause;
+        if (!window.confirm(liveEditConfirmMessage(doc.id, guard))) return;
+        await saveProblem(password, liveEditRetryBody(doc));
+      }
       setMessage(`Saved "${draft.id}".`);
       setDraft(null);
       await load();
@@ -215,10 +232,44 @@ function ProblemEditor({ draft, editingExisting, saving, onChange, onSave, onCan
           <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" value={draft.title} onChange={(e) => set({ title: e.target.value })} />
         </label>
       </div>
-      <label className="block">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted">Statement (plain text, shown pre-wrapped)</span>
-        <textarea className="focus-ring mt-1 w-full rounded-md border border-line bg-white px-3 py-2 text-sm" rows={8} value={draft.statement} onChange={(e) => set({ statement: e.target.value })} />
-      </label>
+      {/* W6: statement + format selector. Markdown adds a LIVE preview pane
+          rendered by the same StatementView the candidate workspace uses, so
+          what the author sees here is exactly what the candidate gets. */}
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted">
+            Statement {draft.statementFormat === "markdown" ? "(Markdown, rendered for candidates)" : "(plain text, shown pre-wrapped)"}
+          </span>
+          <label className="inline-flex items-center gap-2 text-xs text-muted">
+            Format
+            <select
+              className="focus-ring h-8 rounded-md border border-line bg-white px-2 text-xs"
+              value={draft.statementFormat}
+              onChange={(e) => set({ statementFormat: e.target.value as ProblemDraft["statementFormat"] })}
+            >
+              <option value="plain">Plain text</option>
+              <option value="markdown">Markdown</option>
+            </select>
+          </label>
+        </div>
+        <div className={`mt-1 grid gap-3 ${draft.statementFormat === "markdown" ? "md:grid-cols-2" : ""}`}>
+          <textarea
+            className={`focus-ring w-full rounded-md border border-line bg-white px-3 py-2 text-sm ${draft.statementFormat === "markdown" ? "font-mono text-xs" : ""}`}
+            rows={draft.statementFormat === "markdown" ? 14 : 8}
+            spellCheck={draft.statementFormat !== "markdown"}
+            value={draft.statement}
+            onChange={(e) => set({ statement: e.target.value })}
+          />
+          {draft.statementFormat === "markdown" ? (
+            <div className="min-w-0 rounded-md border border-line bg-paper px-3 py-2">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted">Preview (as the candidate sees it)</div>
+              {draft.statement.trim()
+                ? <StatementView statement={draft.statement} format="markdown" />
+                : <p className="text-xs italic text-muted">Type Markdown on the left to preview it here.</p>}
+            </div>
+          ) : null}
+        </div>
+      </div>
       <div className="flex flex-wrap items-end gap-4">
         <div>
           <span className="text-xs font-medium uppercase tracking-wide text-muted">Languages</span>

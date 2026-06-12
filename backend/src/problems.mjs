@@ -33,6 +33,11 @@ export const PROBLEM_BOUNDS = {
 
 const SCORING_MODES = ["per_test", "all_or_nothing"];
 const PROBLEM_STATUSES = ["draft", "published"];
+// W6: how the statement is RENDERED on the candidate side. "plain" (default)
+// keeps today's pre-wrapped text path; "markdown" opts the problem into the
+// shared markdown renderer. Stored ONLY when markdown so plain problems stay
+// byte-identical to pre-W6 docs (absent field == plain everywhere).
+export const STATEMENT_FORMATS = ["plain", "markdown"];
 
 // Slice 1's config problem, now in the seed-bank shape (status/points/scoring
 // added). A Firestore doc with the same id SHADOWS this seed entirely.
@@ -148,6 +153,14 @@ export function validateProblemInput(body) {
   if (!statement.trim()) return invalid("statement is required");
   if (statement.length > PROBLEM_BOUNDS.STATEMENT_MAX) return invalid(`statement: max ${PROBLEM_BOUNDS.STATEMENT_MAX} chars`);
 
+  // W6: optional statement_format. Absent/"plain" -> the field is OMITTED from
+  // storage (back-compat byte-for-byte); "markdown" is stored; anything else
+  // is a hard 400 (never silently coerced).
+  const statementFormat = body?.statement_format === undefined ? "plain" : String(body.statement_format);
+  if (!STATEMENT_FORMATS.includes(statementFormat)) {
+    return invalid(`statement_format must be one of ${STATEMENT_FORMATS.join(", ")}`);
+  }
+
   const rawLanguages = Array.isArray(body?.languages) ? body.languages.map(String) : [];
   const languages = [...new Set(rawLanguages)];
   if (!languages.length) return invalid("languages must be a non-empty array");
@@ -205,7 +218,9 @@ export function validateProblemInput(body) {
       id, title, statement, languages,
       cpuTimeLimit, memoryLimit, points, scoring, status, tags,
       sampleTests: samples.tests, hiddenTests: hidden.tests,
-      ...(stubsResult.stubs ? { stubs: stubsResult.stubs } : {})
+      ...(stubsResult.stubs ? { stubs: stubsResult.stubs } : {}),
+      // W6: stored only when markdown — plain problems keep the pre-W6 shape.
+      ...(statementFormat === "markdown" ? { statement_format: "markdown" } : {})
     }
   };
 }

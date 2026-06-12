@@ -940,6 +940,9 @@ async function contestProblemsPublic(contestOrSettings) {
       id: problem.id,
       title: problem.title,
       statement: problem.statement,
+      // W6: the statement's render format rides ONLY when markdown — plain
+      // problems (and every pre-W6 doc) keep today's payload byte-for-byte.
+      ...(problem.statement_format === "markdown" ? { statement_format: "markdown" } : {}),
       languages: intersected.length ? intersected : ownLanguages,
       points: effectivePoints(entry, problem),
       cpuTimeLimit: problem.cpuTimeLimit,

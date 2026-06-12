@@ -2,7 +2,7 @@
 // Pure form-state logic for the admin problem editor: draft <-> doc mapping and
 // client-side validation MIRRORING backend validateProblemInput bounds (the
 // backend stays the authority). No React; vitest-covered.
-import type { ProblemDoc, ProblemLanguage, ProblemScoring, ProblemStatus, ProblemTest } from "../types";
+import type { ProblemDoc, ProblemLanguage, ProblemScoring, ProblemStatus, ProblemTest, StatementFormat } from "../types";
 
 export const PROBLEM_LANGUAGES: ProblemLanguage[] = ["python", "cpp", "java", "javascript"];
 export const PROBLEM_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -13,6 +13,9 @@ export type ProblemDraft = {
   id: string;
   title: string;
   statement: string;
+  /** W6: statement render format — "plain" (default) or "markdown". Serialized
+   * to the doc ONLY when markdown (absent field == plain, back-compat). */
+  statementFormat: StatementFormat;
   languages: ProblemLanguage[];
   cpuTimeLimit: string;
   memoryLimit: string;
@@ -46,7 +49,7 @@ function stubsFromDoc(stubs: ProblemDoc["stubs"]): Record<ProblemLanguage, strin
 
 export function emptyProblemDraft(): ProblemDraft {
   return {
-    id: "", title: "", statement: "",
+    id: "", title: "", statement: "", statementFormat: "plain",
     languages: [...PROBLEM_LANGUAGES],
     cpuTimeLimit: "5", memoryLimit: "128000", points: "100",
     scoring: "per_test", status: "draft",
@@ -59,6 +62,8 @@ export function emptyProblemDraft(): ProblemDraft {
 export function draftFromDoc(doc: ProblemDoc): ProblemDraft {
   return {
     id: doc.id, title: doc.title, statement: doc.statement,
+    // W6: docs without the field (every pre-W6 problem) edit as plain.
+    statementFormat: doc.statement_format === "markdown" ? "markdown" : "plain",
     languages: [...doc.languages],
     cpuTimeLimit: String(doc.cpuTimeLimit), memoryLimit: String(doc.memoryLimit), points: String(doc.points),
     scoring: doc.scoring, status: doc.status,
@@ -120,6 +125,8 @@ export function draftToDoc(d: ProblemDraft): ProblemDoc {
     cpuTimeLimit: Number(d.cpuTimeLimit), memoryLimit: Number(d.memoryLimit), points: Number(d.points),
     scoring: d.scoring, status: d.status,
     ...(stubs ? { stubs } : {}),
+    // W6: omit when plain — mirrors the backend's absent-field == plain rule.
+    ...(d.statementFormat === "markdown" ? { statement_format: "markdown" as const } : {}),
     sampleTests: d.sampleTests.map((t) => ({ ...t })),
     hiddenTests: d.hiddenTests.map((t) => ({ ...t }))
   };
