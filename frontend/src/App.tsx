@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { adjustContestExamTime, adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
@@ -275,8 +275,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // Mirror for the attachCameraVideo callback ref (same pattern as statusRef).
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
-  const [pipAvailable, setPipAvailable] = useState(false);
-  const [pipMessage, setPipMessage] = useState("");
   // W1: exam-view chrome state — the collapsible proctoring panel (its panels
   // stay MOUNTED when collapsed; the collapse is CSS-only) and the floating
   // camera dock's minimized state (the <video> host stays mounted in both).
@@ -917,7 +915,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     const video = cameraVideoRef.current;
     if (!video) return;
     video.srcObject = cameraStream;
-    setPipAvailable(Boolean(cameraStream && "requestPictureInPicture" in HTMLVideoElement.prototype));
     if (cameraStream) {
       void video.play().catch(() => undefined);
     }
@@ -955,25 +952,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       }
     };
   }, []);
-
-  const requestCameraPictureInPicture = async () => {
-    const video = cameraVideoRef.current;
-    if (!video || !("requestPictureInPicture" in video)) {
-      setPipMessage("Camera pop-out is not supported in this browser.");
-      return;
-    }
-    try {
-      await video.play();
-      if (document.pictureInPictureElement !== video) {
-        await video.requestPictureInPicture();
-      }
-      setPipMessage("Camera pop-out is active. Keep it visible while working in other tabs.");
-      addEvent(createUiEvent("camera_picture_in_picture_started"));
-    } catch (cause) {
-      setPipMessage("Use the camera pop-out button to keep your camera visible over other tabs.");
-      addEvent(createUiEvent("camera_picture_in_picture_failed", { message: cause instanceof Error ? cause.message : String(cause) }));
-    }
-  };
 
   // S5: apply a server-reported exam end time + clock stamp. Announces a
   // mid-exam change (extended/shortened) exactly once per change; the notice
@@ -1121,9 +1099,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         const video = cameraVideoRef.current;
         if (video) {
           video.srcObject = stream;
-          if (stream) {
-            setPipAvailable("requestPictureInPicture" in HTMLVideoElement.prototype);
-          }
         }
       }
     });
@@ -1688,9 +1663,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           cameraRecorded={cameraRecordingOn}
           collapsed={cameraDockCollapsed}
           onToggle={() => setCameraDockCollapsed((collapsed) => !collapsed)}
-          onPopOut={requestCameraPictureInPicture}
-          pipAvailable={pipAvailable}
-          pipMessage={pipMessage}
         />
       </Shell>
     );
@@ -1894,11 +1866,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                 <MonitorUp size={16} /> {status === "starting" ? "Resuming…" : "Resume recording"}
               </button>
             ) : null}
-            {status === "recording" && pipAvailable ? (
-              <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium" onClick={requestCameraPictureInPicture}>
-                <PictureInPicture2 size={16} /> Camera pop-out
-              </button>
-            ) : null}
             {/* Legacy external-contest fallback: shown ONLY when no SERVER
                 problem is assigned. With a problem assigned the own-editor
                 CodingWorkspace below replaces this link entirely. */}
@@ -1939,7 +1906,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             <WhatIsRecordedPanel hasProblem={ownEditorCopy} />
           ) : (
             <>
-              <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
+              <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} />
               <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
               <RulesPanel hasProblem={ownEditorCopy} />
@@ -6141,7 +6108,7 @@ function StatusPill({ status }: { status: SessionStatus }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase ${styles[status]}`}>{status}</span>;
 }
 
-function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, onPopOut, pipAvailable }: { videoRef: React.Ref<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean; pipMessage: string; onPopOut: () => void; pipAvailable: boolean }) {
+function CameraSelfView({ videoRef, mediaCapture, cameraRecorded }: { videoRef: React.Ref<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean }) {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -6158,10 +6125,7 @@ function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, on
         <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50" onClick={onPopOut} disabled={!pipAvailable}>
-          <PictureInPicture2 size={14} /> Pop out
-        </button>
-        <span className="text-xs leading-5 text-muted">{pipMessage || (mediaCapture.camera === "unavailable" ? "No camera was detected. Screen recording continues." : "The camera preview stays here and can pop out over other tabs in supported browsers.")}</span>
+        <span className="text-xs leading-5 text-muted">{mediaCapture.camera === "unavailable" ? "No camera was detected. Screen recording continues." : "The camera preview stays here while you work."}</span>
       </div>
     </section>
   );
@@ -6172,15 +6136,12 @@ function CameraSelfView({ videoRef, mediaCapture, cameraRecorded, pipMessage, on
 // stealing layout space. The <video> host stays MOUNTED in BOTH visual states
 // (minimize is CSS-only) — the camera CAPTURE itself lives in the recorder and
 // never depends on this preview.
-function CameraDock({ videoRef, mediaCapture, cameraRecorded, collapsed, onToggle, onPopOut, pipAvailable, pipMessage }: {
+function CameraDock({ videoRef, mediaCapture, cameraRecorded, collapsed, onToggle }: {
   videoRef: React.Ref<HTMLVideoElement>;
   mediaCapture: MediaCaptureState;
   cameraRecorded: boolean;
   collapsed: boolean;
   onToggle: () => void;
-  onPopOut: () => void;
-  pipAvailable: boolean;
-  pipMessage: string;
 }) {
   const stateLabel = studentCopy.cameraStateLabel(mediaCapture.camera, cameraRecorded);
   return (
@@ -6191,16 +6152,12 @@ function CameraDock({ videoRef, mediaCapture, cameraRecorded, collapsed, onToggl
             <Camera size={12} className="shrink-0" /> <span className="truncate">Camera · {stateLabel}</span>
           </span>
           <span className="flex shrink-0 items-center gap-0.5">
-            <button title="Pop out over other windows" className="focus-ring rounded p-1 text-white/70 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40" disabled={!pipAvailable} onClick={onPopOut}>
-              <PictureInPicture2 size={12} />
-            </button>
             <button title="Minimize camera tile" className="focus-ring rounded p-1 text-white/70 hover:bg-white/10" onClick={onToggle}>
               <ChevronDown size={14} />
             </button>
           </span>
         </div>
         <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
-        {pipMessage ? <p className="px-2.5 py-1.5 text-[10px] leading-4 text-white/60">{pipMessage}</p> : null}
       </div>
       {collapsed ? (
         <button onClick={onToggle} className="focus-ring flex items-center gap-2 rounded-full bg-ink px-3 py-2 text-xs font-medium text-white shadow-subtle">
