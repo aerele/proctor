@@ -2335,6 +2335,9 @@ async function instantiateTemplatePayload(body) {
     problems: entries.map((entry) => ({ ...entry })), // the contest's own copy
     template_slug: template.slug,                      // display-only provenance
     identity_label: pick(body.identity_label, defaults.identity_label),
+    // Dress-rehearsal finding (2026-06-12): rooms was silently DROPPED on
+    // template-instantiate while direct creates accept it — forward it.
+    rooms: body.rooms,
     room_gate_enabled: pick(body.room_gate_enabled, defaults.room_gate_enabled),
     camera_recording: pick(body.camera_recording, defaults.camera_recording),
     screen_markers: pick(body.screen_markers, defaults.screen_markers),
