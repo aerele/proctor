@@ -1,0 +1,340 @@
+{
+  "problems": [
+    {
+      "id": "challenge-1-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-2-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-3-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-4-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-5-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-6-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-7-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-8-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "challenge-9-aerele",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "weather-observation-station-5",
+      "samples": 1,
+      "hidden": 5,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "occupations",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    },
+    {
+      "id": "15-days-of-learning-sql",
+      "samples": 1,
+      "hidden": 4,
+      "checks": {
+        "title": true,
+        "stmt_nonempty": true,
+        "stmt_exact": true,
+        "fmt_md": true,
+        "languages": true,
+        "stubs_all4": true,
+        "stubs_exact": true,
+        "samples": true,
+        "hidden": true,
+        "points": true,
+        "scoring": true,
+        "published": true,
+        "limits": true
+      }
+    }
+  ],
+  "template": {
+    "slug": "kec-aerele-coding-contest",
+    "name": "KEC - Aerele Coding Contest",
+    "description": "Cloned from HackerRank contest #386632 (kec-aerele-coding-contest) on 2026-06-12. 12 problems, 10 points each, per-test scoring. Problems 10-12 are stdin/stdout adaptations of the original SQL challenges.",
+    "problems": [
+      {
+        "problem_id": "challenge-1-aerele",
+        "points": null,
+        "order": 0
+      },
+      {
+        "problem_id": "challenge-2-aerele",
+        "points": null,
+        "order": 1
+      },
+      {
+        "problem_id": "challenge-3-aerele",
+        "points": null,
+        "order": 2
+      },
+      {
+        "problem_id": "challenge-4-aerele",
+        "points": null,
+        "order": 3
+      },
+      {
+        "problem_id": "challenge-5-aerele",
+        "points": null,
+        "order": 4
+      },
+      {
+        "problem_id": "challenge-6-aerele",
+        "points": null,
+        "order": 5
+      },
+      {
+        "problem_id": "challenge-7-aerele",
+        "points": null,
+        "order": 6
+      },
+      {
+        "problem_id": "challenge-8-aerele",
+        "points": null,
+        "order": 7
+      },
+      {
+        "problem_id": "challenge-9-aerele",
+        "points": null,
+        "order": 8
+      },
+      {
+        "problem_id": "weather-observation-station-5",
+        "points": null,
+        "order": 9
+      },
+      {
+        "problem_id": "occupations",
+        "points": null,
+        "order": 10
+      },
+      {
+        "problem_id": "15-days-of-learning-sql",
+        "points": null,
+        "order": 11
+      }
+    ],
+    "defaults": {
+      "duration_minutes": 120,
+      "identity_label": "Roll Number",
+      "room_gate_enabled": true,
+      "camera_recording": {
+        "enabled": true,
+        "fps": 10,
+        "width": 640
+      },
+      "screen_markers": {
+        "enabled": false
+      },
+      "enforcement": {
+        "mode": "block",
+        "fullscreen_reentry_seconds": 20,
+        "fullscreen_exit_limit": 2
+      },
+      "evidence_retention_days": 4,
+      "languages": [
+        "python",
+        "cpp",
+        "java",
+        "javascript"
+      ]
+    },
+    "archived": false,
+    "created_at": "2026-06-12T05:56:47.103Z",
+    "updated_at": "2026-06-12T05:56:47.103Z",
+    "preset": false
+  }
+}
