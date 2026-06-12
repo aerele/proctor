@@ -45,8 +45,12 @@ export function MarkerLayer({ enabled, recording, trackWidth, getScreenTrackSett
     const compute = () =>
       setLayout(
         computeMarkerLayout({
-          viewportW: window.innerWidth,
-          viewportH: window.innerHeight,
+          // clientWidth/Height, NOT innerWidth/Height: when the page overflows, a
+          // classic scrollbar eats ~15px of innerWidth and the right-column markers
+          // (tr/r-13/r-23/br — both P2 right anchors) render under native chrome
+          // while marker_layout claims them visible (P1 visual-verify finding).
+          viewportW: document.documentElement.clientWidth || window.innerWidth,
+          viewportH: document.documentElement.clientHeight || window.innerHeight,
           dpr: window.devicePixelRatio || 1,
           screenW: window.screen?.width || window.innerWidth,
           screenH: window.screen?.height || window.innerHeight,
