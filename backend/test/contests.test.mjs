@@ -548,7 +548,7 @@ test("create: problems[] stored normalized; new snapshot fields default (templat
   const contest = res.body.contest;
   assert.deepEqual(contest.problems, [{ problem_id: "sum-two", points: 40, order: 0 }]); // renumbered
   assert.equal(contest.template_slug, null);
-  assert.deepEqual(contest.languages, ["python", "cpp", "java", "javascript"]);
+  assert.deepEqual(contest.languages, ["python", "cpp", "java", "javascript", "sql"]);
   assert.deepEqual(contest.camera_recording, { enabled: true, fps: 10, width: 640 });
   assert.deepEqual(contest.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 });
 });

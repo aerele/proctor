@@ -7,12 +7,16 @@
 // shortlisted/selected/rejected, a "Mark selection done" action that stamps the
 // retention clock, and CSV export. App.tsx touchpoints stay minimal: import +
 // nav tab + a render branch, scoped by the global contest selector.
-import { AlertTriangle, Award, CheckCircle2, Download, Flag, RefreshCw, ShieldAlert, Users } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { fetchContestResults, markSelectionDone, setContestSelection } from "../api";
+import { AlertTriangle, Award, BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, Download, Flag, RefreshCw, ShieldAlert, Users } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  buildResultsCsv, canMarkSelectionDone, countUnmatched, filterResultRows, selectionCounts,
-  type ContestResultsResponse, type ResultFilters, type ResultRow, type SelectionStatus
+  adminContestEvaluate, adminContestEvaluations, fetchContestResults, markSelectionDone, setContestSelection,
+  type ContestScorecard
+} from "../api";
+import {
+  buildResultsCsv, canMarkSelectionDone, countUnmatched, evalFlagsLabel, filterResultRows, selectionCounts,
+  type ContestResultsResponse, type EvalIntegrityFilter, type EvalTalentFilter,
+  type ResultFilters, type ResultRow, type RowEvaluation, type SelectionStatus
 } from "../results/computeResults";
 
 const SELECTION_LABELS: Record<SelectionStatus, string> = {
@@ -27,6 +31,59 @@ const SELECTION_TONE: Record<SelectionStatus, string> = {
 // The bulk-action targets (none = "unmark"). Shown as buttons over the selected set.
 const BULK_ACTIONS: SelectionStatus[] = ["shortlisted", "selected", "rejected", "none"];
 
+// P1 candidate-evaluation tier presentation. Talent reads "good→bad" on the
+// accent/ink scale; integrity escalates clean→confirmed on the danger scale —
+// same border/bg/text chip vocabulary as the selection + verdict badges.
+const TALENT_LABEL: Record<RowEvaluation["talent_tier"], string> = { strong: "Strong", moderate: "Moderate", weak: "Weak" };
+const TALENT_TONE: Record<RowEvaluation["talent_tier"], string> = {
+  strong: "border-accent/40 bg-accent/10 text-accent",
+  moderate: "border-ink/20 bg-ink/5 text-ink",
+  weak: "border-line bg-white text-muted"
+};
+const INTEGRITY_LABEL: Record<RowEvaluation["integrity_tier"], string> = { clean: "Clean", watch: "Watch", flag: "Flag", confirmed: "Confirmed" };
+const INTEGRITY_TONE: Record<RowEvaluation["integrity_tier"], string> = {
+  clean: "border-accent/40 bg-accent/10 text-accent",
+  watch: "border-warning/40 bg-warning/10 text-warning",
+  flag: "border-danger/40 bg-danger/10 text-danger",
+  confirmed: "border-danger/60 bg-danger/20 text-danger"
+};
+// Severity tone for the evidence-drawer flag list (mirrors the integrity column chips).
+const FLAG_SEVERITY_TONE: Record<ContestScorecard["flags"][number]["severity"], string> = {
+  critical: "border-danger/40 bg-danger/10 text-danger",
+  warning: "border-warning/40 bg-warning/10 text-warning",
+  info: "border-line bg-white text-muted"
+};
+const TALENT_FILTERS: EvalTalentFilter[] = ["all", "strong", "moderate", "weak"];
+const INTEGRITY_FILTERS: EvalIntegrityFilter[] = ["all", "clean", "watch", "flag", "confirmed"];
+
+// The Talent column cell: tier badge + the sortable composite number ("—" when
+// the row has no scorecard, incl. unmatched rows the evaluator never scored).
+function TalentCell({ evaluation }: { evaluation: RowEvaluation | null }) {
+  if (!evaluation) return <span className="text-xs text-muted">—</span>;
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${TALENT_TONE[evaluation.talent_tier]}`}>{TALENT_LABEL[evaluation.talent_tier]}</span>
+      <span className="font-mono text-xs text-muted" title="Talent composite (0–100)">{evaluation.composite}</span>
+    </div>
+  );
+}
+
+// The Eval-Integrity column cell: tier badge + compact "2C/1W" flag counts +
+// a confidence dot (green high / amber medium / grey low).
+const CONFIDENCE_DOT: Record<RowEvaluation["confidence"], string> = { high: "bg-accent", medium: "bg-warning", low: "bg-line" };
+function EvalIntegrityCell({ evaluation }: { evaluation: RowEvaluation | null }) {
+  if (!evaluation) return <span className="text-xs text-muted">—</span>;
+  const f = evaluation.flags_by_severity;
+  const counts = [f.critical ? `${f.critical}C` : "", f.warning ? `${f.warning}W` : "", f.info ? `${f.info}I` : ""].filter(Boolean).join("/");
+  return (
+    <div className="flex items-center gap-2">
+      <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${INTEGRITY_TONE[evaluation.integrity_tier]}`}>{INTEGRITY_LABEL[evaluation.integrity_tier]}</span>
+      {counts ? <span className="font-mono text-xs text-muted" title={evalFlagsLabel(f)}>{counts}</span> : null}
+      <span className={`inline-block h-2 w-2 rounded-full ${CONFIDENCE_DOT[evaluation.confidence]}`} title={`Confidence: ${evaluation.confidence}`} />
+    </div>
+  );
+}
+
 function ResultStatCard({ label, value, tone, icon }: { label: string; value: number | string; tone: string; icon: ReactNode }) {
   return (
     <div className={`rounded-lg border p-5 shadow-subtle ${tone}`}>
@@ -35,6 +92,38 @@ function ResultStatCard({ label, value, tone, icon }: { label: string; value: nu
         {icon}
       </div>
       <p className="mt-3 text-3xl font-semibold text-ink">{value}</p>
+    </div>
+  );
+}
+
+// P1: the per-row expandable evidence drawer. Shows tiers.one_line + the
+// scorecard's flag list (severity chip + code + evidence line). Falls back
+// gracefully while the corpus is loading and for rows with no scorecard.
+function EvidenceDrawer({ evaluation, scorecard, loading }: { evaluation: RowEvaluation | null; scorecard: ContestScorecard | null; loading: boolean }) {
+  // The row's one-line summary is available off the row's own evaluation even
+  // before the (heavier) full scorecard corpus arrives.
+  const oneLine = scorecard?.tiers.one_line || evaluation?.one_line || "";
+  if (!evaluation && !scorecard) {
+    return <p className="text-xs text-muted">No evaluation for this candidate. Run “Evaluate contest” to score the cohort.</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {oneLine ? <p className="text-sm text-ink">{oneLine}</p> : null}
+      {loading ? (
+        <p className="text-xs text-muted">Loading evidence…</p>
+      ) : scorecard && scorecard.flags.length > 0 ? (
+        <ul className="space-y-1">
+          {scorecard.flags.map((flag, i) => (
+            <li key={`${flag.code}:${i}`} className="flex items-start gap-2 text-xs">
+              <span className={`mt-0.5 inline-flex shrink-0 items-center rounded-md border px-1.5 py-0.5 font-medium uppercase tracking-wide ${FLAG_SEVERITY_TONE[flag.severity]}`}>{flag.severity}</span>
+              <span className="font-mono text-muted">{flag.code}{flag.problem_id ? <span className="ml-1 text-line">· {flag.problem_id}</span> : null}</span>
+              <span className="text-ink">{flag.evidence}</span>
+            </li>
+          ))}
+        </ul>
+      ) : scorecard ? (
+        <p className="text-xs text-muted">No integrity flags raised for this candidate.</p>
+      ) : null}
     </div>
   );
 }
@@ -53,6 +142,14 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [filters, setFilters] = useState<ResultFilters>({});
+  // P1 candidate-evaluation: the "Evaluate contest" batch loop progress, the
+  // lazily-fetched scorecard corpus (keyed by identity), and the set of
+  // expanded evidence drawers. evalsByKey===null = not fetched yet.
+  const [evalRunning, setEvalRunning] = useState(false);
+  const [evalProgress, setEvalProgress] = useState(0);
+  const [evalsByKey, setEvalsByKey] = useState<Map<string, ContestScorecard> | null>(null);
+  const [evalsLoading, setEvalsLoading] = useState(false);
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
   const load = async () => {
     setLoading(true);
@@ -71,6 +168,10 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   };
 
   useEffect(() => {
+    // A new contest invalidates the cached scorecard corpus + open drawers.
+    setEvalsByKey(null);
+    setExpandedRows(new Set());
+    setEvalProgress(0);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load is stable per inputs
   }, [contestSlug]);
@@ -139,6 +240,68 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
     } finally {
       setBusy(false);
     }
+  };
+
+  // The scorecard join key: person_id for enrolled rows, username_norm for
+  // unmatched ones — the SAME identity_key the backend stamps on each scorecard.
+  const rowKey = (row: ResultRow) => row.person_id || row.username_norm || "";
+
+  // P1: "Evaluate contest" — loop the batch endpoint carrying the returned
+  // cursor until done:true, surfacing the running evaluated count, then refetch
+  // results (so the new scorecards land on the rows) and drop the stale corpus.
+  const onEvaluate = async () => {
+    if (!configured || evalRunning) return;
+    setEvalRunning(true);
+    setEvalProgress(0);
+    setError("");
+    try {
+      let cursor: string | null | undefined;
+      let total = 0;
+      // Bounded loop guard: even a large cohort terminates well under this.
+      for (let guard = 0; guard < 10000; guard += 1) {
+        const res = await adminContestEvaluate(password, { contest: data.contest_slug, cursor });
+        total += res.evaluated;
+        setEvalProgress(total);
+        if (res.done) break;
+        cursor = res.cursor;
+      }
+      // Fresh scorecards exist now — invalidate the cached corpus + reload rows.
+      setEvalsByKey(null);
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setEvalRunning(false);
+    }
+  };
+
+  // P1: lazily fetch the scorecard corpus the FIRST time any evidence drawer
+  // opens, cache it keyed by identity, and reuse for every subsequent drawer.
+  const ensureScorecards = async (): Promise<Map<string, ContestScorecard> | null> => {
+    if (evalsByKey) return evalsByKey;
+    if (!configured) return null;
+    setEvalsLoading(true);
+    try {
+      const res = await adminContestEvaluations(password, data.contest_slug);
+      const map = new Map<string, ContestScorecard>();
+      for (const card of res.evaluations) map.set(card.identity_key, card);
+      setEvalsByKey(map);
+      return map;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    } finally {
+      setEvalsLoading(false);
+    }
+  };
+
+  const toggleDrawer = (key: string) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else { next.add(key); void ensureScorecards(); }
+      return next;
+    });
   };
 
   const downloadCsv = () => {
@@ -254,6 +417,20 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                   {(["none", "shortlisted", "selected", "rejected"] as SelectionStatus[]).map((s) => <option key={s} value={s}>{SELECTION_LABELS[s]}</option>)}
                 </select>
               </label>
+              {/* P1 candidate-evaluation tier filters. "All" is the no-op; any
+                  other pick drops rows without a matching scorecard. */}
+              <label className="flex flex-col text-xs font-medium text-muted">
+                Talent
+                <select className="focus-ring mt-1 h-9 rounded-md border border-line px-2 text-sm text-ink" value={filters.evalTalent ?? "all"} onChange={(e) => setFilters((f) => ({ ...f, evalTalent: e.target.value as EvalTalentFilter }))}>
+                  {TALENT_FILTERS.map((t) => <option key={t} value={t}>{t === "all" ? "All" : TALENT_LABEL[t]}</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col text-xs font-medium text-muted">
+                Eval integrity
+                <select className="focus-ring mt-1 h-9 rounded-md border border-line px-2 text-sm text-ink" value={filters.evalIntegrity ?? "all"} onChange={(e) => setFilters((f) => ({ ...f, evalIntegrity: e.target.value as EvalIntegrityFilter }))}>
+                  {INTEGRITY_FILTERS.map((t) => <option key={t} value={t}>{t === "all" ? "All" : INTEGRITY_LABEL[t]}</option>)}
+                </select>
+              </label>
               <label className="mb-1 inline-flex items-center gap-2 text-xs font-medium text-muted">
                 <input type="checkbox" checked={Boolean(filters.noCritical)} onChange={(e) => setFilters((f) => ({ ...f, noCritical: e.target.checked }))} />
                 No critical alerts
@@ -277,6 +454,17 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                 </button>
               ))}
               <span className="ml-auto" />
+              {/* P1: run the cheating + talent evaluator over the whole contest.
+                  Loops the batch endpoint to completion, then refetches rows. */}
+              <button
+                className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50"
+                disabled={busy || evalRunning}
+                onClick={() => void onEvaluate()}
+                title="Run the cheating + talent evaluator over this contest's submissions and telemetry"
+              >
+                <BrainCircuit size={14} className={evalRunning ? "animate-pulse" : undefined} />
+                {evalRunning ? `Evaluating ${evalProgress}…` : "Evaluate contest"}
+              </button>
               <button
                 className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-accent px-4 text-sm font-medium text-white disabled:opacity-50"
                 disabled={busy || !canFinalizeSelection}
@@ -293,20 +481,33 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                 <thead>
                   <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
                     <th className="px-2 py-3"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} aria-label="Select all visible" /></th>
+                    <th className="px-1 py-3" aria-label="Evidence" />
                     <th className="px-3 py-3 font-semibold">#</th>
                     <th className="px-3 py-3 font-semibold">Candidate</th>
                     <th className="px-3 py-3 font-semibold text-right">Total</th>
                     {problems.map((p) => <th key={p.problem_id} className="px-3 py-3 font-semibold text-right" title={p.problem_id}>{p.title}</th>)}
+                    <th className="px-3 py-3 font-semibold" title="Talent tier + 0–100 composite from the evaluator">Talent</th>
+                    <th className="px-3 py-3 font-semibold" title="Evaluator integrity tier + flag counts + confidence">Eval integrity</th>
                     <th className="px-3 py-3 font-semibold">Integrity</th>
                     <th className="px-3 py-3 font-semibold">Selection</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleRows.length === 0 ? (
-                    <tr><td colSpan={5 + problems.length} className="px-3 py-6 text-center text-sm text-muted">No candidates match these filters.</td></tr>
-                  ) : visibleRows.map((row) => (
-                    <tr key={row.person_id || `unmatched:${row.username_norm ?? row.candidate_id}`} className={`border-b border-line/60 last:border-0 ${selectedIds.has(row.person_id) && !row.unmatched ? "bg-ink/5" : ""}`}>
+                    <tr><td colSpan={9 + problems.length} className="px-3 py-6 text-center text-sm text-muted">No candidates match these filters.</td></tr>
+                  ) : visibleRows.map((row) => {
+                    const key = rowKey(row);
+                    const expanded = expandedRows.has(key);
+                    const scorecard = evalsByKey?.get(key) ?? null;
+                    return (
+                    <Fragment key={row.person_id || `unmatched:${row.username_norm ?? row.candidate_id}`}>
+                    <tr className={`border-b border-line/60 last:border-0 ${expanded ? "" : ""} ${selectedIds.has(row.person_id) && !row.unmatched ? "bg-ink/5" : ""}`}>
                       <td className="px-2 py-3"><input type="checkbox" checked={!row.unmatched && selectedIds.has(row.person_id)} onChange={() => toggleRow(row.person_id)} disabled={Boolean(row.unmatched)} aria-label={`Select ${row.candidate_id}`} title={row.unmatched ? "Unmatched identity — not an enrollment, selection actions unavailable" : undefined} /></td>
+                      <td className="px-1 py-3">
+                        <button className="focus-ring inline-flex h-6 w-6 items-center justify-center rounded text-muted hover:text-ink" onClick={() => toggleDrawer(key)} aria-label={expanded ? `Hide evidence for ${row.candidate_id}` : `Show evidence for ${row.candidate_id}`} aria-expanded={expanded} title="Evaluator evidence">
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                      </td>
                       <td className="px-3 py-3 font-semibold text-ink">{row.rank}</td>
                       <td className="px-3 py-3">
                         <div className="font-medium text-ink">{row.name || "—"}</div>
@@ -323,6 +524,10 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                         const full = cell ? score >= cell.max_points && cell.max_points > 0 : false;
                         return <td key={p.problem_id} className={`px-3 py-3 text-right ${full ? "font-semibold text-accent" : score > 0 ? "text-ink" : "text-muted"}`}>{score}</td>;
                       })}
+                      {/* P1: Talent + Eval-Integrity cells — render "—" for evaluation:null
+                          (unevaluated rows AND unmatched rows without scorecards). */}
+                      <td className="px-3 py-3"><TalentCell evaluation={row.evaluation} /></td>
+                      <td className="px-3 py-3"><EvalIntegrityCell evaluation={row.evaluation} /></td>
                       <td className="px-3 py-3">
                         <div className="flex flex-wrap items-center gap-1">
                           {row.integrity.alerts_by_severity.critical > 0 ? <span className="inline-flex items-center gap-1 rounded-md border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-xs font-medium text-danger" title="critical alerts">{row.integrity.alerts_by_severity.critical}C</span> : null}
@@ -336,7 +541,16 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                         <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${SELECTION_TONE[row.selection_status]}`}>{SELECTION_LABELS[row.selection_status]}</span>
                       </td>
                     </tr>
-                  ))}
+                    {expanded ? (
+                      <tr className="border-b border-line/60 bg-ink/[0.02]">
+                        <td colSpan={9 + problems.length} className="px-4 py-3">
+                          <EvidenceDrawer evaluation={row.evaluation} scorecard={scorecard} loading={evalsLoading && !scorecard} />
+                        </td>
+                      </tr>
+                    ) : null}
+                    </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

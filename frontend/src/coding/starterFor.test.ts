@@ -37,6 +37,15 @@ describe("starterFor", () => {
     const problem = { stubs: { python: "" } };
     expect(starterFor(problem, "python")).toBe("");
   });
+
+  // SQL (language 82): sql has a generic starter floor like every language,
+  // and per-problem sql stubs (schema-comment headers) win over it.
+  it("resolves sql like any other language: stub wins, STARTERS.sql is the floor", () => {
+    expect(STARTERS.sql).toBe("-- Write your SQL query below.\n");
+    expect(starterFor({}, "sql")).toBe(STARTERS.sql);
+    const problem = { stubs: { sql: "-- T(A INTEGER, B TEXT)\n-- Write your SQL query below.\n" } };
+    expect(starterFor(problem, "sql")).toBe("-- T(A INTEGER, B TEXT)\n-- Write your SQL query below.\n");
+  });
 });
 
 describe("nextCodeOnLanguageSwitch (untouched-swap)", () => {

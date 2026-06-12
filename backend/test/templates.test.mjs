@@ -179,7 +179,7 @@ test("validateTemplateInput: defaults normalized — every field present with sp
   assert.deepEqual(d.camera_recording, { enabled: true, fps: 10, width: 640 });
   assert.deepEqual(d.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 });
   assert.equal(d.evidence_retention_days, 4);
-  assert.deepEqual(d.languages, ["python", "cpp", "java", "javascript"]);
+  assert.deepEqual(d.languages, ["python", "cpp", "java", "javascript", "sql"]);
 });
 
 test("validateTemplateInput: defaults bounds — garbage falls back, retention clamps, languages validated", () => {
@@ -227,7 +227,7 @@ test("SEED_TEMPLATES: the system-check preset matches the spec shape (vision S6/
   assert.equal(seed.defaults.evidence_retention_days, 1);
   assert.equal(seed.defaults.identity_label, "Roll Number");
   assert.deepEqual(seed.defaults.camera_recording, { enabled: true, fps: 10, width: 320 });
-  assert.deepEqual(seed.defaults.languages, ["python", "cpp", "java", "javascript"]);
+  assert.deepEqual(seed.defaults.languages, ["python", "cpp", "java", "javascript", "sql"]);
 });
 
 // ---- endpoints: auth -------------------------------------------------------------

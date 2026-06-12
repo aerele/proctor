@@ -719,7 +719,7 @@ export type EditorEvent = {
 export type ExecRequest = {
   session_id: string;
   problem_id: string;
-  language: "python" | "cpp" | "java" | "javascript";
+  language: "python" | "cpp" | "java" | "javascript" | "sql";
   source_code: string;
 };
 
@@ -952,7 +952,7 @@ export type RoomGatePollResponse = {
 };
 
 // ---- S4: problem bank (admin authoring) -------------------------------------
-export type ProblemLanguage = "python" | "cpp" | "java" | "javascript";
+export type ProblemLanguage = "python" | "cpp" | "java" | "javascript" | "sql";
 export type ProblemTest = { input: string; expected: string };
 export type ProblemScoring = "per_test" | "all_or_nothing";
 export type ProblemStatus = "draft" | "published";

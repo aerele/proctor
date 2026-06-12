@@ -4,7 +4,7 @@
 // backend stays the authority). No React; vitest-covered.
 import type { ProblemDoc, ProblemLanguage, ProblemScoring, ProblemStatus, ProblemTest, StatementFormat } from "../types";
 
-export const PROBLEM_LANGUAGES: ProblemLanguage[] = ["python", "cpp", "java", "javascript"];
+export const PROBLEM_LANGUAGES: ProblemLanguage[] = ["python", "cpp", "java", "javascript", "sql"];
 export const PROBLEM_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // Numeric fields are kept as STRINGS in the draft (raw <input> values) and
@@ -31,7 +31,7 @@ export type ProblemDraft = {
 };
 
 function emptyStubs(): Record<ProblemLanguage, string> {
-  return { python: "", cpp: "", java: "", javascript: "" };
+  return { python: "", cpp: "", java: "", javascript: "", sql: "" };
 }
 
 // F12.2: lift a doc's sparse stubs map into the full keyed draft map (missing

@@ -8,7 +8,7 @@
 import type { ProblemLanguage } from "../types";
 import type { ContestTemplateDetail } from "../api";
 
-export const TEMPLATE_LANGUAGES: ProblemLanguage[] = ["python", "cpp", "java", "javascript"];
+export const TEMPLATE_LANGUAGES: ProblemLanguage[] = ["python", "cpp", "java", "javascript", "sql"];
 export const TEMPLATE_ENFORCEMENT_MODES = ["block", "alert_first"] as const;
 
 // Bounds mirror backend/src/templates.mjs TEMPLATE_BOUNDS so the UI rejects the

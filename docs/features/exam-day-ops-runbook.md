@@ -124,6 +124,16 @@ The alert feed is shared: candidate proctoring alerts **and** (if running) the c
 
 Detail: [admin-results-people.md](admin-results-people.md), [admin-recording-review.md](admin-recording-review.md), [admin-data-lifecycle.md](admin-data-lifecycle.md).
 
+**After contest end: run Evaluate on the Results tab.** Once the window closes,
+press **Evaluate contest** on Results to compute the deterministic talent +
+integrity scorecards from the captured session evidence (keystroke/paste
+telemetry, replayed editor state, submissions, shell/clipboard streams). It is
+admin-triggered only, cursor-batched (resumes automatically until done), and
+idempotent (re-running skips unchanged candidates; pass `force` to recompute).
+The Results columns then gain a talent tier + 0–100 composite, an integrity tier
+with flag counts, and a per-row evidence drawer. See
+[candidate-evaluation.md](candidate-evaluation.md).
+
 ---
 
 ## Key defaults (confirm before exam)

@@ -53,9 +53,25 @@ describe("draft <-> doc round trip", () => {
   it("preserves authored stubs and drops blank-language stubs", () => {
     const doc: ProblemDoc = { ...DOC, stubs: { python: "def solve():\n    pass\n", cpp: "int main(){}\n" } };
     const draft = draftFromDoc(doc);
-    // The draft lifts to a FULL keyed map (java/javascript become blank).
-    expect(draft.stubs).toEqual({ python: "def solve():\n    pass\n", cpp: "int main(){}\n", java: "", javascript: "" });
+    // The draft lifts to a FULL keyed map (java/javascript/sql become blank).
+    expect(draft.stubs).toEqual({ python: "def solve():\n    pass\n", cpp: "int main(){}\n", java: "", javascript: "", sql: "" });
     // Serializing drops the blanks -> the original sparse map.
+    expect(draftToDoc(draft)).toEqual(doc);
+  });
+
+  // SQL (language 82): a sql-only problem authors like any other language —
+  // the picker list, stub map and round-trip all carry the sql key.
+  it("a sql-only doc with a sql stub round-trips intact", () => {
+    const doc: ProblemDoc = {
+      ...DOC, id: "pick-rows", languages: ["sql"],
+      stubs: { sql: "-- Write your SQL query below.\n" },
+      sampleTests: [{ input: "CREATE TABLE T (A INT);", expected: "1" }],
+      hiddenTests: [{ input: "CREATE TABLE T (A INT);", expected: "1" }]
+    };
+    const draft = draftFromDoc(doc);
+    expect(draft.languages).toEqual(["sql"]);
+    expect(draft.stubs.sql).toBe("-- Write your SQL query below.\n");
+    expect(validateProblemDraft(draft)).toBeNull();
     expect(draftToDoc(draft)).toEqual(doc);
   });
 

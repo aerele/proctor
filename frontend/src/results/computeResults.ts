@@ -21,6 +21,21 @@ export type ResultProblemCell = {
   attempts: number;
 };
 
+// P1 candidate-evaluation: the per-row projection of a stored scorecard
+// (scoreboard.projectEvaluation). `null` on rows the evaluator hasn't scored
+// (unevaluated enrollments, or unmatched submitters without a scorecard) —
+// behaviour-preserving against backends that don't send it.
+export type RowEvaluation = {
+  talent_tier: "strong" | "moderate" | "weak";
+  integrity_tier: "clean" | "watch" | "flag" | "confirmed";
+  composite: number; // 0–100 sortable talent composite
+  paste_ratio: number; // 0–1 across scoring problems
+  flags_by_severity: { critical: number; warning: number; info: number };
+  confidence: "high" | "medium" | "low";
+  one_line: string;
+  recommended_action: string | null; // P1: always null (LLM queue is P2)
+};
+
 export type ResultRow = {
   person_id: string;
   rank: number;
@@ -41,6 +56,9 @@ export type ResultRow = {
   unmatched?: boolean;
   /** The scoreboard key of an unmatched row (forensics; absent on matched rows). */
   username_norm?: string;
+  /** P1 candidate-evaluation: the projected scorecard for this identity, or
+   *  null when unevaluated (the evaluator runs only on the admin's button). */
+  evaluation: RowEvaluation | null;
 };
 
 export type ResultProblem = { problem_id: string; title: string; points?: number | null };
@@ -65,6 +83,10 @@ export function countUnmatched(rows: ResultRow[]): number {
   return rows.filter((row) => row.unmatched === true).length;
 }
 
+// P1: the talent/integrity-tier filter vocabularies. "all" is the no-op.
+export type EvalTalentFilter = "all" | "strong" | "moderate" | "weak";
+export type EvalIntegrityFilter = "all" | "clean" | "watch" | "flag" | "confirmed";
+
 export type ResultFilters = {
   search?: string;
   college?: string; // college_norm
@@ -72,6 +94,10 @@ export type ResultFilters = {
   minScore?: number | null;
   noCritical?: boolean;
   selection?: SelectionStatus | "";
+  // P1 candidate-evaluation tier filters. "all"/absent are no-ops; a non-"all"
+  // value drops rows with no evaluation (an unevaluated row can't match a tier).
+  evalTalent?: EvalTalentFilter;
+  evalIntegrity?: EvalIntegrityFilter;
 };
 
 // AND-composed client-side filters over the ranked rows (the server already
@@ -84,6 +110,10 @@ export function filterResultRows(rows: ResultRow[], filters: ResultFilters): Res
     if (filters.minScore != null && row.total < filters.minScore) return false;
     if (filters.noCritical && row.integrity.has_critical) return false;
     if (filters.selection && row.selection_status !== filters.selection) return false;
+    // P1 tier filters: a non-"all" pick requires an evaluation that matches —
+    // unevaluated rows (evaluation:null) can't satisfy a tier, so they drop.
+    if (filters.evalTalent && filters.evalTalent !== "all" && row.evaluation?.talent_tier !== filters.evalTalent) return false;
+    if (filters.evalIntegrity && filters.evalIntegrity !== "all" && row.evaluation?.integrity_tier !== filters.evalIntegrity) return false;
     if (needle && !row.candidate_id.toLowerCase().includes(needle) && !row.name.toLowerCase().includes(needle)) return false;
     return true;
   });
@@ -113,6 +143,9 @@ export function buildResultsCsv(rows: ResultRow[], problems: ResultProblem[]): s
     "rank", "candidate_id", "name", "college", "total",
     ...problems.map((p) => p.title || p.problem_id),
     "critical_alerts", "warning_alerts", "info_alerts", "review_verdict", "selection_status",
+    // P1 candidate-evaluation: SAME 6 columns/order as backend buildResultsCsv,
+    // inserted after selection_status and before unmatched. Blank when null.
+    "talent_tier", "talent_composite", "integrity_tier", "paste_pct", "eval_flags", "eval_one_line",
     // KPR 2026-06-12: flagged in the export too — a hiring decision must never
     // mistake an unverified typed id for a roster-verified one.
     "unmatched"
@@ -126,11 +159,26 @@ export function buildResultsCsv(rows: ResultRow[], problems: ResultProblem[]): s
       row.integrity.alerts_by_severity.info,
       row.integrity.review_verdict,
       row.selection_status,
+      // P1 evaluation columns (blank cells when unevaluated). paste_pct is the
+      // paste_ratio rounded to a whole percent; eval_flags is the "1C/2W/0I"
+      // counts string — both EXACTLY matching the backend CSV formatting.
+      row.evaluation?.talent_tier ?? "",
+      row.evaluation ? row.evaluation.composite : "",
+      row.evaluation?.integrity_tier ?? "",
+      row.evaluation ? `${Math.round(row.evaluation.paste_ratio * 100)}%` : "",
+      row.evaluation ? evalFlagsLabel(row.evaluation.flags_by_severity) : "",
+      row.evaluation?.one_line ?? "",
       row.unmatched ? "yes" : ""
     ];
     return cells.map((v) => csvField(String(v))).join(",");
   });
   return [header, ...lines].join("\n");
+}
+
+// P1: the "1C/2W/0I" flag-counts label — the same compact form the backend
+// CSV `eval_flags` column uses and the Eval-Integrity table cell renders.
+export function evalFlagsLabel(flags: { critical: number; warning: number; info: number }): string {
+  return `${flags.critical}C/${flags.warning}W/${flags.info}I`;
 }
 
 // RFC-4180-ish, same M8 formula-injection guard the rest of the app uses.

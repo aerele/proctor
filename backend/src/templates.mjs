@@ -62,7 +62,9 @@ export const SEED_TEMPLATES = {
       screen_markers: { enabled: false },
       enforcement: { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 },
       evidence_retention_days: 1,
-      languages: ["python", "cpp", "java", "javascript"]
+      // "All languages" semantics — derived so a new language (e.g. sql) can
+      // never silently drift this seed out of date.
+      languages: [...SUPPORTED_LANGUAGES]
     },
     created_at: null,
     updated_at: null

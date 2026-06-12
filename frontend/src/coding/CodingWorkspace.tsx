@@ -27,10 +27,13 @@ export const STARTERS: Record<string, string> = {
   python: "# Read from standard input, print the answer to standard output.\n",
   cpp: "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    // Read from stdin, print the answer to stdout.\n    return 0;\n}\n",
   java: "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        // Read from System.in, print the answer to System.out.\n    }\n}\n",
-  javascript: "// Read from stdin, print the answer to stdout.\nconst input = require(\"fs\").readFileSync(0, \"utf8\");\n"
+  javascript: "// Read from stdin, print the answer to stdout.\nconst input = require(\"fs\").readFileSync(0, \"utf8\");\n",
+  // SQL problems run against a pre-seeded SQLite database (no stdin) — the
+  // candidate submits just the query.
+  sql: "-- Write your SQL query below.\n"
 };
 
-export type StarterLanguage = "python"|"cpp"|"java"|"javascript";
+export type StarterLanguage = "python"|"cpp"|"java"|"javascript"|"sql";
 
 export type PaneProblem = {
   id: string; title: string; statement: string;
@@ -79,7 +82,7 @@ export function ProblemPane({
   onLanguageChange, onCodeChange, onEvent, onRun, onSubmit, onReloadStub, onUndoStubReload
 }: {
   problem: PaneProblem;
-  language: "python"|"cpp"|"java"|"javascript";
+  language: "python"|"cpp"|"java"|"javascript"|"sql";
   code: string;
   run: RunResult | null;
   submit: SubmitResult | null;
@@ -100,7 +103,7 @@ export function ProblemPane({
   stubReloadAvailable: boolean;
   /** W9: seconds left on the post-reload Undo window (0 = no affordance). */
   undoSeconds: number;
-  onLanguageChange: (language: "python"|"cpp"|"java"|"javascript") => void;
+  onLanguageChange: (language: "python"|"cpp"|"java"|"javascript"|"sql") => void;
   onCodeChange: (code: string) => void;
   onEvent: (e: EditorEvent) => void;
   onRun: () => void;
@@ -136,7 +139,7 @@ export function ProblemPane({
       </section>
       <section className="space-y-3">
         <div className="flex flex-wrap items-center gap-3">
-          <select value={language} onChange={(e) => onLanguageChange(e.target.value as "python"|"cpp"|"java"|"javascript")}
+          <select value={language} onChange={(e) => onLanguageChange(e.target.value as "python"|"cpp"|"java"|"javascript"|"sql")}
                   className="rounded-md border border-line px-2 py-1 text-sm">
             {problem.languages.map((l) => <option key={l} value={l}>{l}</option>)}
           </select>

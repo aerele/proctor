@@ -1,0 +1,234 @@
+{
+  "meta": {
+    "slug": "c7",
+    "challenges": [
+      {
+        "slug": "h10",
+        "name": "h10",
+        "solved": 10,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      },
+      {
+        "slug": "m11",
+        "name": "m11",
+        "solved": 11,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      },
+      {
+        "slug": "m40",
+        "name": "m40",
+        "solved": 40,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      },
+      {
+        "slug": "e41",
+        "name": "e41",
+        "solved": 41,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "alice",
+        "rank": 1
+      },
+      {
+        "user": "bob",
+        "rank": 2
+      },
+      {
+        "user": "carol",
+        "rank": 3
+      }
+    ],
+    "submissions": [
+      {
+        "id": "60",
+        "user": "alice",
+        "ch": "m40",
+        "chName": "m40",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 30000
+      },
+      {
+        "id": "61",
+        "user": "bob",
+        "ch": "m40",
+        "chName": "m40",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 30100
+      },
+      {
+        "id": "62",
+        "user": "carol",
+        "ch": "m40",
+        "chName": "m40",
+        "lang": "python3",
+        "status": "Wrong Answer",
+        "score": 0,
+        "tfs": null,
+        "created": 30200
+      },
+      {
+        "id": "63",
+        "user": "alice",
+        "ch": "h10",
+        "chName": "h10",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 40000
+      },
+      {
+        "id": "64",
+        "user": "bob",
+        "ch": "h10",
+        "chName": "h10",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 40005
+      },
+      {
+        "id": "65",
+        "user": "carol",
+        "ch": "e41",
+        "chName": "e41",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 50000
+      }
+    ]
+  },
+  "code": {
+    "60": "#!/usr/bin/env python3\nimport sys\nimport os\n'''\nmodule docstring\nspanning lines\n'''\ndef solve(n):\n    total = 0  # accumulator\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "61": "#!/usr/bin/env python3\nimport sys\nimport os\n'''\nmodule docstring\nspanning lines\n'''\ndef solve(n):\n    total = 0  # accumulator\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "62": "#!/usr/bin/env python3\nimport sys\nimport os\n'''\nmodule docstring\nspanning lines\n'''\ndef solve(n):\n    total = 0  # accumulator\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "63": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "64": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n",
+    "65": "x=1"
+  },
+  "expected": {
+    "recurring_pairs": [
+      {
+        "pair": [
+          "alice",
+          "bob"
+        ],
+        "ranks": [
+          1,
+          2
+        ],
+        "n_problems": 2,
+        "problems": [
+          "h10",
+          "m40"
+        ],
+        "n_hard": 1,
+        "hard_problems": [
+          "h10"
+        ]
+      }
+    ],
+    "exact_clusters": [
+      {
+        "ch": "m40",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 30000,
+            "lang": "python3",
+            "id": "60"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 30100,
+            "lang": "python3",
+            "id": "61"
+          }
+        ]
+      }
+    ],
+    "skeleton_clusters": [
+      {
+        "ch": "h10",
+        "hardness": "hard",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 40000,
+            "lang": "python3",
+            "id": "63"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 40005,
+            "lang": "python3",
+            "id": "64"
+          }
+        ]
+      },
+      {
+        "ch": "m40",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 30000,
+            "lang": "python3",
+            "id": "60"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 30100,
+            "lang": "python3",
+            "id": "61"
+          }
+        ]
+      }
+    ],
+    "tight": [
+      {
+        "kind": "SAME-MINUTE",
+        "dt": 5,
+        "ch": "h10",
+        "a": "alice",
+        "b": "bob"
+      }
+    ]
+  }
+}

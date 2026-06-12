@@ -78,7 +78,7 @@ import type {
   UploadUrlResponse
 } from "./types";
 import { computeAttendance, type AttendanceReport } from "./attendance/computeAttendance";
-import type { ContestResultsResponse, ResultRow, SelectionStatus } from "./results/computeResults";
+import type { ContestResultsResponse, ResultRow, RowEvaluation, SelectionStatus } from "./results/computeResults";
 import type { PeopleDirectoryResponse, PersonScorecardResponse, ScorecardRow } from "./people/computePeople";
 import { summarizeSubmissions, type StoredSubmission } from "./coding/problemSwitch";
 import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type PersonRosterState } from "./roster/personRoster";
@@ -1748,6 +1748,83 @@ export async function markSelectionDone(
   });
 }
 
+// ---- P1 candidate-evaluation: run + read scorecards -----------------------
+// POST /api/admin/contest-evaluate runs ONE batch of the evaluator and returns a
+// cursor to resume; the panel loops it carrying the cursor until done:true.
+// GET /api/admin/contest-evaluations returns the full scorecard corpus (+ meta)
+// for the evidence drawer. Both are admin-authed and contest-scoped.
+
+export type ContestEvaluateResponse = {
+  evaluated: number;
+  skipped: number;
+  cursor?: string | null;
+  done: boolean;
+  meta_written?: boolean;
+};
+
+// A stored scorecard flag (the evidence-drawer row). Severity + code + a
+// one-line evidence string, optionally pinned to a problem.
+export type ScorecardFlag = {
+  code: string;
+  severity: "critical" | "warning" | "info";
+  problem_id?: string | null;
+  evidence: string;
+};
+
+// The subset of the stored scorecard the evidence drawer renders. The full doc
+// has many more fields (talent/integrity sub-objects); the drawer only needs
+// identity (to join to the row), the flags list, and tiers.one_line.
+export type ContestScorecard = {
+  identity_key: string;
+  person_id: string | null;
+  username_norm: string;
+  name?: string;
+  flags: ScorecardFlag[];
+  tiers: { talent: "strong" | "moderate" | "weak"; integrity: "clean" | "watch" | "flag" | "confirmed"; one_line: string };
+};
+
+export type ContestEvaluationsResponse = {
+  evaluations: ContestScorecard[];
+  meta: { schema_version: number; evaluator_version: string; contest_slug: string; computed_at: string } | null;
+};
+
+export async function adminContestEvaluate(
+  password: string,
+  body: { contest: string; limit?: number; cursor?: string | null; force?: boolean }
+): Promise<ContestEvaluateResponse> {
+  if (demoMode) {
+    await wait(220);
+    assertDemoAdmin(password);
+    return demoContestEvaluate(body);
+  }
+  return request("/api/admin/contest-evaluate", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({
+      contest: body.contest,
+      ...(body.limit != null ? { limit: body.limit } : {}),
+      ...(body.cursor != null ? { cursor: body.cursor } : {}),
+      ...(body.force ? { force: true } : {})
+    })
+  });
+}
+
+export async function adminContestEvaluations(
+  password: string,
+  contestSlug: string
+): Promise<ContestEvaluationsResponse> {
+  if (demoMode) {
+    await wait(160);
+    assertDemoAdmin(password);
+    return demoContestEvaluations(contestSlug);
+  }
+  const query = contestSlug ? `?contest=${encodeURIComponent(contestSlug)}` : "";
+  return request<ContestEvaluationsResponse>(`/api/admin/contest-evaluations${query}`, {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+}
+
 // ---- Data lifecycle: export / triple-gated purge / retention sweep (Wave7-H) -
 // Backend: Wave7-G handlers; gates re-enforced server-side (the UI mirrors them).
 
@@ -1814,21 +1891,37 @@ const demoSelectionDoneKey = "aerele-proctor-demo-selection-done-v1";
 type DemoResultSeed = {
   person_id: string; candidate_id: string; name: string; college_norm: string; college: string;
   room: string; scores: [number, number, number]; critical: number; warning: number; review: "none" | "cleared" | "flagged";
+  // P1 candidate-evaluation: the projected scorecard (null = unevaluated). Seeded
+  // so the Talent / Eval-Integrity columns, tier filters, and evidence drawer
+  // render meaningfully offline; the "Evaluate contest" button fills these in.
+  evaluation?: RowEvaluation | null;
 };
 
 // 12 candidates across KEC + PSG; problem points 100/150/50 (sum-two/reverse-
 // words/max-window-sum). Scores hand-tuned for a believable spread.
 const DEMO_RESULT_SEEDS: DemoResultSeed[] = [
-  { person_id: "kec~21cs017", candidate_id: "21CS017", name: "Asha Ramanathan", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 150, 50], critical: 0, warning: 0, review: "cleared" },
-  { person_id: "psg~22it004", candidate_id: "22IT004", name: "Bala Subramanian", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 150, 0], critical: 0, warning: 1, review: "none" },
-  { person_id: "kec~21cs033", candidate_id: "21CS033", name: "Chitra Nair", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 100, 50], critical: 0, warning: 0, review: "none" },
-  { person_id: "psg~22it019", candidate_id: "22IT019", name: "Deepak Rao", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 150, 0], critical: 1, warning: 2, review: "flagged" },
-  { person_id: "kec~21cs008", candidate_id: "21CS008", name: "Esha Pillai", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 75, 50], critical: 0, warning: 0, review: "none" },
-  { person_id: "psg~22it041", candidate_id: "22IT041", name: "Farhan Ali", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 100, 0], critical: 0, warning: 1, review: "none" },
-  { person_id: "kec~21cs025", candidate_id: "21CS025", name: "Gita Menon", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [60, 100, 0], critical: 0, warning: 0, review: "none" },
-  { person_id: "psg~22it012", candidate_id: "22IT012", name: "Harish Kumar", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 0, 0], critical: 0, warning: 0, review: "none" },
-  { person_id: "kec~21cs049", candidate_id: "21CS049", name: "Ishita Bhat", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [40, 50, 0], critical: 2, warning: 1, review: "flagged" },
-  { person_id: "psg~22it027", candidate_id: "22IT027", name: "Jayant Verma", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [60, 0, 0], critical: 0, warning: 0, review: "none" },
+  { person_id: "kec~21cs017", candidate_id: "21CS017", name: "Asha Ramanathan", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 150, 50], critical: 0, warning: 0, review: "cleared",
+    evaluation: { talent_tier: "strong", integrity_tier: "clean", composite: 94, paste_ratio: 0.04, flags_by_severity: { critical: 0, warning: 0, info: 1 }, confidence: "high", one_line: "Solved all three incl. the hard problem with genuine arcs.", recommended_action: null } },
+  { person_id: "psg~22it004", candidate_id: "22IT004", name: "Bala Subramanian", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 150, 0], critical: 0, warning: 1, review: "none",
+    evaluation: { talent_tier: "strong", integrity_tier: "watch", composite: 78, paste_ratio: 0.18, flags_by_severity: { critical: 0, warning: 1, info: 2 }, confidence: "high", one_line: "Two solid solves; one away-episode warrants a glance.", recommended_action: null } },
+  { person_id: "kec~21cs033", candidate_id: "21CS033", name: "Chitra Nair", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 100, 50], critical: 0, warning: 0, review: "none",
+    evaluation: { talent_tier: "moderate", integrity_tier: "clean", composite: 71, paste_ratio: 0.09, flags_by_severity: { critical: 0, warning: 0, info: 0 }, confidence: "high", one_line: "Steady mid-tier solver, clean telemetry.", recommended_action: null } },
+  { person_id: "psg~22it019", candidate_id: "22IT019", name: "Deepak Rao", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 150, 0], critical: 1, warning: 2, review: "flagged",
+    evaluation: { talent_tier: "weak", integrity_tier: "confirmed", composite: 18, paste_ratio: 0.71, flags_by_severity: { critical: 2, warning: 2, info: 1 }, confidence: "high", one_line: "Recurring-pair clone on the hard problem; composite capped.", recommended_action: null } },
+  { person_id: "kec~21cs008", candidate_id: "21CS008", name: "Esha Pillai", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [100, 75, 50], critical: 0, warning: 0, review: "none",
+    evaluation: { talent_tier: "moderate", integrity_tier: "clean", composite: 66, paste_ratio: 0.11, flags_by_severity: { critical: 0, warning: 0, info: 1 }, confidence: "medium", one_line: "Genuine effort across two problems; partial third.", recommended_action: null } },
+  { person_id: "psg~22it041", candidate_id: "22IT041", name: "Farhan Ali", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 100, 0], critical: 0, warning: 1, review: "none",
+    evaluation: { talent_tier: "moderate", integrity_tier: "watch", composite: 58, paste_ratio: 0.34, flags_by_severity: { critical: 0, warning: 1, info: 0 }, confidence: "medium", one_line: "Elevated paste ratio on the second problem.", recommended_action: null } },
+  { person_id: "kec~21cs025", candidate_id: "21CS025", name: "Gita Menon", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [60, 100, 0], critical: 0, warning: 0, review: "none",
+    evaluation: { talent_tier: "moderate", integrity_tier: "clean", composite: 49, paste_ratio: 0.07, flags_by_severity: { critical: 0, warning: 0, info: 0 }, confidence: "high", one_line: "One full solve with a believable score climb.", recommended_action: null } },
+  { person_id: "psg~22it012", candidate_id: "22IT012", name: "Harish Kumar", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [100, 0, 0], critical: 0, warning: 0, review: "none",
+    evaluation: { talent_tier: "weak", integrity_tier: "clean", composite: 32, paste_ratio: 0.13, flags_by_severity: { critical: 0, warning: 0, info: 0 }, confidence: "medium", one_line: "Single easy solve, no further reach.", recommended_action: null } },
+  { person_id: "kec~21cs049", candidate_id: "21CS049", name: "Ishita Bhat", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [40, 50, 0], critical: 2, warning: 1, review: "flagged",
+    evaluation: { talent_tier: "weak", integrity_tier: "flag", composite: 21, paste_ratio: 0.63, flags_by_severity: { critical: 1, warning: 1, info: 0 }, confidence: "high", one_line: "Paste ratio over 0.6 across scoring problems.", recommended_action: null } },
+  { person_id: "psg~22it027", candidate_id: "22IT027", name: "Jayant Verma", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [60, 0, 0], critical: 0, warning: 0, review: "none",
+    evaluation: { talent_tier: "weak", integrity_tier: "clean", composite: 19, paste_ratio: 0.08, flags_by_severity: { critical: 0, warning: 0, info: 0 }, confidence: "low", one_line: "Partial single solve; thin editor telemetry.", recommended_action: null } },
+  // Two seeds intentionally LEFT UNEVALUATED (evaluation omitted → null) so the
+  // "—" rendering and tier-filter drop behaviour are visible in demo mode.
   { person_id: "kec~21cs002", candidate_id: "21CS002", name: "Kavya Iyer", college_norm: "kec", college: "KEC", room: "Lab 1", scores: [0, 0, 0], critical: 0, warning: 0, review: "none" },
   { person_id: "psg~22it038", candidate_id: "22IT038", name: "Lokesh Babu", college_norm: "psg", college: "PSG Tech", room: "Lab 2", scores: [0, 0, 0], critical: 1, warning: 0, review: "none" }
 ];
@@ -1879,7 +1972,8 @@ function demoContestResults(contestSlug: string): ContestResultsResponse {
       },
       selection_status: selection[seed.person_id] ?? "none",
       from_snapshot: false,
-      room: seed.room
+      room: seed.room,
+      evaluation: seed.evaluation ?? null
     };
   });
   rows.sort((a, b) => b.total - a.total || a.candidate_id.localeCompare(b.candidate_id));
@@ -1917,6 +2011,55 @@ function demoMarkSelectionDone(contestSlug: string) {
   const now = new Date().toISOString();
   window.localStorage.setItem(demoSelectionDoneKey, now);
   return { ok: true, selection_done_at: now, enrollments_snapshotted: DEMO_RESULT_SEEDS.length };
+}
+
+// P1 demo parity: the evaluator runs in ONE batch over the seeded population
+// (no real GCS to page over), reporting how many carry a scorecard. done:true
+// always — the panel's cursor loop terminates after a single pass.
+function demoContestEvaluate(body: { contest: string; limit?: number; cursor?: string | null; force?: boolean }): ContestEvaluateResponse {
+  if (body.contest !== "demo-drive-r1") throw demoApiError(400, "contest must name a person-mode contest");
+  const evaluated = DEMO_RESULT_SEEDS.filter((seed) => seed.evaluation).length;
+  return { evaluated, skipped: 0, cursor: null, done: true, meta_written: true };
+}
+
+// P1 demo parity: the scorecard corpus the evidence drawer reads. Built from the
+// same seeds so the drawer's flags + one_line join to the rendered rows; flags
+// are synthesised from each seed's flag counts so the list is non-empty.
+function demoScorecardFlags(seed: DemoResultSeed): ScorecardFlag[] {
+  const ev = seed.evaluation;
+  if (!ev) return [];
+  const flags: ScorecardFlag[] = [];
+  for (let i = 0; i < ev.flags_by_severity.critical; i += 1) {
+    flags.push({ code: i === 0 ? "recurring_pair" : "hard_clone_cluster", severity: "critical", problem_id: DEMO_RESULT_PROBLEMS[1].problem_id, evidence: "Shares an accepted hard-problem solution with another candidate (same minute, same room)." });
+  }
+  for (let i = 0; i < ev.flags_by_severity.warning; i += 1) {
+    flags.push({ code: i === 0 ? "elevated_paste_ratio" : "away_episode", severity: "warning", problem_id: DEMO_RESULT_PROBLEMS[i % 2].problem_id, evidence: i === 0 ? `Paste ratio ${(ev.paste_ratio * 100).toFixed(0)}% on this problem.` : "Tab-away episode of 42s during the solve window." });
+  }
+  for (let i = 0; i < ev.flags_by_severity.info; i += 1) {
+    flags.push({ code: "language_switch", severity: "info", problem_id: null, evidence: "Switched language mid-contest (benign)." });
+  }
+  return flags;
+}
+
+function demoContestEvaluations(contestSlug: string): ContestEvaluationsResponse {
+  if (contestSlug !== "demo-drive-r1") return { evaluations: [], meta: null };
+  const evaluations: ContestScorecard[] = DEMO_RESULT_SEEDS
+    .filter((seed) => seed.evaluation)
+    .map((seed) => {
+      const ev = seed.evaluation!;
+      return {
+        identity_key: seed.person_id,
+        person_id: seed.person_id,
+        username_norm: seed.person_id,
+        name: seed.name,
+        flags: demoScorecardFlags(seed),
+        tiers: { talent: ev.talent_tier, integrity: ev.integrity_tier, one_line: ev.one_line }
+      };
+    });
+  return {
+    evaluations,
+    meta: { schema_version: 1, evaluator_version: "1", contest_slug: contestSlug, computed_at: new Date().toISOString() }
+  };
 }
 
 // ---- demo Data-lifecycle (parity for the NEW section — acceptance bar S4) ----

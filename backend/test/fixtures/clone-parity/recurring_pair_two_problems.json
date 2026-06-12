@@ -1,0 +1,156 @@
+{
+  "meta": {
+    "slug": "c5",
+    "challenges": [
+      {
+        "slug": "med-a",
+        "name": "med-a",
+        "solved": 20,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      },
+      {
+        "slug": "med-b",
+        "name": "med-b",
+        "solved": 35,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "alice",
+        "rank": 4
+      },
+      {
+        "user": "bob",
+        "rank": 6
+      }
+    ],
+    "submissions": [
+      {
+        "id": "40",
+        "user": "alice",
+        "ch": "med-a",
+        "chName": "med-a",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 5000
+      },
+      {
+        "id": "41",
+        "user": "bob",
+        "ch": "med-a",
+        "chName": "med-a",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 5100
+      },
+      {
+        "id": "42",
+        "user": "alice",
+        "ch": "med-b",
+        "chName": "med-b",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 6000
+      },
+      {
+        "id": "43",
+        "user": "bob",
+        "ch": "med-b",
+        "chName": "med-b",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 6100
+      }
+    ]
+  },
+  "code": {
+    "40": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "41": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n",
+    "42": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "43": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n"
+  },
+  "expected": {
+    "recurring_pairs": [
+      {
+        "pair": [
+          "alice",
+          "bob"
+        ],
+        "ranks": [
+          4,
+          6
+        ],
+        "n_problems": 2,
+        "problems": [
+          "med-a",
+          "med-b"
+        ],
+        "n_hard": 0,
+        "hard_problems": []
+      }
+    ],
+    "exact_clusters": [],
+    "skeleton_clusters": [
+      {
+        "ch": "med-a",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 4,
+            "tfs": null,
+            "created": 5000,
+            "lang": "python3",
+            "id": "40"
+          },
+          {
+            "user": "bob",
+            "rank": 6,
+            "tfs": null,
+            "created": 5100,
+            "lang": "python3",
+            "id": "41"
+          }
+        ]
+      },
+      {
+        "ch": "med-b",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 4,
+            "tfs": null,
+            "created": 6000,
+            "lang": "python3",
+            "id": "42"
+          },
+          {
+            "user": "bob",
+            "rank": 6,
+            "tfs": null,
+            "created": 6100,
+            "lang": "python3",
+            "id": "43"
+          }
+        ]
+      }
+    ],
+    "tight": []
+  }
+}

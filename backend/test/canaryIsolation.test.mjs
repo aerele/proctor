@@ -33,6 +33,7 @@ process.env.COLLEGES_COLLECTION = "cn_colleges";
 process.env.PERSONS_COLLECTION = "cn_persons";
 process.env.ENROLLMENTS_COLLECTION = "cn_enrollments";
 process.env.ADMIN_AUDIT_COLLECTION = "cn_audit";
+process.env.EVALUATIONS_COLLECTION = "cn_evaluations";
 process.env.ADMIN_PASSWORD = "cn-admin-pass";
 process.env.INVIGILATOR_PASSWORD = "cn-invig-pass";
 
@@ -56,6 +57,7 @@ const INVIG_HEADERS = { "x-invigilator-password": "cn-invig-pass" };
 const SCOPED_GET_REQUESTS = {
   "/api/admin/alerts": () => adminGet("/api/admin/alerts", { contest_slug: A }),
   "/api/admin/attendance": () => adminGet("/api/admin/attendance", { contest_slug: A }),
+  "/api/admin/contest-evaluations": () => adminGet("/api/admin/contest-evaluations", { contest: A }),
   "/api/admin/contest-results": () => adminGet("/api/admin/contest-results", { contest: A }),
   "/api/admin/ip-report": () => adminGet("/api/admin/ip-report", { contest_slug: A, scope: "all" }),
   "/api/admin/recording-sessions": () => adminGet("/api/admin/recording-sessions", { contest_slug: A }),
