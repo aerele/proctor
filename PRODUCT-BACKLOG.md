@@ -17,6 +17,11 @@ _Last updated: 2026-06-11 (Karthi multipart prioritization, TG 1841–1845)._
   **Karthi: the one feature we may build today — but only once the whole exam flow is confirmed glitch-free.**
 
 ## Deferred features — "some other day"
+- **Keystroke ANALYTICS layer (Slice-4, 2026-06-08 ask — found by the 2026-06-12 missed-asks audit)**: the derived-metrics +
+  authenticity-flags + admin-visualization product that was the stated REASON for owning the editor. Raw capture ships
+  (editor events land per session); nothing analyzes it yet. **Delivery vehicle: the candidate-evaluation plan
+  (`docs/superpowers/plans/2026-06-12-candidate-evaluation.md`) — its deterministic layer IS this ask.** Sub-item: OS
+  mouse-move capture (explicitly deferred; low priority, "the noisy one").
 - **RT-2 (LOW, 2026-06-12 retest)**: end-screen/manifest chunk count can undercount vs GCS when a refresh interrupts manifest persistence (44 vs 48 in the retest); player unaffected (lists GCS directly).
 - **RT-3 (LOW, 2026-06-12 retest)**: admin Recordings timeline merges the person's OTHER sessions' alerts at 00:00 ("SESSIONS COVERED 2") — honest timestamps, but visually confusing; consider per-session lanes or offset mapping.
 - **S-F — contest-eval adapter** _(#32)_: make the Python contest-eval poller easily startable + investigate
