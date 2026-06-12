@@ -596,11 +596,16 @@ test("instantiate: template_slug snapshot-copies problems + defaults; end_at pre
   }));
 
   const res = await call(createReq({
-    name: "KEC June", template_slug: "apt-r1", start_at: "2026-07-01T04:00:00.000Z"
+    name: "KEC June", template_slug: "apt-r1", start_at: "2026-07-01T04:00:00.000Z",
+    rooms: ["Lab T", "Lab U"]
   }));
   assert.equal(res.statusCode, 200);
   const contest = res.body.contest;
   assert.equal(contest.template_slug, "apt-r1");
+  // Dress-rehearsal finding (2026-06-12): body.rooms must survive the
+  // template-instantiate path (it was silently dropped while direct creates
+  // accepted it).
+  assert.deepEqual(contest.rooms, ["Lab T", "Lab U"]);
   assert.deepEqual(contest.problems, [{ problem_id: "sum-two", points: 40, order: 0 }]);
   assert.equal(contest.identity_label, "Hall Ticket");
   assert.equal(contest.room_gate_enabled, false);
