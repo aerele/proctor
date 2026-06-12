@@ -81,6 +81,11 @@ export function consentDisclosure(ownEditor: boolean, cameraRecorded: boolean): 
 // "recorded". Every other state (stopped / permission_denied / ...) passes
 // through unchanged in both modes.
 export function cameraStateLabel(state: string, cameraRecorded: boolean): string {
+  // W8 follow-up: no raw state enums in candidate-facing chrome — a desktop
+  // without a webcam reads "no camera", not "unavailable" (camera is OPTIONAL;
+  // screen recording continues either way).
+  if (state === "unavailable") return "no camera";
+  if (state === "permission_denied") return "blocked";
   if (state !== "recording") return state;
   return cameraRecorded ? "recording" : "monitored, not recorded";
 }

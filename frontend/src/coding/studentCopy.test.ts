@@ -162,8 +162,12 @@ describe("camera recording DISABLED: monitored, not recorded", () => {
     expect(cameraStateLabel("recording", false)).toBe("monitored, not recorded");
   });
 
-  it("cameraStateLabel passes the other capture states through unchanged", () => {
-    for (const state of ["inactive", "stopped", "error", "permission_denied", "unavailable"]) {
+  it("cameraStateLabel humanizes the no-camera/blocked states and passes the rest through", () => {
+    // W8 follow-up: desktops without webcams are a supported, OPTIONAL-camera
+    // setup — candidates must never read raw state enums.
+    expect(cameraStateLabel("unavailable", false)).toBe("no camera");
+    expect(cameraStateLabel("permission_denied", false)).toBe("blocked");
+    for (const state of ["inactive", "stopped", "error"]) {
       expect(cameraStateLabel(state, false)).toBe(state);
     }
   });
@@ -185,8 +189,10 @@ describe("camera recording ENABLED: disclosed and labelled as recording", () => 
     expect(cameraStateLabel("recording", true)).toBe("recording");
   });
 
-  it("cameraStateLabel passes the other capture states through unchanged", () => {
-    for (const state of ["inactive", "stopped", "error", "permission_denied", "unavailable"]) {
+  it("cameraStateLabel humanizes no-camera/blocked and passes the rest through (recorded mode)", () => {
+    expect(cameraStateLabel("unavailable", true)).toBe("no camera");
+    expect(cameraStateLabel("permission_denied", true)).toBe("blocked");
+    for (const state of ["inactive", "stopped", "error"]) {
       expect(cameraStateLabel(state, true)).toBe(state);
     }
   });
