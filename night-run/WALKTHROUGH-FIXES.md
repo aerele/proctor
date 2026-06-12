@@ -27,4 +27,8 @@ docs workflow (`wf_145b15ad-957`) is still committing. Subagents edit + verify; 
 
 **2026-06-12 ~04:00 IST — RETEST rev 00008: ALL PASS.** F1 zero overwrites across 4 stints (every successful upload survives, cumulative manifest, honest gaps); F2 per-row Unlock/Exempt works person-mode; F3 scoped exam-time card + legacy chip; F5 no stale strips; R5 sweeps (F4/F8/F10/F7) all pass; R6 clean candidate pass (100/100, 551 editor events, 98 shell, 55 heartbeats). Full numbers: `evidence/e2e-live/FINDINGS.md` §RETEST. Follow-up RT-1 (chunk-upload retry for flaky Wi-Fi) fixed same night; RT-2/RT-3 (cosmetic) → backlog.
 
-_(W6 … appended live as Karthi comments arrive.)_
+| W6 | authoring+candidate | Problem statement is plain-text only. Support **Markdown as an additional option** in the problem-bank authoring screen, rendered properly when the student takes the problem. (TG 1863, morning 2026-06-12.) | ✅ committed+deployed rev 00013 | fde4736 |
+
+| W7 | admin authoring | Editing a problem's HIDDEN TESTS while an open contest references it → raw `live_edit_confirmation_required` error; UI never implemented the catch-409 → confirm-dialog → resend `confirm_live_edit:<problem.id>` flow (handler.mjs:2050; other fields' edits prompt fine). Workaround given: draft → edit → re-open. (TG 1865/1867.) | ✅ committed+deployed rev 00013 | fde4736 |
+
+_(W8 … appended live as Karthi comments arrive.)_
