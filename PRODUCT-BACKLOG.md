@@ -17,6 +17,11 @@ _Last updated: 2026-06-11 (Karthi multipart prioritization, TG 1841–1845)._
   **Karthi: the one feature we may build today — but only once the whole exam flow is confirmed glitch-free.**
 
 ## Deferred features — "some other day"
+- **Candidate-visible LEADERBOARD (Karthi TG 1914, 2026-06-12)**: per-contest toggle (enable/disable in contest
+  settings, default OFF — keeps the hiring-context default), HackerRank-style live board visible to participants
+  (rank, name/ID, total, per-problem solve markers, time). Better-ideas welcome: e.g. freeze in the final N minutes
+  (HR-style suspense), show only top-K + "your rank", per-room boards for hall display. Overrides the f10 §8 #12
+  rejection WHEN the toggle is on; admin Results stays the authoritative surface.
 - **Keystroke ANALYTICS layer (Slice-4, 2026-06-08 ask — found by the 2026-06-12 missed-asks audit)**: the derived-metrics +
   authenticity-flags + admin-visualization product that was the stated REASON for owning the editor. Raw capture ships
   (editor events land per session); nothing analyzes it yet. **Delivery vehicle: the candidate-evaluation plan
