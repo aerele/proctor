@@ -3490,6 +3490,8 @@ function CandidateRosterSection({ password, contestSlug }: { password: string; c
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  // F-D (KPR 2026-06-12): warn-only unique-ID shape warnings from the upload.
+  const [idWarnings, setIdWarnings] = useState<string[]>([]);
   // S-C panels: the college map-or-confirm gate + per-college decisions
   // ("" = create new, otherwise the existing college_norm to map onto), and
   // the duplicate hard-reject rows.
@@ -3503,6 +3505,7 @@ function CandidateRosterSection({ password, contestSlug }: { password: string; c
     setCollegeGate(null);
     setCollegeDecisions({});
     setDuplicates(null);
+    setIdWarnings([]);
   };
 
   const refresh = async () => {
@@ -3574,6 +3577,7 @@ function CandidateRosterSection({ password, contestSlug }: { password: string; c
         return;
       }
       resetPanels();
+      setIdWarnings((response.id_shape_warnings ?? []).map((w) => w.message));
       const skipped = response.skipped ?? [];
       const personSummary = contest && response.enrollments
         ? ` Colleges created: ${(response.colleges_created ?? []).length}; enrollments +${response.enrollments.created}/${response.enrollments.reactivated} reactivated/${response.enrollments.removed} removed.`
@@ -3620,13 +3624,31 @@ function CandidateRosterSection({ password, contestSlug }: { password: string; c
     setMessage("");
     setError("");
     try {
-      const response = await clearRoster(password, contest || undefined);
+      // F-B (KPR 2026-06-12): a LIVE contest with sessions/enrollments refuses
+      // the clear until the admin types the contest slug — the server's 409
+      // carries the exact consequence, shown verbatim in the dialog.
+      let response: { ok: boolean } | null;
+      try {
+        response = await clearRoster(password, contest || undefined);
+      } catch (cause) {
+        const apiError = cause as ApiError;
+        if (apiError?.code !== "roster_clear_confirmation_required" || !contest) throw cause;
+        const consequence = String(
+          (apiError.body as { consequence?: string } | undefined)?.consequence
+          ?? "Existing sessions are keyed to roster persons; new joins will be keyed anonymously; Results will split."
+        );
+        const typed = window.prompt(`${consequence}
+
+Type the contest slug "${contest}" to clear the roster anyway:`);
+        if (typed === null || typed.trim() === "") return;
+        response = await clearRoster(password, contest, typed.trim());
+      }
       if (response === null) {
         setUnavailable(true);
         return;
       }
       setMessage(contest
-        ? `Roster for contest "${contest}" cleared. Enrollments are kept — a re-upload reconciles them.`
+        ? `Roster for contest "${contest}" cleared. Enrollments are kept — a re-upload reconciles them. Students joining from now on are keyed anonymously unless their typed ID exactly matches an enrolled person.`
         : "Roster cleared — student login no longer requires a roster match.");
       await refresh();
     } catch (cause) {
@@ -3863,6 +3885,13 @@ function CandidateRosterSection({ password, contestSlug }: { password: string; c
           ) : null}
 
           {message ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{message}</div> : null}
+          {/* F-D (KPR 2026-06-12): warn-only ID-shape warnings — loud, never blocking. */}
+          {idWarnings.length > 0 ? (
+            <div className="mt-4 space-y-2 rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
+              <p className="font-semibold"><AlertTriangle size={16} className="mr-2 inline" />Check the unique-ID column before the exam:</p>
+              {idWarnings.map((warning, index) => <p key={index}>{warning}</p>)}
+            </div>
+          ) : null}
           {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
         </>
       )}
@@ -4463,7 +4492,17 @@ function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFi
                   className="cursor-pointer border-b border-line/60 last:border-0 hover:bg-ink/5"
                 >
                   <td className="px-4 py-3">
-                    <div className="font-semibold text-ink">{candidateIdOf(s)}</div>
+                    <div className="font-semibold text-ink">
+                      {candidateIdOf(s)}
+                      {s.identity_unresolved ? (
+                        <span
+                          className="ml-2 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-warning"
+                          title="The typed ID matched no enrolled person (roster cleared / never matched) — this session is keyed anonymously and its scores appear as an unmatched identity on Results."
+                        >
+                          identity unresolved
+                        </span>
+                      ) : null}
+                    </div>
                     {s.name ? <div className="text-xs text-muted">{s.name}</div> : null}
                   </td>
                   <td className="px-4 py-3 text-muted">{s.room || "—"}</td>
@@ -4952,6 +4991,12 @@ function AttendancePanel({ password, contestSlug }: { password: string; contestS
         </div>
       ) : (
         <>
+          {/* KPR 2026-06-12: enrollment-spine fallback after a roster clear — say so explicitly. */}
+          {report.source === "enrollments" && report.note ? (
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
+              <AlertTriangle size={16} className="mr-2 inline" />{report.note}
+            </div>
+          ) : null}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <StatCard label="On roster" value={report.roster_total} tone="ink" icon={<Users size={18} />} />
             <StatCard label="Taken" value={report.taken.total} tone="accent" icon={<UserCheck size={18} />} />

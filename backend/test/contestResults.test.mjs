@@ -245,8 +245,9 @@ test("contest-results?format=csv: header + per-problem columns + integrity + sel
   const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug, format: "csv" } }));
   assert.equal(res.statusCode, 200);
   const lines = res.body.csv.split("\n");
-  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status");
-  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,none$/);
+  // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
+  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,unmatched");
+  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,none,$/);
 });
 
 // ---- bulk selection transitions ------------------------------------------------
@@ -333,4 +334,70 @@ test("PURGE-SURVIVOR: with submissions deleted, results fall back to final_snaps
   assert.equal(asha.from_snapshot, true);
   assert.equal(asha.selection_status, "selected");
   assert.equal(asha.name, "Asha");
+});
+
+// ---- KPR 2026-06-12: unmatched submitters (the live-exam scoring failure) ------
+
+test("contest-results: post-clear anonymous submitters ride as unmatched rows with scores + unmatched_count (never silently dropped)", async () => {
+  const firestore = freshClients();
+  const contest = await seedContest(firestore);
+  // An anonymous post-clear session + its submission: person_id null,
+  // username_norm = bare typed id — matches NO enrollment person_id.
+  firestore.collection("cr_sessions").doc("anon1").set({
+    session_id: "anon1", contest_slug: contest.slug, username_norm: "23cs091",
+    candidate_id: "23CS091", person_id: null, name: "Kishore P S",
+    status: "ended", created_at: "2026-06-10T04:20:00.000Z"
+  });
+  firestore.collection("cr_submissions").doc("anon-sub").set({
+    session_id: "anon1", contest_slug: contest.slug, username_norm: "23cs091",
+    candidate_id: "23CS091", person_id: null, problem_id: "p1", score: 100,
+    max_points: 100, verdict: "accepted", created_at: "2026-06-10T04:21:00.000Z"
+  });
+  // An alert on the unmatched identity folds into ITS integrity column.
+  seedAlert(firestore, { id: "anon-a", contestSlug: contest.slug, personId: "23cs091", severity: "critical" });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.unmatched_count, 1);
+
+  const row = res.body.rows.find((r) => r.unmatched);
+  assert.ok(row, "unmatched submitter row expected");
+  assert.equal(row.candidate_id, "23CS091");
+  assert.equal(row.name, "Kishore P S");         // typed-at-login name from the session
+  assert.equal(row.total, 100);
+  assert.equal(row.person_id, "");
+  assert.equal(row.integrity.has_critical, true); // its alerts are NOT lost either
+  // Matched rows keep their exact totals (behavior-preserving join).
+  const asha = res.body.rows.find((r) => r.person_id === KEC_001);
+  assert.equal(asha.total, 130);
+  assert.equal(asha.integrity.has_critical, true);
+  // Ranks fuse: 130 (Asha) > 100 (unmatched + Bala) > 0.
+  assert.equal(asha.rank, 1);
+  // CSV flags the row.
+  const csvRes = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug, format: "csv" } }));
+  assert.match(csvRes.body.csv, /23CS091.*,yes$/m);
+});
+
+test("contest-results: unmatched_count is 0 on the happy path (every submitter enrolled)", async () => {
+  const firestore = freshClients();
+  const contest = await seedContest(firestore);
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.unmatched_count, 0);
+  assert.equal(res.body.rows.some((r) => r.unmatched), false);
+});
+
+test("contest-selection-done: unmatched rows are SKIPPED when stamping final snapshots (no phantom enrollments)", async () => {
+  const firestore = freshClients();
+  const contest = await seedContest(firestore);
+  firestore.collection("cr_submissions").doc("anon-sub").set({
+    session_id: "anon1", contest_slug: contest.slug, username_norm: "23cs091",
+    candidate_id: "23CS091", person_id: null, problem_id: "p1", score: 100,
+    max_points: 100, verdict: "accepted", created_at: "2026-06-10T04:21:00.000Z"
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/contest-selection-done", headers: ADMIN_HEADERS, body: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  // Only the 3 real enrollments were stamped; no enrollment doc keyed by "".
+  assert.equal(res.body.enrollments_snapshotted, 3);
+  assert.equal(firestore._collections.get("cr_enrollments").has(`${contest.slug}::`), false);
 });

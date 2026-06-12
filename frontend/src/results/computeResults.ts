@@ -35,6 +35,12 @@ export type ResultRow = {
   selection_status: SelectionStatus;
   from_snapshot: boolean;
   room: string;
+  /** KPR 2026-06-12: a scoring identity NOT consumed by any enrollment (e.g.
+   *  an anonymous post-roster-clear session). person_id is "" on these rows;
+   *  scores come straight from submissions and the UI badges them loudly. */
+  unmatched?: boolean;
+  /** The scoreboard key of an unmatched row (forensics; absent on matched rows). */
+  username_norm?: string;
 };
 
 export type ResultProblem = { problem_id: string; title: string; points?: number | null };
@@ -48,8 +54,16 @@ export type ContestResultsResponse =
       selection_done_at: string | null;
       problems: ResultProblem[];
       rows: ResultRow[];
+      /** KPR 2026-06-12: count of unmatched submitter rows (absent on older backends). */
+      unmatched_count?: number;
       generated_at: string;
     };
+
+// KPR 2026-06-12: the banner count — prefers the rows themselves so it works
+// against older backends that don't send unmatched_count.
+export function countUnmatched(rows: ResultRow[]): number {
+  return rows.filter((row) => row.unmatched === true).length;
+}
 
 export type ResultFilters = {
   search?: string;
@@ -98,7 +112,10 @@ export function buildResultsCsv(rows: ResultRow[], problems: ResultProblem[]): s
   const header = [
     "rank", "candidate_id", "name", "college", "total",
     ...problems.map((p) => p.title || p.problem_id),
-    "critical_alerts", "warning_alerts", "info_alerts", "review_verdict", "selection_status"
+    "critical_alerts", "warning_alerts", "info_alerts", "review_verdict", "selection_status",
+    // KPR 2026-06-12: flagged in the export too — a hiring decision must never
+    // mistake an unverified typed id for a roster-verified one.
+    "unmatched"
   ].map(csvField).join(",");
   const lines = rows.map((row) => {
     const cells: Array<string | number> = [
@@ -108,7 +125,8 @@ export function buildResultsCsv(rows: ResultRow[], problems: ResultProblem[]): s
       row.integrity.alerts_by_severity.warning,
       row.integrity.alerts_by_severity.info,
       row.integrity.review_verdict,
-      row.selection_status
+      row.selection_status,
+      row.unmatched ? "yes" : ""
     ];
     return cells.map((v) => csvField(String(v))).join(",");
   });

@@ -165,10 +165,11 @@ test("buildResultsCsv: header + one row per candidate, per-problem columns, inte
   const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true });
   const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
   const lines = csv.split("\n");
-  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status");
+  // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
+  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,unmatched");
   assert.equal(lines.length, 4); // header + 3 candidates
-  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,shortlisted$/);
-  assert.match(lines[3], /^3,21CS002,Carol,KEC,0,0,0,0,0,0,none,none$/);
+  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,shortlisted,$/);
+  assert.match(lines[3], /^3,21CS002,Carol,KEC,0,0,0,0,0,0,none,none,$/);
 });
 
 test("buildResultsCsv: CSV-injection guard on candidate-supplied fields", () => {
@@ -183,4 +184,60 @@ test("buildResultsCsv: CSV-injection guard on candidate-supplied fields", () => 
   // split on the candidate_id cell instead of line boundaries.
   assert.match(csv, /,'=cmd\(\),/); // formula prefix neutralized on candidate_id
   assert.match(csv, /,",evil\n"/); // comma + newline name field quoted
+});
+
+// ---- KPR 2026-06-12: unmatched identities (loud-or-right) -----------------------
+
+// The incident shape: a roster clear mid-contest flips later joins to
+// anonymous keying (username_norm = bare typed id, person_id null). Those
+// scoreboard identities never match an enrollment person_id and were silently
+// dropped — 54 real scorers shown as 0. They must ride as FLAGGED rows.
+test("buildResultsRows: scoreboard identities with no enrollment ride as flagged unmatched rows (never dropped)", () => {
+  const fx = fixture();
+  fx.submissions = [
+    ...fx.submissions,
+    { username_norm: "23cs091", person_id: null, candidate_id: "23CS091", problem_id: "p1", score: 100, max_points: 100, created_at: "2026-06-10T04:30:00.000Z" },
+    { username_norm: "23cs091", person_id: null, candidate_id: "23CS091", problem_id: "p2", score: 50, max_points: 100, created_at: "2026-06-10T04:40:00.000Z" }
+  ];
+  const sessions = [
+    { username_norm: "23cs091", candidate_id: "23CS091", name: "Kishore P S", created_at: "2026-06-10T04:20:00.000Z" }
+  ];
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true, sessions });
+
+  const unmatchedRow = rows.find((r) => r.unmatched);
+  assert.ok(unmatchedRow, "unmatched submitter must appear as a row");
+  assert.equal(unmatchedRow.candidate_id, "23CS091"); // typed display id from the submission denorm
+  assert.equal(unmatchedRow.name, "Kishore P S");     // name typed at login (session doc)
+  assert.equal(unmatchedRow.total, 150);              // best-per-problem, exactly like matched rows
+  assert.deepEqual(unmatchedRow.per_problem.map((c) => [c.problem_id, c.best_score]), [["p1", 100], ["p2", 50]]);
+  assert.equal(unmatchedRow.person_id, "");           // no enrollment/person behind it
+  assert.equal(unmatchedRow.username_norm, "23cs091"); // forensic key preserved
+  assert.equal(unmatchedRow.selection_status, "none");
+  // Ranks fuse: 150 outranks Asha's 130 — the table tells the truth.
+  assert.equal(unmatchedRow.rank, 1);
+  // Matched rows are still all present, in their relative order.
+  assert.deepEqual(rows.filter((r) => !r.unmatched).map((r) => r.person_id), ["kec~21cs001", "psg~21cs001", "kec~21cs002"]);
+  // CSV flags the row in the trailing "unmatched" column.
+  const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
+  assert.match(csv, /^1,23CS091,Kishore P S,,150,100,50,0,0,0,none,none,yes$/m);
+});
+
+test("buildResultsRows: happy path (every submitter enrolled) appends NO unmatched rows", () => {
+  const fx = fixture();
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true });
+  assert.equal(rows.some((r) => r.unmatched), false);
+  assert.equal(rows.length, 3);
+});
+
+test("buildResultsRows: PURGED contest (no submissions) appends no unmatched rows", () => {
+  const enrollments = [{
+    person_id: "kec~21cs001", college_norm: "kec", status: "active", selection_status: "selected",
+    final_snapshot: { total_score: 130, per_problem: { p1: 80, p2: 50 }, integrity: null, unique_id: "21CS001", name: "Asha" }
+  }];
+  const rows = buildResultsRows({
+    submissions: [], enrollments, persons: new Map(), integrityByPerson: new Map(),
+    collegeNames: new Map(), problemOrder: PROBLEM_ORDER, multiCollege: false, purged: true
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows.some((r) => r.unmatched), false);
 });

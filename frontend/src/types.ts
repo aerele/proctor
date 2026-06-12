@@ -275,6 +275,10 @@ export type RecordingSession = {
   camera_chunk_count?: number;
   created_at: string;
   status: string;
+  /** KPR 2026-06-12 (F-C): the session started anonymously on a contest that
+   *  HAS an enrollment spine — the typed id resolved to no person. Loud admin
+   *  signal; absent on older backends / non-list DTOs. */
+  identity_unresolved?: boolean;
 };
 
 export type RecordingSessionsResponse = {
@@ -808,6 +812,10 @@ export type RosterUploadResponse = {
   colleges_created?: string[];
   persons?: { created: number; updated: number };
   enrollments?: { created: number; reactivated: number; removed: number };
+  /** KPR 2026-06-12 (F-D): WARN-ONLY unique-ID shape heuristics (repeated
+   *  suffixes / separator-heavy columns) — the upload always succeeds; the UI
+   *  must show these prominently so the admin re-checks the column choice. */
+  id_shape_warnings?: Array<{ code: string; message: string; suffix?: string; count?: number; total?: number }>;
 };
 
 // GET /api/admin/roster — meta only (never the rows).

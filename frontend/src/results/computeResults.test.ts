@@ -2,7 +2,7 @@
 // The Results tab has no jsdom render harness, so the table's filter + CSV
 // logic is extracted here and unit-tested directly (vision §2.14).
 import { describe, it, expect } from "vitest";
-import { filterResultRows, buildResultsCsv, selectionCounts, canMarkSelectionDone, type ResultRow } from "./computeResults";
+import { filterResultRows, buildResultsCsv, countUnmatched, selectionCounts, canMarkSelectionDone, type ResultRow } from "./computeResults";
 
 function row(over: Partial<ResultRow> = {}): ResultRow {
   return {
@@ -93,9 +93,16 @@ describe("buildResultsCsv", () => {
   it("header + per-problem title columns + integrity + selection; rows in order", () => {
     const csv = buildResultsCsv(ROWS, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
     const lines = csv.split("\n");
-    expect(lines[0]).toBe("rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status");
-    expect(lines[1]).toBe("1,21CS001,Asha,KEC,130,80,50,1,0,0,none,shortlisted");
+    // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
+    expect(lines[0]).toBe("rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,unmatched");
+    expect(lines[1]).toBe("1,21CS001,Asha,KEC,130,80,50,1,0,0,none,shortlisted,");
     expect(lines.length).toBe(4);
+  });
+
+  it("KPR 2026-06-12: unmatched rows export with the yes flag", () => {
+    const rows = [row({ person_id: "", username_norm: "23cs091", candidate_id: "23CS091", name: "Kishore P S", college: "", total: 100, unmatched: true })];
+    const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }]);
+    expect(csv.split("\n")[1]).toBe("1,23CS091,Kishore P S,,100,80,0,0,0,none,none,yes");
   });
 
   it("CSV-injection guard on candidate-supplied id/name", () => {
@@ -103,5 +110,24 @@ describe("buildResultsCsv", () => {
     const csv = buildResultsCsv(evil, [{ problem_id: "p1", title: "P1" }]);
     expect(csv).toContain(",'=cmd(),");
     expect(csv).toContain(',"a,b\nc"');
+  });
+});
+
+// ---- KPR 2026-06-12: unmatched identities --------------------------------------
+
+describe("countUnmatched", () => {
+  it("counts only rows flagged unmatched", () => {
+    const rows = [...ROWS, row({ person_id: "", username_norm: "23cs091", candidate_id: "23CS091", unmatched: true })];
+    expect(countUnmatched(rows)).toBe(1);
+    expect(countUnmatched(ROWS)).toBe(0);
+  });
+});
+
+describe("filterResultRows with unmatched rows", () => {
+  it("unmatched rows pass through filters like any other row (never silently hidden)", () => {
+    const rows = [...ROWS, row({ person_id: "", username_norm: "23cs091", candidate_id: "23CS091", name: "Kishore P S", college_norm: "", college: "", total: 100, room: "", unmatched: true })];
+    expect(filterResultRows(rows, {}).some((r) => r.unmatched)).toBe(true);
+    expect(filterResultRows(rows, { minScore: 100 }).some((r) => r.unmatched)).toBe(true);
+    expect(filterResultRows(rows, { search: "kishore" }).map((r) => r.candidate_id)).toEqual(["23CS091"]);
   });
 });

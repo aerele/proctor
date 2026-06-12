@@ -433,3 +433,60 @@ test("attendance for a person contest joins ITS roster by person_id and reports 
   const legacy = await call(makeReq({ method: "GET", path: "/api/admin/attendance", headers: ADMIN_HEADERS }));
   assert.deepEqual(legacy.body, { configured: false });
 });
+
+// ---- KPR 2026-06-12: attendance after a roster clear (enrollment-spine fallback)
+
+test("attendance falls back to the enrollment spine when the roster was cleared — explicit source + note, never a silent blank", async () => {
+  const { firestore } = freshClients();
+  const contest = await createContest("KEC June 2026");
+  const upload = await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN_HEADERS, body: {
+    contest: contest.slug,
+    unique_id_column: "unique_id",
+    columns: ["college", "unique_id", "name", "email", "room"],
+    column_mapping: { name: "name", email: "email", roll_number: "unique_id", room: "room" },
+    rows: [
+      { college: "KEC", unique_id: "21CS001", name: "Asha", email: "a@x.com", room: "Lab A" },
+      { college: "KEC", unique_id: "21CS002", name: "Bala", email: "b@x.com", room: "Lab A" }
+    ],
+    college_resolutions: { kec: { action: "create" } }
+  } }));
+  assert.equal(upload.body.ok, true, JSON.stringify(upload.body));
+
+  // Clear the roster (draft contest, no window → the F-B confirm gate stays off:
+  // the pre-exam fix workflow keeps its friction-free clear).
+  const cleared = await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN_HEADERS,
+    body: { contest: contest.slug, clear: true } }));
+  assert.equal(cleared.statusCode, 200, JSON.stringify(cleared.body));
+
+  // One person-keyed session (taken, in progress) + one anonymous post-clear
+  // session (unmatched — counted, never silently dropped).
+  await firestore.collection("di_sessions").doc("a1").set({
+    session_id: "a1", username_norm: "kec~21cs001", person_id: "kec~21cs001",
+    candidate_id: "21CS001", contest_slug: contest.slug, status: "active",
+    roster_unique_id: "21CS001", created_at: "2026-06-10T02:00:00.000Z"
+  });
+  await firestore.collection("di_sessions").doc("anon1").set({
+    session_id: "anon1", username_norm: "23cs091", person_id: null,
+    candidate_id: "23CS091", contest_slug: contest.slug, status: "ended",
+    roster_unique_id: "", created_at: "2026-06-10T02:10:00.000Z"
+  });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/attendance", headers: ADMIN_HEADERS, query: { contest_slug: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.configured, true);          // NOT the old silent {configured:false}
+  assert.equal(res.body.source, "enrollments");     // the admin knows what they're looking at
+  assert.match(res.body.note, /roster .* cleared/i);
+  assert.equal(res.body.roster_total, 2);
+  assert.deepEqual(res.body.taken, { total: 1, in_progress: 1, completed: 0 });
+  assert.equal(res.body.not_taken, 1);
+  assert.deepEqual(res.body.absentees, [{ unique_id: "21CS002", name: "Bala", roll_number: "", room: "", college: "KEC" }]);
+  assert.equal(res.body.unmatched_sessions, 1);
+});
+
+test("attendance: person contest with NO roster and NO enrollments stays configured:false", async () => {
+  freshClients();
+  const contest = await createContest("Bare Contest");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/attendance", headers: ADMIN_HEADERS, query: { contest_slug: contest.slug } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, { configured: false, contest_slug: contest.slug });
+});

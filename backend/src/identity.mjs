@@ -177,7 +177,7 @@ export async function listColleges() {
 // excluded) — the numbers an admin counts when fixing the file.
 
 export async function saveContestRoster(contest, body, actor = {}) {
-  if (body.clear === true) return clearContestRoster(contest);
+  if (body.clear === true) return clearContestRoster(contest, body, actor);
 
   const columns = Array.isArray(body.columns)
     ? body.columns.map((c) => String(c).trim().slice(0, ROSTER_CELL_MAX)).filter(Boolean)
@@ -370,6 +370,11 @@ export async function saveContestRoster(contest, body, actor = {}) {
   const collegeNorms = [...new Set(unique.map((c) => c.collegeNorm))].sort();
   await col("contests").doc(contest.slug).set({ colleges: collegeNorms, updated_at: now }, { merge: true });
 
+  // F-D (KPR 2026-06-12): warn-only unique-ID shape check rides the success
+  // response (key present only when something was flagged — older callers and
+  // exact-shape assertions never see it on clean uploads).
+  const idShapeWarnings = uniqueIdShapeWarnings(unique.map((c) => c.uniqueId));
+
   return {
     ok: true,
     configured: true,
@@ -379,7 +384,8 @@ export async function saveContestRoster(contest, body, actor = {}) {
     ambiguous_ids: ambiguousIds,
     colleges_created: collegesCreated.sort(),
     persons: personStats,
-    enrollments: enrollmentStats
+    enrollments: enrollmentStats,
+    ...(idShapeWarnings.length ? { id_shape_warnings: idShapeWarnings } : {})
   };
 }
 
@@ -509,11 +515,58 @@ async function raiseRosterRemovedAlert(contest, enrollment, version, now) {
   });
 }
 
+// KPR 2026-06-12 incident (F-B): the EXACT consequence a mid-contest roster
+// clear has on identity keying — served verbatim in the 409 payload so the
+// admin UI can show it and the operator reads it BEFORE confirming.
+export const ROSTER_CLEAR_CONSEQUENCE =
+  "This contest already has sessions/enrollments keyed to roster persons. "
+  + "After a clear, students who join are keyed anonymously (person_id: null, bare typed id) "
+  + "while existing sessions stay keyed to roster persons — Results will SPLIT into roster rows "
+  + "shown at 0 and unmatched submitter rows. Clear only if you accept that split.";
+
+// Open = status "open"; in-window = now between start_at and end_at. Either
+// makes a roster clear consequential (students can be mid-exam / about to join).
+function contestLiveOrInWindow(contest) {
+  if (String(contest?.status || "") === "open") return true;
+  const startMs = Date.parse(String(contest?.start_at || ""));
+  const endMs = Date.parse(String(contest?.end_at || ""));
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+  const now = Date.now();
+  return now >= startMs && now <= endMs;
+}
+
 // Per-contest clear — mirrors the legacy M5 discipline: PURGE the active
 // version's entry docs (they hold PII), then flip the meta off. Enrollments
 // are durable person × contest rows and deliberately survive (a later upload
 // reconciles them); persons/colleges are never touched.
-async function clearContestRoster(contest) {
+//
+// F-B (KPR 2026-06-12): clearing the roster of a LIVE contest that already has
+// sessions or enrollments flips the identity keying for every later join
+// (person-keyed → anonymous) and silently splits Results. That must never be a
+// one-click action: it now requires the typed contest slug in body.confirm_clear
+// (same typed-confirm discipline as the purge slug gate / points-edit confirm).
+// Draft contests outside their window keep the friction-free clear (the legit
+// fix-the-roster-before-the-exam workflow).
+async function clearContestRoster(contest, body = {}, actor = {}) {
+  const [sessionsSnap, enrollmentsSnap] = await Promise.all([
+    scopedQuery(col("sessions"), contest).limit(1).get(),
+    scopedQuery(col("enrollments"), contest).limit(1).get()
+  ]);
+  const hasSessions = sessionsSnap.docs.length > 0;
+  const hasEnrollments = enrollmentsSnap.docs.length > 0;
+  if ((hasSessions || hasEnrollments) && contestLiveOrInWindow(contest)) {
+    const typed = typeof body.confirm_clear === "string" ? body.confirm_clear.trim() : "";
+    if (typed !== contest.slug) {
+      throw httpError(409, "roster_clear_confirmation_required", {
+        contest: contest.slug,
+        has_sessions: hasSessions,
+        has_enrollments: hasEnrollments,
+        consequence: ROSTER_CLEAR_CONSEQUENCE
+      });
+    }
+  }
+
+  const now = new Date().toISOString();
   const meta = await getContestRosterMeta(contest);
   if (meta?.version) {
     const snapshot = await col("roster")
@@ -528,9 +581,109 @@ async function clearContestRoster(contest) {
   await rosterMetaRefFor(contest.slug).set({
     configured: false,
     contest_slug: contest.slug,
-    cleared_at: new Date().toISOString()
+    cleared_at: now
   });
+  // KPR 2026-06-12: the incident clear left NO server-side trail (we had to
+  // reconstruct it from Cloud Run request logs). Every clear is now audited.
+  await writeAudit({
+    action: "roster_cleared",
+    contest_slug: contest.slug,
+    had_sessions: hasSessions,
+    had_enrollments: hasEnrollments,
+    confirmed: hasSessions || hasEnrollments ? Boolean(body.confirm_clear) : false
+  }, actor, now);
   return { ok: true, configured: false, contest: contest.slug, count: 0, skipped: [] };
+}
+
+// ---- F-C (KPR 2026-06-12): enrollment-spine identity fallback -----------------
+//
+// When a person contest's roster meta is ABSENT (cleared mid-contest) but the
+// contest HAS an enrollment spine (the persons/enrollments minted by the last
+// upload deliberately survive a clear), a typed id can still key correctly by
+// EXACT normalized match against the enrolled persons' unique ids. NO fuzzy or
+// suffix-tolerant matching: person ids are deterministic
+// ("{college_norm}~{identityNorm(typed)}"), so the match is a handful of direct
+// doc reads — one candidate person id per contest college, no scans, no index.
+// Returns { spine, matches }: spine=false → the contest never had an upload
+// (the documented vision §2.4 no-roster path — caller keeps today's behavior
+// with no flag); matches carry {person_id, college_norm, person} for every
+// ACTIVE enrollment whose constructed person id exists.
+export async function resolveEnrollmentSpineMatches(contest, typedId) {
+  const colleges = Array.isArray(contest?.colleges)
+    ? contest.colleges.map((c) => String(c || "")).filter(Boolean)
+    : [];
+  if (!colleges.length) return { spine: false, matches: [] };
+  const norm = identityNorm(typedId);
+  if (!norm || norm === "_") return { spine: true, matches: [] };
+  const matches = [];
+  for (const collegeNorm of colleges) {
+    const personId = personIdOf(collegeNorm, norm);
+    const enrollmentDoc = await col("enrollments").doc(enrollmentIdOf(contest.slug, personId)).get();
+    if (!enrollmentDoc.exists) continue;
+    const enrollment = enrollmentDoc.data();
+    if (enrollment.status === "removed") continue;
+    const personDoc = await col("persons").doc(personId).get();
+    matches.push({
+      person_id: personId,
+      college_norm: collegeNorm,
+      person: personDoc.exists ? personDoc.data() : null
+    });
+  }
+  return { spine: true, matches };
+}
+
+// ---- F-D (KPR 2026-06-12): unique-ID shape warnings (WARN-ONLY, never block) --
+//
+// The incident's root authoring footgun: the roster CSV's unique-ID column
+// carried HackerRank usernames + "_KPRIET"-suffixed roll numbers while the
+// contest's identity label told students to type their "Roll Number" — every
+// lookup failed and staff cleared the roster mid-exam. This heuristic flags
+// uploads whose ids LOOK machine-generated so the admin double-checks the
+// column choice BEFORE the exam. Purely advisory: the upload always proceeds.
+export function uniqueIdShapeWarnings(uniqueIds) {
+  const ids = (Array.isArray(uniqueIds) ? uniqueIds : []).map((v) => String(v || "")).filter(Boolean);
+  const total = ids.length;
+  if (!total) return [];
+  const warnings = [];
+
+  // (a) The same trailing token after a separator on 3+ ids (e.g. "_kpriet"):
+  // a college/batch suffix students will NOT type. Top 3 tokens by count.
+  const suffixCounts = new Map();
+  for (const id of ids) {
+    const match = id.match(/[._\-@]([A-Za-z]{2,})$/);
+    if (!match) continue;
+    const token = match[1].toLowerCase();
+    suffixCounts.set(token, (suffixCounts.get(token) || 0) + 1);
+  }
+  const repeated = [...suffixCounts.entries()]
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 3);
+  for (const [suffix, count] of repeated) {
+    warnings.push({
+      code: "repeated_id_suffix",
+      suffix,
+      count,
+      total,
+      message: `${count} of ${total} unique IDs share the trailing suffix "${suffix}" after a separator (e.g. "..._${suffix}"). `
+        + `Students type their ID exactly as uploaded to log in — if they would type the bare ID without the suffix, the roster lookup will fail. `
+        + `Double-check the unique-ID column before the exam.`
+    });
+  }
+
+  // (b) Separator-heavy column (>=30% of ids contain . _ - @): smells like a
+  // platform-username or email column, not the id students type.
+  const withSeparator = ids.filter((id) => /[._\-@]/.test(id)).length;
+  if (withSeparator / total >= 0.3) {
+    warnings.push({
+      code: "separator_heavy",
+      count: withSeparator,
+      total,
+      message: `${withSeparator} of ${total} unique IDs contain separators (. _ - @) — they look machine-generated `
+        + `(platform usernames or emails), not IDs students type at login. Make sure the chosen unique-ID column is what students will enter.`
+    });
+  }
+  return warnings;
 }
 
 // ---- S-J §2.15 legacy "Adopt into person model" -------------------------------

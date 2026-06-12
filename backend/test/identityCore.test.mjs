@@ -30,7 +30,7 @@ const handler = await import("../src/handler.mjs?identitycore");
 const { api, __setClientsForTest } = handler;
 // handler.mjs?identitycore resolves ./identity.mjs WITHOUT a buster, so this
 // import is the exact module instance the handler configured.
-const { identityNorm, personIdOf, enrollmentIdOf, rosterMetaIdFor, PERSON_ID_SEPARATOR } = await import("../src/identity.mjs");
+const { identityNorm, personIdOf, enrollmentIdOf, rosterMetaIdFor, PERSON_ID_SEPARATOR, uniqueIdShapeWarnings } = await import("../src/identity.mjs");
 
 // Inline req/res + fakes (convention: copied per test file, NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -559,4 +559,118 @@ test("legacy upload (no contest) writes EXACTLY today's docs: no persons, no col
   for (const colName of ["ic_colleges", "ic_persons", "ic_enrollments", "ic_audit"]) {
     assert.equal(firestore._collections.get(colName)?.size ?? 0, 0, colName);
   }
+});
+
+// ---- F-B (KPR 2026-06-12): the roster-clear typed-confirm gate -----------------
+// Clearing the roster of a LIVE contest that has sessions/enrollments flips
+// the identity keying for later joins (person-keyed → anonymous) and splits
+// Results. It now requires the typed contest slug (confirm_clear). A draft
+// contest outside its window keeps the friction-free clear — that path is
+// pinned by "per-contest clear: purges the active version's entries" above.
+
+test("F-B roster clear: in-window contest with enrollments refuses without typed confirm (409 + consequence), clears with it, audited", async () => {
+  const { firestore } = freshClients();
+  const contest = await createContest("KEC June 2026");
+  await call(uploadReq(personUpload(contest.slug, [ROW_ASHA], { college_resolutions: { kec: { action: "create" } } })));
+  // Put the contest INSIDE its exam window (status stays draft → window leg).
+  const HOUR = 3600 * 1000;
+  const win = await call(makeReq({ method: "POST", path: "/api/admin/contest-update", headers: ADMIN_HEADERS, body: {
+    slug: contest.slug,
+    start_at: new Date(Date.now() - HOUR).toISOString(),
+    end_at: new Date(Date.now() + HOUR).toISOString()
+  } }));
+  assert.equal(win.statusCode, 200, JSON.stringify(win.body));
+
+  // No confirm → 409 with the spelled-out consequence; nothing deleted.
+  const refused = await call(uploadReq({ contest: contest.slug, clear: true }));
+  assert.equal(refused.statusCode, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "roster_clear_confirmation_required");
+  assert.equal(refused.body.has_enrollments, true);
+  assert.match(refused.body.consequence, /keyed anonymously/);
+  assert.match(refused.body.consequence, /Results will SPLIT/);
+  assert.ok(firestore._collections.get("ic_roster").size > 0, "roster entries must survive a refused clear");
+
+  // Wrong typed slug → still refused.
+  const wrong = await call(uploadReq({ contest: contest.slug, clear: true, confirm_clear: "not-the-slug" }));
+  assert.equal(wrong.statusCode, 409);
+
+  // Exact typed slug → clears, and the clear is audited (the incident clear
+  // left no server-side trail; never again).
+  const ok = await call(uploadReq({ contest: contest.slug, clear: true, confirm_clear: contest.slug }));
+  assert.equal(ok.statusCode, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.configured, false);
+  assert.equal(firestore._collections.get("ic_roster").size, 0);
+  assert.equal(firestore._collections.get("ic_enrollments").size, 1); // enrollments still survive
+  const audits = [...firestore._collections.get("ic_audit").values()].filter((a) => a.action === "roster_cleared");
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].contest_slug, contest.slug);
+  assert.equal(audits[0].had_enrollments, true);
+});
+
+test("F-B roster clear: contest with NO sessions/enrollments clears without confirmation even in-window", async () => {
+  const { firestore } = freshClients();
+  const contest = await createContest("Empty Contest");
+  const HOUR = 3600 * 1000;
+  await call(makeReq({ method: "POST", path: "/api/admin/contest-update", headers: ADMIN_HEADERS, body: {
+    slug: contest.slug,
+    start_at: new Date(Date.now() - HOUR).toISOString(),
+    end_at: new Date(Date.now() + HOUR).toISOString()
+  } }));
+  const res = await call(uploadReq({ contest: contest.slug, clear: true }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.configured, false);
+  assert.equal(firestore._collections.get("ic_enrollments")?.size ?? 0, 0);
+});
+
+// ---- F-D (KPR 2026-06-12): unique-ID shape warnings (warn-only) ----------------
+// The incident roster's unique-ID column carried HackerRank usernames and
+// "_KPRIET"-suffixed roll numbers while students were told to type their
+// "Roll Number" — every lookup 403'd. The upload now WARNS (never blocks)
+// when the ids look machine-generated.
+
+test("F-D upload warns on a repeated id suffix + separator-heavy column; upload still succeeds", async () => {
+  freshClients();
+  const contest = await createContest("KPR Round 2");
+  const rows = [
+    { college: "KPR", unique_id: "23cs104_kpriet", name: "Mohana", email: "", room: "" },
+    { college: "KPR", unique_id: "23cs091_kpriet", name: "Kishore", email: "", room: "" },
+    { college: "KPR", unique_id: "23am017_KPRIET", name: "Dhamu", email: "", room: "" },
+    { college: "KPR", unique_id: "ammiyappanaborr1", name: "Aborrvaa", email: "", room: "" }
+  ];
+  const res = await call(uploadReq(personUpload(contest.slug, rows, { college_resolutions: { kpr: { action: "create" } } })));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.ok, true); // WARN-ONLY: the upload never blocks
+  assert.equal(res.body.count, 4);
+  const warnings = res.body.id_shape_warnings;
+  assert.ok(Array.isArray(warnings) && warnings.length >= 1, JSON.stringify(res.body));
+  const suffix = warnings.find((w) => w.code === "repeated_id_suffix");
+  assert.ok(suffix, "repeated suffix warning expected");
+  assert.equal(suffix.suffix, "kpriet"); // case-folded
+  assert.equal(suffix.count, 3);
+  assert.match(suffix.message, /roster lookup will fail/);
+  const sep = warnings.find((w) => w.code === "separator_heavy"); // 3/4 = 75% >= 30%
+  assert.ok(sep, "separator-heavy warning expected");
+});
+
+test("F-D clean roll-number upload carries NO id_shape_warnings key", async () => {
+  freshClients();
+  const contest = await createContest("Clean Roster");
+  const res = await call(uploadReq(personUpload(contest.slug, [ROW_ASHA, ROW_BALA], { college_resolutions: { kec: { action: "create" } } })));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.id_shape_warnings, undefined);
+});
+
+test("F-D uniqueIdShapeWarnings (pure): thresholds — suffix needs 3+, separators need 30%", () => {
+  // Two "_kpriet" ids in 10: below the 3+ suffix bar; 2/10 separators: below 30%.
+  const quiet = uniqueIdShapeWarnings([
+    "23cs001_kpriet", "23cs002_kpriet",
+    "23cs003", "23cs004", "23cs005", "23cs006", "23cs007", "23cs008", "23cs009", "23cs010"
+  ]);
+  assert.deepEqual(quiet, []);
+  // Empty / non-array inputs never throw.
+  assert.deepEqual(uniqueIdShapeWarnings([]), []);
+  assert.deepEqual(uniqueIdShapeWarnings(null), []);
+  // Digit-tailed ids (plain roll numbers) never trip the suffix heuristic.
+  assert.deepEqual(uniqueIdShapeWarnings(["23cs104", "23cs091", "23am017"]), []);
 });

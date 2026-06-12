@@ -3423,7 +3423,10 @@ export async function uploadRoster(password: string, payload: RosterUploadReques
 
 // POST /api/admin/roster {clear:true} — roster off (login reverts to legacy).
 // S-C: with `contest`, clears THAT contest's roster (enrollments survive).
-export async function clearRoster(password: string, contest?: string): Promise<{ ok: boolean } | null> {
+// KPR 2026-06-12 (F-B): a LIVE contest with sessions/enrollments refuses the
+// clear with 409 roster_clear_confirmation_required until confirm_clear echoes
+// the typed contest slug — callers pass it after the explicit dialog.
+export async function clearRoster(password: string, contest?: string, confirmClear?: string): Promise<{ ok: boolean } | null> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
@@ -3435,7 +3438,11 @@ export async function clearRoster(password: string, contest?: string): Promise<{
     return await request<{ ok: boolean }>("/api/admin/roster", {
       method: "POST",
       headers: { "x-admin-password": password },
-      body: JSON.stringify({ clear: true, ...(contest ? { contest } : {}) })
+      body: JSON.stringify({
+        clear: true,
+        ...(contest ? { contest } : {}),
+        ...(confirmClear ? { confirm_clear: confirmClear } : {})
+      })
     });
   } catch (cause) {
     if ((cause as ApiError)?.status === 404) return null;
