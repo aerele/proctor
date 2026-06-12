@@ -246,8 +246,10 @@ test("contest-results?format=csv: header + per-problem columns + integrity + sel
   assert.equal(res.statusCode, 200);
   const lines = res.body.csv.split("\n");
   // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
-  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,unmatched");
-  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,none,$/);
+  // P1 (E): 6 candidate-evaluation columns precede unmatched; blank here because
+  // the contest has not been evaluated (no scorecards joined).
+  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,talent_tier,talent_composite,integrity_tier,paste_pct,eval_flags,eval_one_line,unmatched");
+  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,none,,,,,,,$/);
 });
 
 // ---- bulk selection transitions ------------------------------------------------

@@ -1,0 +1,174 @@
+{
+  "meta": {
+    "slug": "c6",
+    "challenges": [
+      {
+        "slug": "hard-a",
+        "name": "hard-a",
+        "solved": 8,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      },
+      {
+        "slug": "hard-b",
+        "name": "hard-b",
+        "solved": 5,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "alice",
+        "rank": 1
+      },
+      {
+        "user": "bob",
+        "rank": 2
+      }
+    ],
+    "submissions": [
+      {
+        "id": "50",
+        "user": "alice",
+        "ch": "hard-a",
+        "chName": "hard-a",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 10000
+      },
+      {
+        "id": "51",
+        "user": "bob",
+        "ch": "hard-a",
+        "chName": "hard-a",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 10030
+      },
+      {
+        "id": "52",
+        "user": "alice",
+        "ch": "hard-b",
+        "chName": "hard-b",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 20000
+      },
+      {
+        "id": "53",
+        "user": "bob",
+        "ch": "hard-b",
+        "chName": "hard-b",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 20200
+      }
+    ]
+  },
+  "code": {
+    "50": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "51": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n",
+    "52": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "53": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n"
+  },
+  "expected": {
+    "recurring_pairs": [
+      {
+        "pair": [
+          "alice",
+          "bob"
+        ],
+        "ranks": [
+          1,
+          2
+        ],
+        "n_problems": 2,
+        "problems": [
+          "hard-a",
+          "hard-b"
+        ],
+        "n_hard": 2,
+        "hard_problems": [
+          "hard-a",
+          "hard-b"
+        ]
+      }
+    ],
+    "exact_clusters": [],
+    "skeleton_clusters": [
+      {
+        "ch": "hard-a",
+        "hardness": "hard",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 10000,
+            "lang": "python3",
+            "id": "50"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 10030,
+            "lang": "python3",
+            "id": "51"
+          }
+        ]
+      },
+      {
+        "ch": "hard-b",
+        "hardness": "hard",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 20000,
+            "lang": "python3",
+            "id": "52"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 20200,
+            "lang": "python3",
+            "id": "53"
+          }
+        ]
+      }
+    ],
+    "tight": [
+      {
+        "kind": "SAME-MINUTE",
+        "dt": 30,
+        "ch": "hard-a",
+        "a": "alice",
+        "b": "bob"
+      },
+      {
+        "kind": "tight-gap",
+        "dt": 200,
+        "ch": "hard-b",
+        "a": "alice",
+        "b": "bob"
+      }
+    ]
+  }
+}

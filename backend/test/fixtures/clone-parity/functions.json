@@ -1,0 +1,120 @@
+{
+  "coreExact": [
+    {
+      "input": "def f():\n    x = 1 + 2  # comment\n    return x",
+      "output": "def f():x=1+2 return x"
+    },
+    {
+      "input": "a = b - c * d / e , f : g ; h < i > j [ k ] { l } m % n & o | p ! q",
+      "output": "a=b-c*d/e,f:g;h<i>j[k]{l}m%n&o|p!q"
+    },
+    {
+      "input": "#!/usr/bin/env python3\nimport os\n'''doc'''\nval = 5\n",
+      "output": "val=5"
+    },
+    {
+      "input": "x='''multi\nline'''+y",
+      "output": "x=+y"
+    },
+    {
+      "input": "  spaced  =  value  ",
+      "output": "spaced=value"
+    }
+  ],
+  "skeleton": [
+    {
+      "input": "def solve(n):\n    return n + 1",
+      "output": "defV(V):returnV+N"
+    },
+    {
+      "input": "def compute(count):\n    return count + 1",
+      "output": "defV(count):returncount+N"
+    },
+    {
+      "input": "for i in range(10): print(i)",
+      "output": "forVinrange(N):print(V)"
+    },
+    {
+      "input": "SELECT a FROM t WHERE x = 5",
+      "output": "selectVfromVwhereV=N"
+    }
+  ],
+  "artifacts": [
+    {
+      "input": "plain ascii code here\nno artifacts",
+      "output": []
+    },
+    {
+      "input": "﻿with bom\r\nand crlf",
+      "output": [
+        "CRLF",
+        "BOM"
+      ]
+    },
+    {
+      "input": "smart “quotes” and en–dash",
+      "output": [
+        "smart-quotes",
+        "en/em-dash"
+      ]
+    },
+    {
+      "input": "nbsp here and zero​width",
+      "output": [
+        "NBSP",
+        "zero-width"
+      ]
+    },
+    {
+      "input": "\ttab line\n  space line\n",
+      "output": [
+        "mixed-indent"
+      ]
+    },
+    {
+      "input": "x — em dash only line that is long enough",
+      "output": [
+        "en/em-dash"
+      ]
+    }
+  ],
+  "provenance": [
+    {
+      "input": "class Solution { };",
+      "output": [
+        "class-Solution(LeetCode)"
+      ]
+    },
+    {
+      "input": "// Driver Code\nint main(){}",
+      "output": [
+        "Driver-Code-banner(GfG)"
+      ]
+    },
+    {
+      "input": "def method(self):\n    pass",
+      "output": [
+        "self-method(OOP-wrapper)"
+      ]
+    },
+    {
+      "input": "#include <bits/stdc++.h>\n#define ll long long\nios_base::sync_with_stdio(0);",
+      "output": [
+        "cp-fastio(weak)",
+        "cp-macro-ll(weak)",
+        "bits-stdc++(weak)"
+      ]
+    },
+    {
+      "input": "from GeeksforGeeks\nleetcode link",
+      "output": [
+        "GfG-mention",
+        "leetcode-mention"
+      ]
+    },
+    {
+      "input": "nothing notable here at all",
+      "output": []
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "slug": "c3",
+    "challenges": [
+      {
+        "slug": "med-prob",
+        "name": "med-prob",
+        "solved": 30,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "dave",
+        "rank": 5
+      }
+    ],
+    "submissions": [
+      {
+        "id": "20",
+        "user": "dave",
+        "ch": "med-prob",
+        "chName": "med-prob",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 3000
+      }
+    ]
+  },
+  "code": {
+    "20": "﻿def f():\r\n\tx = “hello”\r\n  y = a b\r\n  z = m​n  # zero-width\r\n  r = p — q\r\n  return x\r\n"
+  },
+  "expected": {
+    "recurring_pairs": [],
+    "exact_clusters": [],
+    "skeleton_clusters": [],
+    "tight": []
+  }
+}

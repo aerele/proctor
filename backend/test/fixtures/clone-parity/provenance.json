@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "slug": "c4",
+    "challenges": [
+      {
+        "slug": "med-prob",
+        "name": "med-prob",
+        "solved": 30,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "erin",
+        "rank": 2
+      }
+    ],
+    "submissions": [
+      {
+        "id": "30",
+        "user": "erin",
+        "ch": "med-prob",
+        "chName": "med-prob",
+        "lang": "cpp",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 4000
+      }
+    ]
+  },
+  "code": {
+    "30": "#include <bits/stdc++.h>\n// Driver Code below\nclass Solution {\npublic:\n    int solve(int n) { return n; }\n};\n// from GeeksforGeeks editorial\n"
+  },
+  "expected": {
+    "recurring_pairs": [],
+    "exact_clusters": [],
+    "skeleton_clusters": [],
+    "tight": []
+  }
+}

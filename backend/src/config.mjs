@@ -32,6 +32,7 @@ export function loadConfig() {
     ENROLLMENTS_COLLECTION: process.env.ENROLLMENTS_COLLECTION || "proctor_enrollments",
     ADMIN_AUDIT_COLLECTION: process.env.ADMIN_AUDIT_COLLECTION || "proctor_admin_audit",
     TEMPLATES_COLLECTION: process.env.TEMPLATES_COLLECTION || "proctor_templates",
+    EVALUATIONS_COLLECTION: process.env.EVALUATIONS_COLLECTION || "proctor_evaluations",
 
     // ---- Storage / Judge0 -----------------------------------------------------
     EVIDENCE_BUCKET: process.env.EVIDENCE_BUCKET,
@@ -57,6 +58,7 @@ export function loadConfig() {
     EXEC_POLL_CONCURRENCY: Number(process.env.EXEC_POLL_CONCURRENCY || "16"),
     EXEC_MAX_QUEUE: Number(process.env.EXEC_MAX_QUEUE || "200"),
     DISCONNECTED_STALENESS_MS: Number(process.env.DISCONNECTED_STALENESS_MS || "45000"),
+    EVALUATE_BATCH_LIMIT: Number(process.env.EVALUATE_BATCH_LIMIT || "25"),
     PUBLIC_APP_ORIGIN: process.env.PUBLIC_APP_ORIGIN || "*",
     // S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
     // silently disable the brute-force cap; fall back to the safe default of 20.

@@ -1,0 +1,144 @@
+[
+  {
+    "id": "weather-observation-station-5",
+    "title": "Weather Observation Station 5",
+    "statement": "Query the two cities in **STATION** with the **shortest** and **longest** *CITY* names, as well as their respective lengths (i.e. number of characters in the name, spaces included).\n\nIf there is more than one smallest or largest city, choose the one that comes first when ordered alphabetically.\n\n**SQLite dialect (3.27).** Your query runs against a pre-loaded SQLite 3.27 database. Write standard SQLite SQL — use `||` for string concatenation; `RIGHT JOIN`, `FILTER` and `CONCAT()` are **not** available. Output formatting is preconfigured: result columns print space-separated and SQL `NULL` prints as `NULL`. Submit only SQL statements — no input reading, no print code. Multiple statements are allowed; their results print in order.\n\n### Schema\n\nThe **STATION** table is already loaded:\n\n| Field | Type |\n| --- | --- |\n| ID | INTEGER |\n| CITY | VARCHAR(50) |\n| STATE | VARCHAR(2) |\n| LAT_N | NUMERIC |\n| LONG_W | NUMERIC |\n\nwhere *LAT_N* is the northern latitude and *LONG_W* is the western longitude. City names may contain spaces.\n\n### Output Format\n\nTwo lines:\n\n- Line 1: the city with the shortest name, then the length of its name.\n- Line 2: the city with the longest name, then the length of its name.\n\n(If STATION has a single city, the same city appears on both lines. Two `SELECT` statements — shortest first — are the natural shape.)\n\n### Sample\n\nFor the sample database (the seed data is visible in the sample test), the output is:\n\n```\nAmo 3\nMarine On Saint Croix 21\n```\n\nThe shortest name is \"Amo\" (3 characters; \"Goa\" also has 3 but \"Amo\" comes first alphabetically). The longest is \"Marine On Saint Croix\" (21 characters, spaces included).",
+    "statement_format": "markdown",
+    "languages": [
+      "sql"
+    ],
+    "cpuTimeLimit": 5,
+    "memoryLimit": 128000,
+    "points": 10,
+    "scoring": "per_test",
+    "status": "published",
+    "sampleTests": [
+      {
+        "input": "CREATE TABLE STATION (ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC);\nINSERT INTO STATION (ID, CITY, STATE, LAT_N, LONG_W) VALUES\n(1, 'Amo', 'TN', 8.0, 70.0),\n(2, 'Delhi', 'KA', 9.3, 71.7),\n(3, 'Marine On Saint Croix', 'MH', 10.6, 72.4),\n(4, 'Pune', 'DL', 11.9, 73.1),\n(5, 'Goa', 'KL', 12.2, 74.8),\n(6, 'Kochi', 'AP', 13.5, 75.5),\n(7, 'Chennai', 'GA', 14.8, 76.2);",
+        "expected": "Amo 3\nMarine On Saint Croix 21"
+      }
+    ],
+    "hiddenTests": [
+      {
+        "input": "CREATE TABLE STATION (ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC);\nINSERT INTO STATION (ID, CITY, STATE, LAT_N, LONG_W) VALUES\n(1, 'Goa', 'TN', 8.0, 70.0),\n(2, 'Amo', 'KA', 9.3, 71.7),\n(3, 'Puri', 'MH', 10.6, 72.4),\n(4, 'Agra', 'DL', 11.9, 73.1);",
+        "expected": "Amo 3\nAgra 4"
+      },
+      {
+        "input": "CREATE TABLE STATION (ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC);\nINSERT INTO STATION (ID, CITY, STATE, LAT_N, LONG_W) VALUES\n(1, 'Hyderabad', 'TN', 8.0, 70.0);",
+        "expected": "Hyderabad 9\nHyderabad 9"
+      },
+      {
+        "input": "CREATE TABLE STATION (ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC);\nINSERT INTO STATION (ID, CITY, STATE, LAT_N, LONG_W) VALUES\n(1, 'Chennai', 'TN', 8.0, 70.0),\n(2, 'Kolkata', 'KA', 9.3, 71.7),\n(3, 'Mumbai', 'MH', 10.6, 72.4),\n(4, 'Jaipur', 'DL', 11.9, 73.1),\n(5, 'Nagpur', 'KL', 12.2, 74.8);",
+        "expected": "Jaipur 6\nChennai 7"
+      },
+      {
+        "input": "CREATE TABLE STATION (ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC);\nINSERT INTO STATION (ID, CITY, STATE, LAT_N, LONG_W) VALUES\n(1, 'Ooty', 'TN', 8.0, 70.0),\n(2, 'New Delhi Cantonment Area', 'KA', 9.3, 71.7),\n(3, 'East Godavari District', 'MH', 10.6, 72.4),\n(4, 'Port Blair', 'DL', 11.9, 73.1),\n(5, 'Alibag', 'KL', 12.2, 74.8),\n(6, 'Puri', 'AP', 13.5, 75.5);",
+        "expected": "Ooty 4\nNew Delhi Cantonment Area 25"
+      },
+      {
+        "input": "CREATE TABLE STATION (ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC);\nINSERT INTO STATION (ID, CITY, STATE, LAT_N, LONG_W) VALUES\n(1, 'ab', 'TN', 8.0, 70.0),\n(2, 'zb', 'KA', 9.3, 71.7),\n(3, 'aa', 'MH', 10.6, 72.4);",
+        "expected": "aa 2\naa 2"
+      }
+    ],
+    "stubs": {
+      "sql": "-- STATION(ID INTEGER, CITY VARCHAR(50), STATE VARCHAR(2), LAT_N NUMERIC, LONG_W NUMERIC)\n-- SQLite 3.27 - the table is already loaded; output formatting is preconfigured.\n-- Write your SQL query below.\n"
+    },
+    "tags": [
+      "hr-clone",
+      "kec-aerele",
+      "sql"
+    ]
+  },
+  {
+    "id": "occupations",
+    "title": "Occupations",
+    "statement": "[Pivot](https://en.wikipedia.org/wiki/Pivot_table) the *Occupation* column of the **OCCUPATIONS** table so that each *Name* is sorted alphabetically and displayed underneath its corresponding *Occupation*. The output should consist of four columns — **Doctor**, **Professor**, **Singer**, and **Actor** — in that specific order, with names listed alphabetically (top to bottom) under each column.\n\n**Note:** Print **NULL** when there are no more names corresponding to an occupation.\n\n**SQLite dialect (3.27).** Your query runs against a pre-loaded SQLite 3.27 database. Write standard SQLite SQL — use `||` for string concatenation; `RIGHT JOIN`, `FILTER` and `CONCAT()` are **not** available. Output formatting is preconfigured: result columns print space-separated and SQL `NULL` prints as `NULL`. Submit only SQL statements — no input reading, no print code. Multiple statements are allowed; their results print in order.\n\n### Schema\n\nThe **OCCUPATIONS** table is already loaded:\n\n| Column | Type |\n| --- | --- |\n| Name | VARCHAR(50) |\n| Occupation | VARCHAR(20) |\n\n*Occupation* is always one of: Doctor, Professor, Singer or Actor. Names are unique.\n\n### Output Format\n\nPrint the pivot table row by row: each result row has exactly four values (Doctor column, Professor column, Singer column, Actor column), with `NULL` filling columns that have run out of names. The number of rows equals the size of the largest occupation group.\n\n### Sample\n\nFor the sample database (the seed data is visible in the sample test), the output is:\n\n```\nSamantha Ashley Jenny Jane\nNULL Christeen Meera Julia\nNULL Ketty Priya Maria\n```\n\nThe only Doctor is Samantha. The Professors, alphabetically, are Ashley, Christeen, Ketty. The Singers are Jenny, Meera, Priya. The Actors are Jane, Julia, Maria. Columns shorter than the longest (3 rows) are padded with NULL.",
+    "statement_format": "markdown",
+    "languages": [
+      "sql"
+    ],
+    "cpuTimeLimit": 5,
+    "memoryLimit": 128000,
+    "points": 10,
+    "scoring": "per_test",
+    "status": "published",
+    "sampleTests": [
+      {
+        "input": "CREATE TABLE OCCUPATIONS (Name VARCHAR(50), Occupation VARCHAR(20));\nINSERT INTO OCCUPATIONS (Name, Occupation) VALUES\n('Samantha', 'Doctor'),\n('Julia', 'Actor'),\n('Maria', 'Actor'),\n('Meera', 'Singer'),\n('Ashley', 'Professor'),\n('Ketty', 'Professor'),\n('Christeen', 'Professor'),\n('Jane', 'Actor'),\n('Jenny', 'Singer'),\n('Priya', 'Singer');",
+        "expected": "Samantha Ashley Jenny Jane\nNULL Christeen Meera Julia\nNULL Ketty Priya Maria"
+      }
+    ],
+    "hiddenTests": [
+      {
+        "input": "CREATE TABLE OCCUPATIONS (Name VARCHAR(50), Occupation VARCHAR(20));\nINSERT INTO OCCUPATIONS (Name, Occupation) VALUES\n('Aamina', 'Doctor'),\n('Ashley', 'Professor'),\n('Belvet', 'Professor'),\n('Britney', 'Professor'),\n('Christeen', 'Singer'),\n('Eve', 'Actor'),\n('Jane', 'Singer'),\n('Jennifer', 'Actor'),\n('Jenny', 'Singer'),\n('Julia', 'Doctor'),\n('Ketty', 'Actor'),\n('Kristeen', 'Singer'),\n('Maria', 'Professor'),\n('Meera', 'Professor'),\n('Naomi', 'Professor'),\n('Priya', 'Doctor'),\n('Priyanka', 'Professor'),\n('Samantha', 'Actor');",
+        "expected": "Aamina Ashley Christeen Eve\nJulia Belvet Jane Jennifer\nPriya Britney Jenny Ketty\nNULL Maria Kristeen Samantha\nNULL Meera NULL NULL\nNULL Naomi NULL NULL\nNULL Priyanka NULL NULL"
+      },
+      {
+        "input": "CREATE TABLE OCCUPATIONS (Name VARCHAR(50), Occupation VARCHAR(20));\nINSERT INTO OCCUPATIONS (Name, Occupation) VALUES\n('Zoe', 'Doctor'),\n('Amy', 'Professor'),\n('Bea', 'Singer'),\n('Cal', 'Actor');",
+        "expected": "Zoe Amy Bea Cal"
+      },
+      {
+        "input": "CREATE TABLE OCCUPATIONS (Name VARCHAR(50), Occupation VARCHAR(20));\nINSERT INTO OCCUPATIONS (Name, Occupation) VALUES\n('Eve', 'Doctor'),\n('Ada', 'Doctor'),\n('Bob', 'Doctor'),\n('Cid', 'Doctor'),\n('Dan', 'Singer');",
+        "expected": "Ada NULL Dan NULL\nBob NULL NULL NULL\nCid NULL NULL NULL\nEve NULL NULL NULL"
+      },
+      {
+        "input": "CREATE TABLE OCCUPATIONS (Name VARCHAR(50), Occupation VARCHAR(20));\nINSERT INTO OCCUPATIONS (Name, Occupation) VALUES\n('Hari', 'Actor'),\n('Gita', 'Actor'),\n('Farah', 'Actor'),\n('Ella', 'Actor'),\n('Dev', 'Professor'),\n('Chitra', 'Singer'),\n('Bala', 'Doctor'),\n('Asha', 'Doctor');",
+        "expected": "Asha Dev Chitra Ella\nBala NULL NULL Farah\nNULL NULL NULL Gita\nNULL NULL NULL Hari"
+      }
+    ],
+    "stubs": {
+      "sql": "-- OCCUPATIONS(Name VARCHAR(50), Occupation VARCHAR(20))\n-- SQLite 3.27 - the table is already loaded; output formatting is preconfigured.\n-- Write your SQL query below.\n"
+    },
+    "tags": [
+      "hr-clone",
+      "kec-aerele",
+      "sql"
+    ]
+  },
+  {
+    "id": "15-days-of-learning-sql",
+    "title": "15 Days of Learning SQL",
+    "statement": "Julia conducted a **15 Days of Learning SQL** contest. The start date of the contest was *March 01, 2016* and the end date was *March 15, 2016*.\n\nWrite a query to print the total number of unique hackers who made at least 1 submission **each day** (starting on the first day of the contest), and find the *hacker_id* and *name* of the hacker who made the **maximum** number of submissions **each day**. If more than one such hacker has the maximum number of submissions, print the one with the **lowest** *hacker_id*. The query should print this information for each day of the contest, sorted by the date.\n\n**SQLite dialect (3.27).** Your query runs against a pre-loaded SQLite 3.27 database. Write standard SQLite SQL — use `||` for string concatenation; `RIGHT JOIN`, `FILTER` and `CONCAT()` are **not** available. Output formatting is preconfigured: result columns print space-separated and SQL `NULL` prints as `NULL`. Submit only SQL statements — no input reading, no print code. Multiple statements are allowed; their results print in order.\n\n### Schema\n\nThe **Hackers** table is already loaded:\n\n| Column | Type |\n| --- | --- |\n| hacker_id | INTEGER |\n| name | VARCHAR(50) |\n\nThe **Submissions** table is already loaded:\n\n| Column | Type |\n| --- | --- |\n| submission_date | DATE (`'YYYY-MM-DD'` text, `'2016-03-01'` … `'2016-03-15'`) |\n| submission_id | INTEGER |\n| hacker_id | INTEGER |\n| score | INTEGER |\n\nOnly days that have at least one submission appear in the data; days are not guaranteed to be contiguous in the table order.\n\n### Output Format\n\nFor each contest day that has at least one submission, in date order, print one row with four values: the date (`2016-03-DD`), the number of unique hackers who made at least 1 submission on **every** contest day so far (up to and including that day), and the *hacker_id* and *name* of that day's top submitter.\n\n### Sample\n\nFor the sample database (the seed data is visible in the sample test), the output is:\n\n```\n2016-03-01 4 11 Rose\n2016-03-02 2 12 Angela\n2016-03-03 1 13 Frank\n2016-03-04 1 11 Rose\n```\n\nOn day 1 all four hackers submitted (count 4); all made 1 submission, so the lowest id (11, Rose) is the top submitter. On day 2 only hackers 11 and 12 kept their every-day streak (count 2); Angela made 2 submissions, the most. On day 3 only hacker 11 has submitted every day (count 1); Frank made 2 submissions. On day 4 the streak count is still 1; Rose made 2 submissions, the most that day.",
+    "statement_format": "markdown",
+    "languages": [
+      "sql"
+    ],
+    "cpuTimeLimit": 5,
+    "memoryLimit": 128000,
+    "points": 10,
+    "scoring": "per_test",
+    "status": "published",
+    "sampleTests": [
+      {
+        "input": "CREATE TABLE Hackers (hacker_id INTEGER, name VARCHAR(50));\nCREATE TABLE Submissions (submission_date DATE, submission_id INTEGER, hacker_id INTEGER, score INTEGER);\nINSERT INTO Hackers (hacker_id, name) VALUES\n(11, 'Rose'),\n(12, 'Angela'),\n(13, 'Frank'),\n(14, 'Patrick');\nINSERT INTO Submissions (submission_date, submission_id, hacker_id, score) VALUES\n('2016-03-01', 1, 11, 17),\n('2016-03-01', 2, 12, 24),\n('2016-03-01', 3, 13, 31),\n('2016-03-01', 4, 14, 38),\n('2016-03-02', 5, 11, 45),\n('2016-03-02', 6, 12, 52),\n('2016-03-02', 7, 12, 59),\n('2016-03-03', 8, 11, 66),\n('2016-03-03', 9, 13, 73),\n('2016-03-03', 10, 13, 80),\n('2016-03-04', 11, 11, 87),\n('2016-03-04', 12, 11, 94),\n('2016-03-04', 13, 14, 10);",
+        "expected": "2016-03-01 4 11 Rose\n2016-03-02 2 12 Angela\n2016-03-03 1 13 Frank\n2016-03-04 1 11 Rose"
+      }
+    ],
+    "hiddenTests": [
+      {
+        "input": "CREATE TABLE Hackers (hacker_id INTEGER, name VARCHAR(50));\nCREATE TABLE Submissions (submission_date DATE, submission_id INTEGER, hacker_id INTEGER, score INTEGER);\nINSERT INTO Hackers (hacker_id, name) VALUES\n(21, 'Asha'),\n(22, 'Bram'),\n(23, 'Chen'),\n(24, 'Devi'),\n(25, 'Egan');\nINSERT INTO Submissions (submission_date, submission_id, hacker_id, score) VALUES\n('2016-03-01', 1, 21, 17),\n('2016-03-01', 2, 22, 24),\n('2016-03-01', 3, 23, 31),\n('2016-03-01', 4, 23, 38),\n('2016-03-01', 5, 25, 45),\n('2016-03-02', 6, 21, 52),\n('2016-03-02', 7, 22, 59),\n('2016-03-02', 8, 23, 66),\n('2016-03-02', 9, 23, 73),\n('2016-03-02', 10, 25, 80),\n('2016-03-03', 11, 21, 87),\n('2016-03-03', 12, 22, 94),\n('2016-03-03', 13, 23, 10),\n('2016-03-03', 14, 23, 17),\n('2016-03-03', 15, 25, 24),\n('2016-03-04', 16, 21, 31),\n('2016-03-04', 17, 22, 38),\n('2016-03-04', 18, 24, 45),\n('2016-03-04', 19, 24, 52),\n('2016-03-04', 20, 24, 59),\n('2016-03-04', 21, 25, 66),\n('2016-03-05', 22, 21, 73),\n('2016-03-05', 23, 22, 80),\n('2016-03-05', 24, 25, 87),\n('2016-03-05', 25, 25, 94),\n('2016-03-06', 26, 21, 10),\n('2016-03-06', 27, 22, 17),\n('2016-03-06', 28, 25, 24),\n('2016-03-07', 29, 21, 31),\n('2016-03-07', 30, 22, 38),\n('2016-03-07', 31, 25, 45),\n('2016-03-08', 32, 21, 52),\n('2016-03-08', 33, 24, 59),\n('2016-03-08', 34, 24, 66),\n('2016-03-08', 35, 24, 73),\n('2016-03-08', 36, 25, 80),\n('2016-03-09', 37, 21, 87),\n('2016-03-09', 38, 22, 94),\n('2016-03-09', 39, 25, 10),\n('2016-03-09', 40, 25, 17),\n('2016-03-10', 41, 21, 24),\n('2016-03-10', 42, 22, 31),\n('2016-03-10', 43, 25, 38),\n('2016-03-11', 44, 21, 45),\n('2016-03-11', 45, 22, 52),\n('2016-03-11', 46, 25, 59),\n('2016-03-12', 47, 21, 66),\n('2016-03-12', 48, 22, 73),\n('2016-03-12', 49, 24, 80),\n('2016-03-12', 50, 24, 87),\n('2016-03-12', 51, 24, 94),\n('2016-03-12', 52, 25, 10),\n('2016-03-13', 53, 21, 17),\n('2016-03-13', 54, 22, 24),\n('2016-03-13', 55, 25, 31),\n('2016-03-14', 56, 21, 38),\n('2016-03-14', 57, 22, 45),\n('2016-03-14', 58, 25, 52),\n('2016-03-15', 59, 21, 59),\n('2016-03-15', 60, 22, 66),\n('2016-03-15', 61, 25, 73);",
+        "expected": "2016-03-01 4 23 Chen\n2016-03-02 4 23 Chen\n2016-03-03 4 23 Chen\n2016-03-04 3 24 Devi\n2016-03-05 3 25 Egan\n2016-03-06 3 21 Asha\n2016-03-07 3 21 Asha\n2016-03-08 2 24 Devi\n2016-03-09 2 25 Egan\n2016-03-10 2 21 Asha\n2016-03-11 2 21 Asha\n2016-03-12 2 24 Devi\n2016-03-13 2 21 Asha\n2016-03-14 2 21 Asha\n2016-03-15 2 21 Asha"
+      },
+      {
+        "input": "CREATE TABLE Hackers (hacker_id INTEGER, name VARCHAR(50));\nCREATE TABLE Submissions (submission_date DATE, submission_id INTEGER, hacker_id INTEGER, score INTEGER);\nINSERT INTO Hackers (hacker_id, name) VALUES\n(31, 'Solo');\nINSERT INTO Submissions (submission_date, submission_id, hacker_id, score) VALUES\n('2016-03-01', 1, 31, 17),\n('2016-03-02', 2, 31, 24),\n('2016-03-03', 3, 31, 31),\n('2016-03-04', 4, 31, 38),\n('2016-03-05', 5, 31, 45),\n('2016-03-06', 6, 31, 52),\n('2016-03-07', 7, 31, 59),\n('2016-03-08', 8, 31, 66),\n('2016-03-09', 9, 31, 73),\n('2016-03-10', 10, 31, 80),\n('2016-03-11', 11, 31, 87),\n('2016-03-12', 12, 31, 94),\n('2016-03-13', 13, 31, 10),\n('2016-03-14', 14, 31, 17),\n('2016-03-15', 15, 31, 24);",
+        "expected": "2016-03-01 1 31 Solo\n2016-03-02 1 31 Solo\n2016-03-03 1 31 Solo\n2016-03-04 1 31 Solo\n2016-03-05 1 31 Solo\n2016-03-06 1 31 Solo\n2016-03-07 1 31 Solo\n2016-03-08 1 31 Solo\n2016-03-09 1 31 Solo\n2016-03-10 1 31 Solo\n2016-03-11 1 31 Solo\n2016-03-12 1 31 Solo\n2016-03-13 1 31 Solo\n2016-03-14 1 31 Solo\n2016-03-15 1 31 Solo"
+      },
+      {
+        "input": "CREATE TABLE Hackers (hacker_id INTEGER, name VARCHAR(50));\nCREATE TABLE Submissions (submission_date DATE, submission_id INTEGER, hacker_id INTEGER, score INTEGER);\nINSERT INTO Hackers (hacker_id, name) VALUES\n(41, 'Ana'),\n(42, 'Ben'),\n(43, 'Cleo');\nINSERT INTO Submissions (submission_date, submission_id, hacker_id, score) VALUES\n('2016-03-01', 1, 41, 17),\n('2016-03-01', 2, 42, 24),\n('2016-03-01', 3, 43, 31),\n('2016-03-02', 4, 43, 38),\n('2016-03-02', 5, 41, 45),\n('2016-03-03', 6, 42, 52);",
+        "expected": "2016-03-01 3 41 Ana\n2016-03-02 2 41 Ana\n2016-03-03 0 42 Ben"
+      },
+      {
+        "input": "CREATE TABLE Hackers (hacker_id INTEGER, name VARCHAR(50));\nCREATE TABLE Submissions (submission_date DATE, submission_id INTEGER, hacker_id INTEGER, score INTEGER);\nINSERT INTO Hackers (hacker_id, name) VALUES\n(51, 'Mira'),\n(52, 'Noor');\nINSERT INTO Submissions (submission_date, submission_id, hacker_id, score) VALUES\n('2016-03-01', 1, 52, 17),\n('2016-03-01', 2, 51, 24),\n('2016-03-01', 3, 52, 31),\n('2016-03-02', 4, 51, 38),\n('2016-03-02', 5, 52, 45);",
+        "expected": "2016-03-01 2 52 Noor\n2016-03-02 2 51 Mira"
+      }
+    ],
+    "stubs": {
+      "sql": "-- Hackers(hacker_id INTEGER, name VARCHAR(50))\n-- Submissions(submission_date DATE, submission_id INTEGER, hacker_id INTEGER, score INTEGER)\n-- SQLite 3.27 - the tables are already loaded; output formatting is preconfigured.\n-- Write your SQL query below.\n"
+    },
+    "tags": [
+      "hr-clone",
+      "kec-aerele",
+      "sql"
+    ]
+  }
+]

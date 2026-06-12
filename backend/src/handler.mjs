@@ -7,8 +7,10 @@ import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, mas
 import { makeAuth } from "./lib/auth.mjs";
 import { makeSessionStore } from "./lib/sessionStore.mjs";
 import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
+import { makeEvaluation } from "./evaluation.mjs";
+import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
 import { loadConfig } from "./config.mjs";
-import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
+import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
@@ -43,13 +45,13 @@ const {
   LIVE_LOCK_COLLECTION, REVIEW_STATE_COLLECTION, REVIEW_COLLECTION, REVIEW_CLAIMS_COLLECTION,
   SUBMISSIONS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
   ROOM_GATES_COLLECTION, CONTESTS_COLLECTION, COLLEGES_COLLECTION, PERSONS_COLLECTION,
-  ENROLLMENTS_COLLECTION, ADMIN_AUDIT_COLLECTION, TEMPLATES_COLLECTION,
+  ENROLLMENTS_COLLECTION, ADMIN_AUDIT_COLLECTION, TEMPLATES_COLLECTION, EVALUATIONS_COLLECTION,
   EVIDENCE_BUCKET, JUDGE0_BASE_URL, JUDGE0_MODE, JUDGE0_API_KEY, JUDGE0_AUTH_TOKEN,
   URL_EXPIRY_SECONDS, ADMIN_PASSWORD, INVIGILATOR_PASSWORD, ALERTS_INGEST_API_KEY,
   RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
-  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT
+  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT
 } = loadConfig();
 
 // ---- Non-env code constants (kept local to the handler) ---------------------
@@ -285,6 +287,38 @@ const {
   gateRoomKey, getRoomGate
 } = invigilatorRoutes;
 
+// Factory seam (P1): the candidate-evaluation orchestrator + its admin routes.
+// makeEvaluation gathers contest-scoped Firestore docs (ALL reads through the
+// scopedQuery chokepoint) + GCS editor/shell/clipboard evidence, runs the pure
+// metric modules, and writes one scorecard per contest×identity (+ a __meta::
+// doc from the cross-candidate pass). The routes are auth-first (routesAuthLint).
+const evaluation = makeEvaluation({
+  getFirestore,
+  bucket,
+  scopedQuery,
+  resolveContest,
+  contestProblemEntries,
+  getProblem,
+  listEnrollments,
+  collections: {
+    evaluations: EVALUATIONS_COLLECTION,
+    submissions: SUBMISSIONS_COLLECTION,
+    sessions: SESSION_COLLECTION
+  },
+  editorEventsLabel: EDITOR_EVENTS_COLLECTION,
+  evaluateBatchLimit: EVALUATE_BATCH_LIMIT,
+  sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
+  submissionsQueryLimit: SUBMISSIONS_RESULTS_LIMIT
+});
+const evaluationRoutes = makeEvaluationRoutes({
+  requireAdmin,
+  parseBody,
+  badRequest,
+  resolveContest,
+  evaluation
+});
+const { adminContestEvaluate, adminContestEvaluations } = evaluationRoutes;
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -370,6 +404,8 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));
     if (req.method === "GET" && path === "/api/admin/attendance") return send(res, 200, await adminAttendance(req));
     if (req.method === "GET" && path === "/api/admin/contest-results") return send(res, 200, await adminContestResults(req));
+    if (req.method === "POST" && path === "/api/admin/contest-evaluate") return send(res, 200, await adminContestEvaluate(req));
+    if (req.method === "GET" && path === "/api/admin/contest-evaluations") return send(res, 200, await adminContestEvaluations(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection") return send(res, 200, await adminContestSelection(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection-done") return send(res, 200, await adminContestSelectionDone(req));
     if (req.method === "POST" && path === "/api/admin/contest-adopt") return send(res, 200, await adminContestAdopt(req));
@@ -1439,6 +1475,25 @@ async function resolveExecProblem(session, problemIdRaw) {
   return getProblem(problemIdRaw);
 }
 
+// Build the per-test Judge0 batch items for BOTH exec endpoints. Every
+// language but SQL runs the candidate's source as-is with the test's input on
+// stdin — that path stays byte-identical to the pre-SQL shape (pinned by
+// test). For SQL (language 82) the stdin field is DEAD on the engine, so each
+// test ships the composed script (format prelude + the test's seed SQL +
+// the candidate's query) as source_code with an empty stdin — see
+// composeSqlExecSource in problems.mjs (the single source of truth shared
+// with authoring tooling).
+function buildExecItems(problem, tests, language, source) {
+  const languageId = LANGUAGE_IDS[language];
+  return tests.map((t) => ({
+    languageId,
+    source: language === "sql" ? composeSqlExecSource(t.input, source) : source,
+    stdin: language === "sql" ? "" : t.input,
+    expectedOutput: t.expected,
+    cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
+  }));
+}
+
 async function execRun(req) {
   const body = parseBody(req);
   const sessionId = String(body.session_id || "");
@@ -1458,10 +1513,7 @@ async function execRun(req) {
   if (!languageId) return badRequest("unsupported language");
   const source = String(body.source_code || "");
   if (source.length > MAX_SOURCE_CODE_LENGTH) return badRequest(`source_code too large (max ${MAX_SOURCE_CODE_LENGTH} chars)`);
-  const items = problem.sampleTests.map((t) => ({
-    languageId, source, stdin: t.input, expectedOutput: t.expected,
-    cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
-  }));
+  const items = buildExecItems(problem, problem.sampleTests, language, source);
   // Start the cooldown at ENQUEUE time, once validation has fully passed — a
   // validation-rejected request never consumes the slot, and consuming it on
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued runs
@@ -1519,10 +1571,7 @@ async function execSubmit(req) {
   const source = String(body.source_code || "");
   if (source.length > MAX_SOURCE_CODE_LENGTH) return badRequest(`source_code too large (max ${MAX_SOURCE_CODE_LENGTH} chars)`);
 
-  const items = problem.hiddenTests.map((t) => ({
-    languageId, source, stdin: t.input, expectedOutput: t.expected,
-    cpuTimeLimit: problem.cpuTimeLimit, memoryLimit: problem.memoryLimit
-  }));
+  const items = buildExecItems(problem, problem.hiddenTests, language, source);
   // Start the cooldown at ENQUEUE time, once validation has fully passed — a
   // validation-rejected request never consumes the slot, and consuming it on
   // queue ACCEPTANCE (not dispatch) stops a session from stacking queued
@@ -3969,10 +4018,29 @@ async function computeContestResults(contest) {
   ]);
   const sessions = sessionsSnap ? sessionsSnap.docs.map((doc) => doc.data()) : [];
 
+  // P1 (E): join the stored candidate-evaluation scorecards (one doc per
+  // contest×identity, keyed by identity_key — person_id for enrolled rows,
+  // username_norm for unmatched). The __meta:: cross doc is skipped. Empty when
+  // the contest was never evaluated → buildResultsRows stays behavior-preserving.
+  // Skipped on the purged path (the live scorecards are gone; the snapshot
+  // carries the evaluation projection instead).
+  const evaluations = new Map();
+  if (!purged) {
+    const evaluationsSnap = await scopedQuery(getFirestore().collection(EVALUATIONS_COLLECTION), contest)
+      .limit(SUBMISSIONS_RESULTS_LIMIT)
+      .get();
+    for (const doc of evaluationsSnap.docs) {
+      const scorecard = doc.data();
+      const key = String(scorecard?.identity_key || "");
+      if (!key || key.startsWith("__meta::")) continue;
+      evaluations.set(key, scorecard);
+    }
+  }
+
   const multiCollege = Array.isArray(contest.colleges) && contest.colleges.length > 1;
   const rows = buildResultsRows({
     submissions, enrollments, persons, integrityByPerson, collegeNames,
-    problemOrder, multiCollege, purged, sessions
+    problemOrder, multiCollege, purged, sessions, evaluations
   });
 
   // Per-problem column titles (contest order) for the table header + CSV.
@@ -4071,6 +4139,7 @@ async function adminContestSelectionDone(req) {
         alerts_by_severity: row.integrity.alerts_by_severity,
         review_verdict: row.integrity.review_verdict
       },
+      evaluation: row.evaluation || null, // P1 (E): freeze the projected evaluation so the purged path can resurface it
       unique_id: row.candidate_id,
       name: row.name,
       session_status: ""

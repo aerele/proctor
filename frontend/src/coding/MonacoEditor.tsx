@@ -4,10 +4,12 @@ import { mapContentChange, mapPaste, mapCursor, mapSelection, coalesceCursor } f
 import { registerCuratedCompletions } from "./completionProviders";
 import type { EditorEvent } from "../types";
 
-const MONACO_LANG: Record<string, string> = { python: "python", cpp: "cpp", java: "java", javascript: "javascript" };
+// sql maps to Monaco's bundled sql basic-language (ships in the default
+// loader); curated completions stay python/cpp/java/javascript-only by design.
+const MONACO_LANG: Record<string, string> = { python: "python", cpp: "cpp", java: "java", javascript: "javascript", sql: "sql" };
 
 export function MonacoEditor({ language, value, onChange, onEvent }: {
-  language: "python" | "cpp" | "java" | "javascript";
+  language: "python" | "cpp" | "java" | "javascript" | "sql";
   value: string;
   onChange: (v: string) => void;
   onEvent: (e: EditorEvent) => void;

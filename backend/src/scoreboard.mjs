@@ -126,12 +126,53 @@ function perProblemCells(problemOrder, byProblem) {
   });
 }
 
+// ---- P1 candidate-evaluation projection (E) ---------------------------------
+// Project a stored evaluation scorecard down to the compact shape the Results
+// row + CSV carry. NULL-SAFE: any missing/invalid scorecard (null, non-object,
+// no talent/integrity sub-objects) → null, so the join stays behavior-preserving
+// when evaluations are absent. flags_by_severity counts scorecard.flags[] by
+// severity (only the three known buckets; unknowns dropped, never bucketed).
+export function projectEvaluation(scorecard) {
+  if (!scorecard || typeof scorecard !== "object") return null;
+  const talent = scorecard.talent && typeof scorecard.talent === "object" ? scorecard.talent : {};
+  const integrity = scorecard.integrity && typeof scorecard.integrity === "object" ? scorecard.integrity : {};
+  const tiers = scorecard.tiers && typeof scorecard.tiers === "object" ? scorecard.tiers : {};
+  const coverage = scorecard.coverage && typeof scorecard.coverage === "object" ? scorecard.coverage : {};
+
+  const flagsBySeverity = { critical: 0, warning: 0, info: 0 };
+  for (const flag of Array.isArray(scorecard.flags) ? scorecard.flags : []) {
+    const severity = String(flag?.severity || "");
+    if (Object.prototype.hasOwnProperty.call(flagsBySeverity, severity)) flagsBySeverity[severity] += 1;
+  }
+
+  const composite = Number.isFinite(talent.composite) ? talent.composite : null;
+  const pasteRatio = Number.isFinite(integrity.paste_ratio) ? integrity.paste_ratio : null;
+
+  return {
+    talent_tier: tiers.talent != null ? String(tiers.talent) : null,
+    integrity_tier: tiers.integrity != null ? String(tiers.integrity) : null,
+    composite,
+    paste_ratio: pasteRatio,
+    flags_by_severity: flagsBySeverity,
+    confidence: coverage.confidence != null ? String(coverage.confidence) : null,
+    one_line: tiers.one_line != null ? String(tiers.one_line) : null,
+    recommended_action: scorecard.recommended_action != null ? scorecard.recommended_action : null
+  };
+}
+
 // THE Results join. Active enrollments are the row spine (results denominator =
 // active enrollments, vision §2.9); a candidate with no submissions still gets
 // a 0-score row, and a PURGED contest (purged:true → no submissions/persons)
 // materializes rows from enrollment.final_snapshot (purge-survivor rule). The
 // label-driven display id gains the college ONLY when the contest is
 // multi-college (vision §2.13 projection rule).
+//
+// P1 (E): evaluations is an OPTIONAL Map keyed by identity_key — person_id for
+// enrolled rows, username_norm for unmatched rows (mixed keying). Each row gains
+// `evaluation: projectEvaluation(hit) || null`. On the purged path the live
+// scorecard is gone, so a snapshot-stored evaluation (enrollment.final_snapshot
+// .evaluation) is surfaced through the SAME projection shape. Zero behavior
+// change when evaluations is empty (every pre-P1 test passes untouched).
 export function buildResultsRows({
   submissions = [],
   enrollments = [],
@@ -141,8 +182,10 @@ export function buildResultsRows({
   problemOrder = [],
   multiCollege = false,
   purged = false,
-  sessions = []
+  sessions = [],
+  evaluations = new Map()
 } = {}) {
+  const evaluationOf = (key) => (evaluations instanceof Map ? evaluations.get(key) : evaluations?.[key]) || null;
   const scoreboard = new Map(
     computeScoreboard(submissions, problemOrder).map((row) => [row.username_norm, row])
   );
@@ -190,6 +233,14 @@ export function buildResultsRows({
       integrity = summarizeIntegrity(integrityOf(personId) || {});
     }
 
+    // P1 (E) evaluation: live scorecard keyed by person_id; on the purged path
+    // the live scorecard is gone, so surface the snapshot-stored evaluation
+    // (already in the compact stored shape — normalize to the same projection
+    // shape so the UI never branches on origin) when present, else null.
+    const evaluation = fromSnapshot
+      ? (normalizeSnapshotEvaluation(snapshot?.evaluation) || null)
+      : (projectEvaluation(evaluationOf(personId)) || null);
+
     rows.push({
       person_id: personId,
       candidate_id: uniqueId,
@@ -202,7 +253,8 @@ export function buildResultsRows({
       integrity,
       selection_status: String(enrollment.selection_status || "none"),
       from_snapshot: fromSnapshot,
-      last_improvement_at: board?.last_improvement_at || null
+      last_improvement_at: board?.last_improvement_at || null,
+      evaluation
     });
   }
 
@@ -241,6 +293,7 @@ export function buildResultsRows({
       selection_status: "none",
       from_snapshot: false,
       last_improvement_at: board.last_improvement_at || null,
+      evaluation: projectEvaluation(evaluationOf(norm)) || null, // P1 (E): unmatched rows key on username_norm
       unmatched: true
     });
   }
@@ -278,6 +331,31 @@ function normalizeSnapshotIntegrity(integrity) {
   };
 }
 
+// A stored final_snapshot.evaluation blob is ALREADY in the compact projection
+// shape (handler stores {talent_tier, integrity_tier, composite,
+// flags_by_severity, one_line, recommended_action} at selection-done). Normalize
+// it to the full row-projection shape (filling paste_ratio/confidence absent in
+// the snapshot) so the purged path matches the live path. Null when no blob.
+function normalizeSnapshotEvaluation(evaluation) {
+  if (!evaluation || typeof evaluation !== "object") return null;
+  const sev = evaluation.flags_by_severity && typeof evaluation.flags_by_severity === "object"
+    ? evaluation.flags_by_severity : {};
+  return {
+    talent_tier: evaluation.talent_tier != null ? String(evaluation.talent_tier) : null,
+    integrity_tier: evaluation.integrity_tier != null ? String(evaluation.integrity_tier) : null,
+    composite: Number.isFinite(evaluation.composite) ? evaluation.composite : null,
+    paste_ratio: Number.isFinite(evaluation.paste_ratio) ? evaluation.paste_ratio : null,
+    flags_by_severity: {
+      critical: Number(sev.critical || 0),
+      warning: Number(sev.warning || 0),
+      info: Number(sev.info || 0)
+    },
+    confidence: evaluation.confidence != null ? String(evaluation.confidence) : null,
+    one_line: evaluation.one_line != null ? String(evaluation.one_line) : null,
+    recommended_action: evaluation.recommended_action != null ? evaluation.recommended_action : null
+  };
+}
+
 // RFC-4180-ish CSV with the same formula-injection guard the frontend uses
 // (candidate-supplied id/name are quoted + prefixed). Header carries the
 // per-problem TITLES (in contest order) so the export reads like the table.
@@ -287,12 +365,21 @@ export function buildResultsCsv(rows, problems = []) {
     "rank", "candidate_id", "name", "college", "total",
     ...titles,
     "critical_alerts", "warning_alerts", "info_alerts", "review_verdict", "selection_status",
+    // P1 (E) candidate-evaluation columns — after selection_status, before
+    // unmatched. Blank cells when the row has no evaluation (behavior-preserving
+    // for un-evaluated contests).
+    "talent_tier", "talent_composite", "integrity_tier", "paste_pct", "eval_flags", "eval_one_line",
     // KPR 2026-06-12: unmatched-identity rows are flagged in the export too —
     // a hiring decision must never mistake an unverified typed id for a
     // roster-verified one. "yes" on flagged rows, blank otherwise.
     "unmatched"
   ].map(csvField).join(",");
   const lines = rows.map((row) => {
+    const ev = row.evaluation || null;
+    const pastePct = ev && Number.isFinite(ev.paste_ratio) ? String(Math.round(ev.paste_ratio * 100)) : "";
+    const evalFlags = ev
+      ? `${ev.flags_by_severity.critical}C/${ev.flags_by_severity.warning}W/${ev.flags_by_severity.info}I`
+      : "";
     const cells = [
       row.rank, row.candidate_id, row.name, row.college, row.total,
       ...problems.map((p) => {
@@ -304,6 +391,12 @@ export function buildResultsCsv(rows, problems = []) {
       row.integrity.alerts_by_severity.info,
       row.integrity.review_verdict,
       row.selection_status,
+      ev && ev.talent_tier != null ? ev.talent_tier : "",
+      ev && Number.isFinite(ev.composite) ? ev.composite : "",
+      ev && ev.integrity_tier != null ? ev.integrity_tier : "",
+      pastePct,
+      evalFlags,
+      ev && ev.one_line != null ? ev.one_line : "",
       row.unmatched ? "yes" : ""
     ];
     return cells.map((value) => csvField(String(value))).join(",");

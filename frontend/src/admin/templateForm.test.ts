@@ -48,7 +48,7 @@ describe("emptyTemplateDraft", () => {
     expect(draft.identityLabel).toBe("Roll Number");
     expect(draft.roomGateEnabled).toBe(true);
     expect(draft.screenMarkersEnabled).toBe(false); // OMR P1: default OFF
-    expect(draft.languages).toEqual(["python", "cpp", "java", "javascript"]);
+    expect(draft.languages).toEqual(["python", "cpp", "java", "javascript", "sql"]);
     expect(draft.preset).toBe(false);
   });
 });
@@ -90,7 +90,7 @@ describe("draftFromTemplate", () => {
     expect(draft.identityLabel).toBe("Roll Number"); // default
     expect(draft.cameraEnabled).toBe(true);          // default
     expect(draft.screenMarkersEnabled).toBe(false);  // OMR P1: pre-flag docs hydrate OFF
-    expect(draft.languages).toEqual(["python", "cpp", "java", "javascript"]); // default
+    expect(draft.languages).toEqual(["python", "cpp", "java", "javascript", "sql"]); // default
   });
 });
 

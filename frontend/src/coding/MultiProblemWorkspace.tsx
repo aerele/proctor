@@ -38,7 +38,7 @@ import {
 } from "./stubReload";
 import type { EditorEvent, ProblemSubmissionSummary, PublicProblem, RunResult, SubmitResult } from "../types";
 
-type Language = "python" | "cpp" | "java" | "javascript";
+type Language = "python" | "cpp" | "java" | "javascript" | "sql";
 
 type PaneState = {
   language: Language;

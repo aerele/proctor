@@ -9,7 +9,7 @@
 // the CSV. PURE unit tests — no handler, no env, no GCP.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildResultsRows, summarizeIntegrity, buildResultsCsv } from "../src/scoreboard.mjs";
+import { buildResultsRows, summarizeIntegrity, buildResultsCsv, projectEvaluation } from "../src/scoreboard.mjs";
 
 // ---- summarizeIntegrity --------------------------------------------------------
 
@@ -166,10 +166,12 @@ test("buildResultsCsv: header + one row per candidate, per-problem columns, inte
   const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
   const lines = csv.split("\n");
   // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
-  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,unmatched");
+  // P1 (E): 6 candidate-evaluation columns sit after selection_status, before
+  // unmatched; blank here (this fixture has no evaluations attached).
+  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,talent_tier,talent_composite,integrity_tier,paste_pct,eval_flags,eval_one_line,unmatched");
   assert.equal(lines.length, 4); // header + 3 candidates
-  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,shortlisted,$/);
-  assert.match(lines[3], /^3,21CS002,Carol,KEC,0,0,0,0,0,0,none,none,$/);
+  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,shortlisted,,,,,,,$/);
+  assert.match(lines[3], /^3,21CS002,Carol,KEC,0,0,0,0,0,0,none,none,,,,,,,$/);
 });
 
 test("buildResultsCsv: CSV-injection guard on candidate-supplied fields", () => {
@@ -217,9 +219,10 @@ test("buildResultsRows: scoreboard identities with no enrollment ride as flagged
   assert.equal(unmatchedRow.rank, 1);
   // Matched rows are still all present, in their relative order.
   assert.deepEqual(rows.filter((r) => !r.unmatched).map((r) => r.person_id), ["kec~21cs001", "psg~21cs001", "kec~21cs002"]);
-  // CSV flags the row in the trailing "unmatched" column.
+  // CSV flags the row in the trailing "unmatched" column (6 blank eval columns
+  // precede it — this row has no evaluation attached).
   const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
-  assert.match(csv, /^1,23CS091,Kishore P S,,150,100,50,0,0,0,none,none,yes$/m);
+  assert.match(csv, /^1,23CS091,Kishore P S,,150,100,50,0,0,0,none,none,,,,,,,yes$/m);
 });
 
 test("buildResultsRows: happy path (every submitter enrolled) appends NO unmatched rows", () => {
@@ -240,4 +243,153 @@ test("buildResultsRows: PURGED contest (no submissions) appends no unmatched row
   });
   assert.equal(rows.length, 1);
   assert.equal(rows.some((r) => r.unmatched), false);
+});
+
+// ---- P1 candidate-evaluation join (E) ------------------------------------------
+// The compact row projection of a stored scorecard, the identity-keyed join onto
+// Results rows (person_id for enrolled, username_norm for unmatched — MIXED
+// keying is the acceptance case), the null-when-unevaluated default, the 6 new
+// CSV columns, and the purged-path snapshot evaluation survival.
+
+// A full scorecard (subset of the schema relevant to projectEvaluation).
+function scorecard(over = {}) {
+  return {
+    schema_version: 1, evaluator_version: "1",
+    talent: { composite: 72 },
+    integrity: { paste_ratio: 0.37 },
+    coverage: { confidence: "high" },
+    flags: [
+      { code: "x", severity: "critical" }, { code: "y", severity: "critical" },
+      { code: "z", severity: "warning" }, { code: "w", severity: "bogus" }
+    ],
+    tiers: { talent: "strong", integrity: "watch", one_line: "Strong solver; one warning." },
+    recommended_action: null,
+    ...over
+  };
+}
+
+test("projectEvaluation: projects scorecard → compact row shape; flags counted by severity", () => {
+  const ev = projectEvaluation(scorecard());
+  assert.equal(ev.talent_tier, "strong");
+  assert.equal(ev.integrity_tier, "watch");
+  assert.equal(ev.composite, 72);
+  assert.equal(ev.paste_ratio, 0.37);
+  assert.deepEqual(ev.flags_by_severity, { critical: 2, warning: 1, info: 0 }); // bogus dropped
+  assert.equal(ev.confidence, "high");
+  assert.equal(ev.one_line, "Strong solver; one warning.");
+  assert.equal(ev.recommended_action, null); // P1 keeps recommended_action null
+});
+
+test("projectEvaluation: null-safe — missing/invalid scorecard → null; partial → zeroed flags + null fields", () => {
+  assert.equal(projectEvaluation(null), null);
+  assert.equal(projectEvaluation(undefined), null);
+  assert.equal(projectEvaluation("nope"), null);
+  assert.equal(projectEvaluation(42), null);
+  const partial = projectEvaluation({}); // empty object is a valid (if blank) scorecard
+  assert.deepEqual(partial.flags_by_severity, { critical: 0, warning: 0, info: 0 });
+  assert.equal(partial.talent_tier, null);
+  assert.equal(partial.integrity_tier, null);
+  assert.equal(partial.composite, null);
+  assert.equal(partial.paste_ratio, null);
+  assert.equal(partial.confidence, null);
+  assert.equal(partial.one_line, null);
+});
+
+test("buildResultsRows: MIXED keying — enrolled row joins by person_id, unmatched by username_norm", () => {
+  const fx = fixture();
+  // Add an anonymous post-clear submitter (unmatched) so we exercise BOTH keys.
+  fx.submissions = [
+    ...fx.submissions,
+    { username_norm: "23cs091", person_id: null, candidate_id: "23CS091", problem_id: "p1", score: 100, max_points: 100, created_at: "2026-06-10T04:30:00.000Z" }
+  ];
+  const sessions = [{ username_norm: "23cs091", candidate_id: "23CS091", name: "Kishore", created_at: "2026-06-10T04:20:00.000Z" }];
+  const evaluations = new Map([
+    // enrolled person → keyed by person_id
+    ["kec~21cs001", scorecard({ talent: { composite: 88 }, tiers: { talent: "strong", integrity: "clean", one_line: "Genuine." } })],
+    // unmatched anonymous → keyed by username_norm
+    ["23cs091", scorecard({ talent: { composite: 12 }, integrity: { paste_ratio: 0.91 }, tiers: { talent: "weak", integrity: "flag", one_line: "Full paste." },
+      flags: [{ severity: "critical" }] })]
+  ]);
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true, sessions, evaluations });
+
+  const asha = rows.find((r) => r.person_id === "kec~21cs001");
+  assert.ok(asha.evaluation, "enrolled row joined its scorecard by person_id");
+  assert.equal(asha.evaluation.composite, 88);
+  assert.equal(asha.evaluation.talent_tier, "strong");
+
+  const anon = rows.find((r) => r.unmatched);
+  assert.ok(anon.evaluation, "unmatched row joined its scorecard by username_norm");
+  assert.equal(anon.evaluation.composite, 12);
+  assert.equal(anon.evaluation.integrity_tier, "flag");
+  assert.deepEqual(anon.evaluation.flags_by_severity, { critical: 1, warning: 0, info: 0 });
+});
+
+test("buildResultsRows: un-evaluated rows (no scorecard in the map) carry evaluation:null", () => {
+  const fx = fixture();
+  const evaluations = new Map([["kec~21cs001", scorecard()]]); // only Asha evaluated
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true, evaluations });
+  assert.ok(rows.find((r) => r.person_id === "kec~21cs001").evaluation);
+  assert.equal(rows.find((r) => r.person_id === "psg~21cs001").evaluation, null);
+  assert.equal(rows.find((r) => r.person_id === "kec~21cs002").evaluation, null);
+});
+
+test("buildResultsRows: empty evaluations map is behavior-preserving (every row evaluation:null)", () => {
+  const fx = fixture();
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true });
+  assert.equal(rows.every((r) => r.evaluation === null), true);
+});
+
+test("buildResultsCsv: 6 evaluation columns populated when present, blank when null; header order", () => {
+  const fx = fixture();
+  const evaluations = new Map([
+    ["kec~21cs001", scorecard({ talent: { composite: 88 }, integrity: { paste_ratio: 0.37 },
+      tiers: { talent: "strong", integrity: "watch", one_line: "Strong, one warning." },
+      flags: [{ severity: "critical" }, { severity: "critical" }, { severity: "warning" }] })]
+  ]);
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true, evaluations });
+  const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
+  const lines = csv.split("\n");
+  assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,talent_tier,talent_composite,integrity_tier,paste_pct,eval_flags,eval_one_line,unmatched");
+  // Asha (evaluated): tier, composite, integrity tier, paste_pct rounded "37", flags "2C/1W/0I", one_line.
+  assert.match(lines[1], /^1,21CS001,Asha,KEC,130,80,50,1,0,0,flagged,shortlisted,strong,88,watch,37,2C\/1W\/0I,"Strong, one warning\.",$/);
+  // Bala (un-evaluated): the 6 eval columns are blank. CSV carries candidate_id
+  // (= unique_id "21CS001"), name, college — NOT the display_id suffix.
+  assert.match(lines[2], /^2,21CS001,Bala,PSG Tech,100,100,0,0,0,0,none,none,,,,,,,$/);
+});
+
+test("buildResultsRows: PURGED path resurfaces a snapshot-stored evaluation (normalized) when present", () => {
+  const enrollments = [{
+    person_id: "kec~21cs001", college_norm: "kec", status: "active", selection_status: "selected",
+    final_snapshot: {
+      total_score: 130, per_problem: { p1: 80, p2: 50 },
+      integrity: { alerts_by_severity: { critical: 1, warning: 0, info: 0 }, review_verdict: "flagged" },
+      // the compact stored evaluation shape (handler stamps this at selection-done)
+      evaluation: { talent_tier: "strong", integrity_tier: "watch", composite: 71,
+        flags_by_severity: { critical: 1, warning: 2, info: 0 }, one_line: "Frozen.", recommended_action: null },
+      unique_id: "21CS001", name: "Asha"
+    }
+  }];
+  const rows = buildResultsRows({
+    submissions: [], enrollments, persons: new Map(), integrityByPerson: new Map(),
+    collegeNames: new Map([["kec", "KEC"]]), problemOrder: PROBLEM_ORDER, multiCollege: false, purged: true
+  });
+  assert.equal(rows[0].from_snapshot, true);
+  assert.ok(rows[0].evaluation, "snapshot evaluation survives the purge");
+  assert.equal(rows[0].evaluation.talent_tier, "strong");
+  assert.equal(rows[0].evaluation.composite, 71);
+  assert.deepEqual(rows[0].evaluation.flags_by_severity, { critical: 1, warning: 2, info: 0 });
+  assert.equal(rows[0].evaluation.one_line, "Frozen.");
+});
+
+test("buildResultsRows: PURGED path with no snapshot evaluation → evaluation:null", () => {
+  const enrollments = [{
+    person_id: "kec~21cs001", college_norm: "kec", status: "active", selection_status: "selected",
+    final_snapshot: { total_score: 130, per_problem: { p1: 80, p2: 50 }, integrity: null, unique_id: "21CS001", name: "Asha" }
+  }];
+  const rows = buildResultsRows({
+    submissions: [], enrollments, persons: new Map(), integrityByPerson: new Map(),
+    collegeNames: new Map([["kec", "KEC"]]), problemOrder: PROBLEM_ORDER, multiCollege: false, purged: true
+  });
+  assert.equal(rows[0].from_snapshot, true);
+  assert.equal(rows[0].evaluation, null);
 });
