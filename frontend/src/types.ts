@@ -700,7 +700,11 @@ export type EditorEventType =
   | "code_run" | "code_submit"
   /** S-I §3.5: switch marker riding the INCOMING problem's batch —
    * detail: { from_problem_id, to_problem_id }. */
-  | "problem_switched";
+  | "problem_switched"
+  /** W9: candidate explicitly reloaded the starter stub (confirmed) /
+   * restored their pre-reload code via the 20s Undo. Additive — the backend
+   * ingest stores any capped type string, no allowlist to extend. */
+  | "stub_reloaded" | "stub_reload_undone";
 
 export type EditorEvent = {
   type: EditorEventType;
