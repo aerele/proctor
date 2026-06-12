@@ -71,6 +71,14 @@ triple review (code **GO** · UX **GO** · security/PII **GO**). Both services r
   - **P1 committed (`4e0b89c`), NOT deployed**: marker layer behind a contest flag (default OFF —
     flag-off responses pinned BYTE-identical in tests) + `marker_layout`/`camera_pip` events.
     Backend 740/740, frontend 708/708.
+  - **Visually verified in demo mode** (evidence `night-run/evidence/omr-p1/`, 13 shots): 16/16
+    positions pixel-exact at 1366×768 + 1920×1080, flag plumbing end-to-end, markers unmount on lock.
+    **Two OQ1-relevant truths from the screenshots** (I eyeballed them myself): the interior midline
+    markers are opaque and visibly DELETE characters from the candidate's code (`result` → `ult` — shot
+    03/06/07), and the top-edge markers clip the strip's timer text. Corners/edges on paper are
+    genuinely faint. As-built interior placement is too intrusive — your call on §12 OQ1 (translucent /
+    reposition off the code column / fewer). One objective bug found+fixed (`ac21a88`): right-column
+    markers hid under the classic scrollbar (innerWidth→clientWidth).
   - **P2 (detection) + P3 (correlation) wait on your 4 calls** — design doc §12: interior-marker
-    visibility, review-time vs real-time, alert vs review-tag severity, flag-only v1. Markers not yet
-    eyeballed visually (unit-verified only) — flag it on in demo/local and judge OQ1 when you're up.
+    visibility (see above — now with real screenshots), review-time vs real-time, alert vs review-tag
+    severity, flag-only v1.
