@@ -4946,6 +4946,9 @@ function demoContestProblems(contest: ContestSummary | null): PublicProblem[] {
     if (!p || p.status !== "published") continue;
     problems.push({
       id: p.id, title: p.title, statement: p.statement, languages: p.languages,
+      // W6: carry the markdown flag into the demo candidate payload (omitted
+      // for plain problems — mirrors the backend's contestProblemsPublic).
+      ...(p.statement_format === "markdown" ? { statement_format: "markdown" as const } : {}),
       points: entry.points ?? p.points ?? 100, cpuTimeLimit: p.cpuTimeLimit, memoryLimit: p.memoryLimit,
       sampleTests: p.sampleTests,
       // F12.2: carry per-language stubs into the demo candidate payload (omitted
@@ -4991,14 +4994,20 @@ export async function fetchProblemDetail(password: string, id: string): Promise<
   return response.problem;
 }
 
-export async function saveProblem(password: string, problem: ProblemDoc): Promise<ProblemDoc> {
+// W7: `confirm_live_edit` (problem.id) answers the backend's hidden-test
+// live-edit 409 guard — it rides the SAME save body (the backend whitelists
+// problem fields, so the flag is read, never stored). The demo store does NOT
+// enforce the guard (no open-contest reference check, never 409s), so demo
+// saves simply drop the flag.
+export async function saveProblem(password: string, problem: ProblemDoc & { confirm_live_edit?: string }): Promise<ProblemDoc> {
   if (demoMode) {
     await wait(150);
     assertDemoAdmin(password);
+    const { confirm_live_edit: _confirm, ...doc } = problem;
     const now = new Date().toISOString();
     const all = readDemoProblems();
     const existing = all.find((p) => p.id === problem.id);
-    const item: ProblemDoc = { ...problem, created_at: existing?.created_at || now, updated_at: now };
+    const item: ProblemDoc = { ...doc, created_at: existing?.created_at || now, updated_at: now };
     writeDemoProblems([...all.filter((p) => p.id !== problem.id), item]);
     return item;
   }

@@ -64,4 +64,29 @@ describe("draft <-> doc round trip", () => {
       sampleTests: DOC.sampleTests, hiddenTests: DOC.hiddenTests };
     expect("stubs" in draftToDoc(draft)).toBe(false);
   });
+
+  // W6: statement_format normalization — absent/plain stores no field; only
+  // "markdown" rides the doc (mirrors the backend's absent == plain rule).
+  it("a doc without statement_format edits as plain and round-trips with NO field", () => {
+    const draft = draftFromDoc(DOC);
+    expect(draft.statementFormat).toBe("plain");
+    expect("statement_format" in draftToDoc(draft)).toBe(false);
+  });
+
+  it("a markdown doc round-trips with statement_format intact", () => {
+    const doc: ProblemDoc = { ...DOC, statement: "# Reverse\n\nReverse **it**.", statement_format: "markdown" };
+    const draft = draftFromDoc(doc);
+    expect(draft.statementFormat).toBe("markdown");
+    expect(draftToDoc(draft)).toEqual(doc);
+  });
+
+  it("switching a markdown draft back to plain drops the field on serialize", () => {
+    const doc: ProblemDoc = { ...DOC, statement_format: "markdown" };
+    const out = draftToDoc({ ...draftFromDoc(doc), statementFormat: "plain" });
+    expect("statement_format" in out).toBe(false);
+  });
+
+  it("a new (empty) draft defaults to plain", () => {
+    expect(emptyProblemDraft().statementFormat).toBe("plain");
+  });
 });

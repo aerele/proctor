@@ -695,6 +695,92 @@ test("F12.2: stubs flow through a TEMPLATE-instantiated contest's candidate payl
   assert.deepEqual(res.body.problems[0].stubs, STUBS_FIXTURE);
 });
 
+// ---- W6: markdown statement format ------------------------------------------
+// Optional `statement_format` ("plain"|"markdown", default plain). Markdown is
+// stored + served to candidates; plain/absent stores NO field anywhere so every
+// pre-W6 doc and payload stays byte-identical.
+
+test("W6: statement_format markdown rides the authoring roundtrip and persists on the doc", async () => {
+  const { firestore } = freshClients();
+  const created = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ statement: "# Reverse\n\nReverse the **input** line.", statement_format: "markdown" }) }));
+  assert.equal(created.statusCode, 200);
+  assert.equal(created.body.problem.statement_format, "markdown");
+  assert.equal(firestore._collections.get("problems_bank").get("rev-str").statement_format, "markdown");
+
+  const got = await call(makeReq({ method: "GET", path: "/api/admin/problem", headers: ADMIN, query: { id: "rev-str" } }));
+  assert.equal(got.body.problem.statement_format, "markdown");
+});
+
+test("W6: absent or explicit plain statement_format stores NO field (byte-compat); invalid value 400s", async () => {
+  const { firestore } = freshClients();
+  const absent = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  assert.equal(absent.statusCode, 200);
+  assert.equal(Object.hasOwn(absent.body.problem, "statement_format"), false);
+  assert.equal(Object.hasOwn(firestore._collections.get("problems_bank").get("rev-str"), "statement_format"), false);
+
+  const plain = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ statement_format: "plain" }) }));
+  assert.equal(plain.statusCode, 200);
+  assert.equal(Object.hasOwn(plain.body.problem, "statement_format"), false);
+
+  const bad = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ statement_format: "html" }) }));
+  assert.equal(bad.statusCode, 400);
+  assert.match(bad.body.error, /statement_format/);
+});
+
+test("W6: switching a markdown problem back to plain DROPS the stored field (round-trip)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ statement_format: "markdown" }) }));
+  assert.equal(firestore._collections.get("problems_bank").get("rev-str").statement_format, "markdown");
+  const reverted = await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ statement_format: "plain" }) }));
+  assert.equal(reverted.statusCode, 200);
+  assert.equal(Object.hasOwn(firestore._collections.get("problems_bank").get("rev-str"), "statement_format"), false);
+});
+
+test("W6: statement_format rides the candidate problems[] payload + the one-release alias", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
+    body: validProblem({ statement: "Reverse the **input** line.", statement_format: "markdown" }) }));
+  firestore.collection("proctor_contests").doc("md-c").set({
+    slug: "md-c", status: "open", problems: [{ problem_id: "rev-str", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("md1").set({
+    session_id: "md1", status: "active", username_norm: "alice", contest_slug: "md-c",
+    storage_prefix: "contests/md-c/sessions/alice/md1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "md1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.problems[0].statement_format, "markdown");
+  assert.equal(res.body.problem.statement_format, "markdown");
+  // hiddenTests/status stay locked — the format key does not loosen the view.
+  assert.equal(res.body.problems[0].hiddenTests, undefined);
+  assert.equal(res.body.problems[0].status, undefined);
+});
+
+test("W6: a plain problem serves NO statement_format key in problems[] (byte-compat payload)", async () => {
+  const { firestore } = freshClients();
+  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
+  firestore.collection("proctor_contests").doc("pl-c").set({
+    slug: "pl-c", status: "open", problems: [{ problem_id: "rev-str", points: null, order: 0 }]
+  });
+  firestore.collection("problems_sessions").doc("pl1").set({
+    session_id: "pl1", status: "active", username_norm: "bob", contest_slug: "pl-c",
+    storage_prefix: "contests/pl-c/sessions/bob/pl1/"
+  });
+  firestore.collection("problems_settings").doc("active").set({ ...GATE });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "pl1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(Object.hasOwn(res.body.problems[0], "statement_format"), false);
+  assert.equal(Object.hasOwn(res.body.problem, "statement_format"), false);
+});
+
 // ---- Task 4: exec-from-bank + scoring ----------------------------------------
 
 // Deterministic clock for the per-session exec rate limiter (the exec.test.mjs
