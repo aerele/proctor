@@ -31,9 +31,9 @@ docs workflow (`wf_145b15ad-957`) is still committing. Subagents edit + verify; 
 
 | W7 | admin authoring | Editing a problem's HIDDEN TESTS while an open contest references it → raw `live_edit_confirmation_required` error; UI never implemented the catch-409 → confirm-dialog → resend `confirm_live_edit:<problem.id>` flow (handler.mjs:2050; other fields' edits prompt fine). Workaround given: draft → edit → re-open. (TG 1865/1867.) | ✅ committed+deployed rev 00013 | fde4736 |
 
-| W8 | candidate | Camera dock "Pop out over other windows" triggers a false "switched away" alert when used — remove the option. (TG 1867.) | ✅ committed, deploying | see log |
+| W8 | candidate | Camera dock "Pop out over other windows" triggers a false "switched away" alert when used — remove the option. (TG 1867.) | ✅ deployed rev 00014 | fd71830 |
 
-| W9 | candidate coding | Editing keeps the old code when a stub changes (correct) — but add a **Reload stub** option: warn "all your edits will be gone — are you sure?", reload the fresh stub, then show an **Undo (~20s)** to restore the previous code. (TG 1871.) | dispatched | — |
-| W10 | candidate enforcement | The typed fullscreen ack phrase "I will not exit full screen after this" fails on case — make the comparison **case-insensitive**. (TG 1873.) | in progress (coordinator) | — |
+| W9 | candidate coding | Editing keeps the old code when a stub changes (correct) — but add a **Reload stub** option: warn "all your edits will be gone — are you sure?", reload the fresh stub, then show an **Undo (~20s)** to restore the previous code. (TG 1871.) | ✅ deployed rev 00015 | 74ec98b |
+| W10 | candidate enforcement | The typed fullscreen ack phrase "I will not exit full screen after this" fails on case — make the comparison **case-insensitive**. (TG 1873.) | ✅ deployed rev 00015 | 219c016 |
 
 _(W11 … appended live as Karthi comments arrive.)_
