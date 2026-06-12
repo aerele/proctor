@@ -27,6 +27,15 @@ import {
   workspaceTotals
 } from "./problemSwitch";
 import { ProblemPane, nextCodeOnLanguageSwitch, starterFor } from "./CodingWorkspace";
+import {
+  canReloadStub,
+  reloadStubConfirmMessage,
+  stubReloadUndoneEvent,
+  stubReloadedEvent,
+  takeUndoSnapshot,
+  undoSecondsRemaining,
+  type StubUndoSnapshot
+} from "./stubReload";
 import type { EditorEvent, ProblemSubmissionSummary, PublicProblem, RunResult, SubmitResult } from "../types";
 
 type Language = "python" | "cpp" | "java" | "javascript";
@@ -89,7 +98,10 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   });
   const [summaries, setSummaries] = useState<Record<string, ProblemSubmissionSummary>>(() => ({ ...(submissionsSummary ?? {}) }));
   const [busy, setBusy] = useState<BusyState>(null);
-  // Cooldown countdown clock — ticks only while some cooldown is in the future.
+  // W9: the single post-reload undo snapshot (one at a time — a problem or
+  // language switch, the 20s expiry, or the Undo itself discards it).
+  const [undoSnapshot, setUndoSnapshot] = useState<StubUndoSnapshot | null>(null);
+  // Cooldown/undo countdown clock — ticks only while some countdown is live.
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const activeProblem = problems.find((p) => p.id === activeId) ?? problems[0];
@@ -133,14 +145,25 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Tick the cooldown clock while any deadline is in the future.
+  // Tick the countdown clock while any deadline is in the future (exec
+  // cooldowns; W9 reuses the same clock for the undo window).
   const anyCooldownActive = Object.values(panes).some((p) =>
     (p.cooldownUntil.run ?? 0) > nowMs || (p.cooldownUntil.submit ?? 0) > nowMs);
+  const clockActive = anyCooldownActive || undoSnapshot !== null;
   useEffect(() => {
-    if (!anyCooldownActive) return;
+    if (!clockActive) return;
     const timer = setInterval(() => setNowMs(Date.now()), 500);
     return () => clearInterval(timer);
-  }, [anyCooldownActive]);
+  }, [clockActive]);
+
+  // W9 discard rule (a): the undo window lapsed → drop the snapshot (the
+  // affordance disappears on the same clock tick the countdown hits 0).
+  useEffect(() => {
+    if (!undoSnapshot) return;
+    if (undoSecondsRemaining(undoSnapshot, undoSnapshot.problemId, undoSnapshot.language, nowMs) <= 0) {
+      setUndoSnapshot(null);
+    }
+  }, [nowMs, undoSnapshot]);
 
   const updatePane = (problemId: string, patch: Partial<PaneState>) => {
     setPanes((prev) => ({ ...prev, [problemId]: { ...(prev[problemId] ?? initialPane(sessionId, problems.find((p) => p.id === problemId) ?? activeProblem)), ...patch } }));
@@ -149,6 +172,8 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   const switchTo = (problemId: string) => {
     if (problemId === activeId) return;
     batchers.switchTo(activeId, problemId, new Date().toISOString());
+    // W9 discard rule (b): switching problems mid-window drops the snapshot.
+    setUndoSnapshot(null);
     setActiveId(problemId);
   };
 
@@ -162,6 +187,8 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
     // about what "the starter" is for a language.
     const problem = problems.find((p) => p.id === problemId) ?? activeProblem;
     const replacement = nextCodeOnLanguageSwitch(problem, state.code, state.language, next);
+    // W9 discard rule (c): a language switch on the snapshot's problem drops it.
+    if (undoSnapshot && undoSnapshot.problemId === problemId) setUndoSnapshot(null);
     updatePane(problemId, { language: next, ...(replacement !== null ? { code: replacement } : {}) });
     scheduleDraft(problemId);
   };
@@ -169,6 +196,40 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   const onCodeChange = (problemId: string, code: string) => {
     updatePane(problemId, { code });
     scheduleDraft(problemId);
+  };
+
+  // W9: confirmed stub reload — snapshot the candidate's code, replace the
+  // editor with the FRESHEST stub the client has (problem.stubs from the
+  // latest start/resume payload; there is no candidate problems refetch and
+  // we invent no routes — a page reload resumes with newer stubs), update the
+  // draft store and arm the 20s Undo. Monaco emits its own editor_replace for
+  // the programmatic value change, so code replay stays consistent; the
+  // stub_reloaded marker is additive context.
+  const doReloadStub = (problemId: string) => {
+    const state = panesRef.current[problemId];
+    const problem = problems.find((p) => p.id === problemId);
+    if (!state || !problem) return;
+    const stub = problem.stubs?.[state.language];
+    if (typeof stub !== "string") return; // no stub for this language → no-op
+    if (!window.confirm(reloadStubConfirmMessage(state.language))) return;
+    const now = Date.now();
+    setUndoSnapshot(takeUndoSnapshot(problemId, state.language, state.code, now));
+    setNowMs(now); // arm the countdown immediately (clock may have been idle)
+    updatePane(problemId, { code: stub });
+    scheduleDraft(problemId);
+    batchers.add(problemId, stubReloadedEvent(state.language, stub.length, state.code.length, new Date().toISOString()));
+  };
+
+  // W9: Undo — restore the snapshot into the editor + draft store, then
+  // discard it. Guarded against a lapsed window (click racing the expiry).
+  const doUndoStubReload = () => {
+    const snapshot = undoSnapshot;
+    if (!snapshot) return;
+    setUndoSnapshot(null);
+    if (undoSecondsRemaining(snapshot, snapshot.problemId, snapshot.language, Date.now()) <= 0) return;
+    updatePane(snapshot.problemId, { code: snapshot.code });
+    scheduleDraft(snapshot.problemId);
+    batchers.add(snapshot.problemId, stubReloadUndoneEvent(snapshot.language, snapshot.code.length, new Date().toISOString()));
   };
 
   // §4.3: failures map to — rate_limited: per-problem button countdown from
@@ -252,11 +313,15 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
       submitCooldownSeconds={cooldownSecondsRemaining(pane.cooldownUntil.submit, nowMs)}
       attempts={summaries[activeProblem.id]?.attempts ?? 0}
       submitBudget={submitBudget}
+      stubReloadAvailable={canReloadStub(activeProblem, pane.language)}
+      undoSeconds={undoSecondsRemaining(undoSnapshot, activeProblem.id, pane.language, nowMs)}
       onLanguageChange={(language) => onLanguageChange(activeProblem.id, language)}
       onCodeChange={(code) => onCodeChange(activeProblem.id, code)}
       onEvent={(event) => batchers.add(activeProblem.id, event)}
       onRun={() => void doRun(activeProblem.id)}
       onSubmit={() => void doSubmit(activeProblem.id)}
+      onReloadStub={() => doReloadStub(activeProblem.id)}
+      onUndoStubReload={doUndoStubReload}
     />
   );
 

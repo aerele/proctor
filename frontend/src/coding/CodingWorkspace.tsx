@@ -75,7 +75,8 @@ export function ProblemPane({
   busyKind, anyBusy, busyNote,
   runCooldownSeconds, submitCooldownSeconds,
   attempts, submitBudget,
-  onLanguageChange, onCodeChange, onEvent, onRun, onSubmit
+  stubReloadAvailable, undoSeconds,
+  onLanguageChange, onCodeChange, onEvent, onRun, onSubmit, onReloadStub, onUndoStubReload
 }: {
   problem: PaneProblem;
   language: "python"|"cpp"|"java"|"javascript";
@@ -95,11 +96,18 @@ export function ProblemPane({
   submitCooldownSeconds: number;
   attempts: number;
   submitBudget: number | null;
+  /** W9: this problem ships an author stub for the current language. */
+  stubReloadAvailable: boolean;
+  /** W9: seconds left on the post-reload Undo window (0 = no affordance). */
+  undoSeconds: number;
   onLanguageChange: (language: "python"|"cpp"|"java"|"javascript") => void;
   onCodeChange: (code: string) => void;
   onEvent: (e: EditorEvent) => void;
   onRun: () => void;
   onSubmit: () => void;
+  /** W9: container owns confirm + snapshot + replace (pane stays presentational). */
+  onReloadStub: () => void;
+  onUndoStubReload: () => void;
 }) {
   const atCap = submitBudget !== null && attempts >= submitBudget;
   const runLabel = busyKind === "run" ? "Running…" : runCooldownSeconds > 0 ? `Run (${runCooldownSeconds}s)` : "Run";
@@ -139,6 +147,24 @@ export function ProblemPane({
             <span className="text-xs text-muted">Attempt {attempts} / {submitBudget}</span>
           ) : null}
           {busyNote ? <span className="text-xs text-muted">{busyNote}</span> : null}
+          {/* W9: "Reload stub" sits at the right edge of the toolbar — present
+              only when the problem ships a stub for this language. The Undo
+              countdown appears beside it right after a reload, exactly where
+              the candidate just clicked. */}
+          {stubReloadAvailable ? (
+            <span className="ml-auto flex items-center gap-2">
+              {undoSeconds > 0 ? (
+                <button onClick={onUndoStubReload}
+                        className="rounded-md border border-amber-400 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700">
+                  Undo ({undoSeconds}s)
+                </button>
+              ) : null}
+              <button onClick={onReloadStub} title="Replace your code with this problem's latest starter stub"
+                      className="rounded-md border border-line px-2 py-1 text-xs text-muted hover:text-ink">
+                Reload stub
+              </button>
+            </span>
+          ) : null}
         </div>
         {/* UX-H2: the submit verdict renders directly under the Run/Submit row
             (not at the end of the column) so the floating camera dock can never
