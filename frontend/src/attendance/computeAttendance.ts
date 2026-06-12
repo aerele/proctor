@@ -25,9 +25,18 @@ export type AttendanceCore = {
 };
 
 // GET /api/admin/attendance response. `configured:false` carries nothing else.
+// KPR 2026-06-12: source/note appear when a cleared-roster person contest
+// falls back to its surviving enrollment spine (server-computed; absentee
+// roll_number/room are blank because the roster column mapping is gone).
 export type AttendanceReport =
   | { configured: false }
-  | ({ configured: true; contest_slug: string | null; generated_at: string } & AttendanceCore);
+  | ({
+      configured: true;
+      contest_slug: string | null;
+      generated_at: string;
+      source?: "enrollments";
+      note?: string;
+    } & AttendanceCore);
 
 // Mirrors the backend normalizeUniqueId: trim + lowercase + strip ALL whitespace
 // (colleges format roll numbers inconsistently: "21 CS 001" ≡ "21CS001").

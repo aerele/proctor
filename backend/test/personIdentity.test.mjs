@@ -589,3 +589,109 @@ test("start naming an unknown contest → 400 unknown_contest; a draft person co
   assert.equal(draft.statusCode, 403);
   assert.equal(draft.body.error, "contest_not_open");
 });
+
+// ---- F-C (KPR 2026-06-12): enrollment-spine fallback after a roster clear ------
+// The incident: roster cleared mid-contest → every later join keyed
+// anonymously even when the typed id matched a surviving enrolled person.
+// With the fix, roster-meta-absent + enrollment spine present → EXACT
+// normalized match keys the session to the person; a non-matching id stays
+// anonymous but is LOUDLY flagged identity_unresolved (surfaced in the
+// Sessions list) — being unknowingly wrong is not acceptable.
+
+test("F-C cleared roster: typed id matching the enrollment spine keys to the person (username_norm = person_id)", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("KPR Live");
+  await uploadPersonRoster(contest.slug, [ROW_ASHA], { college_resolutions: { kec: { action: "create" } } });
+  // Mid-contest clear: the contest is OPEN, so the typed-confirm gate (F-B)
+  // engages — this also pins the gate's "open" leg.
+  const refused = await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN_HEADERS,
+    body: { contest: contest.slug, clear: true } }));
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.body.error, "roster_clear_confirmation_required");
+  const cleared = await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN_HEADERS,
+    body: { contest: contest.slug, clear: true, confirm_clear: contest.slug } }));
+  assert.equal(cleared.statusCode, 200, JSON.stringify(cleared.body));
+
+  // The student types the BARE roll number (norm of the roster's "21 CS 001").
+  const res = await call(startReq({
+    contest: contest.slug, candidate_id: "21CS001",
+    name: "Typed Name", email: "typed@x.com", consent_accepted: true
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
+  assert.equal(session.username_norm, "kec~21cs001"); // keyed to the person
+  assert.equal(session.person_id, "kec~21cs001");
+  assert.equal(session.college_norm, "kec");
+  assert.equal(session.candidate_id, "21 CS 001");    // person display form wins
+  assert.equal(session.name, "Asha");                  // person profile preferred
+  assert.equal(session.identity_source, "enrollment_spine");
+  assert.equal(session.identity_unresolved, undefined);
+  assert.equal(session.roster_verified, false);        // no ACTIVE roster consulted
+});
+
+test("F-C cleared roster: non-matching typed id stays anonymous but is flagged identity_unresolved + surfaced in sessions-list", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("KPR Live 2");
+  await uploadPersonRoster(contest.slug, [ROW_ASHA], { college_resolutions: { kec: { action: "create" } } });
+  await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN_HEADERS,
+    body: { contest: contest.slug, clear: true, confirm_clear: contest.slug } }));
+
+  const anon = await call(startReq({
+    contest: contest.slug, candidate_id: "99XX999",
+    name: "Stranger", email: "s@x.com", consent_accepted: true
+  }));
+  assert.equal(anon.statusCode, 200, JSON.stringify(anon.body));
+  const anonSession = firestore._collections.get("pi_sessions").get(anon.body.session_id);
+  assert.equal(anonSession.person_id, null);             // current anonymous behavior kept
+  assert.equal(anonSession.username_norm, "99xx999");
+  assert.equal(anonSession.identity_unresolved, true);   // ...but LOUD
+
+  const matched = await call(startReq({
+    contest: contest.slug, candidate_id: "21CS001",
+    name: "Asha", email: "asha@x.com", consent_accepted: true
+  }));
+  assert.equal(matched.statusCode, 200);
+
+  const list = await call(makeReq({ method: "GET", path: "/api/admin/sessions-list", headers: ADMIN_HEADERS,
+    query: { contest_slug: contest.slug } }));
+  assert.equal(list.statusCode, 200);
+  const byId = new Map(list.body.sessions.map((s) => [s.session_id, s]));
+  assert.equal(byId.get(anon.body.session_id).identity_unresolved, true);
+  assert.equal(byId.get(matched.body.session_id).identity_unresolved, false);
+});
+
+test("F-C pure no-roster contest (never uploaded): today's behavior — no flag, no person keys, no spine lookup", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("Walk-in Only");
+  const res = await call(startReq({
+    contest: contest.slug, candidate_id: "Guest 7",
+    name: "Guest", email: "g@x.com", consent_accepted: true
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
+  assert.equal(session.person_id, null);
+  assert.equal(session.username_norm, "guest7");
+  assert.equal(session.identity_unresolved, undefined); // never flagged without a spine
+  assert.equal(session.identity_source, undefined);
+});
+
+test("F-C removed enrollment never spine-matches (stays anonymous + flagged)", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("KPR Live 3");
+  await uploadPersonRoster(contest.slug, [ROW_ASHA], { college_resolutions: { kec: { action: "create" } } });
+  // Re-upload WITHOUT Asha (marks her enrollment removed), then clear.
+  await uploadPersonRoster(contest.slug, [
+    { college: "KEC", unique_id: "21CS999", name: "Other", email: "o@x.com", room: "" }
+  ]);
+  await call(makeReq({ method: "POST", path: "/api/admin/roster", headers: ADMIN_HEADERS,
+    body: { contest: contest.slug, clear: true, confirm_clear: contest.slug } }));
+
+  const res = await call(startReq({
+    contest: contest.slug, candidate_id: "21 CS 001", // Asha's id — enrollment is removed
+    name: "Asha", email: "asha@x.com", consent_accepted: true
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
+  assert.equal(session.person_id, null);
+  assert.equal(session.identity_unresolved, true);
+});

@@ -11,7 +11,7 @@ import { AlertTriangle, Award, CheckCircle2, Download, Flag, RefreshCw, ShieldAl
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fetchContestResults, markSelectionDone, setContestSelection } from "../api";
 import {
-  buildResultsCsv, canMarkSelectionDone, filterResultRows, selectionCounts,
+  buildResultsCsv, canMarkSelectionDone, countUnmatched, filterResultRows, selectionCounts,
   type ContestResultsResponse, type ResultFilters, type ResultRow, type SelectionStatus
 } from "../results/computeResults";
 
@@ -86,8 +86,12 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   const roomOptions = useMemo(() => [...new Set(rows.map((r) => r.room).filter(Boolean))].sort(), [rows]);
   const visibleRows = useMemo(() => filterResultRows(rows, filters), [rows, filters]);
   const counts = useMemo(() => selectionCounts(rows), [rows]);
+  // KPR 2026-06-12: unmatched submitter rows (identities not on the roster).
+  const unmatchedTotal = useMemo(() => countUnmatched(rows), [rows]);
 
-  const visibleIds = visibleRows.map((r) => r.person_id);
+  // Selection operates on enrollments — unmatched rows have no person_id, so
+  // they are excluded from select-all and their checkboxes are disabled.
+  const visibleIds = visibleRows.filter((r) => !r.unmatched).map((r) => r.person_id);
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
 
   const toggleRow = (id: string) => {
@@ -204,6 +208,16 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
             </p>
           ) : null}
 
+          {/* KPR 2026-06-12: unmatched submitters are shown LOUDLY, never dropped. */}
+          {unmatchedTotal > 0 ? (
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
+              <AlertTriangle size={16} className="mr-2 inline" />
+              <span className="font-semibold">{unmatchedTotal} submitter{unmatchedTotal === 1 ? "" : "s"} not on the roster</span>
+              {" — scores shown from submissions. "}
+              They joined without a roster match (for example after a roster clear), so their identity is the ID typed at login, not a verified roster person. Rows are badged "unmatched identity" and excluded from selection actions.
+            </div>
+          ) : null}
+
           <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
             {/* Filters */}
             <div className="flex flex-wrap items-end gap-3">
@@ -291,12 +305,16 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                   {visibleRows.length === 0 ? (
                     <tr><td colSpan={5 + problems.length} className="px-3 py-6 text-center text-sm text-muted">No candidates match these filters.</td></tr>
                   ) : visibleRows.map((row) => (
-                    <tr key={row.person_id} className={`border-b border-line/60 last:border-0 ${selectedIds.has(row.person_id) ? "bg-ink/5" : ""}`}>
-                      <td className="px-2 py-3"><input type="checkbox" checked={selectedIds.has(row.person_id)} onChange={() => toggleRow(row.person_id)} aria-label={`Select ${row.candidate_id}`} /></td>
+                    <tr key={row.person_id || `unmatched:${row.username_norm ?? row.candidate_id}`} className={`border-b border-line/60 last:border-0 ${selectedIds.has(row.person_id) && !row.unmatched ? "bg-ink/5" : ""}`}>
+                      <td className="px-2 py-3"><input type="checkbox" checked={!row.unmatched && selectedIds.has(row.person_id)} onChange={() => toggleRow(row.person_id)} disabled={Boolean(row.unmatched)} aria-label={`Select ${row.candidate_id}`} title={row.unmatched ? "Unmatched identity — not an enrollment, selection actions unavailable" : undefined} /></td>
                       <td className="px-3 py-3 font-semibold text-ink">{row.rank}</td>
                       <td className="px-3 py-3">
                         <div className="font-medium text-ink">{row.name || "—"}</div>
-                        <div className="font-mono text-xs text-muted">{row.display_id}{row.from_snapshot ? <span className="ml-2 rounded bg-line/60 px-1 text-[10px] uppercase tracking-wide">snapshot</span> : null}</div>
+                        <div className="font-mono text-xs text-muted">
+                          {row.display_id}
+                          {row.from_snapshot ? <span className="ml-2 rounded bg-line/60 px-1 text-[10px] uppercase tracking-wide">snapshot</span> : null}
+                          {row.unmatched ? <span className="ml-2 rounded border border-warning/40 bg-warning/10 px-1 text-[10px] uppercase tracking-wide text-warning" title="This identity matched no roster enrollment — score computed from submissions; identity is as typed at login.">unmatched identity</span> : null}
+                        </div>
                       </td>
                       <td className="px-3 py-3 text-right font-semibold text-ink">{row.total}</td>
                       {problems.map((p) => {

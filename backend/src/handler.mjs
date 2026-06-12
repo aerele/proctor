@@ -10,7 +10,7 @@ import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
 import { loadConfig } from "./config.mjs";
 import { configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
-import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
+import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
@@ -698,24 +698,58 @@ async function startPersonSession(req, body, contest) {
   if (meta) {
     identity = await resolvePersonRosterIdentity(meta, body);
   } else {
-    // No-roster person contest (vision §2.4): person_id:null — these sessions
-    // never participate in multi-round linking (documented limitation). The
-    // candidate types id + name + email (F9 §1.4).
+    // No-roster person contest (vision §2.4): the candidate types id + name +
+    // email (F9 §1.4).
     requireFields(body, ["name", "email"]);
     requireValidEmail(body);
     const typed = String(body.candidate_id ?? body.hackerrank_username ?? "").trim();
     if (!typed) return badRequest("candidate_id is required");
-    identity = {
-      person_id: null,
-      college_norm: "",
-      candidate_id: typed,
-      username_norm: identityNorm(typed),
-      roster_unique_id: "",
-      roster_verified: false,
-      name: String(body.name ?? "").trim(),
-      email: String(body.email ?? "").trim(),
-      roll_number: String(body.roll_number ?? "").trim()
-    };
+
+    // F-C (KPR 2026-06-12): roster meta absent but the contest HAS an
+    // enrollment spine (roster uploaded then cleared) → EXACT normalized match
+    // of the typed id against the enrolled persons' unique ids keys the
+    // session to the person anyway (username_norm = person_id), so Results
+    // and multi-round linking stay correct. No fuzzy matching. body.college
+    // disambiguates a multi-college hit exactly like the roster path's picker.
+    const { spine, matches } = await resolveEnrollmentSpineMatches(contest, typed);
+    let chosen = matches;
+    const collegePick = String(body.college ?? "").trim().toLowerCase();
+    if (chosen.length > 1 && collegePick) {
+      chosen = chosen.filter((match) => match.college_norm === collegePick);
+    }
+    if (chosen.length === 1) {
+      const match = chosen[0];
+      identity = {
+        person_id: match.person_id,
+        college_norm: match.college_norm,
+        candidate_id: String(match.person?.unique_id || typed),
+        username_norm: match.person_id,
+        roster_unique_id: "",
+        roster_verified: false, // no ACTIVE roster was consulted — spine match, not roster match
+        name: String(match.person?.name || body.name || "").trim(),
+        email: String(match.person?.email || body.email || "").trim(),
+        roll_number: String(body.roll_number ?? "").trim(),
+        identity_source: "enrollment_spine"
+      };
+    } else {
+      // person_id:null — these sessions never participate in multi-round
+      // linking (documented limitation). When a spine EXISTS but the typed id
+      // didn't match it (or matched ambiguously), flag the session LOUDLY so
+      // the admin Sessions list shows the identity never resolved — being
+      // unknowingly wrong is not acceptable (KPR 2026-06-12).
+      identity = {
+        person_id: null,
+        college_norm: "",
+        candidate_id: typed,
+        username_norm: identityNorm(typed),
+        roster_unique_id: "",
+        roster_verified: false,
+        name: String(body.name ?? "").trim(),
+        email: String(body.email ?? "").trim(),
+        roll_number: String(body.roll_number ?? "").trim(),
+        ...(spine ? { identity_unresolved: true } : {})
+      };
+    }
   }
 
   const now = new Date().toISOString();
@@ -770,7 +804,13 @@ async function startPersonSession(req, body, contest) {
     heartbeat_count: 0,
     chunk_count: 0,
     camera_chunk_count: 0,
-    enforcement_exemptions: {}
+    enforcement_exemptions: {},
+    // F-C (KPR 2026-06-12): conditional keys only — legacy/no-spine session
+    // docs keep their exact key set. identity_unresolved marks an anonymous
+    // session on a contest that HAS an enrollment spine (typed id matched
+    // nothing); identity_source records a spine-resolved keying for forensics.
+    ...(identity.identity_unresolved ? { identity_unresolved: true } : {}),
+    ...(identity.identity_source ? { identity_source: identity.identity_source } : {})
   };
 
   await sessionRef(sessionId).create(item);
@@ -3108,7 +3148,11 @@ async function adminSessionsList(req) {
       chunk_count: Number(doc.chunk_count || 0),
       camera_chunk_count: Number(doc.camera_chunk_count || 0),
       created_at: doc.created_at || "",
-      status: doc.status || ""
+      status: doc.status || "",
+      // F-C (KPR 2026-06-12): loud admin-visible signal — this session started
+      // anonymously on a contest that HAS an enrollment spine (typed id
+      // resolved to no person). False/absent everywhere else.
+      identity_unresolved: doc.identity_unresolved === true
     }));
   return { sessions, truncated };
 }
@@ -3734,7 +3778,10 @@ async function personContestForFilter(contestSlug) {
 // PII-minimized: mapped identity fields + college, no email, no raw fields.
 async function personContestAttendance(contest) {
   const meta = await getContestRosterMeta(contest);
-  if (!meta) return { configured: false, contest_slug: contest.slug };
+  // KPR 2026-06-12: a CLEARED roster used to collapse attendance to
+  // "not configured" even though the enrollment spine (persons minted by the
+  // last upload) survives the clear — fall back to it instead of hiding.
+  if (!meta) return personEnrollmentAttendance(contest);
 
   const entriesSnap = await getFirestore()
     .collection(ROSTER_COLLECTION)
@@ -3796,6 +3843,76 @@ async function personContestAttendance(contest) {
   };
 }
 
+// KPR 2026-06-12: attendance from the ENROLLMENT SPINE when the roster was
+// cleared (roster_meta off) but the durable enrollments survive. Same shape as
+// the roster-driven report plus source:"enrollments" + an explicit note, so
+// the admin knows exactly what they are looking at — never a silent blank.
+// Absentee identity comes from the person docs (unique_id + name; roster
+// column mapping is gone with the meta, so roll_number/room are blank).
+async function personEnrollmentAttendance(contest) {
+  const enrollments = (await listEnrollments(contest)).filter((e) => e.status !== "removed");
+  if (!enrollments.length) return { configured: false, contest_slug: contest.slug };
+
+  const sessionsSnap = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), contest)
+    .limit(SESSIONS_QUERY_LIMIT)
+    .get();
+  const sessions = sessionsSnap.docs.map((doc) => doc.data());
+
+  const knownPersons = new Set(enrollments.map((e) => String(e.person_id || "")));
+  const liveByPerson = new Map();
+  let unmatched = 0;
+  for (const session of sessions) {
+    const personId = String(session.person_id || "");
+    if (!personId || !knownPersons.has(personId)) {
+      unmatched += 1;
+      continue;
+    }
+    const live = session.status !== "ended";
+    liveByPerson.set(personId, Boolean(liveByPerson.get(personId)) || live);
+  }
+
+  const [persons, collegeNames] = await Promise.all([
+    getPersonsByIds([...knownPersons]),
+    getCollegeNameMap()
+  ]);
+  const taken = { total: 0, in_progress: 0, completed: 0 };
+  const absentees = [];
+  for (const enrollment of enrollments) {
+    const personId = String(enrollment.person_id || "");
+    if (liveByPerson.has(personId)) {
+      taken.total += 1;
+      if (liveByPerson.get(personId)) taken.in_progress += 1;
+      else taken.completed += 1;
+    } else {
+      const person = persons.get(personId) || null;
+      const collegeNorm = String(enrollment.college_norm || person?.college_norm || "");
+      absentees.push({
+        unique_id: String(person?.unique_id || ""),
+        name: String(person?.name || ""),
+        roll_number: "",
+        room: "",
+        college: collegeNames.get(collegeNorm) || collegeNorm
+      });
+    }
+  }
+  absentees.sort((a, b) => a.unique_id.localeCompare(b.unique_id) || a.college.localeCompare(b.college));
+
+  return {
+    configured: true,
+    contest_slug: contest.slug,
+    source: "enrollments",
+    note: "The roster for this contest was cleared, so attendance is computed from the surviving enrollments "
+      + "(the persons minted by the last roster upload). Sessions not keyed to a person are counted as unmatched, "
+      + "never as attendance.",
+    roster_total: enrollments.length,
+    taken,
+    not_taken: absentees.length,
+    absentees,
+    unmatched_sessions: unmatched,
+    generated_at: new Date().toISOString()
+  };
+}
+
 // ---- S-J §2.14 Results tab (the post-exam admin rollup) --------------------
 //
 // GET /api/admin/contest-results?contest=slug — ADMIN-ONLY (candidates never
@@ -3842,16 +3959,20 @@ async function computeContestResults(contest) {
     && enrollments.some((enrollment) => enrollment.status !== "removed" && enrollment.final_snapshot);
 
   const activeIds = enrollments.filter((e) => e.status !== "removed").map((e) => e.person_id);
-  const [persons, collegeNames, integrityByPerson] = await Promise.all([
+  const [persons, collegeNames, integrityByPerson, sessionsSnap] = await Promise.all([
     purged ? new Map() : getPersonsByIds(activeIds),
     getCollegeNameMap(),
-    purged ? new Map() : integrityByPersonFor(contest, activeIds)
+    purged ? new Map() : integrityByPersonFor(contest),
+    // KPR 2026-06-12: session docs enrich UNMATCHED submitter rows (name typed
+    // at login). Skipped on the purged path (sessions are deleted by then).
+    purged ? null : scopedQuery(getFirestore().collection(SESSION_COLLECTION), contest).limit(SESSIONS_QUERY_LIMIT).get()
   ]);
+  const sessions = sessionsSnap ? sessionsSnap.docs.map((doc) => doc.data()) : [];
 
   const multiCollege = Array.isArray(contest.colleges) && contest.colleges.length > 1;
   const rows = buildResultsRows({
     submissions, enrollments, persons, integrityByPerson, collegeNames,
-    problemOrder, multiCollege, purged
+    problemOrder, multiCollege, purged, sessions
   });
 
   // Per-problem column titles (contest order) for the table header + CSV.
@@ -3867,6 +3988,9 @@ async function computeContestResults(contest) {
     selection_done_at: contest.selection_done_at || null,
     problems,
     rows,
+    // KPR 2026-06-12: count of scoring identities NOT consumed by any
+    // enrollment — drives the loud "N submitters not on the roster" banner.
+    unmatched_count: rows.filter((row) => row.unmatched).length,
     generated_at: new Date().toISOString()
   };
 }
@@ -3875,8 +3999,12 @@ async function computeContestResults(contest) {
 // (= person_id under person mode) + this contest's review records grouped the
 // same way. ONE bounded scan each, scoped to the contest. summarizeIntegrity
 // (pure) folds them in buildResultsRows.
-async function integrityByPersonFor(contest, activeIds) {
-  const activeSet = new Set(activeIds);
+// KPR 2026-06-12: grouped by EVERY username_norm in the contest (no active-
+// enrollment filter) so UNMATCHED submitter rows keep their integrity column
+// too — buildResultsRows looks up matched rows by person_id and unmatched rows
+// by their scoreboard norm; matched-row values are identical to before (the
+// extra keys are simply never read for them).
+async function integrityByPersonFor(contest) {
   const out = new Map();
   const ensure = (id) => {
     if (!out.has(id)) out.set(id, { alerts: [], reviews: [] });
@@ -3890,7 +4018,7 @@ async function integrityByPersonFor(contest, activeIds) {
     const alert = doc.data();
     if (alert.archived) continue; // archived = triaged-away, not an open integrity signal
     const personId = String(alert.username_norm || "");
-    if (!activeSet.has(personId)) continue;
+    if (!personId) continue;
     ensure(personId).alerts.push({ severity: alert.severity });
   }
 
@@ -3900,7 +4028,7 @@ async function integrityByPersonFor(contest, activeIds) {
   const reviews = await getAllReviews(contest.slug);
   for (const review of reviews) {
     const personId = String(review.username_norm || "");
-    if (!activeSet.has(personId)) continue;
+    if (!personId) continue;
     ensure(personId).reviews.push({ verdict: review.verdict, reviewer_name: review.reviewer_name });
   }
   return out;
@@ -3933,6 +4061,7 @@ async function adminContestSelectionDone(req) {
   // the SAME numbers the Results table shows (single source of truth).
   const snapshotByPerson = new Map();
   for (const row of data.rows) {
+    if (row.unmatched) continue; // no enrollment to stamp (KPR 2026-06-12 rows)
     const perProblem = {};
     for (const cell of row.per_problem) perProblem[cell.problem_id] = cell.best_score;
     snapshotByPerson.set(row.person_id, {
@@ -4186,6 +4315,7 @@ async function adminContestPurge(req) {
   if (results && Array.isArray(results.rows)) {
     const snapshotByPerson = new Map();
     for (const row of results.rows) {
+      if (row.unmatched) continue; // no enrollment to stamp (KPR 2026-06-12 rows)
       const perProblem = {};
       for (const cell of row.per_problem || []) perProblem[cell.problem_id] = cell.best_score;
       snapshotByPerson.set(row.person_id, {
