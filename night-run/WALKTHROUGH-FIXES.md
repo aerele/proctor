@@ -31,4 +31,6 @@ docs workflow (`wf_145b15ad-957`) is still committing. Subagents edit + verify; 
 
 | W7 | admin authoring | Editing a problem's HIDDEN TESTS while an open contest references it → raw `live_edit_confirmation_required` error; UI never implemented the catch-409 → confirm-dialog → resend `confirm_live_edit:<problem.id>` flow (handler.mjs:2050; other fields' edits prompt fine). Workaround given: draft → edit → re-open. (TG 1865/1867.) | ✅ committed+deployed rev 00013 | fde4736 |
 
-_(W8 … appended live as Karthi comments arrive.)_
+| W8 | candidate | Camera dock "Pop out over other windows" triggers a false "switched away" alert when used — remove the option. (TG 1867.) | ✅ committed, deploying | see log |
+
+_(W9 … appended live as Karthi comments arrive.)_
