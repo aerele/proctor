@@ -6,6 +6,7 @@
 // re-engaging the overlay from persisted state.
 import { describe, it, expect } from "vitest";
 import {
+  matchesAckPhrase,
   FULLSCREEN_ACK_PHRASE,
   REPORT_RETRY_MS,
   alertHoldMessage,
@@ -370,5 +371,23 @@ describe("alertHoldMessage", () => {
       expect(alertHoldMessage(violation)).toMatch(/proctor has been alerted/);
       expect(alertHoldMessage(violation)).toMatch(/both steps/i);
     }
+  });
+});
+
+// W10 (exam morning): the ack phrase is judged case- and whitespace-insensitively.
+describe("matchesAckPhrase (W10)", () => {
+  it("accepts the exact phrase", () => {
+    expect(matchesAckPhrase("I will not exit full screen after this")).toBe(true);
+  });
+  it("accepts case variants", () => {
+    expect(matchesAckPhrase("i will not exit full screen after this")).toBe(true);
+    expect(matchesAckPhrase("I WILL NOT EXIT FULL SCREEN AFTER THIS")).toBe(true);
+  });
+  it("tolerates leading/trailing/runs of whitespace", () => {
+    expect(matchesAckPhrase("  i will  not exit full screen after this ")).toBe(true);
+  });
+  it("still rejects wrong words", () => {
+    expect(matchesAckPhrase("i will not exit fullscreen after this")).toBe(false);
+    expect(matchesAckPhrase("")).toBe(false);
   });
 });

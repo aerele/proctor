@@ -33,4 +33,7 @@ docs workflow (`wf_145b15ad-957`) is still committing. Subagents edit + verify; 
 
 | W8 | candidate | Camera dock "Pop out over other windows" triggers a false "switched away" alert when used — remove the option. (TG 1867.) | ✅ committed, deploying | see log |
 
-_(W9 … appended live as Karthi comments arrive.)_
+| W9 | candidate coding | Editing keeps the old code when a stub changes (correct) — but add a **Reload stub** option: warn "all your edits will be gone — are you sure?", reload the fresh stub, then show an **Undo (~20s)** to restore the previous code. (TG 1871.) | dispatched | — |
+| W10 | candidate enforcement | The typed fullscreen ack phrase "I will not exit full screen after this" fails on case — make the comparison **case-insensitive**. (TG 1873.) | in progress (coordinator) | — |
+
+_(W11 … appended live as Karthi comments arrive.)_

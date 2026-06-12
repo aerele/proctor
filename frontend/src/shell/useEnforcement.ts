@@ -17,7 +17,7 @@ import type { ProctorEvent, SessionStatus } from "../types";
 import {
   deserializeEnforcementState, enforcementOverlayVisible, enforcementReducer,
   enforcementRemainingSeconds, enforcementStorageKey, initialEnforcementState,
-  serializeEnforcementState, FULLSCREEN_ACK_PHRASE,
+  serializeEnforcementState, matchesAckPhrase,
   type EnforcementAction, type EnforcementConfig, type EnforcementPhase, type EnforcementState,
   type ViolationPhase
 } from "./enforcement";
@@ -276,7 +276,7 @@ export function useEnforcement(opts: {
     return (text: string) => {
       dispatch({
         kind: "ack",
-        matched: text === FULLSCREEN_ACK_PHRASE,
+        matched: matchesAckPhrase(text),
         fullscreen: Boolean(document.fullscreenElement),
         nowMs: Date.now()
       });

@@ -20,6 +20,14 @@
 
 export const FULLSCREEN_ACK_PHRASE = "I will not exit full screen after this";
 
+// W10 (Karthi, exam morning): the typed ack is judged CASE-INSENSITIVELY (and
+// whitespace-tolerantly) — a nervous candidate typing "i will not exit..."
+// must not fail the countdown over a shift key. Pure so the reducer tests pin it.
+export function matchesAckPhrase(text: string): boolean {
+  const norm = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
+  return norm(text) === norm(FULLSCREEN_ACK_PHRASE);
+}
+
 // Wave-2 review fix: a violation report that never got a server verdict (failed
 // POST, reload mid-flight) is RETRIED on the tick at this interval — one
 // dropped request must never strand the candidate in a dead overlay while the
