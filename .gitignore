@@ -16,6 +16,9 @@ frontend/dist/
 
 # overnight-run scratch + secrets + build artifacts
 night-run/verdict-queue/
+
+# junk/ — temporary data files, real student PII, analysis outputs (never commit)
+junk/
 *.pem
 
 # contest-eval monitoring: live/PII output (alerts carry candidate usernames + code)
