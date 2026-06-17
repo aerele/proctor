@@ -10,6 +10,7 @@ import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
 import { makeEvaluation } from "./evaluation.mjs";
 import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
 import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
+import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
@@ -364,6 +365,38 @@ const {
   adminListTemplates, adminGetTemplate, adminCreateTemplate, adminUpdateTemplate,
   adminArchiveTemplate, adminCloneTemplate, adminDeleteTemplate
 } = adminTemplatesRoutes;
+
+// Factory seam (decomp B3): the problem-bank admin authoring route domain. ctx
+// closes over THIS instance's live-client getter, the auth guard from makeAuth,
+// the http transport helpers, the env-captured collection names + caps, the
+// problem-domain store/validation fns (isValidProblemId/validateProblemInput/
+// getBankProblem), the pure contest-reference finder (+ the template lister it
+// reads through), and the legacy-settings store fns (the §1.4.3 silent-clear
+// path). The returned route handlers are destructured into the SAME names the
+// dispatch table uses, so the dispatch lines stay byte-identical
+// (canaryIsolation). The problem-bank helpers it owns (problemRef /
+// problemReferenceUniverse) come back too — currently used only by these routes.
+const adminProblemsRoutes = makeAdminProblemsRoutes({
+  getFirestore,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  httpError,
+  httpErrorWith,
+  problemsCollection: PROBLEMS_COLLECTION,
+  problemsQueryLimit: PROBLEMS_QUERY_LIMIT,
+  contestsCollection: CONTESTS_COLLECTION,
+  isValidProblemId,
+  validateProblemInput,
+  getBankProblem,
+  findProblemReferences,
+  listTemplates,
+  getSettings,
+  settingsRef
+});
+const {
+  adminListProblems, adminGetProblem, adminSaveProblem, adminDeleteProblem
+} = adminProblemsRoutes;
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
@@ -2094,134 +2127,13 @@ async function adminSaveSettings(req) {
 }
 
 // ---- S4: problem bank (admin authoring) ------------------------------------
-
-function problemRef(id) {
-  return getFirestore().collection(PROBLEMS_COLLECTION).doc(id);
-}
-
-async function adminListProblems(req) {
-  requireAdmin(req);
-  const snapshot = await getFirestore().collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
-  const problems = snapshot.docs
-    .map((doc) => doc.data())
-    .map((p) => ({
-      id: p.id,
-      title: p.title || "",
-      status: p.status || "draft",
-      points: p.points ?? 100,
-      scoring: p.scoring || "per_test",
-      languages: p.languages || [],
-      tags: Array.isArray(p.tags) ? p.tags : [], // S-I §1.2 (legacy docs → [])
-      sample_count: (p.sampleTests || []).length,
-      hidden_count: (p.hiddenTests || []).length,
-      updated_at: p.updated_at || ""
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  return { problems };
-}
-
-async function adminGetProblem(req) {
-  requireAdmin(req);
-  const id = String(req.query?.id || "");
-  if (!isValidProblemId(id)) return badRequest("invalid id");
-  const doc = await problemRef(id).get();
-  if (!doc.exists) throw httpError(404, "Problem not found");
-  // S-I §5.3: surface what references this problem so the editor can render
-  // the "Referenced by" line and pre-warn before delete/unpublish.
-  const refs = findProblemReferences(id, await problemReferenceUniverse());
-  // Full doc INCLUDING hiddenTests — admin-only surface.
-  return {
-    problem: doc.data(),
-    references: {
-      contests: refs.contests.map((contest) => contest.slug),
-      templates: refs.templates.map((template) => template.slug)
-    }
-  };
-}
-
-// ---- S-I §1.4.3: live-reference guard ----------------------------------------
-// Problem CONTENT stays live on contests (exec/start read the bank at serve
-// time), so destructive bank edits must be guarded:
-//   delete while referenced                  -> 409 problem_referenced
-//   unpublish while CONTEST-referenced       -> 409 problem_referenced
-//     (template-only references allow it — instantiation re-validates)
-//   hiddenTests edit while an OPEN contest references it -> typed confirm
-//     (body.confirm_live_edit === the problem id), else 409.
-
-// Bounded pre-fetch for findProblemReferences: real contest docs (limit 500;
-// archived filtered by the pure function) + templates with seeds merged. The
-// synthesized LEGACY contest is deliberately absent — its settings doc keeps
-// the original silent-clear branch below instead of a 409.
-async function problemReferenceUniverse() {
-  const [contestSnapshot, templates] = await Promise.all([
-    getFirestore().collection(CONTESTS_COLLECTION).limit(CONTESTS_REFERENCE_LIMIT).get(),
-    listTemplates()
-  ]);
-  return { contests: contestSnapshot.docs.map((doc) => doc.data()), templates };
-}
-const CONTESTS_REFERENCE_LIMIT = 500;
-
-async function adminSaveProblem(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const checked = validateProblemInput(body);
-  if (!checked.ok) return badRequest(checked.error);
-  const existing = await problemRef(checked.problem.id).get();
-  // Guard comparisons run against doc-or-seed (a draft doc shadowing a
-  // published seed IS an unpublish); created_at preservation stays doc-only.
-  const current = existing.exists ? existing.data() : await getBankProblem(checked.problem.id);
-  if (current) {
-    const unpublishing = current.status === "published" && checked.problem.status === "draft";
-    const hiddenChanged = JSON.stringify(current.hiddenTests || []) !== JSON.stringify(checked.problem.hiddenTests);
-    if (unpublishing || hiddenChanged) {
-      const refs = findProblemReferences(checked.problem.id, await problemReferenceUniverse());
-      if (unpublishing && refs.contests.length) {
-        throw httpErrorWith(409, "problem_referenced", {
-          contests: refs.contests.map((contest) => contest.slug),
-          templates: refs.templates.map((template) => template.slug)
-        });
-      }
-      const openContests = refs.contests.filter((contest) => contest.status === "open");
-      if (hiddenChanged && openContests.length && body.confirm_live_edit !== checked.problem.id) {
-        throw httpErrorWith(409, "live_edit_confirmation_required", {
-          contests: openContests.map((contest) => contest.slug)
-        });
-      }
-    }
-  }
-  const now = new Date().toISOString();
-  const item = {
-    ...checked.problem,
-    created_at: existing.exists ? (existing.data().created_at || now) : now,
-    updated_at: now
-  };
-  await problemRef(item.id).set(item);
-  return { ok: true, problem: item };
-}
-
-async function adminDeleteProblem(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const id = String(body.id || "");
-  if (!isValidProblemId(id)) return badRequest("invalid id");
-  // S-I §1.4.3: references found -> 409, NO silent clearing of contest or
-  // template assignments. (Replaces the old delete-clears-assignment rule.)
-  const refs = findProblemReferences(id, await problemReferenceUniverse());
-  if (refs.contests.length || refs.templates.length) {
-    throw httpErrorWith(409, "problem_referenced", {
-      contests: refs.contests.map((contest) => contest.slug),
-      templates: refs.templates.map((template) => template.slug)
-    });
-  }
-  await problemRef(id).delete();
-  // LEGACY contest path only (spec §1.4.3): the SETTINGS doc assignment is
-  // still silently cleared so legacy start/resume stop advertising a dead id.
-  const settings = await getSettings();
-  if (settings?.problem_id === id) {
-    await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
-  }
-  return { ok: true };
-}
+// The four admin problem-bank route bodies (adminListProblems / adminGetProblem
+// / adminSaveProblem / adminDeleteProblem) + their owned helpers (problemRef /
+// problemReferenceUniverse, with the CONTESTS_REFERENCE_LIMIT cap) moved VERBATIM
+// to the makeAdminProblemsRoutes(ctx) factory in routes/adminProblems.mjs
+// (decomp B3); destructured at module scope above so the dispatch lines stay
+// byte-identical (canaryIsolation). The §1.4.3 live-reference guard rules live
+// alongside the route bodies there.
 
 // ---- S-I §1.1/§2: proctor templates (admin CRUD) -----------------------------
 // The seven admin template route bodies + their owned helpers (templateRef /
