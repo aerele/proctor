@@ -41,6 +41,11 @@ export type EnforcementConfig = {
   exitLimit: number;
   mode: EnforcementMode;
   exemptFullscreen: boolean;
+  // #71: admin per-contest toggle (heartbeat-delivered, like exemptFullscreen)
+  // that removes ONLY the typed-ack step from the L1/alert_hold recovery — the
+  // re-enter-fullscreen requirement and the exit-limit/countdown escalation are
+  // UNCHANGED. Absent (older backend / never set) = the full two-step recovery.
+  simplifiedFullscreenRecovery?: boolean;
 };
 
 export type EnforcementPhase = "idle" | "blocking" | "locking" | "alert_hold";
@@ -124,9 +129,13 @@ function released(state: EnforcementState): EnforcementState {
   return { ...state, phase: "idle", deadlineMs: null, ackOk: false, violation: null, reportPending: false, retryAtMs: null };
 }
 
-// Resolve the L1 episode once BOTH conditions hold (typed phrase + fullscreen).
-function tryResolve(state: EnforcementState, nowMs: number, fullscreen: boolean): EnforcementResult {
-  if (!state.ackOk || !fullscreen) return noop(state);
+// Resolve the L1 episode once the recovery conditions hold. Normally that is
+// BOTH the typed phrase AND fullscreen; with #71's simplified-recovery toggle
+// on, the typed-ack condition is treated as satisfied so re-entering fullscreen
+// alone resolves the episode (the fullscreen requirement is NEVER dropped).
+function tryResolve(state: EnforcementState, nowMs: number, fullscreen: boolean, config: EnforcementConfig): EnforcementResult {
+  const ackSatisfied = config.simplifiedFullscreenRecovery === true || state.ackOk;
+  if (!ackSatisfied || !fullscreen) return noop(state);
   const remaining = state.deadlineMs == null ? 0 : Math.max(0, state.deadlineMs - nowMs);
   return {
     state: released(state),
@@ -175,13 +184,13 @@ export function enforcementReducer(
   if (action.kind === "ack") {
     if (state.phase !== "blocking" && state.phase !== "alert_hold") return noop(state);
     const next = { ...state, ackOk: action.matched };
-    return action.matched ? tryResolve(next, action.nowMs, action.fullscreen) : noop(next);
+    return action.matched ? tryResolve(next, action.nowMs, action.fullscreen, config) : noop(next);
   }
 
   if (action.kind === "fullscreen_change") {
     if (!action.fullscreen) return noop(state); // exits arrive via fullscreen_exit
     if (state.phase !== "blocking" && state.phase !== "alert_hold") return noop(state);
-    return tryResolve(state, action.nowMs, true);
+    return tryResolve(state, action.nowMs, true, config);
   }
 
   if (action.kind === "tick") {
@@ -231,17 +240,28 @@ export function enforcementRemainingSeconds(state: EnforcementState, nowMs: numb
 // after the candidate had already returned to fullscreen and only the typed
 // phrase was missing, which read as a stuck/looping alert ("I came back, why
 // is it still shouting?"). Pure so the wording is vitest-tested.
-export function enforcementHeadline(phase: EnforcementPhase, fullscreen: boolean): string {
+//
+// #71: with simplified recovery on there is no typed-ack step, so re-entering
+// fullscreen is the ONLY action — the back-in-fullscreen headline drops the
+// plural "steps" wording (there is nothing left to finish).
+export function enforcementHeadline(phase: EnforcementPhase, fullscreen: boolean, simplifiedRecovery = false): string {
   if (phase === "locking") return "Test disabled";
-  return fullscreen ? "Finish the steps to continue" : "You left fullscreen";
+  if (!fullscreen) return "You left fullscreen";
+  return simplifiedRecovery ? "Return to fullscreen to continue" : "Finish the steps to continue";
 }
 
 // W5 fix (same truthfulness rule for the sub-line): once back in fullscreen,
 // point at the remaining step instead of repeating the exit instruction.
-export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean, exitCount: number): string {
+//
+// #71: simplified recovery has a single action (re-enter fullscreen), so the
+// out-of-fullscreen line points at that one button instead of "BOTH steps".
+export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean, exitCount: number, simplifiedRecovery = false): string {
   if (phase === "locking") return "Your test is being locked. Raise your hand and call your room proctor.";
-  return fullscreen
-    ? `Fullscreen exit #${exitCount} was recorded. You are back in fullscreen — finish the remaining step below to continue your exam.`
+  if (fullscreen) {
+    return `Fullscreen exit #${exitCount} was recorded. You are back in fullscreen — finish the remaining step below to continue your exam.`;
+  }
+  return simplifiedRecovery
+    ? `Fullscreen exit #${exitCount} was recorded. Return to fullscreen below to continue your exam.`
     : `Fullscreen exit #${exitCount} was recorded. Complete BOTH steps below to continue your exam.`;
 }
 
@@ -249,11 +269,17 @@ export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean,
 // hold was reached through the EXIT LIMIT — word it by the violation that
 // tripped. null (legacy persisted state with no violation) keeps the time
 // wording, the pre-fix default.
-export function alertHoldMessage(violation: ViolationPhase | null): string {
+//
+// #71: simplified recovery has a single action, so the banner says "Return to
+// fullscreen" instead of "Complete both steps".
+export function alertHoldMessage(violation: ViolationPhase | null, simplifiedRecovery = false): string {
   const cause = violation === "exit_limit"
     ? "You exited fullscreen too many times"
     : "Time expired";
-  return `${cause} — your proctor has been alerted. Complete both steps below to continue, or wait for the invigilator.`;
+  const action = simplifiedRecovery
+    ? "Return to fullscreen below to continue, or wait for the invigilator."
+    : "Complete both steps below to continue, or wait for the invigilator.";
+  return `${cause} — your proctor has been alerted. ${action}`;
 }
 
 // ---- Persistence (per session) ----------------------------------------------

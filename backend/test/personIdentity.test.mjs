@@ -377,13 +377,13 @@ test("person start serves the CONTEST's snapshot enforcement + camera, never the
   } });
   const res = await call(startReq({ contest: contest.slug, candidate_id: "G1", ...WALK_IN }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.deepEqual(res.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5 });
+  assert.deepEqual(res.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5, simplified_fullscreen_recovery: false });
   assert.deepEqual(res.body.upload_config.camera, { enabled: false, fps: 5, width: 480 });
 
   // Resume shares startResponse — same contest-sourced config.
   const resume = await call(resumeReq({ session_id: res.body.session_id, contest: contest.slug, candidate_id: "G1" }));
   assert.equal(resume.statusCode, 200);
-  assert.deepEqual(resume.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5 });
+  assert.deepEqual(resume.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 5, simplified_fullscreen_recovery: false });
   assert.deepEqual(resume.body.upload_config.camera, { enabled: false, fps: 5, width: 480 });
 });
 
@@ -436,7 +436,7 @@ test("heartbeat (the live channel) serves the CONTEST's enforcement + end_at on 
     session_id: start.body.session_id, recording_state: "combined:recording;screen:recording", visibility_state: "visible"
   } }));
   assert.equal(hb.statusCode, 200, JSON.stringify(hb.body));
-  assert.deepEqual(hb.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 3 });
+  assert.deepEqual(hb.body.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 3, simplified_fullscreen_recovery: false });
   const contestDoc = firestore._collections.get("pi_contests").get(contest.slug);
   assert.equal(hb.body.end_at, contestDoc.end_at); // S5 live end-time stays contest-sourced
 });

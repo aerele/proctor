@@ -550,7 +550,7 @@ test("create: problems[] stored normalized; new snapshot fields default (templat
   assert.equal(contest.template_slug, null);
   assert.deepEqual(contest.languages, ["python", "cpp", "java", "javascript", "sql"]);
   assert.deepEqual(contest.camera_recording, { enabled: true, fps: 10, width: 640 });
-  assert.deepEqual(contest.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 });
+  assert.deepEqual(contest.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, simplified_fullscreen_recovery: false });
 });
 
 test("create: a problems[] entry referencing a draft/missing problem -> 400 problems_unavailable, nothing created", async () => {
@@ -610,7 +610,7 @@ test("instantiate: template_slug snapshot-copies problems + defaults; end_at pre
   assert.equal(contest.identity_label, "Hall Ticket");
   assert.equal(contest.room_gate_enabled, false);
   assert.deepEqual(contest.camera_recording, { enabled: false, fps: 5, width: 320 });
-  assert.deepEqual(contest.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 1 });
+  assert.deepEqual(contest.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 1, simplified_fullscreen_recovery: false });
   assert.equal(contest.evidence_retention_days, 7);
   assert.deepEqual(contest.languages, ["python", "cpp"]);
   // end_at = start_at + 60 min (editable prefill — an explicit end_at would win).

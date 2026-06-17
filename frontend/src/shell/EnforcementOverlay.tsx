@@ -15,7 +15,7 @@ import { AlertTriangle, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, enforcementHeadline, enforcementSubline, type EnforcementPhase, type ViolationPhase } from "./enforcement";
 
-export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, onAckChange, onEnterFullscreen }: {
+export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, onAckChange, onEnterFullscreen }: {
   phase: EnforcementPhase;
   /** The violation that tripped the hold — words the alert_hold banner (wave-3). */
   violation: ViolationPhase | null;
@@ -23,6 +23,10 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   exitCount: number;
   ackOk: boolean;
   fullscreen: boolean;
+  /** #71: admin per-contest toggle — when true the typed-ack step (Step 1) is
+   *  hidden; re-entering fullscreen is the only action. Lands live via the
+   *  heartbeat-delivered enforcement config. */
+  simplifiedRecovery?: boolean;
   /** Called on every keystroke — the hook matches against the exact phrase. */
   onAckChange: (text: string) => void;
   onEnterFullscreen: () => Promise<void>;
@@ -32,7 +36,9 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // A11y (mirrors the M10 FullscreenGate fix): focus moves into the dialog so
-  // keyboard/screen-reader users land on the required input immediately.
+  // keyboard/screen-reader users land on the required input immediately. In
+  // simplified-recovery mode there is no input, so this is a no-op (the button
+  // is then the first focusable element).
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
@@ -73,10 +79,10 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
                 candidate is back in fullscreen the overlay points at the
                 remaining step instead of repeating "You left fullscreen". */}
             <h1 id="enforcement-title" className="text-3xl font-extrabold uppercase tracking-wide">
-              {enforcementHeadline(phase, fullscreen)}
+              {enforcementHeadline(phase, fullscreen, simplifiedRecovery)}
             </h1>
             <p className="mt-1 text-base font-medium text-red-200">
-              {enforcementSubline(phase, fullscreen, exitCount)}
+              {enforcementSubline(phase, fullscreen, exitCount, simplifiedRecovery)}
             </p>
           </div>
         </div>
@@ -91,34 +97,46 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
             ) : null}
             {phase === "alert_hold" ? (
               <p className="mt-6 rounded-lg border-2 border-red-400 bg-red-800 p-4 text-base font-semibold text-red-100" aria-live="assertive">
-                {alertHoldMessage(violation)}
+                {alertHoldMessage(violation, simplifiedRecovery)}
               </p>
             ) : null}
 
             <div className="mt-6 space-y-4">
-              <div className={`rounded-lg border-2 p-4 ${ackOk ? "border-emerald-400 bg-emerald-900/40" : "border-red-400 bg-red-800/60"}`}>
-                <p className="text-sm font-bold uppercase tracking-wide text-red-100">
-                  Step 1 {ackOk ? "— done" : ""}: type this exact sentence
+              {/* #71: the typed-ack step (Step 1) is rendered ONLY when typing is
+                  required. In simplified-recovery mode it is omitted entirely and
+                  a plain warning replaces it — re-entering fullscreen is the only
+                  action. */}
+              {!simplifiedRecovery ? (
+                <div className={`rounded-lg border-2 p-4 ${ackOk ? "border-emerald-400 bg-emerald-900/40" : "border-red-400 bg-red-800/60"}`}>
+                  <p className="text-sm font-bold uppercase tracking-wide text-red-100">
+                    Step 1 {ackOk ? "— done" : ""}: type this exact sentence
+                  </p>
+                  <p className="mt-2 select-none font-mono text-base font-semibold text-white">{FULLSCREEN_ACK_PHRASE}</p>
+                  <input
+                    ref={inputRef}
+                    className="focus-ring mt-3 h-11 w-full rounded-md border border-red-300 bg-white px-3 font-mono text-sm text-ink"
+                    value={text}
+                    placeholder="Type the sentence here"
+                    autoComplete="off"
+                    spellCheck={false}
+                    onPaste={(event) => event.preventDefault()}
+                    onDrop={(event) => event.preventDefault()}
+                    onChange={(event) => {
+                      setText(event.target.value);
+                      onAckChange(event.target.value);
+                    }}
+                  />
+                </div>
+              ) : (
+                <p className="rounded-lg border-2 border-red-400 bg-red-800/60 p-4 text-base font-semibold text-red-100">
+                  Leaving fullscreen during the exam is not allowed and has been recorded. Return to fullscreen now to continue your exam.
                 </p>
-                <p className="mt-2 select-none font-mono text-base font-semibold text-white">{FULLSCREEN_ACK_PHRASE}</p>
-                <input
-                  ref={inputRef}
-                  className="focus-ring mt-3 h-11 w-full rounded-md border border-red-300 bg-white px-3 font-mono text-sm text-ink"
-                  value={text}
-                  placeholder="Type the sentence here"
-                  autoComplete="off"
-                  spellCheck={false}
-                  onPaste={(event) => event.preventDefault()}
-                  onDrop={(event) => event.preventDefault()}
-                  onChange={(event) => {
-                    setText(event.target.value);
-                    onAckChange(event.target.value);
-                  }}
-                />
-              </div>
+              )}
               <div className={`rounded-lg border-2 p-4 ${fullscreen ? "border-emerald-400 bg-emerald-900/40" : "border-red-400 bg-red-800/60"}`}>
                 <p className="text-sm font-bold uppercase tracking-wide text-red-100">
-                  Step 2 {fullscreen ? "— done" : ""}: return to fullscreen
+                  {simplifiedRecovery
+                    ? `Return to fullscreen ${fullscreen ? "— done" : ""}`
+                    : `Step 2 ${fullscreen ? "— done" : ""}: return to fullscreen`}
                 </p>
                 {!fullscreen ? (
                   <button
