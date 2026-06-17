@@ -96,7 +96,11 @@ export type EnforcementAction =
   | { kind: "fullscreen_change"; fullscreen: boolean; nowMs: number }
   | { kind: "ack"; matched: boolean; fullscreen: boolean; nowMs: number }
   | { kind: "tick"; nowMs: number }
-  | { kind: "config_change"; nowMs: number }
+  // #71 live-release: a heartbeat-delivered config change. `fullscreen` carries
+  // the candidate's CURRENT fullscreen truth so the simplified-recovery flip can
+  // resolve an in-fullscreen candidate immediately (the exemptFullscreen release
+  // does not need it — released() ignores fullscreen — so it stays optional).
+  | { kind: "config_change"; nowMs: number; fullscreen?: boolean }
   | { kind: "violation_result"; locked: boolean; exempt?: boolean; nowMs: number }
   | { kind: "session_ended"; nowMs: number };
 
@@ -156,6 +160,18 @@ export function enforcementReducer(
     // Live exemption (heartbeat-delivered): release any active overlay.
     if (config.exemptFullscreen && state.phase !== "idle") {
       return noop(released(state));
+    }
+    // #71 live-release: simplified-fullscreen-recovery flipped ON mid-episode.
+    // A candidate already stuck in the red overlay AND already back in
+    // fullscreen has no actionable element (the ack input is hidden by the flip
+    // and the re-enter button is hidden because fullscreen is already true), so
+    // mirror exemptFullscreen's mid-block release: try to resolve NOW. The
+    // fullscreen requirement is NEVER dropped — tryResolve only resolves when
+    // action.fullscreen is true, so a candidate NOT in fullscreen stays blocking
+    // and must still re-enter.
+    if (config.simplifiedFullscreenRecovery === true
+      && (state.phase === "blocking" || state.phase === "alert_hold")) {
+      return tryResolve(state, action.nowMs, action.fullscreen === true, config);
     }
     return noop(state);
   }

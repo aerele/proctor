@@ -319,6 +319,56 @@ describe("enforcementReducer — exemption bypass + live config", () => {
     expect(state.phase).toBe("idle");
   });
 
+  // FIX 2 (exam-eve 2026-06-18): flipping simplified-fullscreen-recovery ON via
+  // the heartbeat while a candidate is ALREADY blocking AND already back in
+  // fullscreen must release them immediately — without this the overlay hides
+  // both the ack input AND (fullscreen already true) the re-enter button, so
+  // there is NO actionable element and the candidate is stranded until the
+  // countdown expires into alert_hold.
+  it("flip simplifiedFullscreenRecovery ON while blocking AND already in fullscreen → resolves to idle", () => {
+    const blocking = exit(initialEnforcementState).state;
+    expect(blocking.phase).toBe("blocking");
+    const cfg: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+    const { state, effects } = enforcementReducer(blocking, { kind: "config_change", nowMs: T0 + 5000, fullscreen: true }, cfg);
+    expect(state.phase).toBe("idle");
+    // The resolution emits the ack event (same as a normal resolve).
+    expect(effects.some((e) => e.kind === "event" && e.type === "fullscreen_enforcement_ack")).toBe(true);
+  });
+
+  // Guard: the fullscreen requirement is NEVER dropped. A candidate NOT in
+  // fullscreen when the flip lands must STAY blocking and re-enter to resolve.
+  it("flip simplifiedFullscreenRecovery ON while NOT in fullscreen → stays blocking (still requires fullscreen)", () => {
+    const blocking = exit(initialEnforcementState).state;
+    const cfg: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+    const { state, effects } = enforcementReducer(blocking, { kind: "config_change", nowMs: T0 + 5000, fullscreen: false }, cfg);
+    expect(state.phase).toBe("blocking");
+    expect(effects).toEqual([]);
+    // …and re-entering fullscreen then resolves (no typed ack needed).
+    const resolved = enforcementReducer(state, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 6000 }, cfg).state;
+    expect(resolved.phase).toBe("idle");
+  });
+
+  // The same live-release applies to alert_hold (candidate already past the
+  // countdown but in fullscreen) — flipping the flag releases them.
+  it("flip simplifiedFullscreenRecovery ON while in alert_hold AND in fullscreen → resolves to idle", () => {
+    const cfg: EnforcementConfig = { ...config, mode: "alert_first" };
+    const blocking = exit(initialEnforcementState, T0, cfg).state;
+    const hold = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, cfg).state;
+    expect(hold.phase).toBe("alert_hold");
+    const flipped: EnforcementConfig = { ...cfg, simplifiedFullscreenRecovery: true };
+    const { state } = enforcementReducer(hold, { kind: "config_change", nowMs: T0 + 21_000, fullscreen: true }, flipped);
+    expect(state.phase).toBe("idle");
+  });
+
+  // The flip is a no-op when idle (nothing to resolve) — must not spuriously
+  // emit an ack event or change state.
+  it("flip simplifiedFullscreenRecovery ON while idle → no-op", () => {
+    const cfg: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+    const { state, effects } = enforcementReducer(initialEnforcementState, { kind: "config_change", nowMs: T0, fullscreen: true }, cfg);
+    expect(state).toBe(initialEnforcementState);
+    expect(effects).toEqual([]);
+  });
+
   it("session end releases any phase", () => {
     const blocking = exit(initialEnforcementState).state;
     const { state } = enforcementReducer(blocking, { kind: "session_ended", nowMs: T0 + 5000 }, config);

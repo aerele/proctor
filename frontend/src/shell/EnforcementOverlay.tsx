@@ -34,14 +34,18 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   const [text, setText] = useState("");
   const [fsError, setFsError] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const reenterButtonRef = useRef<HTMLButtonElement | null>(null);
 
   // A11y (mirrors the M10 FullscreenGate fix): focus moves into the dialog so
-  // keyboard/screen-reader users land on the required input immediately. In
-  // simplified-recovery mode there is no input, so this is a no-op (the button
-  // is then the first focusable element).
+  // keyboard/screen-reader users land on the required control immediately.
+  // FIX 3 (exam-eve 2026-06-18): in simplified-recovery mode the typed-ack input
+  // (inputRef) is NOT rendered, so focusing it was a no-op and keyboard/SR users
+  // never landed in the dialog. Focus the "Re-enter fullscreen" button instead —
+  // it is the only action in that mode. The typed-ack path is unchanged.
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (simplifiedRecovery) reenterButtonRef.current?.focus();
+    else inputRef.current?.focus();
+  }, [simplifiedRecovery]);
 
   // A resolved episode unmounts this overlay, so a NEW episode always mounts
   // with an empty box (the phrase is per-episode by construction).
@@ -140,6 +144,7 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
                 </p>
                 {!fullscreen ? (
                   <button
+                    ref={reenterButtonRef}
                     className="focus-ring mt-3 inline-flex h-11 items-center gap-2 rounded-md bg-white px-5 text-sm font-bold text-red-900"
                     onClick={() => {
                       setFsError("");
