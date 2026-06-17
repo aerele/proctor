@@ -1264,11 +1264,12 @@ test("sessions-list: truncated:true when the raw query hits SESSIONS_QUERY_LIMIT
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
-  // Exactly 2000 docs = the handler's SESSIONS_QUERY_LIMIT. The raw query has
-  // no orderBy, so at the cap ARBITRARY docs (live ones included) may have been
-  // dropped — the list must self-report as truncated even though the returned
-  // page itself is small and the matched live rows fit.
-  seedSessionDocs(firestore, 2000, () => ({ status: "ended" }));
+  // Exactly 6000 docs = the handler's SESSIONS_QUERY_LIMIT (raised 2000→6000 on
+  // exam-eve 2026-06-18 for the ~700-student hall). The raw query has no orderBy,
+  // so at the cap ARBITRARY docs (live ones included) may have been dropped — the
+  // list must self-report as truncated even though the returned page itself is
+  // small and the matched live rows fit.
+  seedSessionDocs(firestore, 6000, () => ({ status: "ended" }));
 
   const res = await sessionsList({ status: "" });
   assert.equal(res.statusCode, 200);
