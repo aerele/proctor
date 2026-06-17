@@ -54,17 +54,29 @@ function makeFakeFirestore() {
 
   function makeQuery(name, filters) {
     return {
-      where(field, _op, value) {
-        return makeQuery(name, [...filters, { field, value }]);
+      where(field, op, value) {
+        return makeQuery(name, [...filters, { field, op, value }]);
       },
       limit() {
+        return this;
+      },
+      // Chainable no-op: the REAL scan-window semantics (doc-id order vs
+      // timestamp desc + truncating limit) are exercised in
+      // alertsScanWindow.test.mjs; functional tests here only need pass-through.
+      orderBy() {
         return this;
       },
       async get() {
         const store = getCollection(name);
         let docs = [...store.values()];
-        for (const { field, value } of filters) {
-          docs = docs.filter((doc) => doc[field] === value);
+        for (const { field, op, value } of filters) {
+          // Mirror the Firestore operators the handler actually uses: scalar
+          // equality and the `in` membership test (a small value array).
+          if (op === "in") {
+            docs = docs.filter((doc) => Array.isArray(value) && value.includes(doc[field]));
+          } else {
+            docs = docs.filter((doc) => doc[field] === value);
+          }
         }
         return { docs: docs.map((data) => ({ data: () => data })) };
       }
@@ -79,6 +91,7 @@ function makeFakeFirestore() {
       return {
         where: query.where,
         limit: query.limit,
+        orderBy: query.orderBy,
         get: query.get,
         doc(id) {
           return {
@@ -138,6 +151,9 @@ function makeFakeStorage() {
             },
             async getMetadata() {
               return [{ size: 1, updated: "2026-06-05T00:00:00Z" }];
+            },
+            async download() {
+              return [saved.get(key) ?? ""];
             }
           };
         },
@@ -148,7 +164,8 @@ function makeFakeStorage() {
               name,
               metadata: { size: 1, updated: "2026-06-05T00:00:00Z" },
               async getMetadata() { return [{ size: 1, updated: "2026-06-05T00:00:00Z" }]; },
-              async getSignedUrl() { return [`https://signed.example/${name}`]; }
+              async getSignedUrl() { return [`https://signed.example/${name}`]; },
+              async download() { return [saved.get(name) ?? ""]; }
             }));
           return [files];
         }
@@ -237,6 +254,80 @@ test("slug: valid contest_url → prefixed contest layout (full segment kept)", 
     `prefix should be contest-foldered, got ${res.body.storage_prefix}`
   );
   assert.ok(res.body.storage_prefix.endsWith("/"));
+});
+
+test("start: a malformed candidate email → 400 (F12 email-format gap)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // No @, no domain dot, and an embedded space all fail the permissive gate.
+  for (const email of ["asha-at-example", "asha@example", "has space@example.com"]) {
+    const res = await start(firestore, storage, { email });
+    assert.equal(res.statusCode, 400, `expected 400 for ${email}`);
+    assert.match(res.body.error, /email/i);
+  }
+});
+
+test("start: a well-formed candidate email → 200 (gate is permissive, not RFC-strict)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, { email: "asha.k+tag@mail.example.co" });
+  assert.equal(res.statusCode, 200);
+});
+
+// S-E (F8.2): the legacy start no longer hard-requires the field named
+// "hackerrank_username". The modern client sends `candidate_id`; the server
+// synthesizes the FROZEN hackerrank_username session key from it so legacy reads
+// (doc ids, GCS paths, dual-read DTOs) keep working unchanged.
+test("start: candidate_id alone (no hackerrank_username) → 200, frozen key synthesized", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // detailsBody seeds hackerrank_username; null it out and pass candidate_id only.
+  const res = await start(firestore, storage, {
+    hackerrank_username: undefined,
+    candidate_id: "Asha_R",
+    name: "Asha R",
+    email: "asha@example.com",
+    roll_number: "R-9"
+  });
+  assert.equal(res.statusCode, 200);
+  // The frozen field IS the session key — username_norm derives from it, so the
+  // session must be findable under candidate_id's normalized form.
+  const stored = res.body;
+  assert.equal(stored.hackerrank_username, "Asha_R", "candidate_id synthesized into the frozen field");
+  assert.equal(stored.candidate_id, "Asha_R", "modern candidate_id still surfaced in the response");
+});
+
+test("start: NEITHER candidate_id nor hackerrank_username → 400 (id still mandatory)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, {
+    hackerrank_username: undefined,
+    candidate_id: undefined,
+    name: "No Id",
+    email: "noid@example.com",
+    roll_number: "R-0"
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.error, /required/i);
+});
+
+test("start: hackerrank_username still accepted verbatim (back-compat caller)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const res = await start(firestore, storage, {
+    hackerrank_username: "Legacy_User",
+    candidate_id: undefined,
+    name: "Legacy User",
+    email: "legacy@example.com",
+    roll_number: "R-7"
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.hackerrank_username, "Legacy_User");
 });
 
 test("slug: empty contest_url → LEGACY layout, no contests// double slash", async () => {
@@ -761,6 +852,192 @@ test("session-action: requires admin password", async () => {
 });
 
 // =====================================================================
+// Bulk session details — POST /api/admin/session-details
+// =====================================================================
+
+async function sessionDetails(usernames, contestSlug, headers = ADMIN_HEADERS) {
+  const body = { usernames };
+  if (contestSlug !== undefined) body.contest_slug = contestSlug;
+  return call(makeReq({ method: "POST", path: "/api/admin/session-details", headers, body }));
+}
+
+test("session-details: projects details straight from the session doc, ZERO GCS access", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, {
+    hackerrank_username: "Alice",
+    name: "Alice Example",
+    email: "alice@example.com",
+    roll_number: "R-1",
+    room: "Lab-3"
+  });
+
+  // Fail the test if the handler touches GCS at all — the whole point of this
+  // endpoint is to avoid the per-username getFiles/getSignedUrl fan-out.
+  const noGcs = {
+    bucket() {
+      throw new Error("session-details must not touch GCS");
+    }
+  };
+  __setClientsForTest({ firestore, storage: noGcs });
+
+  const res = await sessionDetails(["Alice"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.details.length, 1);
+  const d = res.body.details[0];
+  assert.equal(d.username, "Alice", "echoes the input username");
+  assert.equal(d.hackerrank_username, "Alice");
+  assert.equal(d.name, "Alice Example");
+  assert.equal(d.email, "alice@example.com", "email projected (recording-sessions omits this)");
+  assert.equal(d.roll_number, "R-1", "roll_number projected (recording-sessions omits this)");
+  assert.equal(d.room, "Lab-3");
+  assert.equal(d.contest_slug, "coding-contest-mcet-june-2026-slot-2");
+  assert.equal(d.status, "active");
+  assert.equal(d.found, true);
+  // No signed-url / evidence fields leak into the details shape.
+  assert.equal(Object.prototype.hasOwnProperty.call(d, "evidence"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(d, "download_url"), false);
+});
+
+test("session-details: preserves input ORDER and emits found:false for unknown usernames", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "Alice", name: "Alice Example", email: "a@x.com", roll_number: "R-1" });
+  await start(firestore, storage, { hackerrank_username: "Bob", name: "Bob Example", email: "b@x.com", roll_number: "R-2" });
+
+  // Order: a known one, an unknown one, another known one. Response must mirror
+  // the input order exactly.
+  const res = await sessionDetails(["Bob", "Nobody", "Alice"]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.details.map((d) => d.username), ["Bob", "Nobody", "Alice"], "input order preserved");
+  assert.deepEqual(res.body.details.map((d) => d.found), [true, false, true]);
+
+  const missing = res.body.details[1];
+  assert.equal(missing.found, false);
+  assert.equal(missing.username, "Nobody", "unknown username still echoes the input");
+  for (const field of ["hackerrank_username", "name", "email", "roll_number", "room", "contest_slug", "status"]) {
+    assert.equal(missing[field], "", `unknown username has empty ${field}`);
+  }
+});
+
+test("session-details: picks the NEWEST session per username (created_at desc)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Two sessions for the same user; force distinct created_at and a distinguishing
+  // field so we can tell which one was projected.
+  const first = await start(firestore, storage, { hackerrank_username: "Alice", name: "Old Name", email: "old@x.com" });
+  await call(makeReq({ method: "POST", path: "/api/admin/session-action", headers: ADMIN_HEADERS, body: { action: "end", session_id: first.body.session_id } }));
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  store.set(first.body.session_id, { ...store.get(first.body.session_id), created_at: "2026-06-05T00:00:00.000Z" });
+  const second = await start(firestore, storage, { hackerrank_username: "Alice", name: "New Name", email: "new@x.com" });
+  store.set(second.body.session_id, { ...store.get(second.body.session_id), created_at: "2026-06-07T00:00:00.000Z" });
+
+  const res = await sessionDetails(["Alice"]);
+  assert.equal(res.body.details[0].name, "New Name", "newest session wins");
+  assert.equal(res.body.details[0].email, "new@x.com");
+});
+
+test("session-details: '@'-prefixed input resolves to the same session (alt-norm match)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Student started WITHOUT the '@'; username_norm is 'alice'.
+  await start(firestore, storage, { hackerrank_username: "Alice", name: "Alice Example", email: "a@x.com" });
+
+  // Roster entry typed WITH the '@' → normalizeUsername('@alice') === '_alice';
+  // the alt-norm ('alice') must still find the session.
+  const res = await sessionDetails(["@alice"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.details[0].found, true, "'@alice' resolves via alt-norm to 'alice'");
+  assert.equal(res.body.details[0].username, "@alice", "echoes the exact input form");
+  assert.equal(res.body.details[0].name, "Alice Example");
+});
+
+test("session-details: a GENUINE '_alice' username is NOT conflated with 'alice'", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // Two DISTINCT students: one whose HackerRank handle is literally '_alice'
+  // (username_norm '_alice'), and a separate 'alice' (username_norm 'alice').
+  const us = await start(firestore, storage, { hackerrank_username: "_alice", name: "Underscore Alice", email: "underscore@x.com" });
+  const pl = await start(firestore, storage, { hackerrank_username: "alice", name: "Plain Alice", email: "plain@x.com" });
+  // Pin distinct created_at so any newest-first tie-break is deterministic.
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  store.set(us.body.session_id, { ...store.get(us.body.session_id), created_at: "2026-06-05T00:00:00.000Z" });
+  store.set(pl.body.session_id, { ...store.get(pl.body.session_id), created_at: "2026-06-07T00:00:00.000Z" });
+
+  // Querying the literal '_alice' (no leading '@') must NOT fall back to 'alice'.
+  // BEFORE the fix, '_alice' normalized to '_alice' and the alt-norm derived
+  // 'alice' from the leading '_', wrongly merging the two distinct students.
+  const underscore = await sessionDetails(["_alice"]);
+  assert.equal(underscore.body.details[0].found, true);
+  assert.equal(underscore.body.details[0].name, "Underscore Alice", "'_alice' resolves to the real '_alice' student, not 'alice'");
+  assert.equal(underscore.body.details[0].email, "underscore@x.com");
+
+  // And 'alice' (no leading '@') still resolves to the plain student only.
+  const plain = await sessionDetails(["alice"]);
+  assert.equal(plain.body.details[0].found, true);
+  assert.equal(plain.body.details[0].name, "Plain Alice");
+  assert.equal(plain.body.details[0].email, "plain@x.com");
+});
+
+test("session-details: a degenerate input ('@' / blank) does NOT query and is found:false", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "alice", name: "Plain Alice", email: "plain@x.com" });
+
+  // A bare '@' normalizes to '_' (degenerate); it must not mass-match docs.
+  const res = await sessionDetails(["@"]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.details[0].found, false, "bare '@' carries no username → found:false");
+  assert.equal(res.body.details[0].username, "@", "echoes the input form");
+  assert.equal(res.body.details[0].name, "");
+});
+
+test("session-details: contest_slug scopes the match", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "Alice", name: "Alice Example", email: "a@x.com" });
+  const contestSlug = "coding-contest-mcet-june-2026-slot-2";
+
+  // Right slug → found; a different slug → not found (scoped out).
+  const hit = await sessionDetails(["Alice"], contestSlug);
+  assert.equal(hit.body.details[0].found, true);
+  const miss = await sessionDetails(["Alice"], "some-other-contest");
+  assert.equal(miss.body.details[0].found, false, "wrong contest_slug excludes the session");
+});
+
+test("session-details: caps usernames at REVIEW_ROSTER_LIMIT (5000) with a 400", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const tooMany = Array.from({ length: 5001 }, (_, i) => `u${i}`);
+  const res = await sessionDetails(tooMany);
+  assert.equal(res.statusCode, 400);
+});
+
+test("session-details: usernames must be an array (400)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/session-details", headers: ADMIN_HEADERS, body: { usernames: "Alice" } }));
+  assert.equal(res.statusCode, 400);
+});
+
+test("session-details: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetails(["Alice"], undefined, {});
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
 // Recording playback picker — GET /api/admin/recording-sessions
 // =====================================================================
 
@@ -819,6 +1096,338 @@ test("recording-sessions: requires admin password", async () => {
   __setClientsForTest({ firestore, storage });
   const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: {} }));
   assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
+// Sessions drill-down — GET /api/admin/sessions-list (all docs, classified to
+// match the stat-card counts; the all-docs counterpart to recording-sessions).
+// =====================================================================
+
+function sessionsList(query = {}, headers = ADMIN_HEADERS) {
+  return call(makeReq({ method: "GET", path: "/api/admin/sessions-list", headers, query }));
+}
+
+// Force a session doc into a given status without going through an action (used
+// to set up locked/ended fixtures deterministically).
+function setStatus(firestore, sessionId, status) {
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  store.set(sessionId, { ...store.get(sessionId), status });
+}
+
+test("sessions-list: a pending_approval session with chunk_count:0 IS returned (NOT recording-filtered)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // carol starts twice → the second is pending_approval, chunk_count:0, and
+  // would be DROPPED by recording-sessions' chunk_count>0 filter.
+  await start(firestore, storage, { hackerrank_username: "carol" });
+  const second = await start(firestore, storage, { hackerrank_username: "carol" });
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  assert.equal(store.get(second.body.session_id).status, "pending_approval", "second device is pending_approval");
+  assert.equal(store.get(second.body.session_id).chunk_count, 0, "and recorded zero chunks");
+
+  const res = await sessionsList({ status: "pending_approval" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 1, "the zero-chunk pending session is listed");
+  assert.equal(res.body.sessions[0].session_id, second.body.session_id);
+  assert.equal(res.body.sessions[0].chunk_count, 0);
+  assert.equal(res.body.sessions[0].status, "pending_approval");
+  // Lightweight contract identical to recording-sessions: no evidence / signed urls.
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body.sessions[0], "evidence"), false);
+});
+
+test("sessions-list: status='' returns ALL session docs (incl. zero-chunk)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  // active alice, ended bob, pending carol(2nd) → three docs total, zero chunks each.
+  await start(firestore, storage, { hackerrank_username: "alice" });
+  const bob = await start(firestore, storage, { hackerrank_username: "bob" });
+  await call(makeReq({ method: "POST", path: "/api/session/end", body: { session_id: bob.body.session_id, assurance_accepted: true } }));
+  await start(firestore, storage, { hackerrank_username: "carol" });
+  await start(firestore, storage, { hackerrank_username: "carol" });
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 4, "all four docs returned regardless of status/chunks");
+  // Row shape matches recording-sessions exactly.
+  for (const field of ["session_id", "hackerrank_username", "name", "room", "contest_slug", "chunk_count", "created_at", "status"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(res.body.sessions[0], field), `expected field ${field}`);
+  }
+});
+
+test("sessions-list: status='locked' returns ONLY locked docs", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  await start(firestore, storage, { hackerrank_username: "alice" }); // active
+  const bob = await start(firestore, storage, { hackerrank_username: "bob" });
+  setStatus(firestore, bob.body.session_id, "locked");
+
+  const res = await sessionsList({ status: "locked" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 1, "only the locked doc");
+  assert.equal(res.body.sessions[0].session_id, bob.body.session_id);
+  assert.equal(res.body.sessions[0].status, "locked");
+});
+
+test("sessions-list: contest_slug and room scope the result", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const contestSlug = "coding-contest-mcet-june-2026-slot-2";
+  // Two rooms in the same contest.
+  await start(firestore, storage, { hackerrank_username: "alice", room: "Lab-3" });
+  await start(firestore, storage, { hackerrank_username: "bob", room: "Lab-4" });
+
+  // contest_slug scope: both are in this contest, so status='' returns both.
+  const all = await sessionsList({ contest_slug: contestSlug });
+  assert.equal(all.body.sessions.length, 2, "both contest docs returned");
+  // A non-matching contest_slug excludes everything.
+  const none = await sessionsList({ contest_slug: "some-other-contest" });
+  assert.equal(none.body.sessions.length, 0, "wrong contest_slug excludes all");
+
+  // room scope: only the Lab-3 session.
+  const lab3 = await sessionsList({ contest_slug: contestSlug, room: "Lab-3" });
+  assert.equal(lab3.body.sessions.length, 1, "only the Lab-3 session");
+  assert.equal(lab3.body.sessions[0].room, "Lab-3");
+  assert.equal(lab3.body.sessions[0].hackerrank_username, "alice");
+});
+
+test("sessions-list: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionsList({ status: "" }, {});
+  assert.equal(res.statusCode, 401);
+});
+
+// Seed session docs DIRECTLY into the fake store (bypassing /api/session/start)
+// so the cap/truncation tests below can create hundreds of docs cheaply. Each
+// doc gets a monotonically increasing created_at, so seeding order == age order
+// (later seeds are newer).
+function seedSessionDocs(firestore, count, make = () => ({})) {
+  firestore.collection(process.env.SESSION_COLLECTION); // materialize the store
+  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
+  for (let i = 0; i < count; i += 1) {
+    const seq = store.size;
+    const doc = {
+      session_id: `seed-${String(seq).padStart(5, "0")}`,
+      hackerrank_username: `bulk_user_${seq}`,
+      name: `Bulk User ${seq}`,
+      room: "Lab-1",
+      contest_slug: "bulk-contest",
+      chunk_count: 0,
+      created_at: new Date(Date.UTC(2026, 5, 9) + seq * 1000).toISOString(),
+      status: "active",
+      last_heartbeat_at: new Date().toISOString(),
+      ...make(i)
+    };
+    store.set(doc.session_id, doc);
+  }
+}
+
+test("sessions-list: capped page keeps live rows over newer ended rows (F6.4 join must see every live session)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // 30 live sessions created EARLY, then 600 ended rows created later — a plain
+  // newest-500 cut would drop every live row, making the alerts-console join
+  // render "no live session" (and hide Lock/End) for candidates who are live.
+  seedSessionDocs(firestore, 30, () => ({ status: "active" }));
+  seedSessionDocs(firestore, 600, () => ({ status: "ended" }));
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 500, "the page stays capped at 500 rows");
+  const liveRows = res.body.sessions.filter((row) => row.status !== "ended");
+  assert.equal(liveRows.length, 30, "EVERY live row survives the cap");
+  // Presentation order is unchanged: newest-first within the selected page.
+  const stamps = res.body.sessions.map((row) => row.created_at);
+  assert.deepEqual(stamps, [...stamps].sort((a, b) => b.localeCompare(a)), "page is newest-first");
+  assert.equal(res.body.truncated, false, "live coverage is complete → not truncated");
+});
+
+test("sessions-list: truncated:true when live rows exceed the page cap", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSessionDocs(firestore, 520, () => ({ status: "active" }));
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.sessions.length, 500, "the page stays capped");
+  assert.equal(res.body.truncated, true, "live rows were cut → consumers must not trust the join");
+});
+
+test("sessions-list: truncated:true when the raw query hits SESSIONS_QUERY_LIMIT", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // Exactly 2000 docs = the handler's SESSIONS_QUERY_LIMIT. The raw query has
+  // no orderBy, so at the cap ARBITRARY docs (live ones included) may have been
+  // dropped — the list must self-report as truncated even though the returned
+  // page itself is small and the matched live rows fit.
+  seedSessionDocs(firestore, 2000, () => ({ status: "ended" }));
+
+  const res = await sessionsList({ status: "" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.truncated, true, "query-cap truncation is flagged");
+});
+
+// =====================================================================
+// Session detail — GET /api/admin/session-detail (F6.3 detail card). ONE
+// session doc projected to the least-privilege fields the admin card shows:
+// identity (incl. roster id), status, IPs, and the doc's own counters. No
+// email, no storage internals, no evidence/signed URLs.
+// =====================================================================
+
+function sessionDetail(query = {}, headers = ADMIN_HEADERS) {
+  return call(makeReq({ method: "GET", path: "/api/admin/session-detail", headers, query }));
+}
+
+test("session-detail: returns the least-privilege projection for one session", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage, { hackerrank_username: "alice" });
+  await recordChunk(started.body.session_id, 0);
+  await recordChunk(started.body.session_id, 1);
+
+  const res = await sessionDetail({ session_id: started.body.session_id });
+  assert.equal(res.statusCode, 200);
+  const detail = res.body.session;
+  assert.equal(detail.session_id, started.body.session_id);
+  assert.equal(detail.hackerrank_username, "alice");
+  assert.equal(detail.name, "Alice Example");
+  assert.equal(detail.roll_number, "R-1");
+  assert.equal(detail.status, "active");
+  assert.equal(detail.chunk_count, 2);
+  // The card's IP block: start/current IP + mid-exam change count.
+  assert.equal(typeof detail.start_ip, "string");
+  assert.equal(typeof detail.current_ip, "string");
+  assert.equal(detail.ip_change_count, 0);
+  // Doc counters the card surfaces as cheap activity stats.
+  for (const field of ["event_count", "clipboard_event_count", "focus_event_count", "heartbeat_count"]) {
+    assert.equal(typeof detail[field], "number", `expected numeric ${field}`);
+  }
+  for (const field of ["roster_unique_id", "room", "contest_slug", "created_at", "updated_at", "blocked_by_session_id"]) {
+    assert.ok(Object.prototype.hasOwnProperty.call(detail, field), `expected field ${field}`);
+  }
+  // Least-privilege: NO email, NO storage internals, NO evidence/signed URLs.
+  for (const field of ["email", "storage_prefix", "evidence", "merged_video_key"]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(detail, field), false, `must not expose ${field}`);
+  }
+});
+
+test("session-detail: 404 for an unknown session_id", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetail({ session_id: "no-such-session" });
+  assert.equal(res.statusCode, 404);
+});
+
+test("session-detail: 400 when session_id is missing", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetail({});
+  assert.equal(res.statusCode, 400);
+});
+
+test("session-detail: requires admin password", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  const res = await sessionDetail({ session_id: "x" }, {});
+  assert.equal(res.statusCode, 401);
+});
+
+// =====================================================================
+// Capture state — F6.6: the heartbeat already persists the recorder's
+// composite recording_state ("combined:X;screen:Y;camera:Z;microphone:W")
+// on the session doc; the admin surfaces get it back as a STRUCTURED
+// per-source capture_state so the session card and the recordings header
+// can say what the recording actually contains.
+// =====================================================================
+
+function heartbeatWith(sessionId, recordingState) {
+  return call(makeReq({
+    method: "POST",
+    path: "/api/heartbeat",
+    body: { session_id: sessionId, recording_state: recordingState, visibility_state: "visible" }
+  }));
+}
+
+test("capture-state: session-detail exposes the per-source state parsed from the heartbeat", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage);
+  await heartbeatWith(started.body.session_id, "combined:recording;screen:recording;camera:permission_denied;microphone:recording");
+
+  const res = await sessionDetail({ session_id: started.body.session_id });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.session.capture_state, {
+    screen: "recording",
+    camera: "permission_denied",
+    microphone: "recording"
+  });
+});
+
+test("capture-state: a bare legacy recording_state (or none yet) → capture_state null", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+
+  // No heartbeat yet — nothing reported.
+  const fresh = await start(firestore, storage);
+  const before = await sessionDetail({ session_id: fresh.body.session_id });
+  assert.equal(before.body.session.capture_state, null);
+
+  // Legacy bare string — no per-source segments to project.
+  await heartbeatWith(fresh.body.session_id, "recording");
+  const after = await sessionDetail({ session_id: fresh.body.session_id });
+  assert.equal(after.body.session.capture_state, null);
+});
+
+test("capture-state: an unexpected segment value projects as 'unknown' (never leaks raw)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage);
+  await heartbeatWith(started.body.session_id, "combined:recording;screen:recording;camera:weird-future-state;microphone:unavailable");
+
+  const res = await sessionDetail({ session_id: started.body.session_id });
+  assert.deepEqual(res.body.session.capture_state, {
+    screen: "recording",
+    camera: "unknown",
+    microphone: "unavailable"
+  });
+});
+
+test("capture-state: GET /api/admin/sessions rows carry capture_state (recordings header)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  seedSettings(firestore);
+  const started = await start(firestore, storage, { hackerrank_username: "alice" });
+  await heartbeatWith(started.body.session_id, "combined:recording;screen:recording;camera:unavailable;microphone:permission_denied");
+
+  const res = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/sessions",
+    headers: ADMIN_HEADERS,
+    query: { username: "alice" }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.sessions[0].capture_state, {
+    screen: "recording",
+    camera: "unavailable",
+    microphone: "permission_denied"
+  });
 });
 
 // =====================================================================
@@ -1099,9 +1708,12 @@ test("M1: empty username is rejected at the contract (400), never key-built", as
   assert.equal(res.statusCode, 400);
 });
 
-// A pure-dot value on a NON-username segment (upload `kind`) also reaches
-// sanitizeSegment and must not produce a traversal in the object key.
-test("M1: upload kind '..' → safe segment, no traversal in the storage_key", async () => {
+// A pure-dot value on a NON-username segment (upload `kind`) must not produce
+// a traversal in any object key. F10.1 strengthened the M1 guarantee: kind is
+// now an ALLOWLIST (screen | camera), so a dot kind is rejected outright
+// instead of being sanitized into a "_" folder (cameraRecording.test.mjs
+// covers the allowlist itself).
+test("M1: upload kind '..' → rejected outright, no traversal possible", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   const sessionId = await startedSession(firestore, storage);
@@ -1110,9 +1722,7 @@ test("M1: upload kind '..' → safe segment, no traversal in the storage_key", a
     path: "/api/upload-url",
     body: { session_id: sessionId, kind: "..", chunk_index: 0, content_type: "video/webm" }
   }));
-  assert.equal(res.statusCode, 200);
-  assert.ok(!res.body.storage_key.includes("/../"), `no traversal in ${res.body.storage_key}`);
-  assert.ok(res.body.storage_key.includes("/_/"), "pure-dot kind became the safe '_' token");
+  assert.equal(res.statusCode, 400);
 });
 
 // ---- M3: 500s must not leak internal messages ----
@@ -1548,4 +2158,129 @@ test("review routes: all require x-admin-password", async () => {
     const res = await call(req);
     assert.equal(res.statusCode, 401, `${req.method} ${req.path} must require admin`);
   }
+});
+
+// =====================================================================
+// F6.7 — GET /api/admin/session-events (recordings timeline event log)
+// =====================================================================
+// The candidate's proctor events live as JSONL objects under the session's
+// GCS prefix (events/events-*.jsonl batches, events/session.jsonl, and
+// events/ip-change-*.jsonl). This endpoint lists + parses them for the admin
+// recordings timeline: least-privilege projection ({type, timestamp, small
+// scalar detail}), ordered by time, capped.
+
+test("session-events: requires admin", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore(), storage: makeFakeStorage() });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-events", query: { session_id: "s1" } }));
+  assert.equal(res.statusCode, 401);
+});
+
+test("session-events: session_id required → 400; unknown session → 404", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore(), storage: makeFakeStorage() });
+  const missing = await call(makeReq({ method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS }));
+  assert.equal(missing.statusCode, 400);
+  const unknown = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: "nope" }
+  }));
+  assert.equal(unknown.statusCode, 404);
+});
+
+test("session-events: merges every events/ jsonl, time-ordered, least-privilege projection", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+
+  // Two batches posted OUT OF ORDER (later batch first) so the read must sort.
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [
+        // detail carries a GCS storage_key (must be dropped), a nested object
+        // (must be dropped — scalars only), and an oversized string (truncated).
+        { type: "chunk_uploaded", timestamp: "2026-06-05T10:05:00Z", detail: { kind: "screen", index: 3, storage_key: "contests/c/x.webm", nested: { deep: 1 }, message: "y".repeat(500) } },
+        { type: "window_blur", timestamp: "2026-06-05T10:04:00Z" }
+      ]
+    }
+  }));
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [
+        { type: "visibility_change", timestamp: "2026-06-05T10:01:00Z", visibility_state: "hidden", detail: { state: "hidden" } },
+        { type: "clipboard_activity", timestamp: "2026-06-05T10:02:30Z", detail: { action: "paste", length: 42 } }
+      ]
+    }
+  }));
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.truncated, false);
+
+  const events = res.body.events;
+  // 4 posted events + the session_started record from events/session.jsonl.
+  assert.equal(events.length, 5, JSON.stringify(events.map((e) => e.type)));
+  const stamps = events.map((e) => e.timestamp);
+  assert.deepEqual(stamps, [...stamps].sort(), "events must be time-ordered ascending");
+  assert.ok(events.some((e) => e.type === "session_started"), "session.jsonl record included");
+
+  // Least-privilege projection: exactly {type, timestamp, detail} per event.
+  for (const event of events) {
+    assert.deepEqual(Object.keys(event).sort(), ["detail", "timestamp", "type"]);
+  }
+  const uploaded = events.find((e) => e.type === "chunk_uploaded");
+  assert.equal(uploaded.detail.storage_key, undefined, "storage_key must be dropped");
+  assert.equal(uploaded.detail.nested, undefined, "nested objects must be dropped (scalars only)");
+  assert.equal(uploaded.detail.message.length, 200, "long strings truncated to 200 chars");
+  assert.equal(uploaded.detail.index, 3, "numeric scalars kept");
+  const clipboard = events.find((e) => e.type === "clipboard_activity");
+  assert.deepEqual(clipboard.detail, { action: "paste", length: 42 });
+});
+
+test("session-events: includes ip-change jsonl records written outside /api/events", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // The heartbeat path writes ip-change records as their own jsonl objects.
+  storage._saved.set(
+    `${prefix}events/ip-change-1234-abcd.jsonl`,
+    JSON.stringify({ type: "ip_address_changed", timestamp: "2026-06-05T10:03:00Z", detail: { previous_ip: "10.0.0.1", current_ip: "10.0.0.2" } }) + "\n"
+  );
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  const ipChange = res.body.events.find((e) => e.type === "ip_address_changed");
+  assert.ok(ipChange, "ip-change record included");
+  assert.equal(ipChange.detail.current_ip, "10.0.0.2");
+});
+
+test("session-events: caps the merged list and flags truncation", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // 2100 records in one jsonl (the cap is 2000). Malformed lines are skipped.
+  const lines = [];
+  for (let i = 0; i < 2100; i += 1) {
+    lines.push(JSON.stringify({ type: "window_blur", timestamp: `2026-06-05T10:00:00.${String(i).padStart(4, "0")}Z` }));
+  }
+  lines.push("not-json {");
+  storage._saved.set(`${prefix}events/events-1-bulk.jsonl`, lines.join("\n") + "\n");
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.events.length, 2000, "capped at 2000");
+  assert.equal(res.body.truncated, true);
 });

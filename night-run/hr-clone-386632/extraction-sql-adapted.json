@@ -1,0 +1,142 @@
+[
+  {
+    "hr_slug": "weather-observation-station-5",
+    "id": "weather-observation-station-5",
+    "title": "Weather Observation Station 5",
+    "order": 9,
+    "points": 10,
+    "scoring": "per_test",
+    "statement_md": "*(Adapted from the SQL challenge: same task, expressed over standard input.)*\n\nYou are given the list of *CITY* names from the **STATION** table. Find the two cities with the **shortest** and **longest** city names, as well as their respective lengths (i.e. number of characters in the name, spaces included).\n\nIf there is more than one smallest or largest city, choose the one that comes first when ordered alphabetically.\n\n### Input Format\n\nThe first line contains an integer N, the number of cities. Each of the next N lines contains one city name. Names may contain spaces, but have no leading or trailing spaces.\n\n### Constraints\n\n1 <= N <= 10000\nEach city name is 1 to 50 characters: uppercase/lowercase letters and spaces only.\n\n### Output Format\n\nTwo lines:\n- Line 1: the city with the shortest name, a single space, then the length of its name.\n- Line 2: the city with the longest name, a single space, then the length of its name.\n\n(If N = 1, the same city appears on both lines.)\n\n### Sample Input 0\n\n```\n7\nAmo\nDelhi\nMarine On Saint Croix\nPune\nGoa\nKochi\nChennai\n```\n\n### Sample Output 0\n\n```\nAmo 3\nMarine On Saint Croix 21\n```\n\n### Explanation 0\n\nThe shortest name is \"Amo\" (3 characters; \"Goa\" also has 3 but \"Amo\" comes first alphabetically). The longest is \"Marine On Saint Croix\" (21 characters, spaces included).",
+    "sample_tests": [
+      {
+        "input": "7\nAmo\nDelhi\nMarine On Saint Croix\nPune\nGoa\nKochi\nChennai\n",
+        "expected": "Amo 3\nMarine On Saint Croix 21",
+        "provenance": "generated"
+      }
+    ],
+    "hidden_tests": [
+      {
+        "input": "4\nGoa\nAmo\nPuri\nAgra\n",
+        "expected": "Amo 3\nAgra 4",
+        "provenance": "generated"
+      },
+      {
+        "input": "1\nHyderabad\n",
+        "expected": "Hyderabad 9\nHyderabad 9",
+        "provenance": "generated"
+      },
+      {
+        "input": "5\nChennai\nKolkata\nMumbai\nJaipur\nNagpur\n",
+        "expected": "Jaipur 6\nChennai 7",
+        "provenance": "generated"
+      },
+      {
+        "input": "6\nOoty\nNew Delhi Cantonment Area\nEast Godavari District\nPort Blair\nAlibag\nPuri\n",
+        "expected": "Ooty 4\nNew Delhi Cantonment Area 25",
+        "provenance": "generated"
+      },
+      {
+        "input": "3\nab\nzb\naa\n",
+        "expected": "aa 2\naa 2",
+        "provenance": "generated"
+      }
+    ],
+    "stubs": {
+      "python": "#!/bin/python3\n\nimport sys\n\ndef main():\n    data = sys.stdin.read().split(\"\\n\")\n    # Line 1: N. Next N lines: one city name each (may contain spaces).\n    # Write your code here\n\nif __name__ == '__main__':\n    main()\n",
+      "cpp": "#include <bits/stdc++.h>\n\nusing namespace std;\n\nint main() {\n    // Read from cin, write the answer to cout.\n    // Line 1: N. Next N lines: one city name each (may contain spaces).\n    // Write your code here\n\n    return 0;\n}\n",
+      "java": "import java.io.*;\nimport java.util.*;\n\npublic class Main {\n    public static void main(String[] args) throws IOException {\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\n        // Line 1: N. Next N lines: one city name each (may contain spaces).\n        // Write your code here\n\n    }\n}\n",
+      "javascript": "'use strict';\n\nprocess.stdin.resume();\nprocess.stdin.setEncoding('utf-8');\n\nlet inputString = '';\nprocess.stdin.on('data', (d) => inputString += d);\nprocess.stdin.on('end', () => {\n    const lines = inputString.split('\\n');\n    // lines[0] = N; lines[1..N] = city names (may contain spaces).\n    // Write your code here\n\n});\n"
+    },
+    "tests_provenance": "generated (original is a SQL challenge; DB data not exportable)"
+  },
+  {
+    "hr_slug": "occupations",
+    "id": "occupations",
+    "title": "Occupations",
+    "order": 10,
+    "points": 10,
+    "scoring": "per_test",
+    "statement_md": "*(Adapted from the SQL challenge: same task, expressed over standard input.)*\n\n[Pivot](https://en.wikipedia.org/wiki/Pivot_table) the *Occupation* column of the **OCCUPATIONS** table so that each *Name* is sorted alphabetically and displayed underneath its corresponding *Occupation*. The output should consist of four columns \u2014 **Doctor**, **Professor**, **Singer**, and **Actor** \u2014 in that specific order, with names listed alphabetically (top to bottom) under each column.\n\n**Note:** Print **NULL** when there are no more names corresponding to an occupation.\n\n### Input Format\n\nThe first line contains an integer N, the number of rows in OCCUPATIONS. Each of the next N lines contains a name and an occupation separated by a single space. *Occupation* is always one of: Doctor, Professor, Singer or Actor.\n\n### Constraints\n\n1 <= N <= 1000\nNames contain only letters (no spaces) and are unique.\n\n### Output Format\n\nPrint the pivot table row by row. Each row contains exactly four values (Doctor column, Professor column, Singer column, Actor column) separated by single spaces, with **NULL** filling columns that have run out of names. Do not print trailing spaces. The number of rows equals the size of the largest occupation group.\n\n### Sample Input 0\n\n```\n10\nSamantha Doctor\nJulia Actor\nMaria Actor\nMeera Singer\nAshley Professor\nKetty Professor\nChristeen Professor\nJane Actor\nJenny Singer\nPriya Singer\n```\n\n### Sample Output 0\n\n```\nSamantha Ashley Jenny Jane\nNULL Christeen Meera Julia\nNULL Ketty Priya Maria\n```\n\n### Explanation 0\n\nThe only Doctor is Samantha. The Professors, alphabetically, are Ashley, Christeen, Ketty. The Singers are Jenny, Meera, Priya. The Actors are Jane, Julia, Maria. Columns shorter than the longest (3 rows) are padded with NULL.",
+    "sample_tests": [
+      {
+        "input": "10\nSamantha Doctor\nJulia Actor\nMaria Actor\nMeera Singer\nAshley Professor\nKetty Professor\nChristeen Professor\nJane Actor\nJenny Singer\nPriya Singer\n",
+        "expected": "Samantha Ashley Jenny Jane\nNULL Christeen Meera Julia\nNULL Ketty Priya Maria",
+        "provenance": "generated (mirrors the original statement's worked example)"
+      }
+    ],
+    "hidden_tests": [
+      {
+        "input": "18\nAamina Doctor\nAshley Professor\nBelvet Professor\nBritney Professor\nChristeen Singer\nEve Actor\nJane Singer\nJennifer Actor\nJenny Singer\nJulia Doctor\nKetty Actor\nKristeen Singer\nMaria Professor\nMeera Professor\nNaomi Professor\nPriya Doctor\nPriyanka Professor\nSamantha Actor\n",
+        "expected": "Aamina Ashley Christeen Eve\nJulia Belvet Jane Jennifer\nPriya Britney Jenny Ketty\nNULL Maria Kristeen Samantha\nNULL Meera NULL NULL\nNULL Naomi NULL NULL\nNULL Priyanka NULL NULL",
+        "provenance": "copied-derived (rebuilt from official expected output; reformatted without trailing spaces)"
+      },
+      {
+        "input": "4\nZoe Doctor\nAmy Professor\nBea Singer\nCal Actor\n",
+        "expected": "Zoe Amy Bea Cal",
+        "provenance": "generated"
+      },
+      {
+        "input": "5\nEve Doctor\nAda Doctor\nBob Doctor\nCid Doctor\nDan Singer\n",
+        "expected": "Ada NULL Dan NULL\nBob NULL NULL NULL\nCid NULL NULL NULL\nEve NULL NULL NULL",
+        "provenance": "generated"
+      },
+      {
+        "input": "8\nHari Actor\nGita Actor\nFarah Actor\nElla Actor\nDev Professor\nChitra Singer\nBala Doctor\nAsha Doctor\n",
+        "expected": "Asha Dev Chitra Ella\nBala NULL NULL Farah\nNULL NULL NULL Gita\nNULL NULL NULL Hari",
+        "provenance": "generated"
+      }
+    ],
+    "stubs": {
+      "python": "#!/bin/python3\n\nimport sys\n\ndef main():\n    data = sys.stdin.read().split(\"\\n\")\n    # Line 1: N. Next N lines: 'Name Occupation'.\n    # Write your code here\n\nif __name__ == '__main__':\n    main()\n",
+      "cpp": "#include <bits/stdc++.h>\n\nusing namespace std;\n\nint main() {\n    // Read from cin, write the answer to cout.\n    // Line 1: N. Next N lines: 'Name Occupation'.\n    // Write your code here\n\n    return 0;\n}\n",
+      "java": "import java.io.*;\nimport java.util.*;\n\npublic class Main {\n    public static void main(String[] args) throws IOException {\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\n        // Line 1: N. Next N lines: 'Name Occupation'.\n        // Write your code here\n\n    }\n}\n",
+      "javascript": "'use strict';\n\nprocess.stdin.resume();\nprocess.stdin.setEncoding('utf-8');\n\nlet inputString = '';\nprocess.stdin.on('data', (d) => inputString += d);\nprocess.stdin.on('end', () => {\n    const lines = inputString.split('\\n');\n    // lines[0] = N; lines[1..N] = 'Name Occupation'.\n    // Write your code here\n\n});\n"
+    },
+    "tests_provenance": "generated + 1 copied-derived (official expected output rebuilt as a hidden case)"
+  },
+  {
+    "hr_slug": "15-days-of-learning-sql",
+    "id": "15-days-of-learning-sql",
+    "title": "15 Days of Learning SQL",
+    "order": 11,
+    "points": 10,
+    "scoring": "per_test",
+    "statement_md": "*(Adapted from the SQL challenge: same task, expressed over standard input.)*\n\nJulia conducted a 15 days of learning SQL contest. The start date of the contest was March 01, 2016 and the end date was March 15, 2016 (day 1 through day 15).\n\nFor each day of the contest, print:\n\n1. the total number of unique hackers who made at least 1 submission **each day** (starting on the first day of the contest, up to and including that day), and\n2. the *hacker_id* and *name* of the hacker who made the **maximum** number of submissions **on that day**. If more than one hacker has the maximum number of submissions on a day, print the one with the **lowest** *hacker_id*.\n\nPrint this information for each day of the contest, sorted by the date.\n\n### Input Format\n\nThe first line contains two integers H and S: the number of hackers and the number of submissions. Each of the next H lines contains an integer *hacker_id* and a string *name*. Each of the next S lines describes one submission: an integer *day* (1 to 15, meaning 2016-03-01 to 2016-03-15) and the *hacker_id* of the submitter.\n\n### Constraints\n\n1 <= H <= 1000\n1 <= S <= 50000\nHacker ids are unique positive integers; names contain only letters.\nEvery day from 1 to 15 that appears in the output is guaranteed to have at least one submission; days are not guaranteed to appear in sorted order in the input.\n\n### Output Format\n\nFor each day (in date order) that has at least one submission, print one line with four values separated by single spaces: the date in `2016-03-DD` format, the count of hackers who submitted every day so far, and the *hacker_id* and *name* of that day's top submitter.\n\n### Sample Input 0\n\n```\n4 13\n11 Rose\n12 Angela\n13 Frank\n14 Patrick\n1 11\n1 12\n1 13\n1 14\n2 11\n2 12\n2 12\n3 11\n3 13\n3 13\n4 11\n4 11\n4 14\n```\n\n### Sample Output 0\n\n```\n2016-03-01 4 11 Rose\n2016-03-02 2 12 Angela\n2016-03-03 1 13 Frank\n2016-03-04 1 11 Rose\n```\n\n### Explanation 0\n\nOn day 1 all four hackers submitted (count 4); all made 1 submission, so the lowest id (11, Rose) is the top submitter. On day 2 only hackers 11 and 12 kept their every-day streak (count 2); Angela made 2 submissions, the most. On day 3 only hacker 11 has submitted every day (count 1); Frank made 2 submissions. On day 4 the streak count is still 1; Rose made 2 submissions, the most that day.",
+    "sample_tests": [
+      {
+        "input": "4 13\n11 Rose\n12 Angela\n13 Frank\n14 Patrick\n1 11\n1 12\n1 13\n1 14\n2 11\n2 12\n2 12\n3 11\n3 13\n3 13\n4 11\n4 11\n4 14\n",
+        "expected": "2016-03-01 4 11 Rose\n2016-03-02 2 12 Angela\n2016-03-03 1 13 Frank\n2016-03-04 1 11 Rose",
+        "provenance": "generated"
+      }
+    ],
+    "hidden_tests": [
+      {
+        "input": "5 61\n21 Asha\n22 Bram\n23 Chen\n24 Devi\n25 Egan\n1 21\n1 22\n1 23\n1 23\n1 25\n2 21\n2 22\n2 23\n2 23\n2 25\n3 21\n3 22\n3 23\n3 23\n3 25\n4 21\n4 22\n4 24\n4 24\n4 24\n4 25\n5 21\n5 22\n5 25\n5 25\n6 21\n6 22\n6 25\n7 21\n7 22\n7 25\n8 21\n8 24\n8 24\n8 24\n8 25\n9 21\n9 22\n9 25\n9 25\n10 21\n10 22\n10 25\n11 21\n11 22\n11 25\n12 21\n12 22\n12 24\n12 24\n12 24\n12 25\n13 21\n13 22\n13 25\n14 21\n14 22\n14 25\n15 21\n15 22\n15 25\n",
+        "expected": "2016-03-01 4 23 Chen\n2016-03-02 4 23 Chen\n2016-03-03 4 23 Chen\n2016-03-04 3 24 Devi\n2016-03-05 3 25 Egan\n2016-03-06 3 21 Asha\n2016-03-07 3 21 Asha\n2016-03-08 2 24 Devi\n2016-03-09 2 25 Egan\n2016-03-10 2 21 Asha\n2016-03-11 2 21 Asha\n2016-03-12 2 24 Devi\n2016-03-13 2 21 Asha\n2016-03-14 2 21 Asha\n2016-03-15 2 21 Asha",
+        "provenance": "generated"
+      },
+      {
+        "input": "1 15\n31 Solo\n1 31\n2 31\n3 31\n4 31\n5 31\n6 31\n7 31\n8 31\n9 31\n10 31\n11 31\n12 31\n13 31\n14 31\n15 31\n",
+        "expected": "2016-03-01 1 31 Solo\n2016-03-02 1 31 Solo\n2016-03-03 1 31 Solo\n2016-03-04 1 31 Solo\n2016-03-05 1 31 Solo\n2016-03-06 1 31 Solo\n2016-03-07 1 31 Solo\n2016-03-08 1 31 Solo\n2016-03-09 1 31 Solo\n2016-03-10 1 31 Solo\n2016-03-11 1 31 Solo\n2016-03-12 1 31 Solo\n2016-03-13 1 31 Solo\n2016-03-14 1 31 Solo\n2016-03-15 1 31 Solo",
+        "provenance": "generated"
+      },
+      {
+        "input": "3 6\n41 Ana\n42 Ben\n43 Cleo\n1 41\n1 42\n1 43\n2 43\n2 41\n3 42\n",
+        "expected": "2016-03-01 3 41 Ana\n2016-03-02 2 41 Ana\n2016-03-03 0 42 Ben",
+        "provenance": "generated"
+      },
+      {
+        "input": "2 5\n51 Mira\n52 Noor\n1 52\n1 51\n1 52\n2 51\n2 52\n",
+        "expected": "2016-03-01 2 52 Noor\n2016-03-02 2 51 Mira",
+        "provenance": "generated"
+      }
+    ],
+    "stubs": {
+      "python": "#!/bin/python3\n\nimport sys\n\ndef main():\n    data = sys.stdin.read().split(\"\\n\")\n    # Line 1: H S. Next H lines: 'hacker_id name'. Next S lines: 'day hacker_id'.\n    # Write your code here\n\nif __name__ == '__main__':\n    main()\n",
+      "cpp": "#include <bits/stdc++.h>\n\nusing namespace std;\n\nint main() {\n    // Read from cin, write the answer to cout.\n    // Line 1: H S. Next H lines: 'hacker_id name'. Next S lines: 'day hacker_id'.\n    // Write your code here\n\n    return 0;\n}\n",
+      "java": "import java.io.*;\nimport java.util.*;\n\npublic class Main {\n    public static void main(String[] args) throws IOException {\n        BufferedReader br = new BufferedReader(new InputStreamReader(System.in));\n        // Line 1: H S. Next H lines: 'hacker_id name'. Next S lines: 'day hacker_id'.\n        // Write your code here\n\n    }\n}\n",
+      "javascript": "'use strict';\n\nprocess.stdin.resume();\nprocess.stdin.setEncoding('utf-8');\n\nlet inputString = '';\nprocess.stdin.on('data', (d) => inputString += d);\nprocess.stdin.on('end', () => {\n    const lines = inputString.split('\\n');\n    // lines[0] = 'H S'; then H hacker lines; then S submission lines.\n    // Write your code here\n\n});\n"
+    },
+    "tests_provenance": "generated (original is a SQL challenge; DB data not exportable)"
+  }
+]

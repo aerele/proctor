@@ -25,3 +25,83 @@ input {
 .focus-ring {
   @apply focus:outline-none focus:ring-2 focus:ring-accent/40 focus:ring-offset-2 focus:ring-offset-paper;
 }
+
+/* W6: markdown problem statements (StatementView, format "markdown" only).
+   Scoped element styles instead of per-component Tailwind overrides so inline
+   vs block code need no renderer-side special-casing. Typography stays in the
+   statement pane's register: text-sm/text-muted body, ink headings, the
+   editor's mono font for code (same font-mono the sample tests use). */
+.statement-markdown > :first-child {
+  margin-top: 0;
+}
+.statement-markdown > :last-child {
+  margin-bottom: 0;
+}
+.statement-markdown p,
+.statement-markdown ul,
+.statement-markdown ol,
+.statement-markdown pre,
+.statement-markdown table,
+.statement-markdown blockquote {
+  @apply my-2;
+}
+.statement-markdown h1,
+.statement-markdown h2,
+.statement-markdown h3,
+.statement-markdown h4,
+.statement-markdown h5,
+.statement-markdown h6 {
+  @apply mb-1 mt-3 font-semibold text-ink;
+}
+.statement-markdown h1 {
+  @apply text-base;
+}
+.statement-markdown h2,
+.statement-markdown h3 {
+  @apply text-sm;
+}
+.statement-markdown h4,
+.statement-markdown h5,
+.statement-markdown h6 {
+  @apply text-xs uppercase tracking-wide;
+}
+.statement-markdown ul {
+  @apply list-disc pl-5;
+}
+.statement-markdown ol {
+  @apply list-decimal pl-5;
+}
+.statement-markdown li {
+  @apply my-0.5;
+}
+.statement-markdown code {
+  @apply rounded bg-ink/5 px-1 py-0.5 font-mono text-[0.85em] text-ink;
+}
+.statement-markdown pre {
+  @apply overflow-x-auto whitespace-pre-wrap rounded-md border border-line bg-white p-2;
+}
+.statement-markdown pre code {
+  @apply block bg-transparent p-0 text-xs;
+}
+.statement-markdown blockquote {
+  @apply border-l-2 border-line pl-3 italic;
+}
+.statement-markdown a {
+  @apply text-accent underline;
+}
+.statement-markdown hr {
+  @apply my-3 border-line;
+}
+.statement-markdown table {
+  @apply block w-fit max-w-full overflow-x-auto border-collapse text-xs;
+}
+.statement-markdown th,
+.statement-markdown td {
+  @apply border border-line px-2 py-1 text-left;
+}
+.statement-markdown th {
+  @apply bg-paper font-semibold text-ink;
+}
+.statement-markdown strong {
+  @apply font-semibold text-ink;
+}

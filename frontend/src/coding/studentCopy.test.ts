@@ -1,0 +1,207 @@
+// frontend/src/coding/studentCopy.test.ts
+//
+// Candidate-facing copy must match the configured test surface. With the
+// own-editor problem configured (SLICE1_PROBLEM truthy → ownEditor=true) NO
+// candidate-facing string may direct the candidate to HackerRank; with no
+// problem configured the original HackerRank copy is served verbatim.
+// Admin-facing text and the "Candidate ID" identity field label (S-A interim
+// label; wire field hackerrank_username frozen until S-E) are intentionally
+// NOT part of this module.
+import { describe, it, expect } from "vitest";
+import {
+  cameraStateLabel,
+  consentDisclosure,
+  endTestConfirmation,
+  formStageIntro,
+  integrityNotices,
+  tabAuditMessage,
+  testRules
+} from "../studentCopy";
+
+const KEYSTROKE_DISCLOSURE = "keystroke timing, is recorded";
+
+const allCandidateStrings = (ownEditor: boolean): string[] => [
+  ...testRules(ownEditor).flatMap((rule) => [rule.title, rule.body]),
+  endTestConfirmation(ownEditor),
+  tabAuditMessage(ownEditor),
+  formStageIntro(ownEditor),
+  ...integrityNotices(ownEditor)
+];
+
+describe("own-editor copy (ownEditor=true)", () => {
+  it("never mentions HackerRank in any candidate-facing string", () => {
+    for (const s of allCandidateStrings(true)) {
+      expect(s.toLowerCase()).not.toContain("hackerrank");
+    }
+  });
+
+  it("never directs the candidate to an external contest", () => {
+    for (const s of allCandidateStrings(true)) {
+      expect(s.toLowerCase()).not.toContain("contest");
+    }
+  });
+
+  it('rules: the stay-focused card title is "Stay on this tab"', () => {
+    expect(testRules(true).map((r) => r.title)).toContain("Stay on this tab");
+  });
+
+  it("rules: keep-recording card directs sharing until the solution is submitted here", () => {
+    const rule = testRules(true).find((r) => r.title === "Keep recording running");
+    expect(rule?.body).toContain("until you have submitted your solution here");
+  });
+
+  it("rules: end-test card directs ending the test here after submitting", () => {
+    const rule = testRules(true).find((r) => r.title === "End the test here when done");
+    expect(rule?.body).toContain("After you submit your solution here");
+    expect(rule?.body).toContain("End test");
+  });
+
+  it("end-test confirmation directs submitting the solution here", () => {
+    expect(endTestConfirmation(true)).toContain("after submitting your solution here");
+  });
+
+  it("tab audit asks to keep only this proctor session open", () => {
+    expect(tabAuditMessage(true)).toContain("Keep only this proctor session open");
+  });
+
+  it("form-stage intro points at the coding workspace, not an external site", () => {
+    expect(formStageIntro(true)).toContain("coding workspace");
+  });
+
+  it("integrity notices reference submitted code instead of HackerRank submissions", () => {
+    expect(integrityNotices(true)).toContain(
+      "Submitted code may be checked for similarity, unusual structure, and copied code patterns."
+    );
+  });
+
+  // M2 (PII disclosure): Slice 1 records every keystroke (full text + timing) to
+  // GCS. The candidate must see this disclosed in the own-editor rules.
+  it("rules: discloses that editor keystrokes (text + timing) are recorded", () => {
+    const rule = testRules(true).find((r) => r.title === "No copy / paste or outside help");
+    expect(rule?.body).toContain("coding editor");
+    expect(rule?.body).toContain(KEYSTROKE_DISCLOSURE);
+  });
+
+  it("consent sentence discloses editor keystroke recording (camera mode aside)", () => {
+    for (const cameraRecorded of [true, false]) {
+      expect(consentDisclosure(true, cameraRecorded)).toContain("coding editor");
+      expect(consentDisclosure(true, cameraRecorded)).toContain(KEYSTROKE_DISCLOSURE);
+    }
+  });
+});
+
+describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", () => {
+  it("keeps the original rules-card strings", () => {
+    const rules = testRules(false);
+    expect(rules.map((r) => r.title)).toContain("Stay on HackerRank and this tab");
+    expect(rules.find((r) => r.title === "Keep recording running")?.body).toBe(
+      "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have fully submitted on HackerRank."
+    );
+    expect(rules.find((r) => r.title === "Keep your camera visible")?.body).toBe(
+      "If a camera is available, keep the self-view (or its pop-out) visible while you work in HackerRank. Microphone is captured when available."
+    );
+    expect(rules.find((r) => r.title === "End the test here when done")?.body).toBe(
+      "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
+    );
+  });
+
+  it("keeps the original end-test confirmation", () => {
+    expect(endTestConfirmation(false)).toBe(
+      "End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below."
+    );
+  });
+
+  it("keeps the original tab-audit message", () => {
+    expect(tabAuditMessage(false)).toBe(
+      "Tab/focus review active. Keep only HackerRank and this proctor session open; other activity may be visible in the shared-screen recording."
+    );
+  });
+
+  it("keeps the original form-stage intro", () => {
+    expect(formStageIntro(false)).toBe(
+      "Enter your details below, then start proctoring before you open the contest. When you start, your browser will ask which screen to share — choose Entire Screen."
+    );
+  });
+
+  it("keeps the original HackerRank integrity notice and the full 12-notice rotation", () => {
+    const notices = integrityNotices(false);
+    expect(notices).toHaveLength(12);
+    expect(notices).toContain(
+      "HackerRank submissions may be checked for similarity, unusual structure, and copied code patterns."
+    );
+    // Both variants rotate the same number of notices.
+    expect(integrityNotices(true)).toHaveLength(12);
+  });
+
+  it("both variants expose the same six rule cards (titles aside, same order/count)", () => {
+    expect(testRules(false)).toHaveLength(6);
+    expect(testRules(true)).toHaveLength(6);
+  });
+
+  // M2: there is no own editor in the HackerRank fallback, so the keystroke
+  // disclosure must NOT appear in any legacy candidate-facing string.
+  it("never claims editor keystroke recording where there is no own editor", () => {
+    const legacyStrings = [
+      ...testRules(false).flatMap((r) => [r.title, r.body]),
+      consentDisclosure(false, false)
+    ];
+    for (const s of legacyStrings) {
+      expect(s).not.toContain(KEYSTROKE_DISCLOSURE);
+      expect(s.toLowerCase()).not.toContain("coding editor");
+    }
+  });
+});
+
+// F6 review / post-F6 wording fix, made CONDITIONAL by F10.1: with the
+// camera_recording setting OFF the camera is a LIVE MONITOR only — its stream
+// is never part of any recorded video — and no candidate-facing string may
+// claim a camera recording exists; the capture-state readout must say
+// "monitored". (cameraRecorded=false everywhere below.)
+describe("camera recording DISABLED: monitored, not recorded", () => {
+  it("cameraStateLabel rewords the recorder's 'recording' state as monitored-only", () => {
+    expect(cameraStateLabel("recording", false)).toBe("monitored, not recorded");
+  });
+
+  it("cameraStateLabel humanizes the no-camera/blocked states and passes the rest through", () => {
+    // W8 follow-up: desktops without webcams are a supported, OPTIONAL-camera
+    // setup — candidates must never read raw state enums.
+    expect(cameraStateLabel("unavailable", false)).toBe("no camera");
+    expect(cameraStateLabel("permission_denied", false)).toBe("blocked");
+    for (const state of ["inactive", "stopped", "error"]) {
+      expect(cameraStateLabel(state, false)).toBe(state);
+    }
+  });
+
+  it("the consent sentence never claims camera recording (both surfaces)", () => {
+    for (const ownEditor of [true, false]) {
+      expect(consentDisclosure(ownEditor, false)).not.toMatch(/camera recording/i);
+      expect(consentDisclosure(ownEditor, false).toLowerCase()).toContain("camera");
+      expect(consentDisclosure(ownEditor, false).toLowerCase()).toContain("monitor");
+    }
+  });
+});
+
+// F10.1: with the camera_recording setting ON (the default) a separate low-res
+// camera stream IS recorded — the consent must disclose it and the camera
+// capture state must read plainly as "recording".
+describe("camera recording ENABLED: disclosed and labelled as recording", () => {
+  it("cameraStateLabel keeps the 'recording' state as recording", () => {
+    expect(cameraStateLabel("recording", true)).toBe("recording");
+  });
+
+  it("cameraStateLabel humanizes no-camera/blocked and passes the rest through (recorded mode)", () => {
+    expect(cameraStateLabel("unavailable", true)).toBe("no camera");
+    expect(cameraStateLabel("permission_denied", true)).toBe("blocked");
+    for (const state of ["inactive", "stopped", "error"]) {
+      expect(cameraStateLabel(state, true)).toBe(state);
+    }
+  });
+
+  it("the consent sentence discloses the low-res camera recording (both surfaces)", () => {
+    for (const ownEditor of [true, false]) {
+      const text = consentDisclosure(ownEditor, true);
+      expect(text).toContain("low-resolution camera recording where available");
+      expect(text).not.toContain("live camera monitoring");
+    }
+  });
+});

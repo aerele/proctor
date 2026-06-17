@@ -57,6 +57,12 @@ function makeFakeFirestore() {
       limit() {
         return this;
       },
+      // Chainable no-op: the REAL scan-window semantics (doc-id order vs
+      // timestamp desc + truncating limit) are exercised in
+      // alertsScanWindow.test.mjs; functional tests here only need pass-through.
+      orderBy() {
+        return this;
+      },
       async get() {
         const store = getCollection(name);
         let docs = [...store.values()];
@@ -76,6 +82,7 @@ function makeFakeFirestore() {
       return {
         where: query.where,
         limit: query.limit,
+        orderBy: query.orderBy,
         get: query.get,
         doc(id) {
           return {

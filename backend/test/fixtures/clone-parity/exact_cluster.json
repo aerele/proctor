@@ -1,0 +1,107 @@
+{
+  "meta": {
+    "slug": "c1",
+    "challenges": [
+      {
+        "slug": "med-prob",
+        "name": "med-prob",
+        "solved": 20,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "alice",
+        "rank": 3
+      },
+      {
+        "user": "bob",
+        "rank": 7
+      }
+    ],
+    "submissions": [
+      {
+        "id": "1",
+        "user": "alice",
+        "ch": "med-prob",
+        "chName": "med-prob",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 1000
+      },
+      {
+        "id": "2",
+        "user": "bob",
+        "ch": "med-prob",
+        "chName": "med-prob",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 1500
+      }
+    ]
+  },
+  "code": {
+    "1": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "2": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n"
+  },
+  "expected": {
+    "recurring_pairs": [],
+    "exact_clusters": [
+      {
+        "ch": "med-prob",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 3,
+            "tfs": null,
+            "created": 1000,
+            "lang": "python3",
+            "id": "1"
+          },
+          {
+            "user": "bob",
+            "rank": 7,
+            "tfs": null,
+            "created": 1500,
+            "lang": "python3",
+            "id": "2"
+          }
+        ]
+      }
+    ],
+    "skeleton_clusters": [
+      {
+        "ch": "med-prob",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 3,
+            "tfs": null,
+            "created": 1000,
+            "lang": "python3",
+            "id": "1"
+          },
+          {
+            "user": "bob",
+            "rank": 7,
+            "tfs": null,
+            "created": 1500,
+            "lang": "python3",
+            "id": "2"
+          }
+        ]
+      }
+    ],
+    "tight": []
+  }
+}
