@@ -274,7 +274,11 @@ function demoEnforcement(): EnforcementConfigPayload {
   return {
     fullscreen_reentry_seconds: normalized.fullscreen_reentry_seconds,
     fullscreen_exit_limit: normalized.fullscreen_exit_limit,
-    mode: normalized.enforcement_mode
+    mode: normalized.enforcement_mode,
+    // #71: demo parity with the backend legacy enforcementConfig — the global
+    // (legacy) settings path never enables simplified recovery (it is a
+    // per-contest toggle), so this stays false here.
+    simplified_fullscreen_recovery: false
   };
 }
 
@@ -3986,6 +3990,9 @@ export async function updateContestApi(password: string, body: ContestUpdateRequ
       ...(patch.end_at !== undefined ? { end_at: patch.end_at || null } : {}),
       ...(patch.rooms !== undefined ? { rooms: patch.rooms.map((room) => room.trim()).filter(Boolean) } : {}),
       ...(patch.room_gate_enabled !== undefined ? { room_gate_enabled: patch.room_gate_enabled } : {}),
+      // #71: carry the enforcement object through the demo update so the
+      // ContestsPanel simplified-recovery toggle reflects after save in demo mode.
+      ...(patch.enforcement !== undefined ? { enforcement: patch.enforcement } : {}),
       ...(patch.problems !== undefined
         ? { problems: patch.problems.map((entry, order) => ({ problem_id: entry.problem_id, points: entry.points ?? null, order })) }
         : {})

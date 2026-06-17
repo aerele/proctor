@@ -229,7 +229,13 @@ export function normalizeTemplateEnforcement(raw) {
   return {
     mode: ENFORCEMENT_MODES.includes(source.mode) ? source.mode : "block",
     fullscreen_reentry_seconds: intAtLeastOr(source.fullscreen_reentry_seconds, FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
-    fullscreen_exit_limit: intAtLeastOr(source.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0)
+    fullscreen_exit_limit: intAtLeastOr(source.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
+    // #71: admin per-contest toggle that drops ONLY the typed-ack step from the
+    // red-screen recovery (the "Enter full screen again" button stays). Default
+    // false and any non-boolean → false, so an untouched contest behaves
+    // byte-identically to today; rides the enforcement object so the 15s
+    // heartbeat propagates a live toggle to in-progress sessions.
+    simplified_fullscreen_recovery: source.simplified_fullscreen_recovery === true
   };
 }
 
