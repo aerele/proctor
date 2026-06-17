@@ -292,6 +292,72 @@ test("no-roster person contest: person_id null, username_norm = identityNorm(can
   assert.match(badEmail.body.error, /email/i);
 });
 
+// 2026-06-18 exam-eve: NO-ROSTER duplicate-login / re-login is the live-exam
+// case (~700 self-entering students). the operator's identity model: uniqueness key =
+// (typed candidate id, contest). A 2nd login on the SAME (roll, contest) is the
+// SAME student re-logging-in — must be graceful (replay resumes; a concurrent
+// 2nd login WAITS via pending_approval, never corrupts the single identity).
+// The roster-path live-lock above shares the SAME H1 code; this pins the
+// no-roster keying (username_norm = identityNorm(candidate_id)) end-to-end.
+test("NO-ROSTER re-login: replay returns the SAME session; concurrent 2nd login WAITS (pending) on the SAME identity; resume re-enters; one username_norm", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("Open Walk-in Live");
+
+  // First login by a self-entered roll number.
+  const first = await call(startReq({
+    contest: contest.slug, candidate_id: "23 CS 091",
+    name: "Devan", email: "devan@x.com", consent_accepted: true
+  }));
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+  assert.equal(first.body.status, "active");
+
+  // (a) Same-tab replay (browser kept the session_id): returns the SAME session,
+  // still active — no new session, no lock contention. This is what the frontend
+  // /api/session/resume + start-replay path does on a refresh/reconnect.
+  const replay = await call(startReq({
+    contest: contest.slug, candidate_id: "23 CS 091",
+    name: "Devan", email: "devan@x.com", consent_accepted: true,
+    session_id: first.body.session_id
+  }));
+  assert.equal(replay.statusCode, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.session_id, first.body.session_id);
+  assert.equal(replay.body.status, "active");
+
+  // (b) A genuinely-new concurrent login on the SAME (roll, contest) — e.g. a
+  // second device / cleared storage — does NOT corrupt the first: it WAITS in
+  // pending_approval, blocked by the first session. (Admin approve/bypass
+  // promotes it; the first never loses its slot silently.)
+  const second = await call(startReq({
+    contest: contest.slug, candidate_id: "23 CS 091",
+    name: "Devan", email: "devan@x.com", consent_accepted: true
+  }));
+  assert.equal(second.statusCode, 200, JSON.stringify(second.body));
+  assert.equal(second.body.status, "pending_approval");
+  assert.equal(second.body.blocked_by_session_id, first.body.session_id);
+  assert.notEqual(second.body.session_id, first.body.session_id);
+
+  // (c) Dedicated resume by the first token re-enters the existing session
+  // (identity-checked: same typed id resolves to the same username_norm).
+  const resume = await call(resumeReq({
+    session_id: first.body.session_id, contest: contest.slug, candidate_id: "23 CS 091"
+  }));
+  assert.equal(resume.statusCode, 200, JSON.stringify(resume.body));
+  assert.equal(resume.body.session_id, first.body.session_id);
+  assert.equal(resume.body.status, "active");
+
+  // (d) Both sessions carry the SAME username_norm (= identityNorm of the typed
+  // id) and person_id:null — so scores from either write to ONE identity, scoped
+  // to the contest. No split, no merge corruption.
+  const firstDoc = firestore._collections.get("pi_sessions").get(first.body.session_id);
+  const secondDoc = firestore._collections.get("pi_sessions").get(second.body.session_id);
+  assert.equal(firstDoc.username_norm, "23cs200");
+  assert.equal(secondDoc.username_norm, "23cs200"); // SAME identity key
+  assert.equal(firstDoc.person_id, null);
+  assert.equal(secondDoc.person_id, null);
+  assert.equal(firstDoc.contest_slug, contest.slug);
+  assert.equal(secondDoc.contest_slug, contest.slug);
+});
+
 test("H1 live-lock on person norms: same person same contest → pending; same roll different colleges → both active; same person two contests → both active", async () => {
   freshClients();
   const contest = await createOpenContest("Shared Drive");

@@ -74,6 +74,12 @@ export type ContestResultsResponse =
       rows: ResultRow[];
       /** KPR 2026-06-12: count of unmatched submitter rows (absent on older backends). */
       unmatched_count?: number;
+      /** 2026-06-18 exam-eve: true when the contest has NO roster AND no
+       *  enrollments — every identity is self-entered, so all rows land in the
+       *  "unmatched" branch by design. The UI then shows NEUTRAL "self-entered"
+       *  copy instead of the loud "not on the roster" banner/badge. Absent/false
+       *  on rostered contests (genuine unmatched rows stay loud). */
+      no_roster?: boolean;
       generated_at: string;
     };
 
