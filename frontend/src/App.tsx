@@ -1,9 +1,57 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Bell, Camera, CheckCircle2, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, ListChecks, Lock, MailWarning, Mic, MonitorUp, PictureInPicture2, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { adminPassword, adminPasswordHash, alertAction, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchProctorSettings, fetchReviewRoster, parseRosterInput, resumeSession, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, uploadReviewFile, validateEndSession } from "./api";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { adjustContestExamTime, adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
-import { classifyStartError, createProctorRecorder, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
-import type { AdminStats, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, ReviewRosterSummary, ServerSessionStatus, SessionAction, SessionStartResponse, SessionStatus, StudentForm, UploadManifestItem } from "./types";
+import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
+import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
+import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "./admin/alertActions";
+import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, viewEventsAffordance, viewRecordingAffordance } from "./admin/sessionDetail";
+import { chunkIndexBase, clearChunkContinuity, mergeManifest, readChunkHwm, readStintManifest, writeStintManifest } from "./chunkContinuity";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, sessionElapsedAnchorMs } from "./examTime";
+import { InvigilatorApp } from "./InvigilatorApp";
+import { ProblemBankSection } from "./admin/ProblemBank";
+import { ContestsPanel } from "./admin/ContestsPanel";
+import { TemplatesPanel } from "./admin/TemplatesPanel";
+import { ResultsPanel } from "./admin/ResultsPanel";
+import { PeoplePanel } from "./admin/PeoplePanel";
+import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
+import { ADMIN_NAV_GROUPS, groupOfView, type AdminView } from "./admin/adminNav";
+import { DateTimeField } from "./admin/DateTimeField";
+import { MultiProblemWorkspace } from "./coding/MultiProblemWorkspace";
+import { clearSessionDrafts } from "./coding/problemSwitch";
+import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
+import * as studentCopy from "./studentCopy";
+import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
+import { normalizeScreenMarkers } from "./screenMarkers";
+import { MarkerLayer } from "./markers/MarkerLayer";
+import { enforcementSettingsFromForm } from "./enforcementSettings";
+import { autofillSuppressionProps } from "./shell/autofill";
+import { elapsedTimerActive, shellHeaderMode } from "./shell/examShell";
+import { EnforcementOverlay } from "./shell/EnforcementOverlay";
+import { ExamShellChrome } from "./shell/ExamShellChrome";
+import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
+import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, rosterLookupErrorMessage, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
+import { useEnforcement } from "./shell/useEnforcement";
+import { useExamShell } from "./shell/useExamShell";
+import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, CollegeChoice, ContestExamConfig, ContestSummary, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
+import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
+import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
+import { buildCollegeResolutions } from "./roster/personRoster";
+import type { ApiError } from "./api";
+import { candidateIdOf } from "./identity";
+import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
+
+// S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
+// start/resume response (admin assigns settings.problem_id → public view; see
+// docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md). No problem
+// assigned → the legacy contest_url link flow renders instead.
+//
+// Candidate-facing copy is surface-specific (studentCopy.ts): with a problem
+// assigned, no student string may direct the candidate to HackerRank. The copy
+// keys off ownEditorCopy (UX-H1): Boolean(sessionConfig?.problem) once a
+// session exists, with a pinned ?contest= link selecting the own-editor
+// variant pre-session too (pinned contests are own-editor sessions).
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -12,63 +60,183 @@ const ADMIN_POLL_INTERVAL_MS = 5000;
 // monitoring/alert-config.json, NOT through this console.
 const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_paste", "first_attempt_solve", "tough_first_attempt"] as const;
 
-const sessionStorageKey = "aerele-proctor-session-id";
-
 const initialForm: StudentForm = {
-  hackerrank_username: "",
+  candidate_id: "",
   name: "",
   roll_number: "",
   email: "",
   room: "",
-  consent_accepted: false
-};
-
-const integrityNotices = [
-  "Your screen recording is being uploaded throughout the assessment for review.",
-  "The shared screen is recorded directly so capture continues while this proctor tab is hidden.",
-  "If a camera is available, keep your face visible in the self-view throughout the assessment.",
-  "Clipboard snapshot and paste activity inside this session are part of the integrity record.",
-  "Focus changes, hidden page states, refreshes, and exits are logged and may require explanation.",
-  "Stopping screen sharing before submission is treated as a serious proctoring violation.",
-  "HackerRank submissions may be checked for similarity, unusual structure, and copied code patterns.",
-  "Shortlisted candidates must be ready to explain and modify their submitted code live.",
-  "Suspicious username/session behavior may lead to manual verification before shortlisting.",
-  "Upload gaps, missing recording chunks, and interrupted sessions are reviewed before results are accepted.",
-  "Any unexplained proctoring anomaly can affect shortlisting even if the code passes all tests.",
-  "Selection depends on score, originality, explanation, and clean proctoring evidence."
-];
-
-const checkpointMessages = [
-  "Confirm immediately that you are present and working alone.",
-  "Confirm your phone is away and not being used for this assessment.",
-  "Confirm you are not using AI tools, search engines, or external help.",
-  "Confirm your screen share is active and you have not hidden any assessment activity.",
-  "Confirm you are the registered candidate solving this assessment yourself."
-];
-
-type IntegrityCheckpoint = {
-  id: string;
-  message: string;
-  expiresAt: number;
+  consent_accepted: false,
+  roster_unique_id: ""
 };
 
 export function App() {
+  // S3: the invigilator portal lives on its own path, like /admin.
+  if (window.location.pathname.startsWith("/invigilator")) return <InvigilatorApp />;
   const isAdmin = window.location.pathname.startsWith("/admin");
-  return isAdmin ? <AdminApp /> : <StudentApp />;
+  return isAdmin ? <AdminApp /> : <CandidateRouter />;
+}
+
+// S-D candidate routing (vision C1 + §10.3). ?contest=<slug> pins the student
+// app to that contest's exam-config; a present-but-bad param shows the
+// access-code landing page; an ABSENT param keeps today's legacy flow while
+// the legacy settings doc exists (the /api/candidate-route probe fails OPEN
+// to legacy so today's deployment can never strand on the code box).
+// Decisions are pure (shell/candidateRouting.ts); this component only fetches.
+function CandidateRouter() {
+  const slug = useMemo(() => contestParamOf(window.location.search), []);
+  const [route, setRoute] = useState<CandidateRoute | null>(null);
+  const [pinnedConfig, setPinnedConfig] = useState<ContestExamConfig | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (slug) {
+        try {
+          const config = await fetchContestExamConfig(slug);
+          if (cancelled) return;
+          setPinnedConfig(config);
+          setRoute(routeForPinnedOutcome(slug, { ok: true }));
+        } catch (cause) {
+          const error = cause as ApiError;
+          if (!cancelled) setRoute(routeForPinnedOutcome(slug, { ok: false, status: error?.status, code: error?.code }));
+        }
+        return;
+      }
+      try {
+        const probe = await fetchCandidateRoute();
+        if (!cancelled) setRoute(routeForNoParam({ ok: true, legacy_configured: probe.legacy_configured }));
+      } catch {
+        if (!cancelled) setRoute(routeForNoParam({ ok: false }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slug, retryNonce]);
+
+  if (!route) {
+    return (
+      <main className="flex min-h-screen items-center justify-center">
+        <p className="text-sm text-muted">Loading…</p>
+      </main>
+    );
+  }
+  if (route.kind === "landing") return <AccessCodeLanding notice={route.notice} />;
+  if (route.kind === "config_error") {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-4">
+        <section className="w-full max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
+          <AlertTriangle size={24} className="mx-auto text-warning" />
+          <h1 className="mt-3 text-lg font-semibold text-ink">Could not load this test</h1>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            The test link looks right, but the configuration could not be loaded. Check that you are online, then try again.
+          </p>
+          <button
+            className="focus-ring mt-4 inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white"
+            onClick={() => {
+              setRoute(null);
+              setRetryNonce((nonce) => nonce + 1);
+            }}
+          >
+            <RefreshCw size={16} /> Try again
+          </button>
+        </section>
+      </main>
+    );
+  }
+  if (route.kind === "contest" && pinnedConfig) {
+    return <StudentApp pinned={{ slug: route.slug, config: pinnedConfig }} />;
+  }
+  return <StudentApp pinned={null} />;
+}
+
+// S-D §10.3: the BARE access-code landing page — weak lab machines type a
+// 6-char code instead of a slug URL. Resolves via the public (rate-limited)
+// POST /api/access-code and redirects to the pinned ?contest= URL.
+function AccessCodeLanding(props: { notice: string }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (!accessCodeReady(code) || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const resolved = await resolveAccessCodeApi(code);
+      window.location.assign(contestUrlFor(resolved.slug));
+      // No setBusy(false): the page is navigating away.
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      setError(landingErrorMessage(apiError?.status, apiError?.code));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="flex min-h-screen items-center justify-center px-4">
+      <section className="w-full max-w-md rounded-lg border border-line bg-panel p-8 text-center shadow-subtle">
+        <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
+        <h1 className="mt-2 text-2xl font-semibold text-ink">Enter your test code</h1>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          Type the 6-character code your invigilator gave you.
+        </p>
+        {props.notice ? (
+          <p className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">{props.notice}</p>
+        ) : null}
+        <input
+          className="focus-ring mt-5 h-14 w-full rounded-md border border-line bg-white text-center font-mono text-3xl font-bold uppercase tracking-[0.35em] text-ink"
+          autoFocus
+          aria-label="Test code"
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={6}
+          value={code}
+          onChange={(event) => setCode(normalizeAccessCodeInput(event.target.value))}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void submit();
+          }}
+        />
+        <button
+          className="focus-ring mt-4 inline-flex h-11 w-full items-center justify-center rounded-md bg-ink text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!accessCodeReady(code) || busy}
+          onClick={() => void submit()}
+        >
+          {busy ? "Checking…" : "Continue"}
+        </button>
+        {error ? <p className="mt-3 text-sm font-medium text-danger">{error}</p> : null}
+      </section>
+    </main>
+  );
 }
 
 // Student gate state — the server-reported lifecycle status, separate from the
 // recorder UI status. "form" is the very first screen (no session yet).
 type StudentGate = "form" | "pending_approval" | "locked" | "ended" | "running";
 
-function StudentApp() {
+// S-D: the candidate app pinned to ONE contest by ?contest= (null = legacy).
+type PinnedContest = { slug: string; config: ContestExamConfig };
+
+function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
+  const pinnedSlug = pinned?.slug ?? "";
+  // Person contests take the person-layer start/resume (contest rides the
+  // body); a pinned LEGACY contest keeps the legacy wire calls untouched —
+  // legacy_empty_slug deployments stamp sessions contest_slug:"" so a pinned
+  // resume would 404 a perfectly valid token.
+  const personPinned = pinned?.config.identity_mode === "person";
+  // Per-contest resume token: person contests are keyed by slug so two browser
+  // tabs can run two contests; legacy keeps the historical bare key so
+  // already-deployed sessions survive this release.
+  const sessionKey = sessionStorageKeyFor(personPinned ? pinnedSlug : "");
   const [form, setForm] = useState<StudentForm>(initialForm);
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [gate, setGate] = useState<StudentGate>("form");
   const [resuming, setResuming] = useState(true);
   const [sessionId, setSessionId] = useState("");
   const [sessionConfig, setSessionConfig] = useState<SessionStartResponse | null>(null);
-  const [identity, setIdentity] = useState<{ name: string; username: string; room: string } | null>(null);
+  const [identity, setIdentity] = useState<{ name: string; candidate_id: string; room: string } | null>(null);
   const [contestUrl, setContestUrl] = useState("");
   const [startIp, setStartIp] = useState("");
   const [currentIp, setCurrentIp] = useState("");
@@ -83,39 +251,397 @@ function StudentApp() {
   const [startError, setStartError] = useState<{ kind: RecorderStartErrorKind; message: string } | null>(null);
   const [reloadWarning, setReloadWarning] = useState("");
   const [manifest, setManifest] = useState<UploadManifestItem[]>([]);
-  const [clipboardText, setClipboardText] = useState("");
   const [clipboardAudit, setClipboardAudit] = useState("Not collected yet.");
   const [tabAudit, setTabAudit] = useState("Not collected yet.");
   const [cookieAudit, setCookieAudit] = useState("Not collected yet.");
-  const [checkpoint, setCheckpoint] = useState<IntegrityCheckpoint | null>(null);
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  // S5: authoritative exam end time + server-clock skew, fed by start/resume
+  // responses and refreshed by every heartbeat (≤15 s — the existing student
+  // polling channel). examEndAtRef mirrors examEndAt for the recorder-callback
+  // closure (the recorder options are built once); timeUpAnnouncedRef makes the
+  // time-up voice warning fire exactly once.
+  const [examEndAt, setExamEndAt] = useState("");
+  const [clockSkewMs, setClockSkewMs] = useState(0);
+  const [examTimeNotice, setExamTimeNotice] = useState("");
+  const examEndAtRef = useRef("");
+  const timeUpAnnouncedRef = useRef(false);
   const [endRequested, setEndRequested] = useState(false);
   // Recording already stopped but the final end/manifest submit failed — show an
   // inline "Retry submitting" instead of dead-ending in the error state.
   const [endFailed, setEndFailed] = useState(false);
   const [assuranceAccepted, setAssuranceAccepted] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  // Mirror for the attachCameraVideo callback ref (same pattern as statusRef).
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const [mediaCapture, setMediaCapture] = useState<MediaCaptureState>({ screen: "inactive", camera: "inactive", microphone: "inactive" });
-  const [pipAvailable, setPipAvailable] = useState(false);
-  const [pipMessage, setPipMessage] = useState("");
+  // W1: exam-view chrome state — the collapsible proctoring panel (its panels
+  // stay MOUNTED when collapsed; the collapse is CSS-only) and the floating
+  // camera dock's minimized state (the <video> host stays mounted in both).
+  const [proctorPanelOpen, setProctorPanelOpen] = useState(false);
+  const [cameraDockCollapsed, setCameraDockCollapsed] = useState(false);
+  // S3 room gate: whether THIS session has been released into the exam (room
+  // OTP / invigilator start-now / gate disabled). Starts false when the gate is
+  // enabled; the poll effect corrects it (also after reload/resume).
+  const [examStarted, setExamStarted] = useState(false);
+  const [gateCode, setGateCode] = useState("");
+  const [gateError, setGateError] = useState("");
+  const [gateBusy, setGateBusy] = useState(false);
+  // F5.3/F5.5: enforcement knobs (exam-config → start/resume → heartbeat keep
+  // them fresh), this session's exemptions, and the server's lock reason (an
+  // enforcement lock offers the room-code unlock; an admin lock does not).
+  const [enforcementPayload, setEnforcementPayload] = useState<EnforcementConfigPayload | null>(null);
+  const [enforcementExemptions, setEnforcementExemptions] = useState<EnforcementExemptions>({});
+  const [lockedReason, setLockedReason] = useState<string | null>(null);
+  // S2 roster login state. examConfig is the public pre-session config; the
+  // unique-ID -> confirm flow fills form.roster_unique_id, which the server
+  // re-verifies at /api/session/start (this client gate is UX only).
+  const [examConfig, setExamConfig] = useState<ExamConfig | null>(null);
+  const [uniqueIdInput, setUniqueIdInput] = useState("");
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupError, setLookupError] = useState("");
+  // Wave-6 review: epoch-ms until which the Find-me button stays disabled after a
+  // 429, so re-clicks during the rate-limit window don't burn more budget (the
+  // M3 limiter has no success refund for the MISS path that 429s).
+  const [lookupCooldownUntil, setLookupCooldownUntil] = useState(0);
+  const [rosterMatch, setRosterMatch] = useState<RosterLookupResult | null>(null);
+  // S4: the assigned problem rides in on the start/resume response. hasProblem
+  // drives every own-editor-vs-HackerRank copy fork (studentCopy.ts, stageHint).
+  // S-I: newer backends serve the ORDERED problems[]; `problem` is the
+  // one-release alias (= problems[0]) older payloads still carry. Either one
+  // makes this an own-editor session.
+  const sessionProblems = sessionConfig?.problems ?? (sessionConfig?.problem ? [sessionConfig.problem] : []);
+  const activeProblem = sessionConfig?.problem ?? sessionProblems[0] ?? null;
+  const hasProblem = activeProblem !== null;
+  // UX-H1: which COPY variant (own-editor vs legacy HackerRank) the candidate
+  // sees. The problem only arrives with the start/resume response, so keying
+  // copy off hasProblem alone left the pre-start rules + consent page on the
+  // legacy variants (and silently dropped the keystroke-recording consent
+  // clause). Every pinned ?contest= candidate is an own-editor session, so a
+  // pinned contest selects own-editor copy too (the public exam-config payload
+  // carries no own-editor flag to gate on instead; a pinned legacy-HackerRank
+  // contest would mis-show own-editor copy — that flow is not in use).
+  // Behavior gates (the W1 exam branch) still key off hasProblem.
+  const ownEditorCopy = hasProblem || pinned !== null;
+  // F10.1: is the separate low-res camera RECORDING enabled? Pre-session the
+  // public exam-config carries it (the consent disclosure renders before any
+  // session exists); once a session starts, its upload_config is authoritative.
+  // normalizeCameraRecording defaults to ENABLED, matching the server default.
+  const cameraRecordingOn = sessionConfig?.upload_config.camera
+    ? sessionConfig.upload_config.camera.enabled
+    : normalizeCameraRecording(examConfig?.camera_recording).enabled;
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
+  // F1 (e2e finding): manifest items accumulated across EVERY recording stint
+  // of this session (each recorder instance only knows its own uploads). The
+  // accumulator is persisted to sessionStorage so a same-tab refresh-resume
+  // keeps the earlier stints; the end-of-test manifest merges this with the
+  // final recorder's list, de-duplicated by (kind, index).
+  const stintManifestRef = useRef<UploadManifestItem[]>([]);
+  const collectStintManifest = (items: UploadManifestItem[] | undefined, forSessionId: string) => {
+    if (!items?.length || !forSessionId) return;
+    stintManifestRef.current = mergeManifest(stintManifestRef.current, items);
+    writeStintManifest(window.sessionStorage, forSessionId, stintManifestRef.current);
+  };
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  cameraStreamRef.current = cameraStream;
+  // F5.1 permissions-first onboarding (stage 1, before fullscreen): the
+  // checklist mirrors the per-permission prompt results; the acquired streams
+  // wait here until beginRecording hands them to the recorder (start() then
+  // reuses them — no second prompt). Streams never survive a reload, so a
+  // resumed session naturally reruns stage 1+2 without re-asking the form.
+  const [permissions, setPermissions] = useState<PermissionChecklist>(initialPermissionChecklist);
+  const [permissionsConfirmed, setPermissionsConfirmed] = useState(false);
+  const [permissionsBusy, setPermissionsBusy] = useState<PermissionKey | "all" | null>(null);
+  const [screenSetupMessage, setScreenSetupMessage] = useState("");
+  const acquiredMediaRef = useRef<AcquiredMedia>({ screen: null, cameraMic: null, cameraMicMode: null });
+  // Setup-stage audit events queued until a session exists (mirrors the
+  // shell's own pre-session buffer), flushed in beginRecording.
+  const preSessionEventsRef = useRef<ProctorEvent[]>([]);
 
-  const canStart = useMemo(() => {
-    return Boolean(
-      form.hackerrank_username.trim() &&
-      form.name.trim() &&
-      form.roll_number.trim() &&
-      form.email.trim() &&
-      form.room.trim() &&
-      form.consent_accepted
-    );
-  }, [form]);
+  const rosterRequired = Boolean(examConfig?.roster_required);
+  const rosterConfirmed = Boolean(form.roster_unique_id);
+  // S-D: which identity form this candidate sees — legacy (lookup-confirm),
+  // person_roster (typed id resolved SERVER-side at start) or person_open
+  // (no-roster person contest: id + details). Pure (candidateRouting.ts).
+  const formMode = candidateFormMode(pinned?.config ?? null, rosterRequired);
+  // S2: while a LEGACY roster is required and unconfirmed, the details form
+  // stays hidden behind the identity-confirm step. Person contests have no
+  // lookup step — the server resolves the typed id at start.
+  const rosterGateActive = formMode === "legacy" && rosterRequired && !rosterConfirmed;
+  // S-C/S-D: a person-contest start can 409 with college_choices — the picker
+  // renders those choices and the pick rides the retried start as `college`.
+  const [collegeChoices, setCollegeChoices] = useState<CollegeChoice[] | null>(null);
+  const [collegeChoice, setCollegeChoice] = useState("");
 
+  const canStart = useMemo(
+    () => candidateFormReady(formMode, form, rosterRequired) && (!collegeChoices || Boolean(collegeChoice)),
+    [form, rosterRequired, formMode, collegeChoices, collegeChoice]
+  );
+
+  // S1 exam shell: EVERY proctor event (recorder onEvent + createUiEvent call
+  // sites) already flows through this single funnel, so the shell taps it here
+  // for anomaly classification (spec §6). The ref breaks the definition cycle —
+  // the shell hook itself emits events through addEvent.
+  const shellTapRef = useRef<(event: ProctorEvent) => void>(() => undefined);
+  // F5.3/F5.4: the enforcement hook taps the SAME funnel (fullscreen exits →
+  // hard-block ladder; blur/hide runs → switch-away debounce).
+  const enforcementTapRef = useRef<(event: ProctorEvent) => void>(() => undefined);
   const addEvent = (event: ProctorEvent) => {
+    shellTapRef.current(event);
+    enforcementTapRef.current(event);
     setEvents((current) => [event, ...current].slice(0, 16));
   };
+
+  // S3 room gate: enabled for this contest AND this session not yet released.
+  // While active, the candidate holds at the RoomCodePanel waiting room — the
+  // coding workspace / contest link stay hidden and the shell stage stays 3.
+  const examGateActive = Boolean(sessionConfig?.room_gate_enabled) && !examStarted;
+
+  // ---- F5.1 stage-1 permission acquisition (all prompts BEFORE fullscreen) --
+  // No session exists during setup, so fullscreen-exit/blur from the prompts
+  // can never be an anomaly (the reducer only fires while recording) — and the
+  // events emitted here are queued and flushed once the session is created.
+  const recordSetupEvent = (type: string, detail?: Record<string, unknown>) => {
+    const event = createUiEvent(type, detail);
+    addEvent(event);
+    // F9: best-effort audit post — a locked/ended session 403/409s these by
+    // design; swallow so expected rejections never hit the console unhandled.
+    if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
+    else preSessionEventsRef.current = [...preSessionEventsRef.current, event].slice(-50);
+  };
+
+  // OMR P1 (design §5.3): the additive camera_pip event — the camera pop-out
+  // is an OS always-on-top window that occludes screen markers in the
+  // recording, so P3's correlation needs to know PiP was active to downgrade.
+  // Ref-bridged because the listeners attach inside the once-memoized
+  // attachCameraVideo callback (same pattern as cameraStreamRef).
+  const cameraPipEmitRef = useRef<(active: boolean) => void>(() => undefined);
+  cameraPipEmitRef.current = (active: boolean) => recordSetupEvent("camera_pip", { active });
+
+  const acquireScreenPermission = async (): Promise<void> => {
+    setPermissions((c) => ({ ...c, screen: "requesting" }));
+    setScreenSetupMessage("");
+    try {
+      const stream = await acquireScreenShareStream(SETUP_SCREEN_CONSTRAINTS, recordSetupEvent);
+      acquiredMediaRef.current.screen?.getTracks().forEach((track) => track.stop());
+      acquiredMediaRef.current.screen = stream;
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        // Killed between setup and start. Once beginRecording hands the stream
+        // to the recorder this listener disarms (identity check) — the recorder
+        // owns the fatal-stop path from then on.
+        if (acquiredMediaRef.current.screen !== stream) return;
+        acquiredMediaRef.current.screen = null;
+        setPermissions((c) => ({ ...c, screen: "pending" }));
+        recordSetupEvent("setup_screen_share_ended");
+      });
+      setPermissions((c) => ({ ...c, screen: "granted" }));
+      recordSetupEvent("setup_screen_share_granted", {
+        display_surface: (stream.getVideoTracks()[0]?.getSettings() as MediaTrackSettings & { displaySurface?: string })?.displaySurface || "unknown"
+      });
+    } catch (cause) {
+      const kind = classifyStartError(cause);
+      setPermissions((c) => ({ ...c, screen: screenStatusFromErrorKind(kind) }));
+      setScreenSetupMessage(screenShareFailureMessage(kind));
+      recordSetupEvent("setup_screen_share_failed", { kind, message: cause instanceof Error ? cause.message : String(cause) });
+    }
+  };
+
+  const acquireCameraMicPermission = async (): Promise<void> => {
+    setPermissions((c) => ({ ...c, camera: "requesting", microphone: "requesting" }));
+    const result = await acquireCameraMicrophone(recordSetupEvent);
+    acquiredMediaRef.current.cameraMic?.getTracks().forEach((track) => track.stop());
+    acquiredMediaRef.current.cameraMic = result.stream;
+    acquiredMediaRef.current.cameraMicMode = result.captureMode;
+    setPermissions((c) => ({ ...c, camera: result.camera, microphone: result.microphone }));
+  };
+
+  const acquireClipboardPermission = async (): Promise<void> => {
+    setPermissions((c) => ({ ...c, clipboard: "requesting" }));
+    if (!navigator.clipboard?.readText) {
+      setPermissions((c) => ({ ...c, clipboard: "unavailable" }));
+      recordSetupEvent("setup_clipboard_permission_failed", { message: "Clipboard read is not supported by this browser." });
+      return;
+    }
+    // Permission primer only: the read triggers the browser grant so the
+    // recorder can log in-exam copy/cut/paste once the session starts. The
+    // pre-session clipboard CONTENT is outside the disclosed monitoring scope
+    // (M6), so we keep neither the text nor its length — only the grant.
+    // FIX-B3 #1: clipboard is OPTIONAL and must never wedge onboarding. Race
+    // readText() against a short timeout so a hung/slow grant prompt can't
+    // strand the "Requesting permissions…" state forever — a timeout is
+    // recorded identically to a denial (not-granted, non-blocking).
+    const outcome = await primeClipboardWithTimeout(() => navigator.clipboard.readText());
+    if (outcome === "granted") {
+      setPermissions((c) => ({ ...c, clipboard: "granted" }));
+      recordSetupEvent("setup_clipboard_permission_granted", {});
+    } else {
+      setPermissions((c) => ({ ...c, clipboard: "denied" }));
+      recordSetupEvent("setup_clipboard_permission_failed", {
+        message: outcome === "timeout"
+          ? "Clipboard grant prompt did not respond in time — recorded as not granted (non-blocking)."
+          : "Clipboard read was blocked."
+      });
+    }
+  };
+
+  // The single stage-1 gesture: screen share first (the required one), then
+  // the camera/mic ladder, then the clipboard primer. Skips already-granted
+  // items so the same button doubles as "request the remaining permissions".
+  const runPermissionsSetup = async () => {
+    setPermissionsBusy("all");
+    try {
+      if (permissions.screen !== "granted" || !acquiredMediaRef.current.screen) await acquireScreenPermission();
+      if (permissions.camera !== "granted" || permissions.microphone !== "granted" || !acquiredMediaRef.current.cameraMic) {
+        await acquireCameraMicPermission();
+      }
+      if (permissions.clipboard !== "granted") await acquireClipboardPermission();
+    } finally {
+      setPermissionsBusy(null);
+    }
+  };
+
+  const retryPermission = (key: PermissionKey) => {
+    setPermissionsBusy(key);
+    void (async () => {
+      try {
+        if (key === "screen") await acquireScreenPermission();
+        else if (key === "clipboard") await acquireClipboardPermission();
+        else await acquireCameraMicPermission();
+      } finally {
+        setPermissionsBusy(null);
+      }
+    })();
+  };
+
+  const confirmPermissions = () => {
+    if (permissionsConfirmed) return;
+    setPermissionsConfirmed(true);
+    recordSetupEvent("setup_permissions_confirmed", { ...permissions });
+  };
+
+  // A flawless run needs no extra click — auto-continue to the fullscreen step.
+  useEffect(() => {
+    if (!permissionsConfirmed && allPermissionsGranted(permissions)) confirmPermissions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permissions, permissionsConfirmed]);
+
+  // Stage-1 gate satisfied: the required screen share is live and confirmed —
+  // or recording already runs (streams were handed to the recorder).
+  const permissionsReady = status === "recording" || status === "ending" ||
+    (permissionsConfirmed && permissions.screen === "granted");
+
+  // S1 exam shell: fullscreen truth, 1-5 stage, top-bar vanish/restore.
+  // examReleased is the S3 room-gate seam: released once the room code (or an
+  // invigilator start-now) admits this session, or when the gate is disabled.
+  const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, permissionsReady, addEvent });
+  shellTapRef.current = shell.onShellEvent;
+
+  // F5.3-6: fullscreen HARD-BLOCK ladder + switch-away debounce. The server's
+  // violation verdict locks the session in block mode; the candidate-side
+  // release is the room's UNLOCK code (UnlockCodePanel on the locked screen).
+  const enforcement = useEnforcement({
+    gate,
+    status,
+    sessionId,
+    config: {
+      reentrySeconds: enforcementPayload?.fullscreen_reentry_seconds ?? 20,
+      exitLimit: enforcementPayload?.fullscreen_exit_limit ?? 2,
+      mode: enforcementPayload?.mode ?? "block",
+      exemptFullscreen: enforcementExemptions.fullscreen === true
+    },
+    addEvent,
+    onLocked: (reason) => {
+      setLockedReason(reason);
+      // Stop the recorder NOW (the heartbeat's 403 would catch it within one
+      // interval anyway, but the lock should be immediate and audible).
+      // F1: bank the stint's manifest once the stop has flushed its uploads.
+      const active = recorderRef.current;
+      if (active) {
+        void active.stop()
+          .then((items) => collectStintManifest(items, sessionId))
+          .catch(() => undefined);
+      }
+      setStatus("idle");
+      setGate("locked");
+      speakWarning("Your test has been locked for leaving fullscreen. Raise your hand and call your room proctor.");
+    },
+    // L1 resolved (typed phrase + back in fullscreen): the typed ack is a
+    // stronger acknowledgement than the AnomalyPanel button, so restore the
+    // top bar in the same gesture (the reducer still re-checks preconditions).
+    onResolved: () => shell.restoreBar()
+  });
+  enforcementTapRef.current = enforcement.onShellEvent;
+
+  // S5: remaining time on the SERVER clock. Recomputed every render — the 1 s
+  // elapsed ticker already re-renders while recording, so this stays live
+  // without another interval. null (no end_at yet / old backend) → no countdown.
+  // (Plan anchored this at isFormStage; it lives here because the shell chrome
+  // below consumes it — the S1 exam shell replaced the old TimerBar.)
+  const examRemainingMs = status === "recording" || status === "ending" ? remainingMs(examEndAt, Date.now(), clockSkewMs) : null;
+  const examTimeUp = examRemainingMs !== null && examRemainingMs <= 0;
+
+  // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
+  // Kept as a props object so the W1 exam branch can render the same chrome
+  // with its extra strip actions + suppressed stage hint.
+  const shellChromeProps = {
+    shell,
+    gate,
+    status,
+    identity,
+    contestName: pinned?.config.contest_name ?? null,
+    elapsedSeconds,
+    examReleased: !examGateActive,
+    permissionsReady,
+    permissionsGate: {
+      checklist: permissions,
+      busy: permissionsBusy,
+      screenMessage: screenSetupMessage,
+      onRun: () => void runPermissionsSetup(),
+      onRetry: retryPermission,
+      onContinue: confirmPermissions
+    },
+    ownEditor: ownEditorCopy,
+    remainingLabel: examRemainingMs !== null ? formatRemaining(examRemainingMs) : null,
+    timeUp: examTimeUp
+  };
+  const shellChrome = <ExamShellChrome {...shellChromeProps} />;
+
+  // F5.3: the hard-block takeover renders ABOVE everything on every branch
+  // (its own visibility rule already yields to the locked/ended screens).
+  const enforcementOverlay = enforcement.overlayVisible ? (
+    <EnforcementOverlay
+      phase={enforcement.phase}
+      violation={enforcement.violation}
+      remainingSeconds={enforcement.remainingSeconds}
+      exitCount={enforcement.exitCount}
+      ackOk={enforcement.ackOk}
+      fullscreen={shell.fullscreen}
+      onAckChange={enforcement.submitAck}
+      onEnterFullscreen={shell.enterFullscreen}
+    />
+  ) : null;
+  // OMR P1 (design §5.1/§5.2): the screen-marker fiducial layer, mounted in
+  // BOTH candidate branches that can be on-screen while status === "recording"
+  // (the W1 exam view and the classic fallback). The flag arrives ONLY via the
+  // start/resume response's optional screen_markers key — absent (flag off /
+  // older backend) renders null, so today's live build is bit-for-bit
+  // unaffected. marker_layout rides the same additive event funnel.
+  const screenMarkersOn = Boolean(sessionConfig?.screen_markers?.enabled);
+  const markerLayer = (
+    <MarkerLayer
+      enabled={screenMarkersOn}
+      recording={status === "recording"}
+      trackWidth={sessionConfig?.upload_config.max_width ?? SETUP_SCREEN_CONSTRAINTS.maxWidth}
+      getScreenTrackSettings={() => recorderRef.current?.getScreenTrackSettings() ?? null}
+      onLayout={(detail) => recordSetupEvent("marker_layout", detail)}
+    />
+  );
+
+  // W2: page top padding follows which fixed header is rendered — the slim
+  // strip needs a small offset, the big alert banner a larger one, the locked
+  // screen none ("hidden").
+  const headerMode = shellHeaderMode(shell.barHidden, gate);
+  const shellPadTop: boolean | "alert" = headerMode === "alert" ? "alert" : headerMode === "strip";
 
   const speakIpChangeWarning = () => {
     const message = "Your IP is changing. Please be attended by our engineer at your institution.";
@@ -139,9 +665,16 @@ function StudentApp() {
     setSessionConfig(session);
     setSessionId(session.session_id);
     setContestUrl(session.contest_url || "");
+    // S3: gate disabled (or absent on an older backend) → released immediately.
+    setExamStarted(!session.room_gate_enabled);
+    // F5.3/F5.5: enforcement knobs + exemptions + lock reason ride start/resume
+    // (the heartbeat keeps them fresh afterwards).
+    if (session.enforcement) setEnforcementPayload(session.enforcement);
+    if (session.enforcement_exemptions) setEnforcementExemptions(session.enforcement_exemptions);
+    setLockedReason(session.locked_reason ?? null);
     setIdentity({
       name: session.name || form.name.trim(),
-      username: session.hackerrank_username || form.hackerrank_username.trim(),
+      candidate_id: candidateIdOf(session) || form.candidate_id.trim(),
       room: session.room || form.room.trim()
     });
     const serverStatus: ServerSessionStatus = session.status || "active";
@@ -149,14 +682,65 @@ function StudentApp() {
     else if (serverStatus === "locked") setGate("locked");
     else if (serverStatus === "ended") setGate("ended");
     else setGate("running");
+    // F5 (e2e finding): the warning strip must reflect LIVE state. The server
+    // reporting ACTIVE invalidates any lock-episode message ("Your test has
+    // been locked…") that would otherwise sit stale over a recovered session.
+    if (serverStatus === "active") setReloadWarning("");
     return serverStatus;
+  };
+
+  // S3 room gate: while recording with the gate enabled and not yet released,
+  // poll every 5 s so an invigilator "Start now" admits the candidate with zero
+  // typing. The first tick runs immediately (covers resume-after-reload where
+  // the server may already have released this session).
+  useEffect(() => {
+    if (status !== "recording" || !sessionConfig?.room_gate_enabled || examStarted) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const response = await pollRoomGate(sessionConfig.session_id);
+        if (!cancelled && response.exam_started) setExamStarted(true);
+      } catch {
+        // transient poll errors are silent; the explicit submit surfaces errors
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [status, sessionConfig, examStarted]);
+
+  const submitGateCode = async () => {
+    if (!sessionConfig) return;
+    setGateBusy(true);
+    setGateError("");
+    try {
+      const response = await pollRoomGate(sessionConfig.session_id, gateCode.trim());
+      if (response.exam_started) {
+        setExamStarted(true);
+        setGateCode("");
+      }
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      if (apiError.code === "invalid_code") {
+        setGateError("That code is not correct for your room. Check the board or ask your invigilator.");
+      } else if (apiError.code === "too_many_attempts") {
+        setGateError("Too many wrong attempts. Wait — your invigilator can admit the whole room.");
+      } else {
+        setGateError(apiError.message || String(cause));
+      }
+    } finally {
+      setGateBusy(false);
+    }
   };
 
   // On load: if a stored session_id exists, resume it WITHOUT re-collecting
   // details (Epic 2). Recording itself is not auto-restarted (getDisplayMedia
   // needs a fresh user gesture) — the student presses "Resume recording".
   useEffect(() => {
-    const stored = window.localStorage.getItem(sessionStorageKey);
+    const stored = window.localStorage.getItem(sessionKey);
     if (!stored) {
       setResuming(false);
       return;
@@ -164,18 +748,22 @@ function StudentApp() {
     let cancelled = false;
     void (async () => {
       try {
-        const session = await resumeSession(stored);
+        // S-D: person-contest resumes are CONTEST-PINNED (F9 D8) — a token
+        // from another contest is indistinguishable from an unknown one.
+        const session = await resumeSession(stored, undefined, personPinned ? { contest: pinnedSlug } : undefined);
         if (cancelled) return;
         const serverStatus = applyServerStatus(session);
         setStartIp(session.start_ip || "unavailable");
         setCurrentIp(session.start_ip || "unavailable");
         if (serverStatus === "ended") {
           setStatus("ended");
-          window.localStorage.removeItem(sessionStorageKey);
+          window.localStorage.removeItem(sessionKey);
+          clearSessionDrafts(stored, window.localStorage);
         }
       } catch {
         // Unknown/expired token — drop it and fall back to the form.
-        window.localStorage.removeItem(sessionStorageKey);
+        window.localStorage.removeItem(sessionKey);
+        clearSessionDrafts(stored, window.localStorage);
       } finally {
         if (!cancelled) setResuming(false);
       }
@@ -186,8 +774,36 @@ function StudentApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // S2: fetch the public exam config (roster gate + room list) once for the
+  // pre-session form. Fail-open on error: the server still enforces the roster
+  // at /api/session/start; a fetch failure only degrades the form UI.
+  // F5.3: the same payload seeds the enforcement knobs pre-session (start/
+  // resume + heartbeat overwrite them later).
+  // S-D: a PINNED contest already carries its exam-config (the router fetched
+  // it via ?contest=) — no second fetch, the contest doc is authoritative.
+  useEffect(() => {
+    if (pinned) {
+      setExamConfig(pinned.config);
+      if (pinned.config.enforcement) setEnforcementPayload((current) => current ?? pinned.config.enforcement ?? null);
+      return;
+    }
+    let cancelled = false;
+    void fetchExamConfig().then((config) => {
+      if (cancelled) return;
+      setExamConfig(config);
+      if (config.enforcement) setEnforcementPayload((current) => current ?? config.enforcement ?? null);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (status !== "recording") return;
+    // Computed when recording starts — sessionConfig (and its problem) is
+    // already set by then, so the notices match the active surface.
+    const integrityNotices = studentCopy.integrityNotices(Boolean(sessionConfig?.problem));
     let noticeIndex = Math.floor(Math.random() * integrityNotices.length);
     const addNotice = () => {
       const text = integrityNotices[noticeIndex % integrityNotices.length];
@@ -205,63 +821,39 @@ function StudentApp() {
     return () => window.clearInterval(timer);
   }, [status]);
 
+  // F5.7: the elapsed ticker is bound to the live test status — the pure
+  // elapsedTimerActive rule stops it the moment status OR gate reports ended
+  // (the last value freezes; the bar never shows a count-up after test end).
+  // The cleanup also covers unmount, so no interval survives the component.
   useEffect(() => {
-    if (status !== "recording" || !sessionId) return;
-    let closed = false;
-    let promptTimer: number | undefined;
-    let expiryTimer: number | undefined;
-
-    const scheduleNext = () => {
-      if (closed) return;
-      const delay = 45_000 + Math.floor(Math.random() * 35_000);
-      promptTimer = window.setTimeout(() => {
-        if (closed) return;
-        const nextCheckpoint = {
-          id: crypto.randomUUID(),
-          message: checkpointMessages[Math.floor(Math.random() * checkpointMessages.length)],
-          expiresAt: Date.now() + 45_000
-        };
-        setCheckpoint(nextCheckpoint);
-        const shownEvent = createUiEvent("integrity_checkpoint_shown", {
-          checkpoint_id: nextCheckpoint.id,
-          message: nextCheckpoint.message,
-          expires_at: new Date(nextCheckpoint.expiresAt).toISOString()
-        });
-        addEvent(shownEvent);
-        void sendEvents(sessionId, [shownEvent]);
-
-        expiryTimer = window.setTimeout(() => {
-          setCheckpoint((current) => {
-            if (!current || current.id !== nextCheckpoint.id) return current;
-            const missedEvent = createUiEvent("integrity_checkpoint_missed", {
-              checkpoint_id: nextCheckpoint.id,
-              message: nextCheckpoint.message
-            });
-            addEvent(missedEvent);
-            void sendEvents(sessionId, [missedEvent]);
-            scheduleNext();
-            return null;
-          });
-        }, 45_000);
-      }, delay);
-    };
-
-    scheduleNext();
-    return () => {
-      closed = true;
-      if (promptTimer) window.clearTimeout(promptTimer);
-      if (expiryTimer) window.clearTimeout(expiryTimer);
-      setCheckpoint(null);
-    };
-  }, [sessionId, status]);
-
-  useEffect(() => {
-    if (status !== "recording" || !recordingStartedAt) return;
+    if (!elapsedTimerActive({ status, gate }) || !recordingStartedAt) return;
     const timer = window.setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - recordingStartedAt) / 1000));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [recordingStartedAt, status]);
+  }, [recordingStartedAt, status, gate]);
+
+  // S5: announce "time is up" once when the countdown crosses zero while
+  // recording. Soft enforcement by design: the recording continues so the
+  // candidate ends their own test (manifest intact); the hard stop is the
+  // admin's End-now (which 409s the heartbeat → B1 self-stop).
+  useEffect(() => {
+    if (status !== "recording" || !examEndAt) return;
+    const check = () => {
+      const left = remainingMs(examEndAt, Date.now(), clockSkewMs);
+      if (left === null || left > 0 || timeUpAnnouncedRef.current) return;
+      timeUpAnnouncedRef.current = true;
+      speakWarning("Time is up. Please end your test now.");
+      const event = createUiEvent("exam_time_up", { end_at: examEndAt });
+      addEvent(event);
+      // F9: best-effort — expected 403/409 once the session is locked/ended.
+      if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
+    };
+    check();
+    const timer = window.setInterval(check, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, examEndAt, clockSkewMs, sessionId]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -311,7 +903,8 @@ function StudentApp() {
         meta_key: event.metaKey
       });
       addEvent(reloadEvent);
-      if (sessionId) void sendEvents(sessionId, [reloadEvent]);
+      // F9: best-effort — expected 403/409 once the session is locked/ended.
+      if (sessionId) void sendEvents(sessionId, [reloadEvent]).catch(() => undefined);
     };
 
     window.addEventListener("keydown", onKeyDown, { capture: true });
@@ -322,50 +915,127 @@ function StudentApp() {
     const video = cameraVideoRef.current;
     if (!video) return;
     video.srcObject = cameraStream;
-    setPipAvailable(Boolean(cameraStream && "requestPictureInPicture" in HTMLVideoElement.prototype));
     if (cameraStream) {
       void video.play().catch(() => undefined);
     }
   }, [cameraStream]);
 
-  const requestCameraPictureInPicture = async () => {
-    const video = cameraVideoRef.current;
-    if (!video || !("requestPictureInPicture" in video)) {
-      setPipMessage("Camera pop-out is not supported in this browser.");
-      return;
-    }
-    try {
-      await video.play();
-      if (document.pictureInPictureElement !== video) {
-        await video.requestPictureInPicture();
+  // W1: the camera <video> host moves between layouts (sidebar self-view in
+  // the waiting/legacy views ↔ the floating dock in the exam view). The effect
+  // above only re-attaches the stream when cameraStream CHANGES, so a
+  // remounted element would stay black after a branch switch. This callback
+  // ref re-attaches the live stream whenever a new node mounts. The camera
+  // CAPTURE itself lives in the recorder (off-DOM) — this is preview-only.
+  const attachCameraVideo = useMemo(() => {
+    // OMR P1: enter/leave PiP listeners ride every mounted camera node so the
+    // camera_pip event fires however the pop-out starts or ends (button, the
+    // PiP window's own close control, node unmount). Additive only — the
+    // existing stream re-attach behavior is unchanged.
+    let pipAttached: HTMLVideoElement | null = null;
+    const onPipEnter = () => cameraPipEmitRef.current(true);
+    const onPipLeave = () => cameraPipEmitRef.current(false);
+    return (node: HTMLVideoElement | null) => {
+      if (pipAttached && pipAttached !== node) {
+        pipAttached.removeEventListener("enterpictureinpicture", onPipEnter);
+        pipAttached.removeEventListener("leavepictureinpicture", onPipLeave);
       }
-      setPipMessage("Camera pop-out is active. Keep it visible while working in other tabs.");
-      addEvent(createUiEvent("camera_picture_in_picture_started"));
-    } catch (cause) {
-      setPipMessage("Use the camera pop-out button to keep your camera visible over other tabs.");
-      addEvent(createUiEvent("camera_picture_in_picture_failed", { message: cause instanceof Error ? cause.message : String(cause) }));
+      if (node && node !== pipAttached) {
+        node.addEventListener("enterpictureinpicture", onPipEnter);
+        node.addEventListener("leavepictureinpicture", onPipLeave);
+      }
+      pipAttached = node;
+      cameraVideoRef.current = node;
+      const stream = cameraStreamRef.current;
+      if (node && node.srcObject !== stream) {
+        node.srcObject = stream;
+        if (stream) void node.play().catch(() => undefined);
+      }
+    };
+  }, []);
+
+  // S5: apply a server-reported exam end time + clock stamp. Announces a
+  // mid-exam change (extended/shortened) exactly once per change; the notice
+  // stays visible until the next change. The first end_at received is silent.
+  const applyExamTime = (endAt?: string, serverNow?: string) => {
+    if (!endAt) return;
+    setClockSkewMs(computeClockSkewMs(serverNow, Date.now()));
+    const change = classifyEndAtChange(examEndAtRef.current, endAt);
+    examEndAtRef.current = endAt;
+    setExamEndAt(endAt);
+    if (change !== "extended" && change !== "shortened") return;
+    const at = new Date(endAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (change === "extended") {
+      timeUpAnnouncedRef.current = false; // more time: a past "time is up" no longer holds
+      // F5: an extension also invalidates a lingering "Time is up" strip.
+      setReloadWarning("");
+      setExamTimeNotice(`The proctor extended the exam — new end time ${at}.`);
+    } else {
+      setExamTimeNotice(`The proctor moved the exam end earlier — new end time ${at}.`);
+      speakWarning("Attention: the exam end time has been moved earlier. Check the timer.");
     }
   };
 
   // Bring up the recorder for an active session. Shared by first-start and by
-  // "Resume recording" after a reload (both need a fresh getDisplayMedia gesture).
+  // "Resume recording" after a reload. F5.1: recording starts IMMEDIATELY from
+  // the streams the stage-1 PermissionsGate already acquired — start() only
+  // re-prompts when the candidate killed the share in between.
   const beginRecording = async (session: SessionStartResponse) => {
     // If a prior recorder is still around (e.g. screen share dropped mid-session
     // and the student is retrying), tear it down first so we don't leave a second
     // heartbeat/upload loop running against the same session.
     if (recorderRef.current) {
-      await recorderRef.current.stop().catch(() => undefined);
+      const prior = recorderRef.current;
       recorderRef.current = null;
+      await prior.stop().catch(() => undefined);
+      // F1: bank the finished stint's manifest before the new stint starts.
+      collectStintManifest(prior.getManifest(), session.session_id);
     }
+    // F1: restore prior stints banked before a same-tab refresh (idempotent —
+    // the merge de-duplicates by (kind, index)).
+    stintManifestRef.current = mergeManifest(
+      readStintManifest(window.sessionStorage, session.session_id),
+      stintManifestRef.current
+    );
+    // Flush the queued setup-stage audit events now that a session exists.
+    const queuedSetupEvents = preSessionEventsRef.current;
+    preSessionEventsRef.current = [];
+    // F9: best-effort — expected 403/409 if the session got blocked meanwhile.
+    if (queuedSetupEvents.length) void sendEvents(session.session_id, queuedSetupEvents).catch(() => undefined);
     setStartIp(session.start_ip || "unavailable");
     setCurrentIp(session.start_ip || "unavailable");
     setIpChanged(false);
-    await collectEntryReviewEvidence(session.session_id);
+    // ownEditor comes from the response itself — the sessionConfig state set
+    // moments ago has not re-rendered into this closure yet.
+    await collectEntryReviewEvidence(session.session_id, Boolean(session.problem));
+
+    // Hand the stage-1 streams over to the recorder. Clearing the ref disarms
+    // the setup ended-listener (identity check) — from here the recorder owns
+    // stream lifecycle, and recorder.stop() owns cleanup even on a failed start.
+    const acquired = acquiredMediaRef.current;
+    acquiredMediaRef.current = { screen: null, cameraMic: null, cameraMicMode: null };
 
     const recorder = createProctorRecorder({
       sessionId: session.session_id,
       config: session.upload_config,
       heartbeatSeconds: session.heartbeat_interval_seconds,
+      // F1: chunk indexes CONTINUE from the prior stint's high-water mark —
+      // max over the server's knowledge (start/resume counts + exact hwm) and
+      // the local sessionStorage hwm — so a restarted recording never reuses
+      // an index and never overwrites earlier chunks. All legs are 0 for a
+      // fresh session (indexes start at 1, exactly as before).
+      chunkIndexBase: {
+        screen: chunkIndexBase([
+          session.chunk_count,
+          session.screen_chunk_index_hwm,
+          readChunkHwm(window.sessionStorage, session.session_id, "screen")
+        ]),
+        camera: chunkIndexBase([
+          session.camera_chunk_count,
+          session.camera_chunk_index_hwm,
+          readChunkHwm(window.sessionStorage, session.session_id, "camera")
+        ])
+      },
+      acquired,
       onEvent: addEvent,
       onUploadChange: (depth, uploaded) => {
         setQueueDepth(depth);
@@ -380,7 +1050,7 @@ function StudentApp() {
             kind: "share_cancelled",
             message: "Screen sharing stopped, so recording is paused. This is logged. Press Resume screen share and choose your Entire Screen to continue — do not close this tab."
           });
-          speakWarning("Screen sharing stopped. Return to the proctor app and resume your screen share immediately.");
+          speakWarning("Screen sharing stopped. Press 'Try again — share entire screen' below to continue.");
         } else {
           // A local capture failure (e.g. MediaRecorder error). Still recoverable
           // via Try again, but surface the raw reason for transparency.
@@ -392,10 +1062,14 @@ function StudentApp() {
       // already stopped itself. Flip the gate to the matching blocked screen so
       // the UI stops claiming "recording".
       onStatusChange: (serverStatus) => {
+        // F1: bank whatever this stint managed to upload (idempotent merge; a
+        // later teardown/end re-collects and fills in any still-in-flight tail).
+        collectStintManifest(recorderRef.current?.getManifest(), session.session_id);
         if (serverStatus === "ended") {
           setStatus("ended");
           setGate("ended");
-          window.localStorage.removeItem(sessionStorageKey);
+          window.localStorage.removeItem(sessionKey);
+          clearSessionDrafts(session.session_id, window.localStorage);
         } else if (serverStatus === "locked") {
           setStatus("idle");
           setGate("locked");
@@ -412,22 +1086,34 @@ function StudentApp() {
         setIpChanged(ipStatus.ipChanged);
         if (ipStatus.newlyChanged) speakIpChangeWarning();
       },
+      // S5: heartbeat-delivered exam end time → live countdown update.
+      onExamTimeChange: ({ endAt, serverNow }) => applyExamTime(endAt, serverNow),
+      // F5.3/F5.5: heartbeat-delivered enforcement config + exemptions — an
+      // admin/invigilator exemption applies live within one interval.
+      onEnforcementChange: ({ enforcement: config, exemptions }) => {
+        if (config) setEnforcementPayload(config);
+        if (exemptions) setEnforcementExemptions(exemptions);
+      },
       onCameraStream: (stream) => {
         setCameraStream(stream);
         const video = cameraVideoRef.current;
         if (video) {
           video.srcObject = stream;
-          if (stream) {
-            setPipAvailable("requestPictureInPicture" in HTMLVideoElement.prototype);
-          }
         }
       }
     });
     recorderRef.current = recorder;
     await recorder.start();
-    const startedAt = Date.now();
-    setRecordingStartedAt(startedAt);
-    setElapsedSeconds(0);
+    // F7 (e2e finding): ELAPSED anchors on the SESSION's server-side start
+    // (skew-corrected), not on this stint — a recording restart or a reload
+    // resumes the count instead of resetting to 0:00. Pre-F7 backends send no
+    // created_at → the anchor degrades to "now" (the old per-stint behavior).
+    const anchor = sessionElapsedAnchorMs(session.created_at, session.server_now, Date.now());
+    setRecordingStartedAt(anchor);
+    setElapsedSeconds(Math.max(0, Math.floor((Date.now() - anchor) / 1000)));
+    // F5 (e2e finding): recording is LIVE again — any prior episode's warning
+    // strip ("Screen sharing stopped…", "…locked…", reload notice) is stale now.
+    setReloadWarning("");
     setStatus("recording");
   };
 
@@ -450,22 +1136,100 @@ function StudentApp() {
     setStatus("idle");
   };
 
+  // S2: look up the typed unique ID against the server-side roster.
+  const lookupRosterId = async () => {
+    // Re-clicking during the post-429 cooldown would just burn more budget.
+    if (Date.now() < lookupCooldownUntil) return;
+    setLookupBusy(true);
+    setLookupError("");
+    try {
+      setRosterMatch(await rosterLookup(uniqueIdInput.trim()));
+    } catch (cause) {
+      setRosterMatch(null);
+      const err = cause as ApiError;
+      const retryAfter = Number(err?.body?.retry_after_seconds);
+      // On a 429 (M3 shared-network throttle) keep the button disabled for the
+      // retry window so re-clicks don't extend the lockout; cap the cooldown so a
+      // bogus huge value can't trap the candidate.
+      if (err?.status === 429 || err?.code === "rate_limited") {
+        const waitMs = (Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 120) : 60) * 1000;
+        setLookupCooldownUntil(Date.now() + waitMs);
+      }
+      setLookupError(
+        err?.status !== undefined || err?.code !== undefined
+          ? rosterLookupErrorMessage(err?.status, err?.code, retryAfter)
+          : cause instanceof Error ? cause.message : String(cause)
+      );
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
+  // Drive the post-429 cooldown: `lookupCooldownActive` is true while the window
+  // is open, and an effect re-renders once it elapses so the Find-me button
+  // re-enables without the candidate having to interact.
+  const [cooldownTick, setCooldownTick] = useState(0);
+  const lookupCooldownActive = lookupCooldownUntil > Date.now();
+  useEffect(() => {
+    if (!lookupCooldownActive) return;
+    const id = window.setTimeout(() => setCooldownTick((t) => t + 1), Math.max(250, lookupCooldownUntil - Date.now()));
+    return () => window.clearTimeout(id);
+    // cooldownTick re-arms the timer after each elapse check.
+  }, [lookupCooldownActive, lookupCooldownUntil, cooldownTick]);
+
+  // "Yes, this is me": prefill the form from the roster record. Roster-sourced
+  // fields render disabled; the server overrides them again at start anyway
+  // (the roster is the identity source of truth — this is just honest UI).
+  const confirmRosterMatch = () => {
+    if (!rosterMatch) return;
+    setForm({
+      ...form,
+      roster_unique_id: rosterMatch.unique_id,
+      candidate_id: candidateIdOf(rosterMatch) || form.candidate_id,
+      name: rosterMatch.name || form.name,
+      roll_number: rosterMatch.roll_number || form.roll_number,
+      email: rosterMatch.email_masked || form.email,
+      room: rosterMatch.room || form.room
+    });
+  };
+
+  const rejectRosterMatch = () => {
+    setRosterMatch(null);
+    setLookupError("");
+  };
+
+  const resetRosterIdentity = () => {
+    setRosterMatch(null);
+    setUniqueIdInput("");
+    setLookupError("");
+    setForm({ ...initialForm });
+  };
+
   const start = async () => {
     setError("");
     setStartError(null);
     setStatus("starting");
     let session: SessionStartResponse;
     try {
-      session = await startSession({
-        ...form,
-        hackerrank_username: form.hackerrank_username.trim(),
-        name: form.name.trim(),
-        roll_number: form.roll_number.trim(),
-        email: form.email.trim(),
-        room: form.room.trim()
-      });
+      session = await startSession(
+        {
+          ...form,
+          candidate_id: form.candidate_id.trim(),
+          name: form.name.trim(),
+          roll_number: form.roll_number.trim(),
+          email: form.email.trim(),
+          room: form.room.trim()
+        },
+        undefined,
+        // S-D: a pinned PERSON contest rides the start body (server-side
+        // identity resolution); a college pick answers a 409 college_choices.
+        personPinned ? { contest: pinnedSlug, college: collegeChoice || undefined } : undefined
+      );
+      setCollegeChoices(null);
+      setCollegeChoice("");
       // Persist the token so a reload resumes the same session (Epic 2).
-      window.localStorage.setItem(sessionStorageKey, session.session_id);
+      window.localStorage.setItem(sessionKey, session.session_id);
+      applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         // pending_approval / locked / ended — do not start the recorder.
@@ -473,8 +1237,26 @@ function StudentApp() {
         return;
       }
     } catch (cause) {
-      // Registration/gate failure (time window, network, etc.) — generic error.
-      setError(cause instanceof Error ? cause.message : String(cause));
+      // Registration/gate failure (time window, roster, network, ...). Roster
+      // codes get a specific human message; everything else stays generic.
+      const apiError = cause as ApiError;
+      const code = apiError?.code;
+      // S-C/S-D: GENUINE ambiguity — the same id exists under two colleges.
+      // Render the picker; the next Start retries with the pick as `college`.
+      if (code === "college_choices" && Array.isArray(apiError.body?.college_choices)) {
+        setCollegeChoices(apiError.body.college_choices as CollegeChoice[]);
+        setCollegeChoice("");
+        setError("");
+        setStatus("idle");
+        return;
+      }
+      setError(
+        code === "not_on_roster" || code === "roster_id_required"
+          ? formMode === "person_roster"
+            ? `Your ${examConfig?.unique_id_label || "ID"} was not found on the list for this test. Check it and try again, or call an invigilator.`
+            : "Your ID was not matched on the student list. Use “Not you? Re-enter ID” to redo the identity step, or call an invigilator."
+          : cause instanceof Error ? cause.message : String(cause)
+      );
       setStatus("idle");
       return;
     }
@@ -497,11 +1279,15 @@ function StudentApp() {
     setStatus("starting");
     let session: SessionStartResponse;
     try {
-      session = await resumeSession(sessionConfig.session_id);
+      session = await resumeSession(sessionConfig.session_id, undefined, personPinned ? { contest: pinnedSlug } : undefined);
+      applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus !== "active") {
         setStatus("idle");
-        if (serverStatus === "ended") window.localStorage.removeItem(sessionStorageKey);
+        if (serverStatus === "ended") {
+          window.localStorage.removeItem(sessionKey);
+          clearSessionDrafts(sessionConfig.session_id, window.localStorage);
+        }
         return;
       }
     } catch (cause) {
@@ -532,18 +1318,35 @@ function StudentApp() {
     if (!sessionConfig) return;
     setError("");
     try {
-      const session = await resumeSession(sessionConfig.session_id);
+      const session = await resumeSession(sessionConfig.session_id, undefined, personPinned ? { contest: pinnedSlug } : undefined);
+      applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
       if (serverStatus === "ended") {
         setStatus("ended");
-        window.localStorage.removeItem(sessionStorageKey);
+        window.localStorage.removeItem(sessionKey);
+        clearSessionDrafts(sessionConfig.session_id, window.localStorage);
       }
+      // Wave-3 walkthrough residue: a release back to ACTIVE must not carry a
+      // red error line from the lock episode into the running view — the
+      // stale message sat above the workspace until the next state change.
+      // start()/resumeRecording() clear these themselves; this is the
+      // blocked-screen path (Check again / unlock code).
+      if (serverStatus === "active") setStartError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
-  const collectEntryReviewEvidence = async (activeSessionId: string) => {
+  // F5.3: a lock arriving via the heartbeat channel (403 session_locked)
+  // carries no reason — fetch it once so the locked screen knows whether to
+  // offer the room-code unlock (enforcement lock) or not (admin lock).
+  useEffect(() => {
+    if (gate !== "locked" || lockedReason !== null || !sessionConfig) return;
+    void refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gate, lockedReason]);
+
+  const collectEntryReviewEvidence = async (activeSessionId: string, ownEditor: boolean) => {
     const now = new Date().toISOString();
     const tabRecord = {
       type: "browser_tab_audit",
@@ -554,7 +1357,7 @@ function StudentApp() {
       status: "screen_and_focus_review_active",
       explanation: "Candidate-facing UI shows tab/focus review as active. Browser tab inventory requires a managed browser extension; full-screen recording and focus events are used in this web-only build."
     };
-    setTabAudit("Tab/focus review active. Keep only HackerRank and this proctor session open; other activity may be visible in the shared-screen recording.");
+    setTabAudit(studentCopy.tabAuditMessage(ownEditor));
     await uploadReviewFile(activeSessionId, "tabs", [tabRecord]);
     addEvent({
       type: "tabs_review_uploaded",
@@ -563,43 +1366,25 @@ function StudentApp() {
       detail: { message: "Tab/focus review active. Shared-screen recording and focus changes are logged." }
     });
 
-    try {
-      if (!navigator.clipboard?.readText) {
-        throw new Error("Clipboard read is not supported by this browser.");
-      }
-      const text = await navigator.clipboard.readText();
-      setClipboardText(text);
-      setClipboardAudit(text ? "Clipboard captured and uploaded." : "Clipboard is empty; empty value uploaded.");
-      await uploadReviewFile(activeSessionId, "clipboard", [{
-        type: "initial_clipboard_snapshot",
-        timestamp: new Date().toISOString(),
-        text,
-        text_length: text.length,
-        visibility_state: document.visibilityState
-      }]);
-      addEvent({
-        type: "clipboard_review_uploaded",
-        timestamp: new Date().toISOString(),
-        visibility_state: document.visibilityState,
-        detail: { text_length: text.length }
-      });
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setClipboardText("");
-      setClipboardAudit(`Clipboard could not be read: ${message}`);
-      await uploadReviewFile(activeSessionId, "clipboard", [{
-        type: "initial_clipboard_snapshot_failed",
-        timestamp: new Date().toISOString(),
-        reason: message,
-        visibility_state: document.visibilityState
-      }]);
-      addEvent({
-        type: "clipboard_review_failed",
-        timestamp: new Date().toISOString(),
-        visibility_state: document.visibilityState,
-        detail: { reason: message }
-      });
-    }
+    // M6 (privacy): we DO NOT snapshot the candidate's clipboard at entry. The
+    // entry read captured whatever was copied BEFORE the session/consent — that
+    // is pre-session content outside the disclosed monitoring scope. Clipboard
+    // monitoring instead begins with the session: the recorder logs in-exam
+    // copy/cut/paste (clipboard_activity) once recording starts. We record only
+    // a NON-CONTENT note here so the proctor knows the scope, never the text.
+    setClipboardAudit("Clipboard content is not captured at entry. Copy, cut, and paste actions during the test are logged for review.");
+    await uploadReviewFile(activeSessionId, "clipboard", [{
+      type: "clipboard_monitoring_in_exam_only",
+      timestamp: new Date().toISOString(),
+      note: "Entry-time clipboard content is not snapshotted (pre-session scope). In-exam copy/cut/paste is logged as clipboard_activity.",
+      visibility_state: document.visibilityState
+    }]);
+    addEvent({
+      type: "clipboard_monitoring_in_exam_only",
+      timestamp: new Date().toISOString(),
+      visibility_state: document.visibilityState,
+      detail: { note: "Entry-time clipboard content not captured; in-exam copy/cut/paste is logged." }
+    });
 
     const cookieRecord = {
       type: "app_cookie_storage_audit",
@@ -635,12 +1420,18 @@ function StudentApp() {
       }
       const finalManifest = await recorderRef.current?.stop();
       recorderStopped = true;
-      const uploads = finalManifest ?? [];
+      // F1: the submitted manifest covers EVERY stint of this session — the
+      // banked prior stints merged with the final recorder's own list.
+      const uploads = mergeManifest(stintManifestRef.current, finalManifest ?? []);
       setManifest(uploads);
       if (sessionId) {
         await endSession({ sessionId, manifest: uploads, assuranceAccepted });
       }
-      window.localStorage.removeItem(sessionStorageKey);
+      window.localStorage.removeItem(sessionKey);
+      if (sessionId) {
+        clearSessionDrafts(sessionId, window.localStorage);
+        clearChunkContinuity(window.sessionStorage, sessionId);
+      }
       setStatus("ended");
       setGate("ended");
       setEndRequested(false);
@@ -670,7 +1461,11 @@ function StudentApp() {
       if (sessionId) {
         await endSession({ sessionId, manifest, assuranceAccepted });
       }
-      window.localStorage.removeItem(sessionStorageKey);
+      window.localStorage.removeItem(sessionKey);
+      if (sessionId) {
+        clearSessionDrafts(sessionId, window.localStorage);
+        clearChunkContinuity(window.sessionStorage, sessionId);
+      }
       setEndFailed(false);
       setStatus("ended");
       setGate("ended");
@@ -682,22 +1477,12 @@ function StudentApp() {
     }
   };
 
-  const confirmCheckpoint = () => {
-    if (!checkpoint || !sessionId) return;
-    const confirmedEvent = createUiEvent("integrity_checkpoint_confirmed", {
-      checkpoint_id: checkpoint.id,
-      message: checkpoint.message,
-      response_time_remaining_ms: Math.max(0, checkpoint.expiresAt - Date.now())
-    });
-    addEvent(confirmedEvent);
-    void sendEvents(sessionId, [confirmedEvent]);
-    setCheckpoint(null);
-  };
-
   // ---- Blocked / non-running gate screens -------------------------------
   if (resuming) {
     return (
-      <Shell>
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
+        {enforcementOverlay}
         <section className="mx-auto max-w-md rounded-lg border border-line bg-panel p-6 text-center shadow-subtle">
           <RefreshCw size={22} className="mx-auto animate-spin text-accent" />
           <p className="mt-3 text-sm text-muted">Restoring your proctoring session…</p>
@@ -708,15 +1493,15 @@ function StudentApp() {
 
   if (gate === "pending_approval") {
     return (
-      <Shell>
-        <StudentStepBanner gate={gate} status={status} />
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
         <BlockedScreen
           tone="warning"
           icon={<Clock size={22} />}
           title="Waiting for proctor approval"
           lines={[
-            "Another session is already active for your HackerRank username.",
+            "Another session is already active for your Candidate ID.",
             "A proctor must approve this device before you can begin — or you can wait for the other session to be unlocked.",
             "Stay on this page. When the proctor approves you, press Check again to continue."
           ]}
@@ -728,29 +1513,44 @@ function StudentApp() {
   }
 
   if (gate === "locked") {
+    const enforcementLock = lockedReason === "fullscreen_enforcement";
     return (
-      <Shell>
-        <StudentStepBanner gate={gate} status={status} />
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
         <BlockedScreen
           tone="danger"
           icon={<Lock size={22} />}
-          title="Your test is locked"
-          lines={[
-            "A proctor has locked this session. You cannot record until it is unlocked.",
-            "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
-          ]}
+          title={enforcementLock ? "Your test is locked — fullscreen rule" : "Your test is locked"}
+          lines={enforcementLock
+            ? [
+                "You did not return to fullscreen in time (or exited fullscreen too many times), so this session locked itself.",
+                "Raise your hand and call your room proctor. They can read you a 6-digit unlock code to enter here, or unlock you from their console."
+              ]
+            : [
+                "A proctor has locked this session. You cannot record until it is unlocked.",
+                "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
+              ]}
           onRefresh={refreshStatus}
           error={error}
         />
+        {enforcementLock && sessionId ? (
+          <UnlockCodePanel
+            sessionId={sessionId}
+            onUnlocked={() => {
+              setLockedReason(null);
+              void refreshStatus();
+            }}
+          />
+        ) : null}
       </Shell>
     );
   }
 
   if (gate === "ended" || status === "ended") {
     return (
-      <Shell>
-        <StudentStepBanner gate="ended" status="ended" />
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
         <section className="mx-auto max-w-xl rounded-lg border border-accent/30 bg-accent/5 p-6 text-center shadow-subtle">
           <CheckCircle2 size={28} className="mx-auto text-accent" />
@@ -767,31 +1567,152 @@ function StudentApp() {
   // gate === "form" (no session yet) or "running" (active session)
   const isFormStage = gate === "form" && status !== "recording" && status !== "ending";
 
+  // W1 — the exam itself: an own-editor session, actively recording, released
+  // into the exam. The coding workspace IS the page. Everything else tucks
+  // into the slim strip (W2 — proctoring-panel toggle + End test live there),
+  // the collapsible proctoring panel, and the floating camera dock. All
+  // capture/preview hosts stay MOUNTED — every collapse is CSS-only. Legacy
+  // (HackerRank-link) sessions and all waiting/error states keep the classic
+  // proctoring-first layout below.
+  if (hasProblem && status === "recording" && gate === "running" && !examGateActive) {
+    return (
+      <Shell padTop={shellPadTop} variant="exam">
+        <ExamShellChrome
+          {...shellChromeProps}
+          hideStageHint
+          actions={
+            <span className="flex items-center gap-2">
+              <button
+                className="focus-ring flex items-center gap-1 rounded-md border border-white/25 px-2.5 py-1 text-xs font-medium text-white/85 hover:bg-white/10"
+                aria-expanded={proctorPanelOpen}
+                onClick={() => {
+                  // The panel opens at the top of the content — surface it even
+                  // when the candidate is scrolled deep into a problem.
+                  setProctorPanelOpen((open) => !open);
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                <ShieldCheck size={13} /> Proctoring {proctorPanelOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              </button>
+              <button
+                className="focus-ring flex items-center gap-1 rounded-md bg-danger px-2.5 py-1 text-xs font-semibold text-white hover:bg-danger/90"
+                onClick={() => {
+                  setEndRequested(true);
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }}
+              >
+                <Square size={11} /> End test
+              </button>
+            </span>
+          }
+        />
+        {enforcementOverlay}
+        {markerLayer}
+
+        {/* Functional notices only — nothing else sits above the workspace. */}
+        {examTimeNotice ? (
+          <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-ink">{examTimeNotice}</div>
+        ) : null}
+        {examTimeUp ? (
+          <div className="mb-5 rounded-lg border border-danger/40 bg-danger/10 p-4">
+            <p className="text-sm font-semibold text-danger">Time is up</p>
+            <p className="mt-1 text-sm leading-6 text-ink">The exam has ended. Stop working now and end your test from this page — your recording continues until you end it.</p>
+          </div>
+        ) : null}
+        {reloadWarning ? (
+          <div className="mb-5 rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm font-medium text-warning">{reloadWarning}</div>
+        ) : null}
+        {error ? (
+          <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div>
+        ) : null}
+        {endRequested ? (
+          <div className="mb-5 [&>*]:mt-0">
+            <EndTestPanel
+              assuranceAccepted={assuranceAccepted}
+              hasProblem={ownEditorCopy}
+              onAssuranceChange={setAssuranceAccepted}
+              onCancel={() => setEndRequested(false)}
+              onEnd={stop}
+            />
+          </div>
+        ) : null}
+
+        {/* The collapsible proctoring panel — ALWAYS MOUNTED (css-hidden when
+            collapsed) so no telemetry/preview host ever unmounts. */}
+        <div className={proctorPanelOpen ? "mb-5 space-y-5" : "hidden"}>
+          <div className="grid gap-5 lg:grid-cols-3">
+            <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
+            <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
+            <RulesPanel hasProblem={ownEditorCopy} />
+          </div>
+          <RecentEventsPanel events={events} />
+        </div>
+
+        {/* S4/S-I: the workspace — THE page (W1). Same conditions as before
+            the redesign: own-editor problems, live session, recording. */}
+        <MultiProblemWorkspace
+          sessionId={sessionId}
+          problems={sessionProblems}
+          submissionsSummary={sessionConfig?.submissions_summary}
+          submitBudget={sessionConfig?.submit_budget ?? null}
+        />
+
+        <CameraDock
+          videoRef={attachCameraVideo}
+          mediaCapture={mediaCapture}
+          cameraRecorded={cameraRecordingOn}
+          collapsed={cameraDockCollapsed}
+          onToggle={() => setCameraDockCollapsed((collapsed) => !collapsed)}
+        />
+      </Shell>
+    );
+  }
+
   return (
-    <Shell>
-      <StudentStepBanner gate={gate} status={status} />
-      {status === "recording" || status === "ending" ? (
-        <TimerBar status={status} elapsedSeconds={elapsedSeconds} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
-      ) : null}
+    <Shell padTop={shellPadTop}>
+      {shellChrome}
+      {enforcementOverlay}
+      {markerLayer}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
+
+      {/* S5: end-time change notice + time-up banner. The countdown itself lives
+          in the shell's ExamTopBar (the S1 replacement for the old TimerBar). */}
+      {examTimeNotice && (status === "recording" || status === "ending") ? (
+        <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-ink">{examTimeNotice}</div>
+      ) : null}
+      {examTimeUp && status === "recording" ? (
+        <div className="mb-5 rounded-lg border border-danger/40 bg-danger/10 p-4">
+          <p className="text-sm font-semibold text-danger">Time is up</p>
+          <p className="mt-1 text-sm leading-6 text-ink">The exam has ended. Stop working now and end your test from this page — your recording continues until you end it.</p>
+        </div>
+      ) : null}
 
       {/* Pre-start: the rules are the headline, not a sidebar afterthought. The
           candidate reads exactly what is required and what is recorded before the
           form, so the rules are unmissable. */}
-      {isFormStage ? <PreStartRules /> : null}
+      {isFormStage ? <PreStartRules hasProblem={ownEditorCopy} /> : null}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
         <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+                Aerele Proctor{pinned ? ` — ${pinned.config.contest_name}` : ""}
+              </p>
               <h1 className="mt-2 text-2xl font-semibold text-ink">
-                {isFormStage ? "Register and start recording" : "HackerRank companion recording"}
+                {isFormStage ? "Register and start recording" : activeProblem ? "Proctored coding test" : "HackerRank companion recording"}
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
                 {isFormStage
-                  ? "Enter your details below, then start proctoring before you open the contest. When you start, your browser will ask which screen to share — choose Entire Screen."
-                  : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
+                  ? studentCopy.formStageIntro(ownEditorCopy)
+                  : activeProblem
+                    // UX-H3: with a problem assigned but recording down (share
+                    // dropped / resume pending), "solve the problem below" points
+                    // at a hidden workspace — name the paused state and the fix.
+                    ? status === "recording" || status === "ending"
+                      ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
+                      : "Your exam is paused — your work is saved. Restart your screen share below to get back to your code."
+                    : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
               </p>
             </div>
             <StatusPill status={status} />
@@ -799,26 +1720,106 @@ function StudentApp() {
 
           {isFormStage ? (
             <>
-              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field label="HackerRank username" value={form.hackerrank_username} onChange={(value) => setForm({ ...form, hackerrank_username: value })} />
-                <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
-                <Field label="Roll number" value={form.roll_number} onChange={(value) => setForm({ ...form, roll_number: value })} />
-                <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
-                <Field label="Room number" value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
-              </div>
-
-              <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
-                <input
-                  className="mt-1 h-4 w-4 accent-accent"
-                  type="checkbox"
-                  checked={form.consent_accepted}
-                  onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
+              {/* S2 (legacy contests only): the roster-lookup confirm flow.
+                  Person contests resolve the typed id SERVER-side at start —
+                  there is no public per-contest lookup endpoint by design. */}
+              {formMode === "legacy" && rosterRequired ? (
+                <IdentityLookupPanel
+                  label={examConfig?.unique_id_label ?? ""}
+                  value={uniqueIdInput}
+                  onChange={setUniqueIdInput}
+                  busy={lookupBusy}
+                  cooldown={lookupCooldownActive}
+                  error={lookupError}
+                  match={rosterMatch}
+                  confirmed={rosterConfirmed}
+                  confirmedId={form.roster_unique_id}
+                  onLookup={() => void lookupRosterId()}
+                  onConfirm={confirmRosterMatch}
+                  onReject={rejectRosterMatch}
+                  onReset={resetRosterIdentity}
                 />
-                <span>
-                  I have read the rules above and consent to screen recording and, where available, camera and microphone recording for this hiring assessment. I understand that suspicious activity, stopped recording, copied code, or failed verification may lead to disqualification.
-                </span>
-              </label>
+              ) : null}
+              {!rosterGateActive ? (
+                <>
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {formMode === "person_roster" ? (
+                      <>
+                        {/* S-D label-driven identity (F9 §1.5): ONE typed id —
+                            the server resolves the rest from the contest
+                            roster at start (name/roll/email never typed). */}
+                        <Field
+                          label={examConfig?.unique_id_label || "Candidate ID"}
+                          value={form.roster_unique_id}
+                          onChange={(value) => setForm({ ...form, roster_unique_id: value, candidate_id: value })}
+                        />
+                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                      </>
+                    ) : formMode === "person_open" ? (
+                      <>
+                        {/* No-roster person contest (F9 §1.4): id + name +
+                            email — no separate roll field (the identity label
+                            is often "Roll Number" itself). */}
+                        <Field label={examConfig?.unique_id_label || "Candidate ID"} value={form.candidate_id} onChange={(value) => setForm({ ...form, candidate_id: value })} />
+                        <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
+                        <Field label="Email" type="text" inputMode="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                      </>
+                    ) : (
+                      <>
+                        <Field label="Candidate ID" value={form.candidate_id} disabled={rosterConfirmed && Boolean(candidateIdOf(rosterMatch))} onChange={(value) => setForm({ ...form, candidate_id: value })} />
+                        <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
+                        <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
+                        <Field label="Email" type="text" inputMode="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
+                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
+                      </>
+                    )}
+                  </div>
+                  {formMode === "person_roster" ? (
+                    <p className="mt-2 text-xs text-muted">
+                      Your name and details come from the official list — type your {examConfig?.unique_id_label || "ID"} exactly as registered.
+                    </p>
+                  ) : null}
+
+                  {/* S-C/S-D: genuine ambiguity — the typed id exists under
+                      more than one college. The pick rides the retried start. */}
+                  {collegeChoices ? (
+                    <div className="mt-5 rounded-lg border border-warning/40 bg-warning/10 p-4">
+                      <p className="text-sm font-semibold text-ink">Select your college</p>
+                      <p className="mt-1 text-sm leading-6 text-muted">
+                        Your {examConfig?.unique_id_label || "ID"} is registered under more than one college. Pick yours, then press Start again.
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {collegeChoices.map((choice) => (
+                          <label key={choice.college_norm} className="flex items-center gap-3 rounded-md border border-line bg-white/60 px-3 py-2 text-sm">
+                            <input
+                              type="radio"
+                              name="college-choice"
+                              className="h-4 w-4 accent-accent"
+                              checked={collegeChoice === choice.college_norm}
+                              onChange={() => setCollegeChoice(choice.college_norm)}
+                            />
+                            <span className="font-medium text-ink">{choice.name || choice.college || choice.college_norm}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
+                    <input
+                      className="mt-1 h-4 w-4 accent-accent"
+                      type="checkbox"
+                      checked={form.consent_accepted}
+                      onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
+                    />
+                    <span>
+                      {studentCopy.consentDisclosure(ownEditorCopy, cameraRecordingOn)}
+                    </span>
+                  </label>
+                </>
+              ) : null}
             </>
           ) : null}
 
@@ -827,6 +1828,7 @@ function StudentApp() {
           {startError ? (
             <ScreenShareErrorPanel
               startError={startError}
+              stopped={gate === "running"}
               busy={status === "starting"}
               onRetry={retryScreenShare}
               onDismiss={() => setStartError(null)}
@@ -850,10 +1852,6 @@ function StudentApp() {
             </div>
           ) : null}
 
-          {checkpoint ? (
-            <IntegrityCheckpointPanel checkpoint={checkpoint} onConfirm={confirmCheckpoint} />
-          ) : null}
-
           <div className="mt-5 flex flex-wrap gap-3">
             {/* While the recoverable share-error panel is up it owns the retry, so
                 we hide the duplicate Start/Resume buttons to avoid two CTAs. */}
@@ -868,12 +1866,10 @@ function StudentApp() {
                 <MonitorUp size={16} /> {status === "starting" ? "Resuming…" : "Resume recording"}
               </button>
             ) : null}
-            {status === "recording" && pipAvailable ? (
-              <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium" onClick={requestCameraPictureInPicture}>
-                <PictureInPicture2 size={16} /> Camera pop-out
-              </button>
-            ) : null}
-            {status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error ? (
+            {/* Legacy external-contest fallback: shown ONLY when no SERVER
+                problem is assigned. With a problem assigned the own-editor
+                CodingWorkspace below replaces this link entirely. */}
+            {!activeProblem && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error && !examGateActive ? (
               <a
                 className="focus-ring inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white"
                 href={contestUrl}
@@ -893,6 +1889,7 @@ function StudentApp() {
           {endRequested && status === "recording" ? (
             <EndTestPanel
               assuranceAccepted={assuranceAccepted}
+              hasProblem={ownEditorCopy}
               onAssuranceChange={setAssuranceAccepted}
               onCancel={() => setEndRequested(false)}
               onEnd={stop}
@@ -906,27 +1903,41 @@ function StudentApp() {
               so we show a compact preview of what monitoring will capture instead.
               Recording stage: the live panels take over. */}
           {isFormStage ? (
-            <WhatIsRecordedPanel />
+            <WhatIsRecordedPanel hasProblem={ownEditorCopy} />
           ) : (
             <>
-              <CameraSelfView videoRef={cameraVideoRef} mediaCapture={mediaCapture} pipMessage={pipMessage} onPopOut={requestCameraPictureInPicture} pipAvailable={pipAvailable} />
-              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} />
-              <EntryReviewPanel clipboardAudit={clipboardAudit} clipboardText={clipboardText} tabAudit={tabAudit} cookieAudit={cookieAudit} />
-              <RulesPanel />
+              <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} />
+              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
+              <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
+              <RulesPanel hasProblem={ownEditorCopy} />
             </>
           )}
         </aside>
       </div>
 
-      <section className="mt-5 rounded-lg border border-line bg-panel p-5">
-        <div className="mb-4 flex items-center gap-2">
-          <ClipboardList size={18} />
-          <h2 className="text-base font-semibold">Recent proctor events</h2>
+      {/* S3 room gate: recording runs while the candidate waits; the workspace
+          and the contest link stay hidden until the room code (or an
+          invigilator start-now) releases this session. */}
+      {status === "recording" && examGateActive ? (
+        <div className="mt-5">
+          <RoomCodePanel
+            room={identity?.room || ""}
+            code={gateCode}
+            error={gateError}
+            busy={gateBusy}
+            onCodeChange={(value) => setGateCode(normalizeOtpInput(value))}
+            onSubmit={() => void submitGateCode()}
+          />
         </div>
-        <div className="space-y-2">
-          {events.length ? events.map((event, index) => <EventRow key={`${event.timestamp}-${index}`} event={event} />) : <p className="text-sm text-muted">Events will appear after recording starts.</p>}
-        </div>
-      </section>
+      ) : null}
+
+      {/* S4/S-I: the own-editor workspace now renders in the dedicated W1
+          exam branch above (coding-central layout). This classic branch keeps
+          only the pre-start / waiting / legacy / error surfaces. */}
+
+      <div className="mt-5">
+        <RecentEventsPanel events={events} />
+      </div>
     </Shell>
   );
 }
@@ -940,62 +1951,9 @@ function createUiEvent(type: string, detail?: Record<string, unknown>): ProctorE
   };
 }
 
-// Guided step indicator (Epic 3): always shows the student where they are and
-// what the next action is, so they do not need to ask a proctor.
-function StudentStepBanner({ gate, status }: { gate: StudentGate; status: SessionStatus }) {
-  const steps = [
-    { key: "details", label: "Enter details" },
-    { key: "record", label: "Record + take test" },
-    { key: "end", label: "End test" }
-  ];
-  let activeIndex = 0;
-  let hint = "Fill in your details and consent, then start proctoring.";
-  if (status === "recording" || status === "ending") {
-    activeIndex = 1;
-    hint = "Recording is active. Open HackerRank with the Start test button and keep this tab running. End the test here when you submit.";
-  } else if (gate === "running") {
-    activeIndex = 1;
-    hint = "Your session was restored. Press Resume recording to share your screen again and continue.";
-  } else if (gate === "pending_approval") {
-    activeIndex = 1;
-    hint = "Waiting for a proctor to approve this device. Stay on this page.";
-  } else if (gate === "locked") {
-    activeIndex = 1;
-    hint = "Your session is locked. Call a proctor to unlock you.";
-  } else if (gate === "ended" || status === "ended") {
-    activeIndex = 2;
-    hint = "Your test is complete. You may close this tab.";
-  }
-
-  return (
-    <section className="mb-5 rounded-lg border border-line bg-panel p-4 shadow-subtle">
-      <div className="flex flex-wrap items-center gap-2">
-        {steps.map((step, index) => (
-          <div key={step.key} className="flex items-center gap-2">
-            <span
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${
-                index < activeIndex
-                  ? "border-accent/30 bg-accent/10 text-accent"
-                  : index === activeIndex
-                    ? "border-ink bg-ink text-white"
-                    : "border-line bg-white text-muted"
-              }`}
-            >
-              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-white/20 text-[10px]">{index + 1}</span>
-              {step.label}
-            </span>
-            {index < steps.length - 1 ? <span className="text-muted">›</span> : null}
-          </div>
-        ))}
-      </div>
-      <p className="mt-3 text-sm leading-6 text-muted">{hint}</p>
-    </section>
-  );
-}
-
 // Prominent identity confirmation (Epic 3): the student sees exactly who the
 // session is registered to before and during the test.
-function IdentityCard({ identity }: { identity: { name: string; username: string; room: string } }) {
+function IdentityCard({ identity }: { identity: { name: string; candidate_id: string; room: string } }) {
   return (
     <section className="mb-5 rounded-lg border border-accent/40 bg-accent/5 p-5 shadow-subtle">
       <div className="flex flex-wrap items-center gap-3">
@@ -1003,7 +1961,7 @@ function IdentityCard({ identity }: { identity: { name: string; username: string
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-accent">You are taking the test as</p>
           <p className="mt-1 text-lg font-semibold text-ink">
-            {identity.name} <span className="font-mono text-base text-muted">({identity.username})</span>
+            {identity.name} <span className="font-mono text-base text-muted">({identity.candidate_id})</span>
           </p>
           <p className="mt-1 text-sm text-muted">Room {identity.room || "—"} · Confirm this is you. If anything is wrong, call a proctor before continuing.</p>
         </div>
@@ -1033,29 +1991,71 @@ function BlockedScreen({ tone, icon, title, lines, onRefresh, error }: { tone: "
   );
 }
 
-function TimerBar({ status, elapsedSeconds, startIp, currentIp, ipChanged }: { status: SessionStatus; elapsedSeconds: number; startIp: string; currentIp: string; ipChanged: boolean }) {
+// F5.6 L2 candidate-side release: an ENFORCEMENT-locked session unlocks with
+// the room's dedicated UNLOCK code (minted on the invigilator portal — wave-2
+// fix: never the start code, which the candidate typed themselves to begin).
+// Admin locks never render this panel (locked_reason gate in the caller).
+function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; onUnlocked: () => void }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const submit = async () => {
+    setBusy(true);
+    setMessage("");
+    try {
+      await unlockEnforcementGate(sessionId, code.trim());
+      setCode("");
+      onUnlocked();
+    } catch (cause) {
+      const apiCode = (cause as ApiError)?.code;
+      setMessage(
+        apiCode === "invalid_code" ? "That code is not valid. Ask your room proctor to read it again — the unlock code is NOT the code you started with."
+          : apiCode === "too_many_attempts" ? "Too many attempts — this session can now only be unlocked by a proctor."
+            : apiCode === "no_unlock_code" ? "Your room proctor hasn't issued an unlock code yet. Ask them to generate one on their console, or to unlock you from there."
+              : apiCode === "not_enforcement_locked" ? "This lock can only be released by a proctor."
+                : cause instanceof Error ? cause.message : String(cause)
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className={`sticky top-0 z-10 mb-5 rounded-lg border px-4 py-3 text-white shadow-subtle ${ipChanged ? "border-danger/40 bg-danger" : "border-ink/10 bg-ink"}`}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <span className="text-sm font-semibold">Proctoring active</span>
-          <div className="mt-1 flex flex-wrap gap-2 text-xs text-white/80">
-            <span>Start IP: <span className="font-mono text-white">{startIp || "pending"}</span></span>
-            <span>Current IP: <span className="font-mono text-white">{currentIp || startIp || "pending"}</span></span>
-          </div>
-        </div>
-        <span className="font-mono text-lg font-semibold">{formatElapsed(elapsedSeconds)}</span>
-        <span className="rounded-full border border-white/20 px-3 py-1 text-xs uppercase">{ipChanged ? "ip changed" : status}</span>
+    <section className="mx-auto mt-5 max-w-xl rounded-lg border border-line bg-panel p-5 text-center shadow-subtle">
+      <p className="text-sm font-semibold text-ink">Have the unlock code?</p>
+      <p className="mt-1 text-sm leading-6 text-muted">Your room proctor can read you a 6-digit unlock code (from their proctor console) to unlock this session.</p>
+      <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
+        <input
+          className="focus-ring h-11 w-44 rounded-md border border-line bg-white px-3 text-center font-mono text-lg tracking-[0.3em]"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={6}
+          placeholder="000000"
+          value={code}
+          onChange={(event) => setCode(normalizeOtpInput(event.target.value))}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && isCompleteOtp(code) && !busy) void submit();
+          }}
+        />
+        <button
+          className="focus-ring inline-flex h-11 items-center gap-2 rounded-md bg-ink px-5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!isCompleteOtp(code) || busy}
+          onClick={() => void submit()}
+        >
+          <KeyRound size={16} /> Unlock
+        </button>
       </div>
-    </div>
+      {message ? <p className="mt-3 text-sm font-medium text-danger">{message}</p> : null}
+    </section>
   );
 }
 
-function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }: { assuranceAccepted: boolean; onAssuranceChange: (value: boolean) => void; onCancel: () => void; onEnd: () => void }) {
+function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCancel, onEnd }: { assuranceAccepted: boolean; hasProblem: boolean; onAssuranceChange: (value: boolean) => void; onCancel: () => void; onEnd: () => void }) {
   return (
     <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4">
       <p className="text-sm font-semibold text-danger">End test confirmation</p>
-      <p className="mt-1 text-sm leading-6 text-ink">End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below.</p>
+      <p className="mt-1 text-sm leading-6 text-ink">{studentCopy.endTestConfirmation(hasProblem)}</p>
       <label className="mt-4 flex gap-3 rounded-md border border-line bg-white/70 p-3 text-sm leading-6 text-muted">
         <input className="mt-1 h-4 w-4 accent-danger" type="checkbox" checked={assuranceAccepted} onChange={(event) => onAssuranceChange(event.target.checked)} />
         <span>I assure that I worked independently, did not copy, did not use AI/external help, and submitted only my own solution.</span>
@@ -1072,7 +2072,58 @@ function EndTestPanel({ assuranceAccepted, onAssuranceChange, onCancel, onEnd }:
   );
 }
 
-type AdminView = "stats" | "alerts" | "review" | "recordings" | "settings";
+// W3: AdminView + the grouped nav model live in admin/adminNav.ts.
+
+// A2: the status a stat-card drill-down filters the Sessions list to. Mirrors the
+// AdminStats card labels. "" = no status filter (the Total card). "disconnected"
+// has no literal session-doc status (it is a derived liveness state), so the
+// Sessions list treats it as the active sessions and shows an explanatory note.
+type SessionsStatusFilter = "" | "active" | "locked" | "pending_approval" | "ended" | "disconnected";
+
+// S3: the waiting room between "recording started" and "exam released". Shows a
+// big 6-digit entry (the invigilator writes the room code on the board) and
+// auto-advances when the invigilator opens the whole room.
+function RoomCodePanel(props: {
+  room: string;
+  code: string;
+  error: string;
+  busy: boolean;
+  onCodeChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const { room, code, error, busy, onCodeChange, onSubmit } = props;
+  return (
+    <section className="rounded-lg border border-accent/40 bg-accent/5 p-6 text-center shadow-subtle">
+      <KeyRound size={26} className="mx-auto text-accent" />
+      <h2 className="mt-3 text-xl font-semibold text-ink">Waiting for your room code</h2>
+      <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted">
+        Recording has started. Your invigilator will announce a 6-digit start code for room {room ? <strong>{room}</strong> : "(not set)"} just before the test begins. Enter it below — or simply wait: if your invigilator starts the whole room, this screen advances automatically.
+      </p>
+      <div className="mx-auto mt-4 flex max-w-xs items-center gap-3">
+        <input
+          className="focus-ring h-12 w-full rounded-md border border-line bg-white px-4 text-center text-2xl font-semibold tracking-[0.4em] text-ink"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          placeholder="000000"
+          value={code}
+          onChange={(event) => onCodeChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && isCompleteOtp(code) && !busy) onSubmit();
+          }}
+        />
+        <button
+          className="focus-ring inline-flex h-12 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!isCompleteOtp(code) || busy}
+          onClick={onSubmit}
+        >
+          {busy ? "Checking…" : "Start"}
+        </button>
+      </div>
+      {error ? <p className="mt-3 text-sm font-medium text-danger">{error}</p> : null}
+      <p className="mt-3 text-xs text-muted">Stay in this tab. Your screen is being recorded while you wait.</p>
+    </section>
+  );
+}
 
 function AdminApp() {
   const [view, setView] = useState<AdminView>("stats");
@@ -1089,15 +2140,49 @@ function AdminApp() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(false);
   const [alertsLoaded, setAlertsLoaded] = useState(false);
-  const [alertFilters, setAlertFilters] = useState<AlertFilters>({});
+  // S-D (A1): the global contest scope seeds from THIS TAB's URL ?contest=
+  // param, so two browser tabs run two parallel drives independently.
+  const [alertFilters, setAlertFilters] = useState<AlertFilters>(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("contest")?.trim() ?? "";
+    return fromUrl ? { contest_slug: fromUrl } : {};
+  });
+  // S-D: the contests list feeding the selector dropdown (and the Contests
+  // tab keeps it fresh via onContestsChanged).
+  const [adminContests, setAdminContests] = useState<ContestSummary[] | null>(null);
+  // One-shot guard: the single-open-contest auto-default applies once per tab.
+  const contestDefaultApplied = useRef(false);
   const [rooms, setRooms] = useState<string[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  // S5: exam-time card state. examEndAt/examSkewMs refresh from every stats
+  // response (incl. the 5 s auto-poll), so another admin's change shows live.
+  // endNowArmed = the two-click confirm for "End exam now".
+  const [examEndAt, setExamEndAt] = useState("");
+  const [examSkewMs, setExamSkewMs] = useState(0);
+  const [examTimeBusy, setExamTimeBusy] = useState(false);
+  const [endNowArmed, setEndNowArmed] = useState(false);
+  const [examTimeInput, setExamTimeInput] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [actionMessage, setActionMessage] = useState("");
   const [alertSettings, setAlertSettings] = useState<AlertSettings | null>(null);
   const [alertSettingsLoading, setAlertSettingsLoading] = useState(false);
   const [alertSettingsMessage, setAlertSettingsMessage] = useState("");
+  // S2: room labels for the student room dropdown, edited as comma-separated text.
+  const [roomsText, setRoomsText] = useState("");
+  // F10.1: camera-recording knobs. fps/width are TEXT state so a cleared field
+  // stays blank while typing; cameraRecordingFromForm maps blank/invalid text
+  // to the defaults at save time (never 0 — the wave-2 blank-saves-0 finding).
+  const [cameraRecEnabled, setCameraRecEnabled] = useState(true);
+  const [cameraFpsText, setCameraFpsText] = useState("10");
+  const [cameraWidthText, setCameraWidthText] = useState("640");
+  // OMR P1: screen-marker fiducials flag — default OFF (the live exam runs
+  // with this stack flag-off; only an explicit save turns it on).
+  const [screenMarkersEnabled, setScreenMarkersEnabled] = useState(false);
+  // Wave-3: the F5.3 enforcement knobs get the same TEXT-state treatment —
+  // clearing "Fullscreen exit limit" used to save 0 (lock on the FIRST exit)
+  // silently; enforcementSettingsFromForm maps blank/invalid to 20 s / 2 exits.
+  const [reentrySecondsText, setReentrySecondsText] = useState("20");
+  const [exitLimitText, setExitLimitText] = useState("2");
   // Review roster (multi-reviewer workflow): pasted usernames + the coverage
   // summary. `rosterUnavailable` flags a 404 (endpoint not deployed yet).
   const [rosterText, setRosterText] = useState("");
@@ -1106,7 +2191,47 @@ function AdminApp() {
   const [rosterMessage, setRosterMessage] = useState("");
   const [rosterUnavailable, setRosterUnavailable] = useState(false);
   const [exportingReviews, setExportingReviews] = useState(false);
+  // B: "Download all details" CSV button busy state (mirrors exportingReviews).
+  const [downloadingDetails, setDownloadingDetails] = useState(false);
+  // A2/A4: the GCS-free Sessions drill-down — its list, loading flag, and the
+  // status the active stat-card drilled into ("" = Total, no status filter).
+  const [sessionsList, setSessionsList] = useState<RecordingSession[] | null>(null);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsStatusFilter, setSessionsStatusFilter] = useState<SessionsStatusFilter>("");
+  const [sessionsUnavailable, setSessionsUnavailable] = useState(false);
+  // F6.3: the session whose detail card is open (a snapshot of the clicked row;
+  // the render prefers the fresh sessionsList match so the card tracks reloads).
+  const [detailSession, setDetailSession] = useState<RecordingSession | null>(null);
+  // F6.3 state-based deep link Sessions → Recordings: load this candidate (and
+  // prefer this exact session) when the Recordings tab mounts; one-shot (the
+  // RecordingReview consumes it and we clear it).
+  const [recordingDeepLink, setRecordingDeepLink] = useState<{ username: string; usernameNorm?: string; sessionId?: string } | null>(null);
+  // F6.3 one-shot client-side candidate filter for the alerts console ("View
+  // alerts" on the detail card). "" = off; cleared via the chip in the console.
+  const [alertCandidateFilter, setAlertCandidateFilter] = useState("");
 
+  // S7: IP report state — the report payload, scope (live = non-ended only),
+  // loading flag, and the 404-degrade marker (endpoint not deployed yet).
+  const [ipReport, setIpReport] = useState<IpReportResponse | null>(null);
+  const [ipReportLoading, setIpReportLoading] = useState(false);
+  const [ipScope, setIpScope] = useState<IpReportScope>("live");
+  const [ipReportUnavailable, setIpReportUnavailable] = useState(false);
+
+  // F6.4: ALL session docs (status "" = no filter) under the current contest
+  // scope, used by the alerts console to join each alert to its candidate's
+  // CURRENT session status so rows render only the actions valid for it.
+  // null = not loaded yet, sessions-list not deployed, OR the list came back
+  // truncated (live rows may be missing — joinableSessions) → rows fall back
+  // to the full action set (incomplete data must not lose admin capability).
+  const [alertSessions, setAlertSessions] = useState<RecordingSession[] | null>(null);
+  // F6 review: true when the last sessions-list fetch FAILED (non-404). With
+  // no join data to keep, rows degrade to archive-only + a "session status
+  // unavailable" note (alertJoinState) instead of guessing at actions.
+  const [alertSessionsFailed, setAlertSessionsFailed] = useState(false);
+
+  // F6 review: the join fetch is DECOUPLED from the alerts load — a failing
+  // sessions-list must never blank the alerts console (the join is an
+  // enhancement; the alerts are the product).
   const loadAlerts = async (filters?: AlertFilters) => {
     setAlertsLoading(true);
     setError("");
@@ -1121,6 +2246,24 @@ function AdminApp() {
     } finally {
       setAlertsLoading(false);
     }
+    await loadAlertSessions(filters);
+  };
+
+  // F6.4: refresh the status-join data for the alerts console. Errors are
+  // non-fatal (the join is an enhancement; alerts stay usable without it); a
+  // 404 or a TRUNCATED list maps to null via joinableSessions → rows fall back
+  // to the full action set rather than trusting an incomplete join.
+  const loadAlertSessions = async (filters?: AlertFilters) => {
+    try {
+      const active = filters ?? alertFilters;
+      const list = await fetchSessionsList(password, { status: "", contestSlug: active.contest_slug });
+      setAlertSessions(joinableSessions(list));
+      setAlertSessionsFailed(false);
+    } catch {
+      // Keep any previous join data — stale statuses beat dropping the buttons.
+      // The failed flag only bites when there is nothing kept (alertJoinState).
+      setAlertSessionsFailed(true);
+    }
   };
 
   const loadStats = async (filters?: AlertFilters) => {
@@ -1132,11 +2275,137 @@ function AdminApp() {
       const active = filters ?? alertFilters;
       const response = await fetchAdminStats(password, active.contest_slug, active.room);
       setStats(response.stats);
+      captureExamTime(response);
       if (response.rooms) setRooms(response.rooms);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setStatsLoading(false);
+    }
+  };
+
+  // S5: capture the exam end time + clock skew from a stats response. Skew is
+  // computed at receipt time (server_now vs local now) — recomputing later
+  // against a stale stamp would drift.
+  const captureExamTime = (response: AdminStatsResponse) => {
+    if (response.end_at === undefined) return; // backend without S5 yet
+    setExamEndAt(response.end_at);
+    setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
+  };
+
+  // F3 (E2E live): the Live exam-time card follows the GLOBAL contest scope.
+  // Where its display value comes from and where its quick-actions write:
+  //   - no scope            → the legacy settings schedule (clearly labeled)
+  //   - scoped, legacy row  → same legacy schedule (the synthesized contest IS
+  //                           the settings doc)
+  //   - scoped, real row    → THAT contest's window via contest-exam-time —
+  //                           the same API the Contest → Detail panel uses
+  //   - scoped, unknown slug (deep link / list still loading) → editor disabled,
+  //     never silently writing the wrong schedule
+  const examTimeScope: ExamTimeCardScope = (() => {
+    const slug = alertFilters.contest_slug ?? "";
+    if (!slug) return { kind: "legacy" as const };
+    const match = (adminContests ?? []).find((contest) => contest.slug === slug) ?? null;
+    if (!match) return { kind: "unknown" as const, slug };
+    return match.legacy ? { kind: "legacy" as const, slug } : { kind: "contest" as const, slug };
+  })();
+
+  // S5: apply an exam-time change; outcomes surface through the existing
+  // actionMessage banner, and stats reload so counts reflect an end-now.
+  // F3: a scoped real contest writes through contest-exam-time (its OWN
+  // end_at + end-now sweep over ITS sessions); legacy keeps /api/admin/exam-time.
+  const runExamTime = async (body: ExamTimeRequest) => {
+    if (examTimeScope.kind === "unknown") {
+      setError(`Contest "${examTimeScope.slug}" is not in the contests list — exam-time controls are disabled for this scope.`);
+      return;
+    }
+    setExamTimeBusy(true);
+    setError("");
+    setActionMessage("");
+    try {
+      const response = examTimeScope.kind === "contest"
+        ? await adjustContestExamTime(password, examTimeScope.slug, body)
+        : await adjustExamTime(password, body);
+      setExamEndAt(response.end_at);
+      setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
+      setEndNowArmed(false);
+      setExamTimeInput("");
+      setActionMessage(body.end_now
+        ? `Exam ended — ${response.ended_count} live session(s) force-ended. Students see the end within ~15 seconds.`
+        : `Exam end time set to ${new Date(response.end_at).toLocaleString()}. Students see it within ~15 seconds.`);
+      await loadStats();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExamTimeBusy(false);
+    }
+  };
+
+  // A2/A4: load the GCS-free Sessions drill-down list from the sessions-list
+  // endpoint, which returns ALL session docs classified by the SAME rules as the
+  // stat cards (so the list matches the card counts) and reaches zero-chunk
+  // pending_approval sessions the recorded-chunks-only picker would hide. The status
+  // is SERVER-driven: callers pass it explicitly via statusOverride to dodge the
+  // setState race (drillToSessions / the status dropdown set the filter state and
+  // load in the same tick, so reading sessionsStatusFilter here would be stale).
+  // A null response means the sessions-list endpoint is not deployed yet → the
+  // Sessions view shows a "not available" note.
+  const loadSessions = async (filters?: AlertFilters, statusOverride?: SessionsStatusFilter) => {
+    setSessionsLoading(true);
+    setError("");
+    try {
+      const active = filters ?? alertFilters;
+      const status = statusOverride ?? sessionsStatusFilter;
+      const list = await fetchSessionsList(password, {
+        status,
+        contestSlug: active.contest_slug,
+        room: active.room
+      });
+      if (list === null) {
+        setSessionsUnavailable(true);
+        setSessionsList([]);
+        return;
+      }
+      setSessionsUnavailable(false);
+      setSessionsList(list.sessions);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSessionsLoading(false);
+    }
+  };
+
+  // A2: open the Sessions drill-down from a clicked stat card. Sets the status
+  // filter, switches to the Sessions view, and loads the list under the current
+  // contest scope. The chosen status is passed EXPLICITLY into loadSessions so the
+  // right status loads without depending on the just-set (and still-stale) state.
+  const drillToSessions = (status: SessionsStatusFilter) => {
+    setSessionsStatusFilter(status);
+    setView("sessions");
+    void loadSessions(undefined, status);
+  };
+
+  // S7: load the IP-wise report. The scope is passed EXPLICITLY (same
+  // stale-state dodge as loadSessions); the contest scope follows the global
+  // filter. A null response = endpoint not deployed → "unavailable" note.
+  const loadIpReport = async (scopeOverride?: IpReportScope, filters?: AlertFilters) => {
+    setIpReportLoading(true);
+    setError("");
+    try {
+      const active = filters ?? alertFilters;
+      const scope = scopeOverride ?? ipScope;
+      const report = await fetchIpReport(password, { contestSlug: active.contest_slug, scope });
+      if (report === null) {
+        setIpReportUnavailable(true);
+        setIpReport(null);
+        return;
+      }
+      setIpReportUnavailable(false);
+      setIpReport(report);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setIpReportLoading(false);
     }
   };
 
@@ -1147,24 +2416,65 @@ function AdminApp() {
     void (async () => {
       setAlertsLoading(true);
       setError("");
-      try {
-        const response = await fetchAlerts(password, alertFilters);
-        if (cancelled) return;
+      // F6.4: the status-join data loads alongside the alerts themselves so the
+      // first render already shows the contextual action buttons. F6 review:
+      // the two fetches are DECOUPLED (allSettled) — a non-404 sessions-list
+      // failure must not blank the console; the alerts render and the rows
+      // degrade per alertJoinState (archive-only + note).
+      const [alertsResult, sessionsResult] = await Promise.allSettled([
+        fetchAlerts(password, alertFilters),
+        fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
+      ]);
+      if (cancelled) return;
+      if (alertsResult.status === "fulfilled") {
+        const response = alertsResult.value;
         const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
         setAlerts(sorted);
         if (response.rooms) setRooms(response.rooms);
         setAlertsLoaded(true);
-      } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-      } finally {
-        if (!cancelled) setAlertsLoading(false);
+      } else {
+        const cause = alertsResult.reason;
+        setError(cause instanceof Error ? cause.message : String(cause));
       }
+      if (sessionsResult.status === "fulfilled") {
+        setAlertSessions(joinableSessions(sessionsResult.value));
+        setAlertSessionsFailed(false);
+      } else {
+        setAlertSessionsFailed(true);
+      }
+      setAlertsLoading(false);
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, alertsLoaded, password]);
+
+  // S-D (A1): load the contests list for the selector once unlocked; apply the
+  // single-open-contest auto-default ONCE per tab (an explicit URL ?contest=
+  // always wins inside defaultContestSelection).
+  useEffect(() => {
+    if (!unlocked) return;
+    let cancelled = false;
+    void fetchContests(password, true)
+      .then((list) => {
+        if (cancelled) return;
+        setAdminContests(list);
+        if (!contestDefaultApplied.current) {
+          contestDefaultApplied.current = true;
+          const fromUrl = new URLSearchParams(window.location.search).get("contest")?.trim() ?? "";
+          const selection = defaultContestSelection(list, fromUrl);
+          if (selection && selection !== fromUrl) selectContest(selection);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAdminContests([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, password]);
 
   // Auto-load stats the first time the unlocked admin opens the stats tab.
   useEffect(() => {
@@ -1177,6 +2487,7 @@ function AdminApp() {
         const response = await fetchAdminStats(password, alertFilters.contest_slug, alertFilters.room);
         if (cancelled) return;
         setStats(response.stats);
+        captureExamTime(response);
         if (response.rooms) setRooms(response.rooms);
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -1205,14 +2516,32 @@ function AdminApp() {
           const response = await fetchAdminStats(password, alertFilters.contest_slug, alertFilters.room);
           if (cancelled) return;
           setStats(response.stats);
+          captureExamTime(response);
           if (response.rooms) setRooms(response.rooms);
         } else {
-          const response = await fetchAlerts(password, alertFilters);
+          // F6.4: the join data refreshes on the same cadence as the alerts so
+          // the contextual buttons track live status changes. F6 review:
+          // decoupled (allSettled) — one stream failing must not drop the other.
+          const [alertsResult, sessionsResult] = await Promise.allSettled([
+            fetchAlerts(password, alertFilters),
+            fetchSessionsList(password, { status: "", contestSlug: alertFilters.contest_slug })
+          ]);
           if (cancelled) return;
-          const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-          setAlerts(sorted);
-          if (response.rooms) setRooms(response.rooms);
-          setAlertsLoaded(true);
+          if (alertsResult.status === "fulfilled") {
+            const response = alertsResult.value;
+            const sorted = [...response.alerts].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+            setAlerts(sorted);
+            if (response.rooms) setRooms(response.rooms);
+            setAlertsLoaded(true);
+          }
+          if (sessionsResult.status === "fulfilled") {
+            setAlertSessions(joinableSessions(sessionsResult.value));
+            setAlertSessionsFailed(false);
+          } else {
+            // Keep any previous join data (stale beats dropping the buttons);
+            // the flag only bites when nothing was ever kept (alertJoinState).
+            setAlertSessionsFailed(true);
+          }
         }
       } catch {
         // Swallow poll errors so a transient failure doesn't spam the banner;
@@ -1267,8 +2596,19 @@ function AdminApp() {
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
+        room_gate_enabled: Boolean(response.room_gate_enabled),
+        enforcement_mode: response.enforcement_mode ?? "block",
+        problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
+      setReentrySecondsText(String(response.fullscreen_reentry_seconds ?? 20));
+      setExitLimitText(String(response.fullscreen_exit_limit ?? 2));
+      setRoomsText((response.rooms ?? []).join(", "));
+      const camera = normalizeCameraRecording(response.camera_recording);
+      setCameraRecEnabled(camera.enabled);
+      setCameraFpsText(String(camera.fps));
+      setCameraWidthText(String(camera.width));
+      setScreenMarkersEnabled(normalizeScreenMarkers(response.screen_markers).enabled);
       setSettingsMessage("Loaded current gate.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1285,14 +2625,39 @@ function AdminApp() {
       const response = await saveProctorSettings(password, {
         start_at: localInputToIso(settings.start_at),
         end_at: localInputToIso(settings.end_at),
-        contest_url: settings.contest_url
+        contest_url: settings.contest_url,
+        room_gate_enabled: settings.room_gate_enabled === true,
+        // Wave-3: blank/invalid text falls back to the defaults (20 s / 2
+        // exits, never 0) — clearing the exit-limit field must not silently
+        // persist the harshest setting (lock on the FIRST exit).
+        ...enforcementSettingsFromForm({ reentrySeconds: reentrySecondsText, exitLimit: exitLimitText }),
+        enforcement_mode: settings.enforcement_mode,
+        problem_id: settings.problem_id,
+        // F10.1: blank/invalid fps/width text falls back to the defaults here
+        // (never 0); the server normalizes again with the same rules.
+        camera_recording: cameraRecordingFromForm({ enabled: cameraRecEnabled, fps: cameraFpsText, width: cameraWidthText }),
+        // OMR P1: boolean-only flag (size/contrast are code constants).
+        screen_markers: { enabled: screenMarkersEnabled },
+        // parseRosterInput = the existing comma/newline split + trim + dedupe.
+        rooms: parseRosterInput(roomsText)
       });
       setSettings({
         start_at: isoToLocalInput(response.start_at),
         end_at: isoToLocalInput(response.end_at),
         contest_url: response.contest_url || "",
+        room_gate_enabled: Boolean(response.room_gate_enabled),
+        enforcement_mode: response.enforcement_mode ?? "block",
+        problem_id: response.problem_id || "",
         updated_at: response.updated_at
       });
+      setReentrySecondsText(String(response.fullscreen_reentry_seconds ?? 20));
+      setExitLimitText(String(response.fullscreen_exit_limit ?? 2));
+      setRoomsText((response.rooms ?? []).join(", "));
+      const savedCamera = normalizeCameraRecording(response.camera_recording);
+      setCameraRecEnabled(savedCamera.enabled);
+      setCameraFpsText(String(savedCamera.fps));
+      setCameraWidthText(String(savedCamera.width));
+      setScreenMarkersEnabled(normalizeScreenMarkers(response.screen_markers).enabled);
       setSettingsMessage("Saved. The time window is now the only start gate (no passcode).");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -1301,12 +2666,36 @@ function AdminApp() {
     }
   };
 
-  const search = async () => {
+  // S-D (A1): the review search is scoped by the GLOBAL contest selector like
+  // every other tab. `filters` mirrors loadStats/loadAlerts — selectContest
+  // passes the NEXT filters explicitly because setState is async.
+  // F4 (E2E live): a roster/person-mode candidate's STORED key is the
+  // person_id ("{college}~{uid}"), which the typed display id can never
+  // normalize to — so when the direct lookup comes back empty, resolve the
+  // typed id against the sessions list (the same stored-key join the
+  // Recordings picker uses) and re-query by the EXACT username_norm.
+  const search = async (filters?: AlertFilters) => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetchAdminSessions(username, password);
-      setResult(response.sessions);
+      const contestSlug = (filters ?? alertFilters).contest_slug;
+      const response = await fetchAdminSessions(username, password, contestSlug);
+      let sessions = response.sessions;
+      if (!sessions.length && username.trim()) {
+        const typed = username.trim().toLowerCase();
+        const list = await fetchSessionsList(password, { status: "", contestSlug }).catch(() => null);
+        const norms = [...new Set((list?.sessions ?? [])
+          .filter((row) => candidateIdOf(row).toLowerCase() === typed)
+          .map((row) => row.username_norm || "")
+          .filter(Boolean))];
+        // Same display id under several stored keys (e.g. two colleges sharing
+        // a roll number across contests when unscoped) → union a bounded few.
+        for (const norm of norms.slice(0, 3)) {
+          const resolved = await fetchAdminSessions(username, password, contestSlug, norm);
+          sessions = sessions.concat(resolved.sessions);
+        }
+      }
+      setResult(sessions);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -1316,14 +2705,16 @@ function AdminApp() {
 
   // Per-candidate or bulk remote action against the backend session-action API.
   // After it runs we refresh whatever data the current view is showing.
-  const runAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+  // F5.5: "exempt" carries an exemptions payload (merged server-side).
+  const runAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[]; exemptions?: EnforcementExemptions }) => {
     setError("");
     setActionMessage("");
     try {
       const response = await sessionAction(password, {
         action,
         ...(opts.sessionId ? { session_id: opts.sessionId } : {}),
-        ...(opts.usernames ? { usernames: opts.usernames } : {})
+        ...(opts.usernames ? { usernames: opts.usernames } : {}),
+        ...(opts.exemptions ? { exemptions: opts.exemptions } : {})
       });
       setActionMessage(`${action} applied to ${response.updated.length} session(s).`);
       await loadStats();
@@ -1336,17 +2727,14 @@ function AdminApp() {
   };
 
   const toggleSelected = (key: string) => {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setSelected((current) => toggleId(current, key));
   };
 
   // ARCHIVE a single alert (or a set of ids) then refresh the alerts list so the
   // change is visible immediately. In demo mode the api mutates the demo store, so
-  // the reload reflects the archive flag.
+  // the reload reflects the archive flag. F6.2: only the just-archived ids leave
+  // the selection — the rest survives (it's ids-based, so auto-refresh keeps it);
+  // unarchive keeps the selection so the admin can act on the restored alerts.
   const archiveAlerts = async (ids: string[], action: "archive" | "unarchive" = "archive") => {
     if (!ids.length) return;
     setError("");
@@ -1355,7 +2743,7 @@ function AdminApp() {
       const response = await alertAction(password, { action, ids });
       setActionMessage(`${action === "archive" ? "Archived" : "Unarchived"} ${response.updated.length} alert(s)${response.missing.length ? ` (${response.missing.length} missing)` : ""}.`);
       await loadAlerts();
-      setSelected(new Set());
+      if (action === "archive") setSelected((current) => removeFromSelection(current, ids));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -1363,24 +2751,111 @@ function AdminApp() {
 
   // APPROVE-then-ARCHIVE: the Approve button on an alert row both approves the
   // session (session-action) AND archives that alert (alert-action), orchestrated
-  // here on the frontend. runAction already refreshes stats/alerts afterward.
-  const approveAndArchive = async (alert: Alert) => {
+  // here on the frontend. F6.4: when the row's status-join resolved a DIFFERENT
+  // session than the alert references (e.g. the alert's session ended and the
+  // candidate has a newer pending one), the caller passes that joined session id
+  // so approve targets the session the buttons were rendered for — never an
+  // ended doc.
+  const approveAndArchive = async (alert: Alert, targetSessionId?: string) => {
     setError("");
     setActionMessage("");
     try {
+      const sessionId = targetSessionId ?? alert.session_id;
       await sessionAction(password, {
         action: "approve",
-        ...(alert.session_id ? { session_id: alert.session_id } : { usernames: [alert.hackerrank_username] }),
+        ...(sessionId ? { session_id: sessionId } : { usernames: [candidateIdOf(alert)] }),
         ...(alert.contest_slug ? { contest_slug: alert.contest_slug } : {})
       });
       await alertAction(password, { action: "archive", ids: [alert.id] });
-      setActionMessage(`Approved ${alert.hackerrank_username} and archived the alert.`);
+      setActionMessage(`Approved ${candidateIdOf(alert)} and archived the alert.`);
       await loadStats();
       await loadAlerts();
       setSelected(new Set());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
+  };
+
+  // A4: APPROVE a pending session from the Sessions drill-down. Reuses the
+  // sessionAction plumbing ({action:'approve', session_id}), shows a transient
+  // success/error, then reloads the Sessions list and the live stats.
+  const approveSession = async (session: RecordingSession) => {
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await sessionAction(password, { action: "approve", session_id: session.session_id });
+      setActionMessage(`Approved ${candidateIdOf(session)} (${response.updated.length} session(s)).`);
+      await loadSessions();
+      await loadStats();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  // ---- F6.3 Session detail card ------------------------------------------
+  // Open the card for a clicked Sessions row. Alerts are lazily loaded the
+  // first time a card opens so its "Alerts" stat can join the live alert list
+  // (the alerts tab may never have been visited yet).
+  const openSessionDetail = (session: RecordingSession) => {
+    setDetailSession(session);
+    if (!alertsLoaded && !alertsLoading) void loadAlerts();
+  };
+
+  // Run a session action from the detail card, then refresh the Sessions list
+  // (and stats/alerts via runAction) so the row + card reflect the new status.
+  const runDetailAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+    await runAction(action, opts);
+    await loadSessions();
+  };
+
+  // F8.1: "Open session card" from an IP-report candidate row — jump to the
+  // Sessions tab with the detail card seeded from the drill-down row (the
+  // fields the report carries; chunk_count arrives via the card's own
+  // session-detail fetch). The fresh sessions list loads in parallel and its
+  // row takes over as soon as it lands (same layering as a Sessions click).
+  const openSessionCardFromIp = (candidate: IpReportCandidate) => {
+    setView("sessions");
+    void loadSessions();
+    openSessionDetail({
+      session_id: candidate.session_id,
+      hackerrank_username: candidateIdOf(candidate),
+      name: candidate.name,
+      room: candidate.room,
+      contest_slug: ipReport?.contest_slug ?? "",
+      chunk_count: 0,
+      created_at: candidate.created_at,
+      status: candidate.status
+    });
+  };
+
+  // F8.1: a session action from the IP-report drill-down refreshes the report
+  // (and stats/alerts via runAction) so the row reflects the new status.
+  const runIpReportAction = async (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => {
+    await runAction(action, opts);
+    await loadIpReport();
+  };
+
+  // "View recording" — jump to the Recordings tab pre-scoped to this candidate
+  // and session (state-based deep link; RecordingReview consumes + clears it).
+  const jumpToRecording = (session: RecordingSession) => {
+    // FIX-B1: carry the STORED key (username_norm) so the player resolves
+    // person-mode sessions; candidate_id stays the display label. Older
+    // backends omit username_norm → loadUser falls back to candidate_id.
+    setRecordingDeepLink({
+      username: candidateIdOf(session),
+      usernameNorm: session.username_norm || undefined,
+      sessionId: session.session_id
+    });
+    setDetailSession(null);
+    setView("recordings");
+  };
+
+  // "View alerts" — jump to the Alerts tab filtered to this candidate (no
+  // server-side username filter exists, so it's a one-shot client-side filter).
+  const jumpToAlerts = (session: RecordingSession) => {
+    setAlertCandidateFilter(candidateIdOf(session));
+    setDetailSession(null);
+    setView("alerts");
   };
 
   const loadAlertSettings = async () => {
@@ -1447,7 +2922,7 @@ function AdminApp() {
         return;
       }
       setRosterUnavailable(false);
-      setRosterMessage(`Saved roster with ${result.count} username${result.count === 1 ? "" : "s"}.`);
+      setRosterMessage(`Saved roster with ${result.count} Candidate ID${result.count === 1 ? "" : "s"}.`);
       // Refresh the coverage summary after saving.
       const summary = await fetchReviewRoster(password);
       if (summary) {
@@ -1490,6 +2965,44 @@ function AdminApp() {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setExportingReviews(false);
+    }
+  };
+
+  // DOWNLOAD ALL DETAILS CSV: resolve a candidate-detail row for each pasted
+  // Candidate ID (POST /api/admin/session-details), build a CSV
+  // (header candidate_id,name,email,roll_number,room) with ONE row per INPUT
+  // Candidate ID (blank cells when the candidate was not found, so the operator
+  // sees who is missing), and trigger a client download — mirrors exportReviewsCsv.
+  const downloadDetailsCsv = async () => {
+    setDownloadingDetails(true);
+    setRosterMessage("");
+    setError("");
+    try {
+      const usernames = parseRosterInput(rosterText);
+      const details = await fetchSessionDetails(password, usernames, alertFilters.contest_slug);
+      if (details === null) {
+        setRosterUnavailable(true);
+        return;
+      }
+      setRosterUnavailable(false);
+      const csv = buildDetailsCsv(details);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "candidate-details.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const missing = details.filter((d) => !d.found).length;
+      setRosterMessage(
+        `Exported details for ${details.length} Candidate ID${details.length === 1 ? "" : "s"} to candidate-details.csv${missing ? ` (${missing} not found)` : ""}.`
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDownloadingDetails(false);
     }
   };
 
@@ -1541,6 +3054,36 @@ function AdminApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, alertSettings, password]);
 
+  // S-D (A1): apply a contest selection everywhere — state, the loaded tabs,
+  // and THIS TAB's URL (?contest=) so a reload or duplicated tab keeps its
+  // scope (two tabs = two parallel drives).
+  const selectContest = (slug: string) => {
+    const next = { ...alertFilters, contest_slug: slug || undefined };
+    setAlertFilters(next);
+    window.history.replaceState(null, "", `${window.location.pathname}${searchWithContestParam(window.location.search, slug)}`);
+    void loadStats(next);
+    if (alertsLoaded) void loadAlerts(next);
+    if (sessionsList !== null) void loadSessions(next);
+    if (ipReport !== null) void loadIpReport(undefined, next);
+    // The review search re-runs under the new scope (same condition as
+    // runAction's refresh) so displayed results never outlive the selector.
+    if (view === "review" && username) void search(next);
+  };
+
+  // W3: ONE navigation chokepoint for the grouped nav — carries the per-view
+  // load side effects the old flat tabs had inline. The per-group memory means
+  // switching sections returns to the view you were last on in that section
+  // (covers EVERY view change, including drill-downs, via the effect below).
+  const lastViewByGroup = useRef<Partial<Record<string, AdminView>>>({});
+  useEffect(() => {
+    lastViewByGroup.current[groupOfView(view).key] = view;
+  }, [view]);
+  const goTo = (next: AdminView) => {
+    setView(next);
+    if (next === "sessions") void loadSessions();
+    if (next === "ips") void loadIpReport();
+  };
+
   if (!unlocked) {
     return (
       <Shell>
@@ -1552,7 +3095,9 @@ function AdminApp() {
               <p className="mt-1 text-sm text-muted">Enter the admin password to view proctoring controls.</p>
             </div>
           </div>
-          <Field label="Admin password" type="password" value={passwordInput} onChange={setPasswordInput} />
+          <div onKeyDown={(e) => { if (e.key === "Enter" && passwordInput) void unlockAdmin(); }}>
+            <Field label="Admin password" type="password" value={passwordInput} onChange={setPasswordInput} />
+          </div>
           <button className="focus-ring mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={unlockAdmin} disabled={!passwordInput}>
             <Lock size={16} /> Unlock admin
           </button>
@@ -1564,41 +3109,162 @@ function AdminApp() {
 
   return (
     <Shell>
-      <nav className="mb-5 flex flex-wrap gap-2" aria-label="Admin views">
-        <AdminTab active={view === "stats"} onClick={() => setView("stats")} icon={<ShieldCheck size={16} />} label="Live stats" />
-        <AdminTab active={view === "alerts"} onClick={() => setView("alerts")} icon={<Bell size={16} />} label="Live alerts" badge={alerts.length} />
-        <AdminTab active={view === "review"} onClick={() => setView("review")} icon={<Search size={16} />} label="Review" />
-        <AdminTab active={view === "recordings"} onClick={() => setView("recordings")} icon={<Film size={16} />} label="Recordings" />
-        <AdminTab active={view === "settings"} onClick={() => setView("settings")} icon={<Lock size={16} />} label="Settings" />
-      </nav>
+      {/* W3: grouped admin nav. Top row: SECTIONS (left) + the global contest
+          scope (top-right — it scopes EVERY screen, so it sits ABOVE them all;
+          A1/S-D: the selection persists in this tab's URL ?contest= param).
+          Second row: the views of the active section (hidden for single-view
+          sections), so the header is never more than two slim rows. */}
+      <div className="mb-5 rounded-lg border border-line bg-panel shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-3 py-2">
+          <nav className="flex flex-wrap items-center gap-1" aria-label="Admin sections">
+            {ADMIN_NAV_GROUPS.map((group) => (
+              <GroupTab
+                key={group.key}
+                active={groupOfView(view).key === group.key}
+                onClick={() => goTo(lastViewByGroup.current[group.key] ?? group.views[0].view)}
+                icon={GROUP_ICONS[group.key]}
+                label={group.label}
+                badge={group.key === "live" ? alerts.length : undefined}
+              />
+            ))}
+          </nav>
+          <ContestScopePicker
+            contests={adminContests}
+            contestSlug={alertFilters.contest_slug ?? ""}
+            onSelect={selectContest}
+          />
+        </div>
+        {groupOfView(view).views.length > 1 ? (
+          <nav className="flex flex-wrap items-center gap-1 rounded-b-lg border-t border-line bg-paper/70 px-3 py-1.5" aria-label="Admin views">
+            {groupOfView(view).views.map((entry) => (
+              <AdminTab
+                key={entry.view}
+                active={view === entry.view}
+                onClick={() => goTo(entry.view)}
+                icon={VIEW_ICONS[entry.view]}
+                label={entry.label}
+                badge={entry.view === "alerts" ? alerts.length : undefined}
+              />
+            ))}
+          </nav>
+        ) : null}
+      </div>
 
       {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
       {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
 
       {view === "stats" ? (
-        <StatsDashboard
-          stats={stats}
-          loading={statsLoading}
-          onRefresh={() => loadStats()}
-          rooms={rooms}
-          room={alertFilters.room ?? ""}
-          onRoomChange={(room) => {
-            const next = { ...alertFilters, room: room || undefined };
-            setAlertFilters(next);
-            void loadStats(next);
+        <>
+          <ExamTimeCard
+            endAt={examEndAt}
+            skewMs={examSkewMs}
+            busy={examTimeBusy}
+            endNowArmed={endNowArmed}
+            onArmEndNow={setEndNowArmed}
+            absoluteInput={examTimeInput}
+            onAbsoluteInputChange={setExamTimeInput}
+            onAdjust={(body) => void runExamTime(body)}
+            scope={examTimeScope}
+          />
+          <StatsDashboard
+            stats={stats}
+            loading={statsLoading}
+            onRefresh={() => loadStats()}
+            rooms={rooms}
+            room={alertFilters.room ?? ""}
+            onRoomChange={(room) => {
+              const next = { ...alertFilters, room: room || undefined };
+              setAlertFilters(next);
+              void loadStats(next);
+            }}
+            onDrill={drillToSessions}
+          />
+        </>
+      ) : null}
+
+      {view === "sessions" ? (
+        <>
+          <SessionsView
+            sessions={sessionsList}
+            loading={sessionsLoading}
+            unavailable={sessionsUnavailable}
+            statusFilter={sessionsStatusFilter}
+            onStatusFilterChange={(status) => {
+              // The status filter is SERVER-side now: update the state AND reload the
+              // list with the new status passed explicitly (the state is still stale
+              // this tick), so the list re-matches the server-classified counts.
+              setSessionsStatusFilter(status);
+              void loadSessions(undefined, status);
+            }}
+            contestSlug={alertFilters.contest_slug ?? ""}
+            onRefresh={() => loadSessions()}
+            onApprove={(session) => void approveSession(session)}
+            onOpenDetail={openSessionDetail}
+          />
+          {/* F6.3: the detail card prefers the FRESH sessionsList row (reloads
+              after an action update it); the click-time snapshot is the fallback
+              when a status-filtered reload dropped the row from the list. */}
+          {detailSession ? (
+            <SessionDetailCard
+              password={password}
+              session={sessionsList?.find((s) => s.session_id === detailSession.session_id) ?? detailSession}
+              alerts={alerts}
+              alertsLoaded={alertsLoaded}
+              onClose={() => setDetailSession(null)}
+              onAction={runDetailAction}
+              onViewRecording={jumpToRecording}
+              onViewAlerts={jumpToAlerts}
+            />
+          ) : null}
+        </>
+      ) : null}
+
+      {view === "attendance" ? (
+        <AttendancePanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
+      ) : null}
+
+      {view === "results" ? (
+        <ResultsPanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
+      ) : null}
+
+      {/* People tab is CROSS-ROUND by design — it ignores the contest selector. */}
+      {view === "people" ? (
+        <PeoplePanel password={password} />
+      ) : null}
+
+      {view === "ips" ? (
+        <IpReportView
+          report={ipReport}
+          loading={ipReportLoading}
+          unavailable={ipReportUnavailable}
+          scope={ipScope}
+          onScopeChange={(scope) => {
+            setIpScope(scope);
+            void loadIpReport(scope);
           }}
+          contestSlug={alertFilters.contest_slug ?? ""}
+          onRefresh={() => loadIpReport()}
+          onAction={(action, opts) => void runIpReportAction(action, opts)}
+          onOpenSessionCard={openSessionCardFromIp}
         />
       ) : null}
 
       {view === "alerts" ? (
         <AlertsConsole
           alerts={alerts}
+          sessions={alertSessions}
+          sessionsFailed={alertSessionsFailed}
           loading={alertsLoading}
           loaded={alertsLoaded}
           filters={alertFilters}
           rooms={rooms}
+          candidateFilter={alertCandidateFilter}
+          onClearCandidateFilter={() => setAlertCandidateFilter("")}
           selected={selected}
           onToggleSelected={toggleSelected}
+          onSelectAll={(ids) => setSelected((current) => addAllToSelection(current, ids))}
+          onDeselectAll={(ids) => setSelected((current) => removeFromSelection(current, ids))}
+          onClearSelection={() => setSelected(new Set())}
           onFiltersChange={(next) => {
             setAlertFilters(next);
             void loadAlerts(next);
@@ -1606,9 +3272,21 @@ function AdminApp() {
           onRefresh={() => loadAlerts()}
           onAction={runAction}
           onArchive={(ids, action) => void archiveAlerts(ids, action)}
-          onApproveArchive={(alert) => void approveAndArchive(alert)}
+          onApproveArchive={(alert, targetSessionId) => void approveAndArchive(alert, targetSessionId)}
         />
       ) : null}
+
+      {view === "contests" ? (
+        <ContestsPanel
+          password={password}
+          renderRoster={(slug) => <CandidateRosterSection password={password} contestSlug={slug} />}
+          onContestsChanged={setAdminContests}
+        />
+      ) : null}
+
+      {view === "problems" ? <ProblemBankSection password={password} /> : null}
+
+      {view === "templates" ? <TemplatesPanel password={password} /> : null}
 
       {view === "settings" ? (
       <div className="space-y-5">
@@ -1621,9 +3299,93 @@ function AdminApp() {
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr]">
-          <Field label="Start time" type="datetime-local" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
-          <Field label="End time" type="datetime-local" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
+          <DateTimeField label="Start time" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
+          <DateTimeField label="End time" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
           <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
+          <Field label="Active problem ID" value={settings.problem_id ?? ""} onChange={(value) => setSettings({ ...settings, problem_id: value })} />
+          <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
+          {/* F5.3: fullscreen enforcement knobs. TEXT state (wave-3) so a
+              cleared field stays blank while typing; blank/invalid saves the
+              DEFAULTS (20 / 2), never 0 — the server normalizes again. */}
+          <Field
+            label="Fullscreen re-entry countdown (seconds, blank = 20)"
+            type="number"
+            value={reentrySecondsText}
+            onChange={setReentrySecondsText}
+          />
+          <Field
+            label="Fullscreen exit limit (exits beyond this lock, blank = 2)"
+            type="number"
+            value={exitLimitText}
+            onChange={setExitLimitText}
+          />
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">Enforcement mode</span>
+            <select
+              className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+              value={settings.enforcement_mode ?? "block"}
+              onChange={(event) => setSettings({ ...settings, enforcement_mode: event.target.value === "alert_first" ? "alert_first" : "block" })}
+            >
+              <option value="block">Block — countdown expiry / exit limit locks the test</option>
+              <option value="alert_first">Alert first — raise a critical alert, never auto-lock</option>
+            </select>
+          </label>
+          {/* F10.1: separate low-res camera recording. Default ON; tuned for
+              eye-movement evidence (glancing down at notes/a phone). Blank or
+              out-of-range fps/width saves the DEFAULT (10 / 640), never 0. */}
+          <div className="rounded-md border border-line bg-white/60 p-4 md:col-span-3">
+            <label className="flex items-start gap-3 text-sm leading-6 text-muted">
+              <input
+                className="mt-1 h-4 w-4 accent-accent"
+                type="checkbox"
+                checked={cameraRecEnabled}
+                onChange={(event) => setCameraRecEnabled(event.target.checked)}
+              />
+              <span>
+                <span className="font-medium text-ink">Camera recording (separate low-res stream)</span> — record the candidate's camera alongside the screen, low frame rate and resolution tuned to catch eye movement (repeated glances at notes or a phone). When off, the camera is live-monitored only and candidates are told so.
+              </span>
+            </label>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 md:max-w-md">
+              <Field
+                label={`Camera frame rate (fps, ${CAMERA_FPS_MIN}-${CAMERA_FPS_MAX})`}
+                type="number"
+                value={cameraFpsText}
+                onChange={setCameraFpsText}
+              />
+              <Field
+                label={`Camera width (px, ${CAMERA_WIDTH_MIN}-${CAMERA_WIDTH_MAX})`}
+                type="number"
+                value={cameraWidthText}
+                onChange={setCameraWidthText}
+              />
+            </div>
+            <p className="mt-2 text-xs text-muted">Blank or out-of-range values save the defaults (10 fps, 640 px). The camera picks its nearest supported resolution.</p>
+          </div>
+          {/* OMR P1: screen-marker fiducials flag — default OFF. Mirrors the
+              camera_recording toggle; v1 is boolean-only (size/contrast are
+              code constants until real recordings justify knobs). */}
+          <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
+            <input
+              className="mt-1 h-4 w-4 accent-accent"
+              type="checkbox"
+              checked={screenMarkersEnabled}
+              onChange={(event) => setScreenMarkersEnabled(event.target.checked)}
+            />
+            <span>
+              <span className="font-medium text-ink">Screen markers (overlay detection)</span> — render small tone-on-tone OMR-style markers at the edges and a few interior points of the candidate's exam screen. They ride into the screen recording so review-time analysis can detect windows drawn over the exam. Visual only — recording and telemetry behave exactly the same when off.
+            </span>
+          </label>
+          <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
+            <input
+              className="mt-1 h-4 w-4 accent-accent"
+              type="checkbox"
+              checked={settings.room_gate_enabled === true}
+              onChange={(event) => setSettings({ ...settings, room_gate_enabled: event.target.checked })}
+            />
+            <span>
+              <span className="font-medium text-ink">Room start codes (invigilator gate)</span> — after recording starts, candidates wait until their room's invigilator releases a 6-digit code (or presses "Start now") from <code>/invigilator</code>. Unchecking this releases everyone.
+            </span>
+          </label>
           <div className="mt-6 flex flex-wrap gap-3 md:col-span-3">
             <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={loadSettings} disabled={settingsLoading}>
               Load current
@@ -1637,17 +3399,25 @@ function AdminApp() {
         {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
       </section>
 
+      {/* S-C: the global contest filter (A1) doubles as the roster target until
+          the S-D selector lands — set it to a person contest's slug to upload
+          THAT contest's roster (college column compulsory); clear it for the
+          legacy global roster. */}
+      <CandidateRosterSection password={password} contestSlug={alertFilters.contest_slug ?? ""} />
+
       <ReviewRosterSection
         text={rosterText}
         onTextChange={setRosterText}
         summary={rosterSummary}
         loading={rosterLoading}
         exporting={exportingReviews}
+        downloadingDetails={downloadingDetails}
         message={rosterMessage}
         unavailable={rosterUnavailable}
         onSave={() => void saveReviewRosterNow()}
         onReload={() => void loadReviewRoster()}
         onExport={() => void exportReviewsCsv()}
+        onDownloadDetails={() => void downloadDetailsCsv()}
       />
 
       <ProctorAlertTypesSection
@@ -1669,12 +3439,12 @@ function AdminApp() {
           <Search size={20} />
           <div>
             <h1 className="text-2xl font-semibold">Review dashboard</h1>
-            <p className="mt-1 text-sm text-muted">Search by HackerRank username to inspect sessions, events, and uploaded evidence — and run remote actions.</p>
+            <p className="mt-1 text-sm text-muted">Search by Candidate ID to inspect sessions, events, and uploaded evidence — and run remote actions.</p>
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-          <Field label="HackerRank username" value={username} onChange={setUsername} />
-          <button className="focus-ring mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={search} disabled={loading || !username || !password}>
+          <Field label="Candidate ID" value={username} onChange={setUsername} />
+          <button className="focus-ring mt-6 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={() => void search()} disabled={loading || !username || !password}>
             <Search size={16} /> Search
           </button>
         </div>
@@ -1688,9 +3458,451 @@ function AdminApp() {
       </>
       ) : null}
 
-      {view === "recordings" ? <RecordingReview password={password} /> : null}
+      {view === "recordings" ? (
+        <RecordingReview
+          password={password}
+          contestSlug={alertFilters.contest_slug}
+          deepLink={recordingDeepLink}
+          onDeepLinkConsumed={() => setRecordingDeepLink(null)}
+        />
+      ) : null}
     </Shell>
   );
+}
+
+// SETTINGS tab — S2 candidate roster upload. The admin picks a CSV/TSV file, we
+// parse it CLIENT-SIDE (roster/parseRoster.ts), preview the first rows, choose
+// the unique-ID column (+ optional identity-field mappings, pre-suggested from
+// the headers), and POST structured rows to /api/admin/roster. While a roster
+// is configured, student login REQUIRES a roster match (enforced server-side).
+//
+// S-C: when `contestSlug` names a person contest the upload goes down the
+// person-layer pipeline — the college column is COMPULSORY, unknown colleges
+// block on a map-or-confirm panel (vision §2.2), and duplicate (college,
+// unique_id) rows hard-reject the whole file with row numbers (vision §2.8).
+function CandidateRosterSection({ password, contestSlug }: { password: string; contestSlug: string }) {
+  const [status, setStatus] = useState<RosterStatus | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [parsed, setParsed] = useState<ParsedRoster | null>(null);
+  const [fileName, setFileName] = useState("");
+  const [uniqueIdColumn, setUniqueIdColumn] = useState("");
+  const [mapping, setMapping] = useState<RosterFieldMapping>({});
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  // F-D (KPR 2026-06-12): warn-only unique-ID shape warnings from the upload.
+  const [idWarnings, setIdWarnings] = useState<string[]>([]);
+  // S-C panels: the college map-or-confirm gate + per-college decisions
+  // ("" = create new, otherwise the existing college_norm to map onto), and
+  // the duplicate hard-reject rows.
+  const [collegeGate, setCollegeGate] = useState<{ new_colleges: NewCollegePreview[]; known_colleges: KnownCollege[] } | null>(null);
+  const [collegeDecisions, setCollegeDecisions] = useState<Record<string, string>>({});
+  const [duplicates, setDuplicates] = useState<RosterDuplicate[] | null>(null);
+
+  const contest = contestSlug.trim();
+
+  const resetPanels = () => {
+    setCollegeGate(null);
+    setCollegeDecisions({});
+    setDuplicates(null);
+    setIdWarnings([]);
+  };
+
+  const refresh = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const next = await fetchRosterStatus(password, contest || undefined);
+      if (next === null) setUnavailable(true);
+      else {
+        setUnavailable(false);
+        setStatus(next);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    resetPanels();
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contest]);
+
+  const onFile = async (file: File | null) => {
+    setMessage("");
+    setError("");
+    resetPanels();
+    if (!file) return;
+    const text = await file.text();
+    const result = parseRoster(text);
+    if (!result.columns.length || !result.rows.length) {
+      setParsed(null);
+      setError(result.errors[0] || "Could not read any rows from that file.");
+      return;
+    }
+    const suggestion = suggestMapping(result.columns);
+    setParsed(result);
+    setFileName(file.name);
+    setUniqueIdColumn(suggestion.uniqueIdColumn);
+    setMapping(suggestion.mapping);
+  };
+
+  const upload = async (resolutions?: Record<string, CollegeResolution>) => {
+    if (!parsed || !uniqueIdColumn) return;
+    setBusy(true);
+    setMessage("");
+    setError("");
+    setDuplicates(null);
+    try {
+      const response = await uploadRoster(password, {
+        ...(contest ? { contest } : {}),
+        unique_id_column: uniqueIdColumn,
+        columns: parsed.columns,
+        column_mapping: mapping,
+        rows: parsed.rows,
+        ...(resolutions ? { college_resolutions: resolutions } : {})
+      });
+      if (response === null) {
+        setUnavailable(true);
+        return;
+      }
+      // S-C college gate: the upload BLOCKED on unknown colleges — render the
+      // map-or-confirm panel and keep the parsed file for the re-post.
+      if (response.needs_college_confirmation) {
+        setCollegeGate({ new_colleges: response.new_colleges ?? [], known_colleges: response.known_colleges ?? [] });
+        setCollegeDecisions(Object.fromEntries((response.new_colleges ?? []).map((c) => [c.college_norm, ""])));
+        return;
+      }
+      resetPanels();
+      setIdWarnings((response.id_shape_warnings ?? []).map((w) => w.message));
+      const skipped = response.skipped ?? [];
+      const personSummary = contest && response.enrollments
+        ? ` Colleges created: ${(response.colleges_created ?? []).length}; enrollments +${response.enrollments.created}/${response.enrollments.reactivated} reactivated/${response.enrollments.removed} removed.`
+        : "";
+      const ambiguous = (response.ambiguous_ids ?? []).length;
+      setMessage(
+        `Roster saved: ${response.count ?? 0} students` +
+        (skipped.length ? `; ${skipped.length} row(s) skipped (${summarizeSkipped(skipped)})` : "") +
+        (ambiguous ? `; ${ambiguous} id(s) exist under multiple colleges — those candidates pick their college at login` : "") +
+        ". Student login now requires a roster match." + personSummary
+      );
+      setParsed(null);
+      setFileName("");
+      await refresh();
+    } catch (cause) {
+      const apiError = cause as ApiError;
+      // S-C duplicate hard-reject: the whole file bounced — show the rows.
+      if (apiError?.code === "duplicate_unique_ids" && Array.isArray(apiError.body?.duplicates)) {
+        setDuplicates(apiError.body.duplicates as RosterDuplicate[]);
+        setError("Duplicate candidates in the file — fix the rows below and re-upload. Nothing was saved.");
+        return;
+      }
+      if (apiError?.code === "college_required" && Array.isArray(apiError.body?.rows)) {
+        setError(`The college cell is blank on row(s) ${(apiError.body.rows as number[]).join(", ")} — every row needs a college. Nothing was saved.`);
+        return;
+      }
+      if (apiError?.code === "college_column_required") {
+        setError("This contest requires a college column — map one under \"College column\" (or add a 'college' header to the file).");
+        return;
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmColleges = () => {
+    if (!collegeGate) return;
+    void upload(buildCollegeResolutions(collegeDecisions));
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    setMessage("");
+    setError("");
+    try {
+      // F-B (KPR 2026-06-12): a LIVE contest with sessions/enrollments refuses
+      // the clear until the admin types the contest slug — the server's 409
+      // carries the exact consequence, shown verbatim in the dialog.
+      let response: { ok: boolean } | null;
+      try {
+        response = await clearRoster(password, contest || undefined);
+      } catch (cause) {
+        const apiError = cause as ApiError;
+        if (apiError?.code !== "roster_clear_confirmation_required" || !contest) throw cause;
+        const consequence = String(
+          (apiError.body as { consequence?: string } | undefined)?.consequence
+          ?? "Existing sessions are keyed to roster persons; new joins will be keyed anonymously; Results will split."
+        );
+        const typed = window.prompt(`${consequence}
+
+Type the contest slug "${contest}" to clear the roster anyway:`);
+        if (typed === null || typed.trim() === "") return;
+        response = await clearRoster(password, contest, typed.trim());
+      }
+      if (response === null) {
+        setUnavailable(true);
+        return;
+      }
+      setMessage(contest
+        ? `Roster for contest "${contest}" cleared. Enrollments are kept — a re-upload reconciles them. Students joining from now on are keyed anonymously unless their typed ID exactly matches an enrolled person.`
+        : "Roster cleared — student login no longer requires a roster match.");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // F8.3: client-side template download — headers are EXACTLY the parser's
+  // accepted names (compulsory first), so the filled file re-uploads with
+  // every column auto-mapped and unique_id pre-picked as the ID column.
+  const downloadTemplate = () => {
+    const blob = new Blob([buildRosterTemplateCsv()], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "roster-template.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  const compulsoryHeaders = ROSTER_TEMPLATE_COLUMNS.filter((column) => column.required).map((column) => column.header);
+  const optionalHeaders = ROSTER_TEMPLATE_COLUMNS.filter((column) => !column.required).map((column) => column.header);
+
+  const mappingSelect = (field: keyof RosterFieldMapping, label: string) => (
+    <label className="block">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
+      <select
+        className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+        value={mapping[field] ?? ""}
+        onChange={(event) => setMapping({ ...mapping, [field]: event.target.value || undefined })}
+      >
+        <option value="">— not in this file —</option>
+        {(parsed?.columns ?? []).map((column) => (
+          <option key={column} value={column}>{column}</option>
+        ))}
+      </select>
+    </label>
+  );
+
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Users size={20} />
+          <div>
+            <h2 className="text-2xl font-semibold">Candidate roster</h2>
+            <p className="mt-1 text-sm text-muted">
+              Upload the student list (CSV/TSV, any columns) and pick the unique-ID column. While a roster is active, students must match it to log in.
+            </p>
+          </div>
+        </div>
+        <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" onClick={() => void refresh()} disabled={busy}>
+          <RefreshCw size={16} className={busy ? "animate-spin" : undefined} /> Reload
+        </button>
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-line bg-white p-4 text-sm text-muted">
+          The roster endpoints are not deployed on this backend yet.
+        </div>
+      ) : (
+        <>
+          <div className="rounded-md border border-line bg-white/60 p-3 text-sm">
+            {contest ? (
+              <div className="mb-1">
+                <span className="font-semibold">Contest roster:</span> <span className="font-mono">{contest}</span>
+                <span className="text-muted"> (from the contest filter above; the college column is compulsory)</span>
+              </div>
+            ) : null}
+            {status?.configured ? (
+              <span>
+                <span className="font-semibold text-accent">Roster active:</span> {status.count} students · ID column <span className="font-mono">{status.unique_id_column}</span>
+                {status.college_column ? <span> · college column <span className="font-mono">{status.college_column}</span></span> : null}
+                {status.updated_at ? <span className="text-muted"> · updated {new Date(status.updated_at).toLocaleString()}</span> : null}
+              </span>
+            ) : (
+              <span className="text-muted">
+                {contest ? "No roster uploaded for this contest yet." : "No roster uploaded — student login is open (legacy form)."}
+              </span>
+            )}
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium">
+              <UploadCloud size={16} /> Choose roster file (.csv / .tsv)
+              <input
+                type="file"
+                accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
+                className="hidden"
+                onChange={(event) => void onFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            {/* F8.3: pre-named template so colleges never need the column-mapping UI. */}
+            <button
+              type="button"
+              onClick={downloadTemplate}
+              className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium text-ink hover:border-ink/40"
+            >
+              <Download size={16} /> Download template CSV
+            </button>
+            {fileName ? <span className="text-sm text-muted">{fileName}</span> : null}
+          </div>
+          <p className="mt-2 text-xs text-muted">
+            Template columns — compulsory: {compulsoryHeaders.map((header, index) => (
+              <Fragment key={header}>{index > 0 ? ", " : null}<span className="font-mono font-semibold text-ink">{header}</span></Fragment>
+            ))} · optional: {optionalHeaders.map((header, index) => (
+              <Fragment key={header}>{index > 0 ? ", " : null}<span className="font-mono">{header}</span></Fragment>
+            ))}. Ships with 2 example rows — replace them with your students. Files with other column names also work (you map the columns after choosing the file).
+          </p>
+
+          {parsed ? (
+            <div className="mt-4 space-y-4">
+              {parsed.errors.length ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+                  {parsed.errors.slice(0, 5).map((line) => <div key={line}>{line}</div>)}
+                  {parsed.errors.length > 5 ? <div>…and {parsed.errors.length - 5} more.</div> : null}
+                </div>
+              ) : null}
+
+              <div className="overflow-x-auto rounded-md border border-line">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-white/60 text-xs uppercase tracking-wide text-muted">
+                    <tr>{parsed.columns.map((column) => <th key={column} className="px-3 py-2">{column}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {parsed.rows.slice(0, 5).map((row, index) => (
+                      <tr key={index} className="border-t border-line">
+                        {parsed.columns.map((column) => <td key={column} className="px-3 py-2">{row[column]}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-muted">Showing first {Math.min(5, parsed.rows.length)} of {parsed.rows.length} rows.</p>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-accent">Unique-ID column (required)</span>
+                  <select
+                    className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+                    value={uniqueIdColumn}
+                    onChange={(event) => setUniqueIdColumn(event.target.value)}
+                  >
+                    {parsed.columns.map((column) => <option key={column} value={column}>{column}</option>)}
+                  </select>
+                </label>
+                {mappingSelect("college", contest ? "College column (required)" : "College column")}
+                {mappingSelect("name", "Name column")}
+                {mappingSelect("email", "Email column")}
+                {mappingSelect("roll_number", "Roll-number column")}
+                {mappingSelect("hackerrank_username", "Candidate-ID column")}
+                {mappingSelect("room", "Room column")}
+              </div>
+
+              {/* S-C: duplicate hard-reject panel — the exact rows the admin
+                  has to fix in the file (1-based data rows; nothing saved). */}
+              {duplicates?.length ? (
+                <div className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm">
+                  <div className="mb-2 font-semibold text-danger">Duplicate candidates — whole file rejected</div>
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-xs uppercase tracking-wide text-muted">
+                      <tr><th className="py-1 pr-3">Row</th><th className="py-1 pr-3">College</th><th className="py-1 pr-3">Candidate ID</th><th className="py-1">Conflicts with row</th></tr>
+                    </thead>
+                    <tbody>
+                      {duplicates.slice(0, 20).map((dup) => (
+                        <tr key={`${dup.row}-${dup.unique_id}`} className="border-t border-danger/20">
+                          <td className="py-1 pr-3 font-mono">{dup.row}</td>
+                          <td className="py-1 pr-3">{dup.college}</td>
+                          <td className="py-1 pr-3 font-mono">{dup.unique_id}</td>
+                          <td className="py-1 font-mono">{dup.conflicts_with_row}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {duplicates.length > 20 ? <div className="mt-1 text-xs text-muted">…and {duplicates.length - 20} more.</div> : null}
+                </div>
+              ) : null}
+
+              {/* S-C: college canonicalization gate (vision §2.2) — map each NEW
+                  college name onto an existing college or confirm creating it.
+                  This is the only enforceable moment to stop spelling drift. */}
+              {collegeGate ? (
+                <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm">
+                  <div className="mb-2 font-semibold">
+                    This upload creates {collegeGate.new_colleges.length} new college{collegeGate.new_colleges.length === 1 ? "" : "s"} — map or confirm each one
+                  </div>
+                  <div className="space-y-2">
+                    {collegeGate.new_colleges.map((college) => (
+                      <div key={college.college_norm} className="flex flex-wrap items-center gap-3">
+                        <span className="font-mono font-semibold">{college.names.join(" / ")}</span>
+                        <span className="text-xs text-muted">({college.rows} row{college.rows === 1 ? "" : "s"})</span>
+                        <select
+                          className="focus-ring h-9 rounded-md border border-line bg-white px-2 text-sm"
+                          value={collegeDecisions[college.college_norm] ?? ""}
+                          onChange={(event) => setCollegeDecisions({ ...collegeDecisions, [college.college_norm]: event.target.value })}
+                        >
+                          <option value="">Create new college “{college.name}”</option>
+                          {collegeGate.known_colleges.map((known) => (
+                            <option key={known.college_norm} value={known.college_norm}>Use existing “{known.name}”</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    className="focus-ring mt-3 inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    onClick={confirmColleges}
+                    disabled={busy}
+                  >
+                    <UploadCloud size={16} /> {busy ? "Uploading…" : "Confirm colleges and upload"}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => void upload()}
+                  disabled={busy || !uniqueIdColumn}
+                >
+                  <UploadCloud size={16} /> {busy ? "Uploading…" : `Upload roster (${parsed.rows.length} students)`}
+                </button>
+              )}
+            </div>
+          ) : null}
+
+          {status?.configured ? (
+            <div className="mt-4">
+              <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-danger/40 px-4 py-2 text-sm font-medium text-danger disabled:opacity-50" onClick={() => void clear()} disabled={busy}>
+                <X size={16} /> Clear roster (open login)
+              </button>
+            </div>
+          ) : null}
+
+          {message ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{message}</div> : null}
+          {/* F-D (KPR 2026-06-12): warn-only ID-shape warnings — loud, never blocking. */}
+          {idWarnings.length > 0 ? (
+            <div className="mt-4 space-y-2 rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
+              <p className="font-semibold"><AlertTriangle size={16} className="mr-2 inline" />Check the unique-ID column before the exam:</p>
+              {idWarnings.map((warning, index) => <p key={index}>{warning}</p>)}
+            </div>
+          ) : null}
+          {error ? <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+function summarizeSkipped(skipped: Array<{ row: number; reason: string }>) {
+  const counts = new Map<string, number>();
+  for (const item of skipped) counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
+  return [...counts.entries()].map(([reason, count]) => `${count}× ${reason}`).join(", ");
 }
 
 // SETTINGS tab — per-type proctor alert configuration (enable/disable + severity)
@@ -1742,6 +3954,20 @@ function ProctorAlertTypesSection({ settings, loading, message, onReload, onSave
                   {!config.enabled ? <span className="rounded-full border border-line px-2 py-0.5 text-xs text-muted">disabled</span> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
+                  {/* F9.3 (Wave6, the operator): whether this type appears on the
+                      INVIGILATOR room dashboard's alert feed (filtered
+                      server-side). DEFAULT ALL OFF — the admin opts each type in;
+                      nothing is shared with invigilators until ticked here. */}
+                  <label className="flex items-center gap-2 text-xs text-muted">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-accent"
+                      checked={config.show_to_invigilator}
+                      disabled={loading}
+                      onChange={(event) => updateType(type, { show_to_invigilator: event.target.checked })}
+                    />
+                    Share with invigilator
+                  </label>
                   {/* tab_away alone exposes a configurable threshold: the minimum
                       continuous "HackerRank not visible" span (seconds) the
                       monitoring tab-away detector must observe before alerting.
@@ -1810,18 +4036,42 @@ function ContestEvalAlertTypesSection() {
   );
 }
 
-// Escape one CSV field per RFC-4180: wrap in quotes and double any embedded quote
-// when it contains a comma, quote, or newline. Keeps usernames with odd chars safe.
-function csvField(value: string): string {
-  if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
+// Escape one CSV field per RFC-4180 AND neutralize spreadsheet formula injection.
+// A candidate-controlled cell (name/username) starting with = + - @ — or a leading
+// tab / carriage return that some apps strip before re-checking — executes as a
+// formula when the export is opened in Excel/Sheets. Prefix any such cell with a
+// single quote (') so the spreadsheet treats it as literal text, THEN apply the
+// RFC-4180 quoting (wrap in quotes + double embedded quotes for comma/quote/CR/LF).
+export function csvField(value: string): string {
+  const neutralized = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  if (/[",\n\r]/.test(neutralized)) return `"${neutralized.replace(/"/g, '""')}"`;
+  return neutralized;
 }
 
-// Build the reviews CSV: header `username,reviewer_name,verdict`, one row per
-// review record, verdict rendered as 1/0. Exported by the Settings page.
+// Build the reviews CSV: header `candidate_id,reviewer_name,verdict`, one row
+// per review record, verdict rendered as 1/0. Exported by the Settings page.
+// (S-A: the user-facing CSV header says candidate_id; the wire field `username`
+// inside review records stays frozen until S-E.)
 function buildReviewsCsv(reviews: Array<{ username: string; reviewer_name: string; verdict: number }>): string {
-  const header = "username,reviewer_name,verdict";
+  const header = "candidate_id,reviewer_name,verdict";
   const rows = reviews.map((r) => `${csvField(r.username)},${csvField(r.reviewer_name)},${r.verdict === 1 ? 1 : 0}`);
+  return [header, ...rows].join("\n");
+}
+
+// Build the candidate-details CSV: header `candidate_id,name,email,roll_number,room`,
+// one row per INPUT Candidate ID (blank cells when the candidate was not found so
+// the operator can see who is missing). Every field goes through csvField (escaping).
+function buildDetailsCsv(details: SessionDetail[]): string {
+  const header = "candidate_id,name,email,roll_number,room";
+  const rows = details.map((d) =>
+    [
+      csvField(d.username),
+      csvField(d.found ? d.name : ""),
+      csvField(d.found ? d.email : ""),
+      csvField(d.found ? d.roll_number : ""),
+      csvField(d.found ? d.room : "")
+    ].join(",")
+  );
   return [header, ...rows].join("\n");
 }
 
@@ -1835,22 +4085,26 @@ function ReviewRosterSection({
   summary,
   loading,
   exporting,
+  downloadingDetails,
   message,
   unavailable,
   onSave,
   onReload,
-  onExport
+  onExport,
+  onDownloadDetails
 }: {
   text: string;
   onTextChange: (value: string) => void;
   summary: ReviewRosterSummary | null;
   loading: boolean;
   exporting: boolean;
+  downloadingDetails: boolean;
   message: string;
   unavailable: boolean;
   onSave: () => void;
   onReload: () => void;
   onExport: () => void;
+  onDownloadDetails: () => void;
 }) {
   // Live client-side count of what's currently in the textarea (after split/dedupe).
   const parsedCount = useMemo(() => parseRosterInput(text).length, [text]);
@@ -1861,7 +4115,7 @@ function ReviewRosterSection({
           <ListChecks size={20} />
           <div>
             <h2 className="text-2xl font-semibold">Review roster</h2>
-            <p className="mt-1 text-sm text-muted">Paste the HackerRank usernames to be reviewed (comma or newline separated). Reviewers open Recordings → Review mode and are served these students one-by-one.</p>
+            <p className="mt-1 text-sm text-muted">Paste the Candidate IDs to be reviewed (comma or newline separated). Reviewers open Recordings → Review mode and are served these students one-by-one.</p>
           </div>
         </div>
         <button
@@ -1901,6 +4155,13 @@ function ReviewRosterSection({
             >
               <Download size={16} className={exporting ? "animate-pulse" : undefined} /> {exporting ? "Exporting…" : "Export reviews CSV"}
             </button>
+            <button
+              className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50"
+              onClick={onDownloadDetails}
+              disabled={downloadingDetails || !parsedCount}
+            >
+              <Download size={16} className={downloadingDetails ? "animate-pulse" : undefined} /> {downloadingDetails ? "Downloading…" : "Download all details"}
+            </button>
           </div>
 
           {/* SUMMARY LINE from GET review-roster. */}
@@ -1927,7 +4188,167 @@ function ReviewRosterSection({
   );
 }
 
-function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void; rooms: string[]; room: string; onRoomChange: (room: string) => void }) {
+// A1: GLOBAL CONTEST FILTER banner, rendered below the nav so it shows on EVERY
+// tab. When a slug is set it shows an active chip with a Clear button; when empty
+// it shows a compact labeled input. Applying/clearing rescopes Stats, Alerts,
+// Sessions, and Recordings (the parent re-loads loaded data; the 5s poll re-keys
+// for Stats/Alerts only). Sessions is NOT auto-polled — the poll effect guards on
+// view==='stats'||'alerts' — so the parent re-loads the Sessions list explicitly
+// (on tab-open, stat-card drill, status change, Refresh, and post-approve).
+// S-D (A1): the real contest SELECTOR — a dropdown of every contest (legacy
+// included) replacing the old type-a-slug banner. The selection scopes
+// Sessions/Alerts/Recordings/IP/Attendance/Stats via the existing contest_slug
+// filters and persists in this tab's URL. A selected slug that is not in the
+// dropdown (deep link to an old/purged slug) renders as a literal option so
+// the URL state is never silently dropped.
+// W3: the global contest scope, compacted into the nav header's top-right
+// corner — it filters EVERY admin screen, so it sits above all of them.
+function ContestScopePicker({ contests, contestSlug, onSelect }: {
+  contests: ContestSummary[] | null;
+  contestSlug: string;
+  onSelect: (slug: string) => void;
+}) {
+  const known = contests ?? [];
+  const unknownSelection = contestSlug && !known.some((contest) => contest.slug === contestSlug);
+  return (
+    <label
+      className="flex items-center gap-2"
+      title="Scopes every admin screen. The selection sticks to this browser tab's URL — open another tab for a second contest."
+    >
+      <span className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted">
+        <ListFilter size={13} /> Contest
+      </span>
+      <select
+        className="focus-ring h-8 max-w-[18rem] rounded-md border border-line bg-white px-2 text-sm"
+        value={contestSlug}
+        onChange={(event) => onSelect(event.target.value)}
+      >
+        <option value="">All contests</option>
+        {known.map((contest) => (
+          <option key={contest.slug} value={contest.slug}>
+            {contest.name} ({contest.slug}) — {contest.status}{contest.legacy ? " · legacy" : ""}
+          </option>
+        ))}
+        {unknownSelection ? <option value={contestSlug}>{contestSlug} (unknown slug)</option> : null}
+      </select>
+      {contestSlug ? (
+        <button
+          type="button"
+          onClick={() => onSelect("")}
+          className="focus-ring inline-flex h-8 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium text-ink hover:border-ink/40"
+          title="Back to all contests"
+        >
+          <X size={13} /> Clear
+        </button>
+      ) : null}
+    </label>
+  );
+}
+
+// F3 (E2E live): where the Live exam-time card reads from / writes to.
+//   legacy  — the legacy settings schedule (no scope, or the synthesized
+//             legacy contest is scoped); writes via /api/admin/exam-time.
+//   contest — a real contest is scoped; the card shows ITS window and writes
+//             via contest-exam-time (the Contest → Detail panel's API).
+//   unknown — a scoped slug not in the contests list (deep link / still
+//             loading); the editor is disabled so nothing wrong gets written.
+type ExamTimeCardScope =
+  | { kind: "legacy"; slug?: string }
+  | { kind: "contest"; slug: string }
+  | { kind: "unknown"; slug: string };
+
+// S5: live exam-time control on the Live stats view. Remaining time is computed
+// against the SERVER clock (skew captured when the stats/exam-time response
+// arrived) so the admin display agrees with the students'. The 1 s ticker only
+// re-renders this card. "End exam now" is a deliberate two-click confirm.
+// F3 (E2E live): the card is scope-aware — an explicit chip says WHICH
+// schedule it shows/edits, so a scoped contest can never be confused with the
+// legacy schedule on exam day.
+function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteInput, onAbsoluteInputChange, onAdjust, scope }: {
+  endAt: string;
+  skewMs: number;
+  busy: boolean;
+  endNowArmed: boolean;
+  onArmEndNow: (armed: boolean) => void;
+  absoluteInput: string;
+  onAbsoluteInputChange: (value: string) => void;
+  onAdjust: (body: ExamTimeRequest) => void;
+  scope: ExamTimeCardScope;
+}) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const left = remainingMs(endAt, Date.now(), skewMs);
+  const over = left !== null && left <= 0;
+  // F3: an unknown scope disables every write (display still shows whatever
+  // the scoped stats poll reported — "" → the no-schedule line).
+  const editable = scope.kind !== "unknown";
+  const buttonClass = "focus-ring inline-flex h-10 items-center justify-center rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50";
+  return (
+    <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold text-ink">Exam time</h2>
+            {scope.kind === "contest" ? (
+              <span className="inline-flex rounded-full border border-accent/40 bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent" title="This card shows and edits the scoped contest's exam window — the same window as Contests → Detail.">
+                Contest: {scope.slug}
+              </span>
+            ) : scope.kind === "legacy" ? (
+              <span className="inline-flex rounded-full border border-line bg-white/60 px-2.5 py-0.5 text-xs font-semibold text-muted" title="This card shows and edits the LEGACY schedule (Settings), not any contest window. Scope to a contest (top-right) to control its window.">
+                Legacy schedule{scope.slug ? ` (${scope.slug})` : ""}
+              </span>
+            ) : (
+              <span className="inline-flex rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 text-xs font-semibold text-warning" title="The scoped slug is not in the contests list — controls are disabled so the wrong schedule can never be edited.">
+                Unknown contest: {scope.slug} — controls disabled
+              </span>
+            )}
+          </div>
+          {endAt ? (
+            <p className="mt-1 text-sm text-muted">
+              Ends {new Date(endAt).toLocaleString()} ·{" "}
+              <span className={`font-mono font-semibold ${over ? "text-danger" : "text-ink"}`}>
+                {over ? "time is up" : `${formatRemaining(left ?? 0)} left`}
+              </span>
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-muted">
+              {scope.kind === "contest"
+                ? "No exam window configured for this contest yet — set it in Contests → Detail."
+                : scope.kind === "unknown"
+                  ? "No schedule to show for this scope."
+                  : "No schedule configured yet — set the gate in Settings."}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <button className={buttonClass} disabled={busy || !endAt || !editable} onClick={() => onAdjust({ extend_minutes: 15 })}>+15 min</button>
+          <button className={buttonClass} disabled={busy || !endAt || !editable} onClick={() => onAdjust({ extend_minutes: 5 })}>+5 min</button>
+          <button className={buttonClass} disabled={busy || !endAt || !editable} onClick={() => onAdjust({ extend_minutes: -5 })}>−5 min</button>
+          <DateTimeField label="New end time" value={absoluteInput} onChange={onAbsoluteInputChange} className="w-64" disabled={!editable} />
+          <button className={buttonClass} disabled={busy || !absoluteInput || !editable} onClick={() => onAdjust({ end_at: localInputToIso(absoluteInput) })}>Set</button>
+          {endNowArmed ? (
+            <>
+              <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md bg-danger px-3 text-sm font-medium text-white disabled:opacity-50" disabled={busy || !editable} onClick={() => onAdjust({ end_now: true })}>Confirm: end for everyone</button>
+              <button className={buttonClass} disabled={busy} onClick={() => onArmEndNow(false)}>Cancel</button>
+            </>
+          ) : (
+            <button className="focus-ring inline-flex h-10 items-center justify-center rounded-md border border-danger/40 px-3 text-sm font-medium text-danger disabled:opacity-50" disabled={busy || !endAt || !editable} onClick={() => onArmEndNow(true)}>End exam now…</button>
+          )}
+        </div>
+      </div>
+      <p className="mt-3 text-xs text-muted">
+        {scope.kind === "contest"
+          ? `Changes reach students within ~15 seconds via their heartbeat — no reload needed. "End exam now" force-ends every live session in ${scope.slug} only.`
+          : "Changes reach students within ~15 seconds via their heartbeat — no reload needed. \"End exam now\" also force-ends every live session in the contest."}
+      </p>
+    </section>
+  );
+}
+
+function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange, onDrill }: { stats: AdminStats | null; loading: boolean; onRefresh: () => void; rooms: string[]; room: string; onRoomChange: (room: string) => void; onDrill: (status: SessionsStatusFilter) => void }) {
   return (
     <section className="space-y-5">
       <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -1953,16 +4374,913 @@ function StatsDashboard({ stats, loading, onRefresh, rooms, room, onRoomChange }
         <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading stats…" : "No stats loaded yet."}</div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-          <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} />
-          <StatCard label="Disconnected" value={stats.disconnected ?? 0} tone="danger" icon={<Activity size={18} />} />
-          <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} />
-          <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} />
-          <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} />
-          <StatCard label="Total" value={stats.total} tone="ink" icon={<Users size={18} />} />
+          <StatCard label="Live" value={stats.live} tone="accent" icon={<MonitorUp size={18} />} onClick={() => onDrill("active")} />
+          <StatCard label="Disconnected" value={stats.disconnected ?? 0} tone="danger" icon={<Activity size={18} />} onClick={() => onDrill("disconnected")} />
+          <StatCard label="Locked" value={stats.locked} tone="danger" icon={<Lock size={18} />} onClick={() => onDrill("locked")} />
+          <StatCard label="Pending approval" value={stats.pending_approval} tone="warning" icon={<Clock size={18} />} onClick={() => onDrill("pending_approval")} />
+          <StatCard label="Finished" value={stats.finished} tone="muted" icon={<CheckCircle2 size={18} />} onClick={() => onDrill("ended")} />
+          <StatCard label="Total" value={stats.total} tone="ink" icon={<Users size={18} />} onClick={() => onDrill("")} />
           <StatCard label="Not started / total" value={stats.not_started_or_total ?? stats.total} tone="muted" icon={<Users size={18} />} />
         </div>
       )}
     </section>
+  );
+}
+
+// A2: status-filter options for the Sessions drill-down. "disconnected" has no
+// literal session-doc status (derived liveness), so the list treats it as the
+// active sessions and the view shows an explanatory note.
+const SESSIONS_STATUS_OPTIONS: Array<{ value: SessionsStatusFilter; label: string }> = [
+  { value: "", label: "All statuses" },
+  { value: "active", label: "Live" },
+  { value: "disconnected", label: "Disconnected" },
+  { value: "locked", label: "Locked" },
+  { value: "pending_approval", label: "Pending approval" },
+  { value: "ended", label: "Finished" }
+];
+
+// A2/A4: the GCS-free SESSIONS drill-down — a lightweight table of sessions from
+// fetchSessionsList (ALL session docs classified server-side to match the stat
+// cards), scoped to the global contest filter and room. The status filter is now
+// SERVER-side: changing it reloads from the server, so the rows already arrive
+// status-filtered and we render them directly (no client-side double-filtering).
+// When filtered to pending_approval, each row shows an Approve quick action (A4) —
+// which now reaches zero-chunk pending_approval sessions. Opened by clicking a stat
+// card on the Live stats dashboard.
+function SessionsView({ sessions, loading, unavailable, statusFilter, onStatusFilterChange, contestSlug, onRefresh, onApprove, onOpenDetail }: {
+  sessions: RecordingSession[] | null;
+  loading: boolean;
+  unavailable: boolean;
+  statusFilter: SessionsStatusFilter;
+  onStatusFilterChange: (status: SessionsStatusFilter) => void;
+  contestSlug: string;
+  onRefresh: () => void;
+  onApprove: (session: RecordingSession) => void;
+  /** F6.3: clicking a row opens the session detail card. */
+  onOpenDetail: (session: RecordingSession) => void;
+}) {
+  // The server already returns the rows status-filtered (classified to match the
+  // stat-card counts), so render them directly — no client-side re-filtering.
+  const rows = sessions ?? [];
+
+  return (
+    <section className="space-y-5">
+      <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Users size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">Sessions</h1>
+              <p className="mt-1 text-sm text-muted">
+                Drill into sessions by status{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}. Click a stat card on Live stats to jump straight to a status, or click a row for the full detail card.
+              </p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <FilterSelect
+            label="Status"
+            value={statusFilter}
+            options={SESSIONS_STATUS_OPTIONS}
+            onChange={(value) => onStatusFilterChange(value as SessionsStatusFilter)}
+          />
+          <p className="text-xs text-muted">
+            Showing <span className="font-medium text-ink">{rows.length}</span> session{rows.length === 1 ? "" : "s"}.
+          </p>
+        </div>
+        {statusFilter === "disconnected" ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle size={14} /> "Disconnected" is a derived liveness state — the server classifies these as active sessions whose latest liveness signal has gone stale.
+          </p>
+        ) : null}
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          <AlertTriangle size={16} className="mr-2 inline" />
+          The sessions-list endpoint is not deployed yet, so the Sessions list is unavailable. Live stats still work; deploy the sessions-list API to enable this drill-down.
+        </div>
+      ) : sessions === null ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading sessions…" : "No sessions loaded yet."}</div>
+      ) : rows.length === 0 ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No sessions match this status.</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-line bg-panel shadow-subtle">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
+                <th className="px-4 py-3 font-semibold">Candidate</th>
+                <th className="px-4 py-3 font-semibold">Room</th>
+                <th className="px-4 py-3 font-semibold">Contest</th>
+                <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Chunks</th>
+                <th className="px-4 py-3 font-semibold">Started</th>
+                {statusFilter === "pending_approval" ? <th className="px-4 py-3 font-semibold">Action</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s) => (
+                // F6.3: the whole row opens the detail card (cursor + hover make
+                // it discoverable); the Approve quick action stops propagation.
+                <tr
+                  key={s.session_id}
+                  onClick={() => onOpenDetail(s)}
+                  title="Open session detail"
+                  className="cursor-pointer border-b border-line/60 last:border-0 hover:bg-ink/5"
+                >
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-ink">
+                      {candidateIdOf(s)}
+                      {s.identity_unresolved ? (
+                        <span
+                          className="ml-2 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-warning"
+                          title="The typed ID matched no enrolled person (roster cleared / never matched) — this session is keyed anonymously and its scores appear as an unmatched identity on Results."
+                        >
+                          identity unresolved
+                        </span>
+                      ) : null}
+                    </div>
+                    {s.name ? <div className="text-xs text-muted">{s.name}</div> : null}
+                  </td>
+                  <td className="px-4 py-3 text-muted">{s.room || "—"}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-muted">{s.contest_slug || "—"}</td>
+                  <td className="px-4 py-3">
+                    <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{s.status}</span>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-muted">{s.chunk_count}</td>
+                  <td className="px-4 py-3 text-xs text-muted">{s.created_at ? new Date(s.created_at).toLocaleString() : "—"}</td>
+                  {statusFilter === "pending_approval" ? (
+                    <td className="px-4 py-3">
+                      {/* F6 review: same explanatory tooltip as every other Approve. */}
+                      <ActionTooltip tip={SESSION_ACTION_INFO.approve.tooltip}>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onApprove(s);
+                          }}
+                          disabled={s.status !== "pending_approval"}
+                          className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+                        >
+                          <CheckCircle2 size={14} /> Approve
+                        </button>
+                      </ActionTooltip>
+                    </td>
+                  ) : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// F6.3 SESSION DETAIL CARD — the drill-down behind a clicked Sessions row, as a
+// modal overlay. Three data sources, layered cheapest-first:
+//   1. the list row itself (identity/status/chunks — already fetched);
+//   2. GET /api/admin/session-detail (roster id, IP block, doc activity
+//      counters) — null (404) degrades to the row fields, never an error;
+//   3. the already-fetched alerts list (client-side join) + the existing
+//      submission-events endpoint for this candidate+contest.
+// Actions render ONLY the status-valid set (validSessionActionsFor — same table
+// as the alerts console); an ended session is view-only. The status shown
+// prefers the refetched detail so it stays truthful even when a status-filtered
+// list reload dropped the row.
+function SessionDetailCard({ password, session, alerts, alertsLoaded, onClose, onAction, onViewRecording, onViewAlerts }: {
+  password: string;
+  session: RecordingSession;
+  alerts: Alert[];
+  alertsLoaded: boolean;
+  onClose: () => void;
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[]; exemptions?: EnforcementExemptions }) => Promise<void>;
+  onViewRecording: (session: RecordingSession) => void;
+  onViewAlerts: (session: RecordingSession) => void;
+}) {
+  const [detail, setDetail] = useState<SessionCardDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [submissions, setSubmissions] = useState<SubmissionEvent[] | null>(null);
+  // Bumped after an action so the detail refetches even when the (possibly
+  // filtered-out) list row no longer changes underneath us.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  // Load the least-privilege backend detail; a null (endpoint not deployed)
+  // leaves `detail` empty and the card renders from the list row alone.
+  useEffect(() => {
+    let cancelled = false;
+    setDetailLoading(true);
+    void (async () => {
+      try {
+        const next = await fetchSessionCardDetail(password, session.session_id);
+        if (!cancelled) setDetail(next);
+      } catch {
+        // Non-fatal: the card still shows the list-row fields.
+      } finally {
+        if (!cancelled) setDetailLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [password, session.session_id, session.status, refreshNonce]);
+
+  // Submission-time markers for this candidate+contest (existing endpoint; the
+  // recordings timeline uses the same source). null = still loading / none.
+  useEffect(() => {
+    let cancelled = false;
+    setSubmissions(null);
+    void (async () => {
+      try {
+        const events = await fetchSubmissionEvents(password, candidateIdOf(session), session.contest_slug || undefined);
+        if (!cancelled) setSubmissions(events ?? []);
+      } catch {
+        if (!cancelled) setSubmissions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [password, session.hackerrank_username, session.candidate_id, session.contest_slug]);
+
+  // The truthful status: the refetched detail wins over the click-time row.
+  const status = detail?.status || session.status;
+  const chunkCount = detail?.chunk_count ?? session.chunk_count;
+  // F10.1: the separate camera stream's chunk counter (0 for legacy sessions /
+  // older backends). Drives the camera metric + the recorded-camera labels.
+  const cameraChunkCount = detail?.camera_chunk_count ?? session.camera_chunk_count ?? 0;
+  const actions = validSessionActionsFor(status);
+  const sessionAlerts = useMemo(() => alertsForSession(alerts, session), [alerts, session]);
+  const sortedSubmissions = useMemo(
+    () => (submissions ? [...submissions].sort((a, b) => a.submitted_at.localeCompare(b.submitted_at)) : []),
+    [submissions]
+  );
+  const rosterId = detail?.roster_unique_id || detail?.roll_number || "";
+
+  const runCardAction = (action: SessionAction) => {
+    void (async () => {
+      await onAction(action, { sessionId: session.session_id });
+      setRefreshNonce((n) => n + 1);
+    })();
+  };
+
+  // F5.5: per-session enforcement exemption toggle (action "exempt" with a
+  // one-key payload; the server merges, so the other toggle is untouched).
+  const toggleExemption = (key: keyof EnforcementExemptions) => {
+    void (async () => {
+      await onAction("exempt", {
+        sessionId: session.session_id,
+        exemptions: { [key]: !(detail?.enforcement_exemptions?.[key] === true) }
+      });
+      setRefreshNonce((n) => n + 1);
+    })();
+  };
+
+  // F6 review: Recordings-tab deep links. "View events" stays usable for
+  // zero-chunk sessions (the activity log needs no chunks); both disable in
+  // demo mode for candidates outside the seeded recording dataset.
+  const dataAvailable = recordingDataAvailable(candidateIdOf(session));
+  const recordingLink = viewRecordingAffordance(chunkCount, dataAvailable);
+  const eventsLink = viewEventsAffordance(dataAvailable);
+
+  // F6 review — modal a11y, mirroring the M10 FullscreenGate fix: focus moves
+  // into the dialog on open (the close button), Escape closes, and Tab /
+  // Shift+Tab cycle within the card so the page behind stays unreachable.
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+  const onDialogKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      onClose();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    const items = focusables ? Array.from(focusables) : [];
+    if (items.length === 0) {
+      e.preventDefault();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !dialogRef.current?.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !dialogRef.current?.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    // Modal overlay: click-outside, Escape, or the X closes; clicks inside
+    // don't bubble out.
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Session detail for ${candidateIdOf(session)}`}
+      className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-ink/40 p-4 sm:p-10"
+      onClick={onClose}
+      onKeyDown={onDialogKeyDown}
+    >
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="focus:outline-none w-full max-w-3xl rounded-lg border border-line bg-panel p-5 shadow-subtle"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-xl font-semibold">{candidateIdOf(session)}</h2>
+              <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{status}</span>
+              {detailLoading ? <RefreshCw size={14} className="animate-spin text-muted" /> : null}
+            </div>
+            {session.name ? <p className="mt-1 text-sm text-muted">{session.name}</p> : null}
+            <p className="mt-1 font-mono text-xs text-muted">{session.session_id}</p>
+          </div>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close session detail"
+            className="focus-ring rounded-md border border-line p-2 text-ink hover:border-ink/40"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* INFO — identity + where/when + the IP block. */}
+        <div className="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+          <AlertField label="Roster ID" value={rosterId || "—"} mono />
+          <AlertField label="Room" value={session.room || "—"} />
+          <AlertField label="Contest" value={session.contest_slug || "—"} mono />
+          <AlertField label="Started" value={session.created_at ? new Date(session.created_at).toLocaleString() : "—"} />
+          <AlertField label="Start IP" value={detail?.start_ip || "—"} mono />
+          <AlertField label="Current IP" value={detail?.current_ip || "—"} mono />
+        </div>
+        {detail && detail.ip_change_count > 0 ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle size={14} /> IP changed {detail.ip_change_count} time{detail.ip_change_count === 1 ? "" : "s"} mid-exam.
+          </p>
+        ) : null}
+
+        {/* F5.3: locked-by-enforcement context — the candidate self-locked via
+            the fullscreen ladder; the room's UNLOCK code (invigilator portal)
+            or Unlock here releases it. */}
+        {status === "locked" && detail?.locked_reason === "fullscreen_enforcement" ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+            <Lock size={14} /> Locked by FULLSCREEN ENFORCEMENT (countdown expired or exit limit) — the room proctor's unlock code (or Unlock here / on the invigilator portal) releases it.
+          </p>
+        ) : null}
+
+        {/* F5.5: per-session enforcement exemptions (legit environment problems). */}
+        {detail && status !== "ended" ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-line bg-white/60 px-3 py-2 text-xs">
+            <span className="font-semibold uppercase tracking-wide text-muted">Enforcement exemptions</span>
+            <ActionTooltip tip="Exempt this session from the fullscreen hard-block (exits then log as plain events).">
+              <button
+                type="button"
+                onClick={() => toggleExemption("fullscreen")}
+                className={`focus-ring rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                  detail.enforcement_exemptions?.fullscreen === true ? "border-warning/50 bg-warning/15 text-warning" : "border-line bg-white/60 text-muted"
+                }`}
+              >
+                Fullscreen{detail.enforcement_exemptions?.fullscreen === true ? ": exempt" : ""}
+              </button>
+            </ActionTooltip>
+            <ActionTooltip tip="Exempt this session from switch-away (tab_away) alerting — episodes still log as events.">
+              <button
+                type="button"
+                onClick={() => toggleExemption("switch_away")}
+                className={`focus-ring rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                  detail.enforcement_exemptions?.switch_away === true ? "border-warning/50 bg-warning/15 text-warning" : "border-line bg-white/60 text-muted"
+                }`}
+              >
+                Switch-away{detail.enforcement_exemptions?.switch_away === true ? ": exempt" : ""}
+              </button>
+            </ActionTooltip>
+          </div>
+        ) : null}
+
+        {/* STATS — recording, alerts join, submissions, doc activity counters. */}
+        <div className="mt-4 flex flex-wrap gap-3 text-sm">
+          <Metric icon={<Video size={16} />} label="Chunks" value={String(chunkCount)} />
+          <Metric icon={<Clock size={16} />} label="Recorded" value={formatApproxDuration(approxRecordingSeconds(chunkCount))} />
+          {/* F10.1: the separate camera stream's own chunk counter (only shown
+              when this session actually uploaded camera chunks). */}
+          {cameraChunkCount > 0 ? <Metric icon={<Camera size={16} />} label="Camera chunks" value={String(cameraChunkCount)} /> : null}
+          <Metric icon={<Bell size={16} />} label="Alerts" value={alertsLoaded ? String(sessionAlerts.length) : "…"} />
+          <Metric icon={<CheckCircle2 size={16} />} label="Submissions" value={submissions === null ? "…" : String(sortedSubmissions.length)} />
+          {detail ? <Metric icon={<Activity size={16} />} label="Events" value={`${detail.event_count} (${detail.clipboard_event_count} clipboard · ${detail.focus_event_count} focus)`} /> : null}
+        </div>
+
+        {/* CAPTURE — F6.6: last-reported per-source capture state (from the
+            heartbeat's composite recording_state). The recorded webm is the
+            direct screen stream with mic audio mixed in. F10.1: when this
+            session uploaded camera chunks the camera row reads as a real
+            (separate, low-res) recording; otherwise the camera was
+            live-monitor only and the labels say so plainly. Hidden until a
+            composite heartbeat reported it. */}
+        {detail?.capture_state ? (
+          <div className="mt-4 rounded-md border border-line bg-white/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Capture — last reported</p>
+            <ul className="mt-2 space-y-1.5 text-xs">
+              <li className="flex flex-wrap items-center gap-2">
+                <MonitorUp size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="w-24 font-medium text-ink">Screen</span>
+                <span className="text-muted">{captureSourceLabel("screen", detail.capture_state.screen)}</span>
+              </li>
+              <li className="flex flex-wrap items-center gap-2">
+                <Camera size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="w-24 font-medium text-ink">Camera</span>
+                <span className="text-muted">{captureSourceLabel("camera", detail.capture_state.camera, cameraChunkCount > 0)}</span>
+              </li>
+              <li className="flex flex-wrap items-center gap-2">
+                <Mic size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="w-24 font-medium text-ink">Microphone</span>
+                <span className="text-muted">{captureSourceLabel("microphone", detail.capture_state.microphone)}</span>
+              </li>
+            </ul>
+          </div>
+        ) : null}
+
+        {/* SUBMISSION TIMES — newest-last, capped so a heavy solver stays tidy. */}
+        {sortedSubmissions.length ? (
+          <div className="mt-4 rounded-md border border-line bg-white/60 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Submissions</p>
+            <ul className="mt-2 space-y-1 text-xs">
+              {sortedSubmissions.slice(0, 8).map((event) => (
+                <li key={event.submission_id} className="flex flex-wrap items-center gap-2">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${event.valid ? "bg-accent" : "bg-danger"}`} aria-hidden />
+                  <time className="font-mono text-muted" dateTime={event.submitted_at}>{new Date(event.submitted_at).toLocaleString()}</time>
+                  {event.challenge_name ? <span className="font-medium text-ink">{event.challenge_name}</span> : null}
+                  {event.status ? <span className="text-muted">{event.status}</span> : null}
+                </li>
+              ))}
+            </ul>
+            {sortedSubmissions.length > 8 ? (
+              <p className="mt-2 text-xs text-muted">+{sortedSubmissions.length - 8} more — see the recording timeline markers.</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* ACTIONS + LINKS — only the status-valid session actions render
+            (ended → none, view-only); links jump to the scoped tabs. */}
+        <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-line pt-4">
+          {actions.length ? (
+            <ActionGroup label={`Session — ${status}`}>
+              {actions.map((action) => (
+                <SessionActionButton
+                  key={action}
+                  action={action}
+                  targetLabel={candidateIdOf(session)}
+                  onRun={runCardAction}
+                />
+              ))}
+            </ActionGroup>
+          ) : (
+            <span className="text-xs text-muted">
+              {status === "ended" ? "This session has ended — view-only." : "No session actions apply to this status."}
+            </span>
+          )}
+          <div className="ml-auto flex flex-wrap gap-2">
+            <ActionTooltip tip={recordingLink.tip}>
+              <button
+                type="button"
+                onClick={() => onViewRecording(session)}
+                disabled={recordingLink.disabled}
+                title={recordingLink.disabled ? recordingLink.tip : undefined}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+              >
+                <Film size={14} /> View recording
+              </button>
+            </ActionTooltip>
+            {/* F6 review: the chunk-free events path — same deep link, the
+                Recordings tab's activity log renders without any chunks. */}
+            <ActionTooltip tip={eventsLink.tip}>
+              <button
+                type="button"
+                onClick={() => onViewRecording(session)}
+                disabled={eventsLink.disabled}
+                title={eventsLink.disabled ? eventsLink.tip : undefined}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40 disabled:opacity-50"
+              >
+                <Activity size={14} /> View events
+              </button>
+            </ActionTooltip>
+            <ActionTooltip tip="Open the Live alerts tab filtered to this candidate's alerts.">
+              <button
+                type="button"
+                onClick={() => onViewAlerts(session)}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+              >
+                <Bell size={14} /> View alerts{alertsLoaded ? ` (${sessionAlerts.length})` : ""}
+              </button>
+            </ActionTooltip>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// S6 ATTENDANCE — roster-based attendance from GET /api/admin/attendance: taken /
+// not-taken counts (in-progress vs completed) + the absentee list with CSV export.
+// Self-contained (own load/error state, like ContestEvalAlertTypesSection): loads
+// when the tab mounts and when the global contest filter changes; manual Refresh
+// only — NO auto-poll (each call scans the whole roster + session set). Degrades
+// to "not deployed yet" when fetchAttendance returns null (endpoint 404).
+function AttendancePanel({ password, contestSlug }: { password: string; contestSlug: string }) {
+  const [report, setReport] = useState<AttendanceReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+  const [error, setError] = useState("");
+  const [filter, setFilter] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const next = await fetchAttendance(password, contestSlug || undefined);
+      if (next === null) {
+        setUnavailable(true);
+        setReport(null);
+        return;
+      }
+      setUnavailable(false);
+      setReport(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load is stable per render inputs
+  }, [contestSlug]);
+
+  const downloadCsv = () => {
+    if (!report || !report.configured) return;
+    const csv = buildAbsenteesCsv(report.absentees);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "absentees.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const needle = filter.trim().toLowerCase();
+  const rows = report && report.configured
+    ? report.absentees.filter(
+        (a) =>
+          !needle ||
+          a.unique_id.toLowerCase().includes(needle) ||
+          a.name.toLowerCase().includes(needle) ||
+          a.roll_number.toLowerCase().includes(needle) ||
+          a.room.toLowerCase().includes(needle)
+      )
+    : [];
+
+  return (
+    <section className="space-y-5">
+      <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <UserCheck size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">Attendance</h1>
+              <p className="mt-1 text-sm text-muted">
+                Roster-based attendance{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}: who has taken the test, who is still in it, and who never showed up. Loads on open; Refresh to update.
+              </p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={() => void load()} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {error ? <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
+
+      {unavailable ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          <AlertTriangle size={16} className="mr-2 inline" />
+          The attendance endpoint is not deployed yet. Deploy the backend to enable attendance stats.
+        </div>
+      ) : report === null ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading attendance…" : "No attendance loaded yet."}</div>
+      ) : !report.configured ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">
+          No student roster is configured, so attendance cannot be computed. Upload a roster in Settings → Candidate roster first.
+        </div>
+      ) : (
+        <>
+          {/* KPR 2026-06-12: enrollment-spine fallback after a roster clear — say so explicitly. */}
+          {report.source === "enrollments" && report.note ? (
+            <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
+              <AlertTriangle size={16} className="mr-2 inline" />{report.note}
+            </div>
+          ) : null}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+            <StatCard label="On roster" value={report.roster_total} tone="ink" icon={<Users size={18} />} />
+            <StatCard label="Taken" value={report.taken.total} tone="accent" icon={<UserCheck size={18} />} />
+            <StatCard label="In progress" value={report.taken.in_progress} tone="warning" icon={<Clock size={18} />} />
+            <StatCard label="Completed" value={report.taken.completed} tone="muted" icon={<CheckCircle2 size={18} />} />
+            <StatCard label="Not taken" value={report.not_taken} tone="danger" icon={<AlertTriangle size={18} />} />
+          </div>
+
+          {report.unmatched_sessions > 0 ? (
+            <p className="inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+              <AlertTriangle size={14} /> {report.unmatched_sessions} session{report.unmatched_sessions === 1 ? "" : "s"} could not be tied to the roster (started before the roster was uploaded, or under a replaced roster) — not counted as attendance.
+            </p>
+          ) : null}
+
+          <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Absentees</h2>
+                <p className="mt-1 text-xs text-muted">
+                  {report.not_taken} roster student{report.not_taken === 1 ? "" : "s"} with no session — as of {new Date(report.generated_at).toLocaleString()}.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <input
+                  className="focus-ring h-9 rounded-md border border-line px-3 text-sm"
+                  placeholder="Filter by ID, name, roll, room"
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                />
+                <button
+                  className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50"
+                  onClick={downloadCsv}
+                  disabled={report.not_taken === 0}
+                >
+                  <Download size={14} /> Download CSV
+                </button>
+              </div>
+            </div>
+
+            {report.not_taken === 0 ? (
+              <p className="mt-4 rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-sm text-accent">Full house — every roster student has a session.</p>
+            ) : rows.length === 0 ? (
+              <p className="mt-4 text-sm text-muted">No absentees match this filter.</p>
+            ) : (
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
+                      <th className="px-4 py-3 font-semibold">Unique ID</th>
+                      <th className="px-4 py-3 font-semibold">Name</th>
+                      <th className="px-4 py-3 font-semibold">Roll number</th>
+                      <th className="px-4 py-3 font-semibold">Room</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((a) => (
+                      <tr key={a.unique_id} className="border-b border-line/60 last:border-0">
+                        <td className="px-4 py-3 font-mono text-xs font-semibold text-ink">{a.unique_id}</td>
+                        <td className="px-4 py-3">{a.name || "—"}</td>
+                        <td className="px-4 py-3 text-muted">{a.roll_number || "—"}</td>
+                        <td className="px-4 py-3 text-muted">{a.room || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// S7: scope options for the IP report — "live" (non-ended = logged-in users)
+// vs "all" (adds ended sessions for after-the-exam forensics).
+const IP_SCOPE_OPTIONS: Array<{ value: IpReportScope; label: string }> = [
+  { value: "live", label: "Logged-in (live)" },
+  { value: "all", label: "All sessions" }
+];
+
+// S7: IP-wise report of logged-in users — the proxy-detection signal surface.
+// One row per IP, biggest clusters first: on campus, rooms collapse to a few
+// NAT IPs with many users, so an unexpected solo IP (off-campus candidate) or
+// an unexpected cluster (many candidates through one box) stands out. Rows
+// with 2+ distinct users get a warning tint; candidates whose IP changed
+// mid-exam get a warning icon. Interpretation stays with the admin — the
+// report never auto-flags.
+function IpReportView({ report, loading, unavailable, scope, onScopeChange, contestSlug, onRefresh, onAction, onOpenSessionCard }: {
+  report: IpReportResponse | null;
+  loading: boolean;
+  unavailable: boolean;
+  scope: IpReportScope;
+  onScopeChange: (scope: IpReportScope) => void;
+  contestSlug: string;
+  onRefresh: () => void;
+  /** F8.1: status-valid session actions from the drill-down rows. */
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
+  /** F8.1: jump to the Sessions tab with this candidate's detail card open. */
+  onOpenSessionCard: (candidate: IpReportCandidate) => void;
+}) {
+  // F8.1: which IP rows are expanded into their candidate-session drill-down.
+  // A Set keyed by IP so several clusters can be open at once; survives the
+  // 'report' object being replaced by a refresh.
+  const [expandedIps, setExpandedIps] = useState<Set<string>>(new Set());
+  const toggleIp = (ip: string) => {
+    setExpandedIps((current) => {
+      const next = new Set(current);
+      if (next.has(ip)) next.delete(ip);
+      else next.add(ip);
+      return next;
+    });
+  };
+  return (
+    <section className="space-y-5">
+      <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Network size={20} />
+            <div>
+              <h1 className="text-2xl font-semibold">IP report</h1>
+              <p className="mt-1 text-sm text-muted">
+                IP-wise count of logged-in users{contestSlug ? <> for contest <span className="font-mono font-medium">{contestSlug}</span></> : null}. Many candidates on one unexpected IP — or a candidate on an IP nobody else uses — is a proxy/off-campus signal; a shared campus NAT is normal.
+              </p>
+            </div>
+          </div>
+          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap items-end gap-3">
+          <FilterSelect label="Scope" value={scope} options={IP_SCOPE_OPTIONS} onChange={(value) => onScopeChange(value as IpReportScope)} />
+          {report ? (
+            <p className="text-xs text-muted">
+              <span className="font-medium text-ink">{report.distinct_ips}</span> distinct IP{report.distinct_ips === 1 ? "" : "s"} across{" "}
+              <span className="font-medium text-ink">{report.total_sessions}</span> session{report.total_sessions === 1 ? "" : "s"} ·{" "}
+              <span className="font-medium text-ink">{report.multi_user_ips}</span> multi-user IP{report.multi_user_ips === 1 ? "" : "s"} ·{" "}
+              <span className="font-medium text-ink">{report.ip_changed_sessions}</span> session{report.ip_changed_sessions === 1 ? "" : "s"} with a mid-exam IP change
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {unavailable ? (
+        <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          <AlertTriangle size={16} className="mr-2 inline" />
+          The ip-report endpoint is not deployed yet, so the IP report is unavailable. Deploy the backend to enable it.
+        </div>
+      ) : report === null ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">{loading ? "Loading IP report…" : "No report loaded yet."}</div>
+      ) : report.ips.length === 0 ? (
+        <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No sessions match this scope.</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-line bg-panel shadow-subtle">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-line text-xs uppercase tracking-wide text-muted">
+                <th className="px-4 py-3 font-semibold">IP address</th>
+                <th className="px-4 py-3 font-semibold">Users</th>
+                <th className="px-4 py-3 font-semibold">Sessions</th>
+                <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Rooms</th>
+                <th className="px-4 py-3 font-semibold">Candidates</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.ips.map((entry) => (
+                <Fragment key={entry.ip}>
+                  {/* F8.1: the row is the drill-down toggle (cursor + chevron
+                      make it discoverable, like the Sessions rows). */}
+                  <tr
+                    onClick={() => toggleIp(entry.ip)}
+                    title={expandedIps.has(entry.ip) ? "Hide candidate sessions" : "Show candidate sessions"}
+                    aria-expanded={expandedIps.has(entry.ip)}
+                    className={`cursor-pointer border-b border-line/60 last:border-0 hover:bg-ink/5 ${entry.users >= 2 ? "bg-warning/5" : ""}`}
+                  >
+                    <td className="px-4 py-3 font-mono text-ink">
+                      <span className="inline-flex items-center gap-1.5">
+                        {expandedIps.has(entry.ip) ? <ChevronDown size={14} className="text-muted" /> : <ChevronRight size={14} className="text-muted" />}
+                        {entry.ip}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 font-semibold text-ink">{entry.users}</td>
+                    <td className="px-4 py-3 font-mono text-muted">{entry.sessions}</td>
+                    <td className="px-4 py-3 text-xs text-muted">
+                      {entry.active ? <span className="mr-2">{entry.active} live</span> : null}
+                      {entry.locked ? <span className="mr-2">{entry.locked} locked</span> : null}
+                      {entry.pending_approval ? <span className="mr-2">{entry.pending_approval} pending</span> : null}
+                      {entry.ended ? <span>{entry.ended} ended</span> : null}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-muted">{entry.rooms.length ? entry.rooms.join(", ") : "—"}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-1.5">
+                        {entry.candidates.map((candidate) => (
+                          <span
+                            key={candidate.session_id}
+                            className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-xs text-ink"
+                            title={`${candidate.name || candidateIdOf(candidate)} · ${candidate.status}${candidate.ip_change_count > 0 ? ` · IP changed ${candidate.ip_change_count}×` : ""}`}
+                          >
+                            {candidateIdOf(candidate)}
+                            {candidate.ip_change_count > 0 ? <AlertTriangle size={12} className="text-warning" /> : null}
+                          </span>
+                        ))}
+                        {entry.candidates_truncated ? <span className="text-xs text-muted">+{entry.sessions - entry.candidates.length} more</span> : null}
+                      </div>
+                    </td>
+                  </tr>
+                  {/* F8.1 drill-down: the candidate sessions on this IP with
+                      status-valid actions (same validity table as everywhere)
+                      and a session-card deep link per candidate. */}
+                  {expandedIps.has(entry.ip) ? (
+                    <tr className="border-b border-line/60 last:border-0">
+                      <td colSpan={6} className="bg-ink/[0.03] px-4 py-3">
+                        <div className="space-y-2">
+                          {entry.candidates.map((candidate) => (
+                            <IpCandidateRow
+                              key={candidate.session_id}
+                              candidate={candidate}
+                              onAction={onAction}
+                              onOpenSessionCard={onOpenSessionCard}
+                            />
+                          ))}
+                          {entry.candidates_truncated ? (
+                            <p className="text-xs text-muted">Showing the newest {entry.candidates.length} of {entry.sessions} sessions on this IP.</p>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+          {report.ips_truncated ? (
+            <p className="border-t border-line px-4 py-3 text-xs text-muted">Showing the {report.ips.length} largest IP groups; more exist beyond the cap.</p>
+          ) : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// F8.1: one candidate session inside an expanded IP-report row — identity
+// (name, roster id, room), a status badge, the session start time, the
+// status-VALID session actions (validSessionActionsFor — same table as the
+// alerts console / session card), and an "Open session card" deep link.
+function IpCandidateRow({ candidate, onAction, onOpenSessionCard }: {
+  candidate: IpReportCandidate;
+  onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
+  onOpenSessionCard: (candidate: IpReportCandidate) => void;
+}) {
+  const actions = validSessionActionsFor(candidate.status);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white/70 p-3">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+        <div className="min-w-36">
+          <div className="text-sm font-semibold text-ink">{candidate.name || candidateIdOf(candidate)}</div>
+          <div className="font-mono text-xs text-muted">{candidateIdOf(candidate)}</div>
+        </div>
+        <span className="text-xs text-muted">Roster ID <span className="font-mono font-medium text-ink">{candidate.roster_unique_id || "—"}</span></span>
+        <span className="text-xs text-muted">Room <span className="font-medium text-ink">{candidate.room || "—"}</span></span>
+        <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{candidate.status}</span>
+        <span className="text-xs text-muted">Started <span className="font-medium text-ink">{candidate.created_at ? new Date(candidate.created_at).toLocaleString() : "—"}</span></span>
+        {candidate.ip_change_count > 0 ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-0.5 text-xs font-medium text-warning">
+            <AlertTriangle size={12} /> IP changed {candidate.ip_change_count}×
+          </span>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {actions.length ? (
+          <ActionButtons onAction={onAction} sessionId={candidate.session_id} actions={actions} />
+        ) : (
+          <span className="text-xs text-muted">{candidate.status === "ended" ? "Ended — view-only." : "No session actions apply."}</span>
+        )}
+        <button
+          type="button"
+          onClick={() => onOpenSessionCard(candidate)}
+          className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+        >
+          Open session card <ExternalLink size={12} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1982,7 +5300,7 @@ function RoomFilter({ rooms, value, onChange }: { rooms: string[]; value: string
   );
 }
 
-function StatCard({ label, value, tone, icon }: { label: string; value: number; tone: "accent" | "danger" | "warning" | "muted" | "ink"; icon: React.ReactNode }) {
+function StatCard({ label, value, tone, icon, onClick }: { label: string; value: number; tone: "accent" | "danger" | "warning" | "muted" | "ink"; icon: React.ReactNode; onClick?: () => void }) {
   const toneStyles: Record<typeof tone, string> = {
     accent: "border-accent/30 bg-accent/5 text-accent",
     danger: "border-danger/30 bg-danger/5 text-danger",
@@ -1990,45 +5308,94 @@ function StatCard({ label, value, tone, icon }: { label: string; value: number; 
     muted: "border-line bg-white text-muted",
     ink: "border-ink/20 bg-ink/5 text-ink"
   };
-  return (
-    <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>
+  const inner = (
+    <>
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wide">{label}</span>
         {icon}
       </div>
       <p className="mt-3 text-3xl font-semibold text-ink">{value}</p>
+    </>
+  );
+  // A2: clickable cards become buttons (cursor-pointer + hover ring); plain cards
+  // keep the existing div. Tone styles are identical in both branches.
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`focus-ring block w-full cursor-pointer rounded-lg border p-5 text-left shadow-subtle transition hover:ring-2 hover:ring-ink/20 ${toneStyles[tone]}`}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>{inner}</div>;
+}
+
+// F6.4: design-system hover tooltip (CSS-only, shows on hover AND keyboard
+// focus). Every action button is wrapped in one so the plain-language
+// explanation from SESSION_ACTION_INFO / ALERT_ACTION_INFO is one hover away.
+function ActionTooltip({ tip, children }: { tip: string; children: React.ReactNode }) {
+  return (
+    <span className="group relative inline-flex">
+      {children}
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-60 -translate-x-1/2 rounded-md bg-ink px-3 py-2 text-xs font-normal leading-5 text-white opacity-0 shadow-subtle transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100"
+      >
+        {tip}
+      </span>
+    </span>
+  );
+}
+
+// F6.4: visually separated, labeled cluster of action buttons (session actions
+// vs alert actions on an alert row).
+function ActionGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-white/60 p-1.5 pl-2.5">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</span>
+      {children}
     </div>
   );
 }
 
-const ACTION_LABELS: Array<{ action: SessionAction; label: string; destructive: boolean }> = [
-  { action: "approve", label: "Approve", destructive: false },
-  { action: "unlock", label: "Unlock", destructive: false },
-  { action: "lock", label: "Lock", destructive: true },
-  { action: "bypass", label: "Bypass", destructive: false },
-  { action: "end", label: "End", destructive: true }
-];
-
-// Compact per-candidate remote-action buttons. Destructive actions confirm first.
-function ActionButtons({ onAction, sessionId, username, actions = ACTION_LABELS }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions?: typeof ACTION_LABELS }) {
-  const run = (action: SessionAction, destructive: boolean) => {
-    if (destructive) {
-      const target = sessionId ? `session ${sessionId.slice(0, 8)}…` : `${username}`;
-      if (!window.confirm(`Apply "${action}" to ${target}? This affects the live session.`)) return;
-    }
-    onAction(action, sessionId ? { sessionId } : username ? { usernames: [username] } : {});
+// One session-action button: label + tooltip from SESSION_ACTION_INFO, confirm
+// dialog on destructive actions (end, lock). targetLabel names the confirm target.
+function SessionActionButton({ action, targetLabel, onRun }: { action: SessionAction; targetLabel: string; onRun: (action: SessionAction) => void }) {
+  const info = SESSION_ACTION_INFO[action];
+  const run = () => {
+    if (info.destructive && !window.confirm(`Apply "${info.label}" to ${targetLabel}? This affects the live session.`)) return;
+    onRun(action);
   };
   return (
+    <ActionTooltip tip={info.tooltip}>
+      <button
+        type="button"
+        onClick={run}
+        className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${info.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
+      >
+        {info.label}
+      </button>
+    </ActionTooltip>
+  );
+}
+
+// Compact per-candidate remote-action buttons. Destructive actions confirm first.
+// Callers pass the status-valid `actions` set (validSessionActionsFor) — there
+// is no full-set default left; every surface knows its session's status.
+function ActionButtons({ onAction, sessionId, username, actions }: { onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; sessionId?: string; username?: string; actions: SessionAction[] }) {
+  const targetLabel = sessionId ? `session ${sessionId.slice(0, 8)}…` : `${username}`;
+  return (
     <div className="flex flex-wrap gap-2">
-      {actions.map((item) => (
-        <button
-          key={item.action}
-          type="button"
-          onClick={() => run(item.action, item.destructive)}
-          className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${item.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
-        >
-          {item.label}
-        </button>
+      {actions.map((action) => (
+        <SessionActionButton
+          key={action}
+          action={action}
+          targetLabel={targetLabel}
+          onRun={(chosen) => onAction(chosen, sessionId ? { sessionId } : username ? { usernames: [username] } : {})}
+        />
       ))}
     </div>
   );
@@ -2036,35 +5403,89 @@ function ActionButtons({ onAction, sessionId, username, actions = ACTION_LABELS 
 
 function ReviewSessionCard({ session, onAction }: { session: Record<string, unknown>; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void }) {
   const sessionId = session.session_id ? String(session.session_id) : undefined;
+  // F6 review: the status is in hand — render only the status-valid actions
+  // (same table as the alerts console / session detail card), not all five.
+  const status = session.status ? String(session.status) : "";
+  const actions = validSessionActionsFor(status);
   return (
     <div className="rounded-lg border border-line bg-panel p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-xs text-muted">{sessionId ?? ""}</p>
-          <h2 className="mt-1 text-lg font-semibold">{String(session.hackerrank_username ?? "")}</h2>
+          <h2 className="mt-1 text-lg font-semibold">{candidateIdOf(session)}</h2>
           {session.room ? <p className="text-xs text-muted">Room {String(session.room)}</p> : null}
         </div>
-        <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{String(session.status ?? "unknown")}</span>
+        <span className="rounded-full border border-line px-3 py-1 text-xs font-medium">{status || "unknown"}</span>
       </div>
       <div className="mt-4">
-        <ActionButtons onAction={onAction} sessionId={sessionId} />
+        {actions.length ? (
+          <ActionButtons onAction={onAction} sessionId={sessionId} actions={actions} />
+        ) : (
+          <span className="text-xs text-muted">
+            {status === "ended" ? "This session has ended — view-only." : "No session actions apply to this status."}
+          </span>
+        )}
       </div>
       <pre className="mt-4 max-h-96 overflow-auto rounded-md bg-ink p-4 text-xs text-white">{JSON.stringify(session, null, 2)}</pre>
     </div>
   );
 }
 
+// W3: nav icons. Group icons key the primary (sections) row; view icons key
+// the secondary row of the active section.
+const GROUP_ICONS: Record<string, React.ReactNode> = {
+  live: <ShieldCheck size={15} />,
+  contest: <ListChecks size={15} />,
+  evidence: <Film size={15} />,
+  authoring: <ClipboardList size={15} />,
+  people: <Users size={15} />,
+  settings: <Lock size={15} />
+};
+const VIEW_ICONS: Record<AdminView, React.ReactNode> = {
+  stats: <ShieldCheck size={15} />,
+  alerts: <Bell size={15} />,
+  sessions: <Users size={15} />,
+  ips: <Network size={15} />,
+  contests: <ListChecks size={15} />,
+  attendance: <UserCheck size={15} />,
+  results: <Award size={15} />,
+  review: <Search size={15} />,
+  recordings: <Film size={15} />,
+  problems: <ClipboardList size={15} />,
+  templates: <LayoutTemplate size={15} />,
+  people: <Users size={15} />,
+  settings: <Lock size={15} />
+};
+
+// W3 primary row: one tab per SECTION — active section is ink-filled.
+function GroupTab({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: number }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? "true" : undefined}
+      className={`focus-ring inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ${active ? "bg-ink text-white" : "text-ink hover:bg-ink/5"}`}
+    >
+      {icon}
+      {label}
+      {badge ? <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none ${active ? "bg-white/20 text-white" : "bg-danger/10 text-danger"}`}>{badge}</span> : null}
+    </button>
+  );
+}
+
+// W3 secondary row: the active section's views as a segmented strip — active
+// view is a raised white pill.
 function AdminTab({ active, onClick, icon, label, badge }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; badge?: number }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`focus-ring inline-flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium ${active ? "border-ink bg-ink text-white" : "border-line bg-panel text-ink hover:border-ink/40"}`}
+      className={`focus-ring inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm ${active ? "border-line bg-white font-semibold text-ink shadow-subtle" : "border-transparent font-medium text-muted hover:text-ink"}`}
     >
       {icon}
       {label}
-      {badge ? <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${active ? "bg-white/20 text-white" : "bg-ink/10 text-ink"}`}>{badge}</span> : null}
+      {badge ? <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none ${active ? "bg-danger/10 text-danger" : "bg-ink/10 text-ink"}`}>{badge}</span> : null}
     </button>
   );
 }
@@ -2079,28 +5500,99 @@ function SeverityPill({ severity }: { severity: AlertSeverity }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
-function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onToggleSelected, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
+function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
   alerts: Alert[];
+  /** F6.4 status-join data; null = not loaded / 404 / truncated (see alertJoinState). */
+  sessions: RecordingSession[] | null;
+  /** F6 review: the join fetch failed (non-404) — with no kept data, rows
+   * degrade to archive-only with a "session status unavailable" note. */
+  sessionsFailed: boolean;
   loading: boolean;
   loaded: boolean;
   filters: AlertFilters;
   rooms: string[];
+  /** F6.3: one-shot client-side candidate filter ("View alerts" on the session
+   * detail card). "" = off. Cleared via the chip rendered with the filters. */
+  candidateFilter: string;
+  onClearCandidateFilter: () => void;
   selected: Set<string>;
   onToggleSelected: (key: string) => void;
+  onSelectAll: (ids: string[]) => void;
+  /** F6 review: un-checking "Select all" removes ONLY the currently-filtered
+   * ids — off-screen ids selected under another filter survive. */
+  onDeselectAll: (ids: string[]) => void;
+  onClearSelection: () => void;
   onFiltersChange: (filters: AlertFilters) => void;
   onRefresh: () => void;
   onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
   onArchive: (ids: string[], action?: "archive" | "unarchive") => void;
-  onApproveArchive: (alert: Alert) => void;
+  onApproveArchive: (alert: Alert, targetSessionId?: string) => void;
 }) {
+  // F6.3: the rendered list — the candidate filter is CLIENT-side (the alerts
+  // API has no username filter), matched on normalized usernames the same way
+  // the status join works. Everything below (metrics, select-all scope, rows)
+  // operates on this visible list.
+  const visibleAlerts = useMemo(() => {
+    if (!candidateFilter) return alerts;
+    const norm = normalizeJoinUsername(candidateFilter);
+    return alerts.filter((alert) => (alert.username_norm || normalizeJoinUsername(candidateIdOf(alert))) === norm);
+  }, [alerts, candidateFilter]);
   // Unique candidate usernames in the current (selected) alert set, for bulk actions.
-  const selectedUsernames = useMemo(() => {
-    const usernames = new Set<string>();
-    for (const alert of alerts) {
-      if (selected.has(alert.id)) usernames.add(alert.hackerrank_username);
-    }
-    return [...usernames];
-  }, [alerts, selected]);
+  const selectedUsernames = useMemo(() => usernamesForSelection(alerts, selected), [alerts, selected]);
+  // F6.2: ids of the CURRENTLY FILTERED list — the scope of "Select all". The
+  // selected Set may also hold off-screen ids (selection survives refresh and
+  // filter changes); bulk archive acts on ALL selected ids, not just visible ones.
+  const visibleIds = useMemo(() => visibleAlerts.map((alert) => alert.id), [visibleAlerts]);
+  const allSelected = isAllSelected(selected, visibleIds);
+  // F6 review: how rows/bulk treat the join data — contextual ("joined"), full
+  // fallback ("fallback": not loaded / 404 / truncated), or archive-only with a
+  // note ("unavailable": the join fetch failed and nothing was kept).
+  const joinState = alertJoinState(sessions, sessionsFailed);
+  // F6.4: bulk buttons show only the UNION of actions valid for the selected
+  // candidates' live sessions (fallback → full set, same degrade as rows).
+  const bulkActions = useMemo(
+    () =>
+      joinState === "joined" && sessions !== null
+        ? bulkSessionActionsFor(selectedUsernames, sessions)
+        : joinState === "fallback"
+          ? SESSION_ACTION_ORDER
+          : [],
+    [joinState, sessions, selectedUsernames]
+  );
+
+  // TG-1581 grouping: none (flat, default) | candidate | type. Pure grouping
+  // (alertGrouping.ts) over the VISIBLE list, so the room/severity/candidate
+  // filters scope the groups too. collapsedGroups is keyed by group key and
+  // reset when the mode changes (candidate keys and type keys could collide).
+  const [groupBy, setGroupBy] = useState<AlertGroupBy>("none");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const groups = useMemo(
+    () => (groupBy === "none" ? null : groupAlerts(visibleAlerts, groupBy)),
+    [groupBy, visibleAlerts]
+  );
+  const toggleGroupCollapsed = (key: string) => {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  // The same row everywhere — the grouped sections must render EXACTLY what the
+  // flat list renders (selection, actions, archive all keep working).
+  const renderAlertRow = (alert: Alert) => (
+    <AlertRow
+      key={alert.id}
+      alert={alert}
+      sessions={sessions}
+      joinState={joinState}
+      selected={selected.has(alert.id)}
+      onToggleSelected={() => onToggleSelected(alert.id)}
+      onAction={onAction}
+      onArchive={onArchive}
+      onApproveArchive={onApproveArchive}
+    />
+  );
 
   return (
     <>
@@ -2132,15 +5624,27 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
             onChange={(value) => onFiltersChange({ ...filters, severity: value ? (value as AlertSeverity) : undefined })}
           />
           <RoomFilter rooms={rooms} value={filters.room ?? ""} onChange={(room) => onFiltersChange({ ...filters, room: room || undefined })} />
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted">Contest slug</span>
-            <input
-              className="focus-ring mt-1 h-10 w-48 rounded-md border border-line bg-white px-3 text-sm"
-              value={filters.contest_slug ?? ""}
-              placeholder="all contests"
-              onChange={(event) => onFiltersChange({ ...filters, contest_slug: event.target.value || undefined })}
-            />
-          </label>
+          {/* TG-1581: group related alerts for easier triage (client-side). */}
+          <FilterSelect
+            label="Group by"
+            value={groupBy}
+            options={[{ value: "none", label: "No grouping" }, { value: "candidate", label: "Candidate" }, { value: "type", label: "Alert type" }]}
+            onChange={(value) => {
+              setGroupBy(value as AlertGroupBy);
+              setCollapsedGroups(new Set());
+            }}
+          />
+          {/* A1: the contest filter is now the GLOBAL banner below the nav; the
+              per-console contest input was removed to avoid two sources of truth. */}
+          {/* F6.3: one-shot candidate filter chip (set by the session detail card). */}
+          {candidateFilter ? (
+            <span className="mb-2 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent">
+              Candidate: <span className="font-mono">{candidateFilter}</span>
+              <button type="button" onClick={onClearCandidateFilter} aria-label="Clear candidate filter" className="focus-ring rounded-full hover:text-ink">
+                <X size={12} />
+              </button>
+            </span>
+          ) : null}
           <label className="mb-2 flex items-center gap-2 text-sm">
             <input
               className="h-4 w-4 accent-accent"
@@ -2153,16 +5657,77 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
         </div>
 
         <div className="mt-4 flex flex-wrap gap-3 text-sm">
-          <Metric icon={<Bell size={16} />} label="Total" value={String(alerts.length)} />
-          <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(alerts.filter((alert) => alert.severity === "critical").length)} />
-          <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(alerts.filter((alert) => alert.severity === "warning").length)} />
+          <Metric icon={<Bell size={16} />} label="Total" value={String(visibleAlerts.length)} />
+          <Metric icon={<AlertTriangle size={16} />} label="Critical" value={String(visibleAlerts.filter((alert) => alert.severity === "critical").length)} />
+          <Metric icon={<AlertTriangle size={16} />} label="Warning" value={String(visibleAlerts.filter((alert) => alert.severity === "warning").length)} />
         </div>
+
+        {/* F6 review: the status join failed (non-404) with nothing kept —
+            alerts stay fully readable, session actions hide until a refresh
+            succeeds (auto-retry every poll tick). */}
+        {joinState === "unavailable" ? (
+          <p className="mt-4 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <AlertTriangle size={14} /> Session status unavailable — the sessions list could not be loaded, so session actions are hidden (archiving still works). Retrying on the next refresh.
+          </p>
+        ) : null}
+
+        {/* F6.1-2 selection bar: select-all over the CURRENTLY FILTERED list,
+            selected count, clear, and bulk archive/unarchive on ALL selected ids. */}
+        {visibleAlerts.length || selected.size ? (
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                className="h-4 w-4 accent-accent"
+                type="checkbox"
+                checked={allSelected}
+                // F6 review: un-checking removes only the CURRENTLY FILTERED ids;
+                // off-screen ids picked under another filter stay selected
+                // ("Clear selection" is the explicit clear-everything action).
+                onChange={() => (allSelected ? onDeselectAll(visibleIds) : onSelectAll(visibleIds))}
+              />
+              Select all ({visibleAlerts.length})
+            </label>
+            <span className="text-sm font-medium">{selected.size} selected</span>
+            {selected.size ? (
+              <>
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                >
+                  Clear selection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onArchive([...selected], "archive")}
+                  className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                >
+                  <Archive size={14} /> Archive selected
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onArchive([...selected], "unarchive")}
+                  className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                >
+                  <ArchiveRestore size={14} /> Unarchive selected
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
 
         {selectedUsernames.length ? (
           <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border border-ink/20 bg-ink/5 p-3">
             <span className="text-sm font-medium">{selectedUsernames.length} candidate(s) selected:</span>
             <span className="font-mono text-xs text-muted">{selectedUsernames.join(", ")}</span>
-            <BulkActionButtons usernames={selectedUsernames} onAction={onAction} />
+            <BulkActionButtons
+              usernames={selectedUsernames}
+              actions={bulkActions}
+              noActionsNote={joinState === "unavailable"
+                ? "Session status unavailable — bulk session actions are hidden; bulk archive above still works."
+                : undefined}
+              onAction={onAction}
+            />
           </div>
         ) : null}
       </section>
@@ -2170,20 +5735,51 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
       <section className="space-y-3">
         {!loaded && loading ? (
           <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">Loading alerts…</div>
-        ) : alerts.length === 0 ? (
-          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive.</div>
+        ) : visibleAlerts.length === 0 ? (
+          <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">
+            {candidateFilter
+              ? <>No alerts for candidate <span className="font-mono">{candidateFilter}</span> under the current filters. Clear the candidate chip above to see everyone.</>
+              : "No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive."}
+          </div>
+        ) : groups === null ? (
+          visibleAlerts.map(renderAlertRow)
         ) : (
-          alerts.map((alert) => (
-            <AlertRow
-              key={alert.id}
-              alert={alert}
-              selected={selected.has(alert.id)}
-              onToggleSelected={() => onToggleSelected(alert.id)}
-              onAction={onAction}
-              onArchive={onArchive}
-              onApproveArchive={onApproveArchive}
-            />
-          ))
+          // TG-1581 grouped view: collapsible sections, same AlertRow inside.
+          groups.map((group) => {
+            const collapsed = collapsedGroups.has(group.key);
+            const allGroupSelected = isAllSelected(selected, group.ids);
+            return (
+              <section key={group.key} className="rounded-lg border border-line bg-white/40">
+                <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+                  {/* Group-select feeds the SAME selection model as the
+                      select-all bar (union add / filtered remove), so bulk
+                      archive + bulk session actions work across groups. */}
+                  <input
+                    className="h-4 w-4 accent-accent"
+                    type="checkbox"
+                    checked={allGroupSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !allGroupSelected && group.ids.some((id) => selected.has(id));
+                    }}
+                    onChange={() => (allGroupSelected ? onDeselectAll(group.ids) : onSelectAll(group.ids))}
+                    aria-label={`Select all alerts for ${group.label}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => toggleGroupCollapsed(group.key)}
+                    aria-expanded={!collapsed}
+                    className="focus-ring flex flex-wrap items-center gap-2 rounded-md text-left"
+                  >
+                    {collapsed ? <ChevronRight size={16} className="text-muted" /> : <ChevronDown size={16} className="text-muted" />}
+                    <span className={`font-semibold ${groupBy === "candidate" ? "" : "font-mono text-sm"}`}>{group.label}</span>
+                    <span className="rounded-full bg-ink/10 px-2 py-0.5 text-xs font-semibold text-ink">{group.alerts.length}</span>
+                    <SeverityPill severity={group.worstSeverity} />
+                  </button>
+                </div>
+                {!collapsed ? <div className="space-y-3 px-3 pb-3">{group.alerts.map(renderAlertRow)}</div> : null}
+              </section>
+            );
+          })
         )}
       </section>
     </>
@@ -2191,23 +5787,35 @@ function AlertsConsole({ alerts, loading, loaded, filters, rooms, selected, onTo
 }
 
 // Bulk actions operate on the live session of each selected candidate username.
-function BulkActionButtons({ usernames, onAction }: { usernames: string[]; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
-  const run = (action: SessionAction, destructive: boolean) => {
-    if (destructive && !window.confirm(`Apply "${action}" to ${usernames.length} candidate(s)? This affects their live sessions.`)) return;
+// F6.4: only the actions valid for at least one selected candidate render
+// (union — the backend applies each action per-candidate and skips the rest).
+// `noActionsNote` overrides the empty-state copy when the actions are hidden
+// for a DIFFERENT reason than "no live sessions" (join data unavailable).
+function BulkActionButtons({ usernames, actions, noActionsNote, onAction }: { usernames: string[]; actions: SessionAction[]; noActionsNote?: string; onAction: (action: SessionAction, opts: { usernames?: string[] }) => void }) {
+  if (!actions.length) {
+    return <span className="text-xs text-muted">{noActionsNote ?? "No session actions apply — the selected candidates have no live sessions."}</span>;
+  }
+  const run = (action: SessionAction) => {
+    const info = SESSION_ACTION_INFO[action];
+    if (info.destructive && !window.confirm(`Apply "${info.label}" to ${usernames.length} candidate(s)? This affects their live sessions.`)) return;
     onAction(action, { usernames });
   };
   return (
     <div className="flex flex-wrap gap-2">
-      {ACTION_LABELS.map((item) => (
-        <button
-          key={item.action}
-          type="button"
-          onClick={() => run(item.action, item.destructive)}
-          className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${item.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
-        >
-          Bulk {item.label}
-        </button>
-      ))}
+      {actions.map((action) => {
+        const info = SESSION_ACTION_INFO[action];
+        return (
+          <ActionTooltip key={action} tip={`${info.tooltip} Applies to each selected candidate's latest live session.`}>
+            <button
+              type="button"
+              onClick={() => run(action)}
+              className={`focus-ring rounded-md border px-2.5 py-1.5 text-xs font-medium ${info.destructive ? "border-danger/40 text-danger hover:bg-danger/10" : "border-line text-ink hover:border-ink/40"}`}
+            >
+              Bulk {info.label}
+            </button>
+          </ActionTooltip>
+        );
+      })}
     </div>
   );
 }
@@ -2225,18 +5833,33 @@ function FilterSelect({ label, value, options, onChange }: { label: string; valu
   );
 }
 
-// Session actions shown on an alert row EXCLUDING approve — approve is handled
-// by the dedicated Approve button below, which also archives the alert.
-const ALERT_ROW_ACTIONS = ACTION_LABELS.filter((item) => item.action !== "approve");
-
-function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert) => void }) {
+function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
+  // F6.4: join the alert to the session its actions would target (the alert's
+  // own LIVE session_id, else the candidate's latest live session) and render
+  // ONLY the actions valid for that session's status. F6 review (joinState):
+  // "fallback" (no list yet / 404 / truncated) → full action set so a stale
+  // backend never costs admin capability; "unavailable" (join fetch failed) →
+  // archive-only with a note. Contest-eval alerts whose candidate has no
+  // session resolve to joined === null → alert actions only.
+  const joined = joinState === "joined" && sessions !== null ? sessionForAlert(alert, sessions) : null;
+  const sessionActions =
+    joinState === "joined" ? validSessionActionsFor(joined?.status) : joinState === "fallback" ? SESSION_ACTION_ORDER : [];
+  const sessionGroupLabel = joinState === "joined" ? `Session — ${joined?.status ?? "none"}` : "Session";
+  // Actions target the JOINED session (never a stale alert.session_id whose doc
+  // fell back to a newer live one); without join data, legacy targeting applies.
+  const actionTarget = joined
+    ? { sessionId: joined.session_id }
+    : alert.session_id
+      ? { sessionId: alert.session_id }
+      : { usernames: [candidateIdOf(alert)] };
+  const archiveInfo = alert.archived ? ALERT_ACTION_INFO.unarchive : ALERT_ACTION_INFO.archive;
   return (
     <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.archived ? "opacity-70" : ""} ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 gap-3">
-          <input className="mt-1.5 h-4 w-4 shrink-0 accent-accent" type="checkbox" checked={selected} onChange={onToggleSelected} aria-label={`Select ${alert.hackerrank_username}`} />
+          <input className="mt-1.5 h-4 w-4 shrink-0 accent-accent" type="checkbox" checked={selected} onChange={onToggleSelected} aria-label={`Select ${candidateIdOf(alert)}`} />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <SeverityPill severity={alert.severity} />
@@ -2252,10 +5875,14 @@ function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onAp
       </div>
 
       <div className="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
-        <AlertField label="Candidate" value={alert.hackerrank_username} mono />
+        <AlertField label="Candidate" value={candidateIdOf(alert)} mono />
         {alert.room ? <AlertField label="Room" value={alert.room} /> : null}
         {alert.contest_slug ? <AlertField label="Contest" value={alert.contest_slug} mono /> : null}
         {alert.session_id ? <AlertField label="Session" value={alert.session_id} mono /> : null}
+        {/* F6.4: the joined status explains WHY the row offers these actions;
+            "unavailable" = the join fetch failed (F6 review). */}
+        {joinState === "joined" ? <AlertField label="Session status" value={joined?.status ?? "no live session"} /> : null}
+        {joinState === "unavailable" ? <AlertField label="Session status" value="unavailable" /> : null}
         {alert.verdict ? <AlertField label="Verdict" value={alert.verdict.status} /> : null}
       </div>
 
@@ -2279,33 +5906,45 @@ function AlertRow({ alert, selected, onToggleSelected, onAction, onArchive, onAp
             </button>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Approve also archives this alert (frontend orchestrates approve → archive). */}
-          <button
-            type="button"
-            onClick={() => onApproveArchive(alert)}
-            className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
-          >
-            Approve
-          </button>
-          {alert.archived ? (
-            <button
-              type="button"
-              onClick={() => onArchive([alert.id], "unarchive")}
-              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
-            >
-              <ArchiveRestore size={14} /> Unarchive
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => onArchive([alert.id], "archive")}
-              className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
-            >
-              <Archive size={14} /> Archive
-            </button>
-          )}
-          <ActionButtons onAction={onAction} username={alert.hackerrank_username} sessionId={alert.session_id} actions={ALERT_ROW_ACTIONS} />
+        <div className="flex flex-wrap items-center gap-3">
+          {/* F6.4: session actions and alert actions are separate labeled groups;
+              the session group renders only when an action is valid for the
+              joined session's status. */}
+          {sessionActions.length ? (
+            <ActionGroup label={sessionGroupLabel}>
+              {sessionActions.map((action) =>
+                action === "approve" ? (
+                  // Approve also archives this alert (frontend orchestrates
+                  // approve → archive), targeting the JOINED session.
+                  <ActionTooltip key="approve" tip={`${SESSION_ACTION_INFO.approve.tooltip} Also archives this alert.`}>
+                    <button
+                      type="button"
+                      onClick={() => onApproveArchive(alert, joined?.session_id)}
+                      className="focus-ring rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                    >
+                      {SESSION_ACTION_INFO.approve.label}
+                    </button>
+                  </ActionTooltip>
+                ) : (
+                  <SessionActionButton key={action} action={action} targetLabel={candidateIdOf(alert)} onRun={(chosen) => onAction(chosen, actionTarget)} />
+                )
+              )}
+            </ActionGroup>
+          ) : joinState === "unavailable" ? (
+            // F6 review: the join fetch failed — say so instead of guessing.
+            <span className="text-xs text-muted">Session status unavailable — archive only.</span>
+          ) : null}
+          <ActionGroup label="Alert">
+            <ActionTooltip tip={archiveInfo.tooltip}>
+              <button
+                type="button"
+                onClick={() => onArchive([alert.id], alert.archived ? "unarchive" : "archive")}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+              >
+                {alert.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />} {archiveInfo.label}
+              </button>
+            </ActionTooltip>
+          </ActionGroup>
         </div>
       </div>
 
@@ -2325,19 +5964,31 @@ function AlertField({ label, value, mono = false }: { label: string; value: stri
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+// padTop: StudentApp sets it while the fixed S1 ExamTopBar (64px) is rendered,
+// so the header/content start below the bar. AdminApp never passes it.
+// padTop matches the fixed shell header (W2): true = slim strip, "alert" =
+// the taller anomaly banner. The "exam" variant (W1) widens the container and
+// drops the page header — the strip already carries the branding/identity, so
+// nothing distracts from the workspace.
+function Shell({ children, padTop = false, variant = "page" }: { children: React.ReactNode; padTop?: boolean | "alert"; variant?: "page" | "exam" }) {
+  const pad = padTop === "alert" ? "pt-40" : padTop ? "pt-14" : "";
   return (
-    <main className="min-h-screen bg-paper px-4 py-5 text-ink md:px-8">
-      <div className="mx-auto max-w-6xl">
-        <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
-          <div className="flex items-center gap-3">
-            <img src="/aerele-logo.png" alt="Aerele" className="h-9 w-9 rounded-md" />
-            <div>
-              <p className="text-sm font-semibold">Aerele Proctor</p>
-              <p className="text-xs text-muted">Evidence collection for coding assessments</p>
+    <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${pad}`}>
+      {/* UX-H2: the exam variant reserves bottom clearance (pb-48) so the
+          fixed bottom-right CameraDock never covers end-of-page content
+          (run results / verdict) once the candidate scrolls to the bottom. */}
+      <div className={`mx-auto ${variant === "exam" ? "max-w-screen-2xl pb-48" : "max-w-6xl"}`}>
+        {variant === "exam" ? null : (
+          <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
+            <div className="flex items-center gap-3">
+              <img src="/aerele-logo.png" alt="Aerele" className="h-9 w-9 rounded-md" />
+              <div>
+                <p className="text-sm font-semibold">Aerele Proctor</p>
+                <p className="text-xs text-muted">Evidence collection for coding assessments</p>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
+        )}
         {children}
       </div>
     </main>
@@ -2357,18 +6008,135 @@ function localInputToIso(value: string) {
   return new Date(value).toISOString();
 }
 
-function formatElapsed(totalSeconds: number) {
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
-}
-
-function Field({ label, value, onChange, type = "text", disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; disabled?: boolean }) {
+function Field({ label, value, onChange, type = "text", disabled = false, inputMode }: { label: string; value: string; onChange: (value: string) => void; type?: string; disabled?: boolean; inputMode?: React.ComponentProps<"input">["inputMode"] }) {
+  // F12.1: spread the autofill-suppression set so Chrome's email/address popup
+  // (which drops fullscreen) can never fire on focus. See shell/autofill.ts.
   return (
     <label className="block">
       <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
-      <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm disabled:bg-neutral-100" type={type} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+      <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm disabled:bg-neutral-100" type={type} inputMode={inputMode} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} {...autofillSuppressionProps(label)} />
+    </label>
+  );
+}
+
+// S2 — roster identity gate (form stage, before the details form). Three
+// states: enter-ID, confirm-match, confirmed. The server re-verifies the ID at
+// /api/session/start, so this panel is UX only — never a security boundary.
+function IdentityLookupPanel({ label, value, onChange, busy, cooldown, error, match, confirmed, confirmedId, onLookup, onConfirm, onReject, onReset }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  busy: boolean;
+  /** True during the post-429 rate-limit cooldown — the button stays disabled. */
+  cooldown: boolean;
+  error: string;
+  match: RosterLookupResult | null;
+  confirmed: boolean;
+  confirmedId: string;
+  onLookup: () => void;
+  onConfirm: () => void;
+  onReject: () => void;
+  onReset: () => void;
+}) {
+  const idLabel = label || "Unique ID";
+  if (confirmed) {
+    return (
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/5 p-4">
+        <div className="flex items-center gap-2 text-sm">
+          <UserCheck size={18} className="text-accent" />
+          <span className="font-medium">Identity confirmed:</span>
+          <span className="font-mono">{confirmedId}</span>
+        </div>
+        <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium" onClick={onReset}>
+          Not you? Re-enter ID
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-5 rounded-lg border border-line bg-white/60 p-4">
+      <p className="text-xs font-semibold uppercase tracking-wide text-accent">Step 1 — confirm your identity</p>
+      <p className="mt-1 text-sm text-muted">
+        This exam uses a pre-registered student list. Enter your {idLabel} exactly as registered, then confirm the matched record.
+      </p>
+      {!match ? (
+        <>
+          <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+            <Field label={idLabel} value={value} onChange={onChange} />
+            <button
+              className="focus-ring mt-5 inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={onLookup}
+              disabled={busy || cooldown || !value.trim()}
+            >
+              <Search size={16} /> {busy ? "Checking…" : cooldown ? "Please wait…" : "Find me"}
+            </button>
+          </div>
+          {error ? <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
+        </>
+      ) : (
+        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-4">
+          <p className="text-sm font-semibold text-ink">Is this you?</p>
+          <dl className="mt-2 grid gap-x-6 gap-y-1 text-sm md:grid-cols-2">
+            <div><dt className="inline text-muted">{idLabel}: </dt><dd className="inline font-medium">{match.unique_id}</dd></div>
+            {match.name ? <div><dt className="inline text-muted">Name: </dt><dd className="inline font-medium">{match.name}</dd></div> : null}
+            {match.roll_number && match.roll_number !== match.unique_id ? (
+              <div><dt className="inline text-muted">Roll number: </dt><dd className="inline font-medium">{match.roll_number}</dd></div>
+            ) : null}
+            {match.email_masked ? <div><dt className="inline text-muted">Email: </dt><dd className="inline font-medium">{match.email_masked}</dd></div> : null}
+            {candidateIdOf(match) ? <div><dt className="inline text-muted">Candidate ID: </dt><dd className="inline font-medium">{candidateIdOf(match)}</dd></div> : null}
+            {match.room ? <div><dt className="inline text-muted">Room: </dt><dd className="inline font-medium">{match.room}</dd></div> : null}
+          </dl>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white" onClick={onConfirm}>
+              <UserCheck size={16} /> Yes, this is me
+            </button>
+            <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-4 py-2 text-sm font-medium" onClick={onReject}>
+              No — search again
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// S2 — pre-fed room dropdown (+ "Other" free text). Falls back to the legacy
+// free-text field when the admin has not configured any rooms.
+function RoomField({ rooms, value, onChange }: { rooms: string[]; value: string; onChange: (value: string) => void }) {
+  const [otherMode, setOtherMode] = useState(() => value !== "" && !rooms.includes(value));
+  if (!rooms.length) {
+    return <Field label="Room number" value={value} onChange={onChange} />;
+  }
+  return (
+    <label className="block">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted">Room number</span>
+      <select
+        className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+        value={otherMode ? "__other__" : value}
+        onChange={(event) => {
+          if (event.target.value === "__other__") {
+            setOtherMode(true);
+            onChange("");
+          } else {
+            setOtherMode(false);
+            onChange(event.target.value);
+          }
+        }}
+      >
+        <option value="">Select your room…</option>
+        {rooms.map((room) => (
+          <option key={room} value={room}>{room}</option>
+        ))}
+        <option value="__other__">Other…</option>
+      </select>
+      {otherMode ? (
+        <input
+          className="focus-ring mt-2 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
+          placeholder="Type your room"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : null}
     </label>
   );
 }
@@ -2385,7 +6153,7 @@ function StatusPill({ status }: { status: SessionStatus }) {
   return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase ${styles[status]}`}>{status}</span>;
 }
 
-function CameraSelfView({ videoRef, mediaCapture, pipMessage, onPopOut, pipAvailable }: { videoRef: React.RefObject<HTMLVideoElement>; mediaCapture: MediaCaptureState; pipMessage: string; onPopOut: () => void; pipAvailable: boolean }) {
+function CameraSelfView({ videoRef, mediaCapture, cameraRecorded }: { videoRef: React.Ref<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean }) {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -2393,16 +6161,69 @@ function CameraSelfView({ videoRef, mediaCapture, pipMessage, onPopOut, pipAvail
           <Camera size={18} />
           <h2 className="font-semibold">Camera self-view</h2>
         </div>
-        <span className={`rounded-full border px-2 py-1 text-xs font-medium ${mediaCapture.camera === "recording" ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>{mediaCapture.camera}</span>
+        {/* F10.1: with the camera-recording setting ON, a working camera reads
+            "recording" (a separate low-res stream IS recorded); with it off
+            the camera is a live monitor only — "monitored, not recorded". */}
+        <span className={`rounded-full border px-2 py-1 text-xs font-medium ${mediaCapture.camera === "recording" ? "border-accent/30 bg-accent/10 text-accent" : "border-warning/30 bg-warning/10 text-warning"}`}>{studentCopy.cameraStateLabel(mediaCapture.camera, cameraRecorded)}</span>
       </div>
       <div className="overflow-hidden rounded-md border border-line bg-ink">
         <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50" onClick={onPopOut} disabled={!pipAvailable}>
-          <PictureInPicture2 size={14} /> Pop out
+        <span className="text-xs leading-5 text-muted">{mediaCapture.camera === "unavailable" ? "No camera was detected. Screen recording continues." : "The camera preview stays here while you work."}</span>
+      </div>
+    </section>
+  );
+}
+
+// W1 — the floating camera dock for the exam view: a small bottom-right tile
+// (HackerRank-style) that keeps the rule-mandated self-view visible without
+// stealing layout space. The <video> host stays MOUNTED in BOTH visual states
+// (minimize is CSS-only) — the camera CAPTURE itself lives in the recorder and
+// never depends on this preview.
+function CameraDock({ videoRef, mediaCapture, cameraRecorded, collapsed, onToggle }: {
+  videoRef: React.Ref<HTMLVideoElement>;
+  mediaCapture: MediaCaptureState;
+  cameraRecorded: boolean;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  const stateLabel = studentCopy.cameraStateLabel(mediaCapture.camera, cameraRecorded);
+  return (
+    <div className="fixed bottom-4 right-4 z-40">
+      <div className={collapsed ? "hidden" : "w-56 overflow-hidden rounded-lg border border-line bg-ink shadow-subtle"}>
+        <div className="flex items-center justify-between gap-2 px-2.5 py-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-semibold text-white/80">
+            <Camera size={12} className="shrink-0" /> <span className="truncate">Camera · {stateLabel}</span>
+          </span>
+          <span className="flex shrink-0 items-center gap-0.5">
+            <button title="Minimize camera tile" className="focus-ring rounded p-1 text-white/70 hover:bg-white/10" onClick={onToggle}>
+              <ChevronDown size={14} />
+            </button>
+          </span>
+        </div>
+        <video ref={videoRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
+      </div>
+      {collapsed ? (
+        <button onClick={onToggle} className="focus-ring flex items-center gap-2 rounded-full bg-ink px-3 py-2 text-xs font-medium text-white shadow-subtle">
+          <Camera size={14} /> Camera · {stateLabel}
         </button>
-        <span className="text-xs leading-5 text-muted">{pipMessage || (mediaCapture.camera === "unavailable" ? "No camera was detected. Screen recording continues." : "The camera preview stays here and can pop out over other tabs in supported browsers.")}</span>
+      ) : null}
+    </div>
+  );
+}
+
+// Recent proctor events — shared by the classic layout (bottom section) and
+// the exam view's collapsible proctoring panel.
+function RecentEventsPanel({ events }: { events: ProctorEvent[] }) {
+  return (
+    <section className="rounded-lg border border-line bg-panel p-5">
+      <div className="mb-4 flex items-center gap-2">
+        <ClipboardList size={18} />
+        <h2 className="text-base font-semibold">Recent proctor events</h2>
+      </div>
+      <div className="space-y-2">
+        {events.length ? events.map((event, index) => <EventRow key={`${event.timestamp}-${index}`} event={event} />) : <p className="text-sm text-muted">Events will appear after recording starts.</p>}
       </div>
     </section>
   );
@@ -2416,7 +6237,10 @@ function recordingStateLabel(status: SessionStatus): { label: string; recording:
   return { label: "Not recording", recording: false };
 }
 
-function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState }) {
+// startIp/currentIp moved here from the deleted TimerBar (S1): close-up
+// diagnostics, not at-a-distance content. The ip-changed red treatment is
+// superseded by the shell's anomaly flow (ip_address_changed vanishes the bar).
+function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture, startIp, currentIp, ipChanged }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState; startIp: string; currentIp: string; ipChanged: boolean }) {
   const state = recordingStateLabel(status);
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
@@ -2434,42 +6258,19 @@ function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, man
         <Metric icon={<UploadCloud size={16} />} label="Uploaded chunks" value={`${uploadedCount}${queueDepth ? ` (${queueDepth} pending)` : ""}`} />
         <Metric icon={<MonitorUp size={16} />} label="Chunk interval" value={config ? `${config.upload_config.chunk_seconds}s` : "Not started"} />
         <Metric icon={<MonitorUp size={16} />} label="Screen" value={mediaCapture.screen} />
-        <Metric icon={<Camera size={16} />} label="Camera" value={mediaCapture.camera} />
+        {/* Camera = live monitor only; its stream is never recorded. */}
+        <Metric icon={<Camera size={16} />} label="Camera" value={studentCopy.cameraStateLabel(mediaCapture.camera, config?.upload_config.camera?.enabled === true)} />
         <Metric icon={<Mic size={16} />} label="Microphone" value={mediaCapture.microphone} />
         <Metric icon={<ClipboardList size={16} />} label="Manifest items" value={String(manifest.length)} />
+        <Metric icon={<Activity size={16} />} label="Start IP" value={startIp || "pending"} />
+        <Metric icon={<Activity size={16} />} label="Current IP" value={`${currentIp || startIp || "pending"}${ipChanged ? " (changed)" : ""}`} />
       </div>
       {sessionId ? <p className="mt-4 break-all font-mono text-xs text-muted">{sessionId}</p> : null}
     </section>
   );
 }
 
-function IntegrityCheckpointPanel({ checkpoint, onConfirm }: { checkpoint: IntegrityCheckpoint; onConfirm: () => void }) {
-  const [remaining, setRemaining] = useState(Math.max(0, checkpoint.expiresAt - Date.now()));
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setRemaining(Math.max(0, checkpoint.expiresAt - Date.now()));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [checkpoint.expiresAt]);
-
-  return (
-    <div className="mt-5 rounded-lg border border-warning/40 bg-warning/10 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold text-warning">Integrity checkpoint</p>
-          <p className="mt-1 text-sm leading-6 text-ink">{checkpoint.message}</p>
-          <p className="mt-1 text-xs text-muted">Missed checkpoints are logged as integrity anomalies. Time remaining: {Math.ceil(remaining / 1000)}s</p>
-        </div>
-        <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-warning px-4 py-2 text-sm font-medium text-white" onClick={onConfirm}>
-          <CheckCircle2 size={16} /> Confirm now
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit }: { clipboardAudit: string; clipboardText: string; tabAudit: string; cookieAudit: string }) {
+function EntryReviewPanel({ clipboardAudit, tabAudit, cookieAudit }: { clipboardAudit: string; tabAudit: string; cookieAudit: string }) {
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-2">
@@ -2482,11 +6283,10 @@ function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit
           <p className="mt-1 leading-6 text-muted">{tabAudit}</p>
         </div>
         <div>
+          {/* M6: clipboard CONTENT is never snapshotted at entry — this only
+              describes the in-exam monitoring scope, never any pasted text. */}
           <p className="font-medium">Clipboard</p>
           <p className="mt-1 leading-6 text-muted">{clipboardAudit}</p>
-          {clipboardText ? (
-            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-line bg-white p-3 font-mono text-xs text-ink">{clipboardText}</pre>
-          ) : null}
         </div>
         <div>
           <p className="flex items-center gap-2 font-medium"><Cookie size={15} /> Cookies and storage</p>
@@ -2499,43 +6299,29 @@ function EntryReviewPanel({ clipboardAudit, clipboardText, tabAudit, cookieAudit
 
 // Single source of truth for the test rules. The prominent PreStartRules block
 // (pre-start) and the compact RulesPanel reminder (during recording) both read
-// this so the rules never drift between the two surfaces.
-const TEST_RULES: Array<{ icon: React.ReactNode; title: string; body: string }> = [
-  {
-    icon: <MonitorUp size={18} />,
-    title: "Share your ENTIRE SCREEN",
-    body: "When prompted, choose Entire Screen — not a tab, window, or browser. Tab/window sharing is rejected and recording will not start."
-  },
-  {
-    icon: <Video size={18} />,
-    title: "Keep recording running",
-    body: "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have fully submitted on HackerRank."
-  },
-  {
-    icon: <Eye size={18} />,
-    title: "Stay on HackerRank and this tab",
-    body: "Don't switch to other tabs, apps, or windows. Focus changes, hidden states, and exits are logged and may need explanation."
-  },
-  {
-    icon: <Copy size={18} />,
-    title: "No copy / paste or outside help",
-    body: "Clipboard and paste activity is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
-  },
-  {
-    icon: <Camera size={18} />,
-    title: "Keep your camera visible",
-    body: "If a camera is available, keep the self-view (or its pop-out) visible while you work in HackerRank. Microphone is captured when available."
-  },
-  {
-    icon: <ClipboardCheck size={18} />,
-    title: "End the test here when done",
-    body: "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
-  }
+// this so the rules never drift between the two surfaces. The TEXT lives in
+// studentCopy.testRules (own-editor vs HackerRank variants, unit-tested); this
+// zips it with one icon per rule, in the same fixed order. ownEditor is
+// server-driven per session (S4: Boolean(sessionConfig?.problem)), so the
+// rules are a function of it instead of a module constant.
+const TEST_RULE_ICONS: React.ReactNode[] = [
+  <MonitorUp size={18} />,   // Share your ENTIRE SCREEN
+  <Video size={18} />,       // Keep recording running
+  <Eye size={18} />,         // Stay on (HackerRank and) this tab
+  <Copy size={18} />,        // No copy / paste or outside help
+  <Camera size={18} />,      // Keep your camera visible
+  <ClipboardCheck size={18} /> // End the test here when done
 ];
+const testRulesWithIcons = (ownEditor: boolean): Array<{ icon: React.ReactNode; title: string; body: string }> =>
+  studentCopy.testRules(ownEditor).map((rule, index) => ({ icon: TEST_RULE_ICONS[index], ...rule }));
 
 // PROMINENT pre-start rules — the candidate reads this before the form. This is
 // the headline of the page at the form stage, not a sidebar afterthought.
-function PreStartRules() {
+// UX-H1: the caller passes ownEditorCopy (pinned ?contest= = own-editor), so a
+// pinned candidate reads the own-editor rules pre-session instead of the
+// legacy HackerRank variants.
+function PreStartRules({ hasProblem }: { hasProblem: boolean }) {
+  const rules = testRulesWithIcons(hasProblem);
   return (
     <section className="mb-5 rounded-lg border border-warning/40 bg-warning/5 p-6 shadow-subtle">
       <div className="flex items-start gap-3">
@@ -2548,7 +6334,7 @@ function PreStartRules() {
         </div>
       </div>
       <ol className="mt-5 grid gap-3 sm:grid-cols-2">
-        {TEST_RULES.map((rule, index) => (
+        {rules.map((rule, index) => (
           <li key={rule.title} className="flex gap-3 rounded-lg border border-line bg-panel p-4">
             <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink/5 text-accent">{rule.icon}</span>
             <div>
@@ -2567,7 +6353,8 @@ function PreStartRules() {
 
 // Compact rules reminder kept in the sidebar DURING recording so the candidate
 // can re-check the rules at a glance without losing the live panels.
-function RulesPanel() {
+function RulesPanel({ hasProblem }: { hasProblem: boolean }) {
+  const rules = testRulesWithIcons(hasProblem);
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center gap-2">
@@ -2575,7 +6362,7 @@ function RulesPanel() {
         <h2 className="font-semibold">Rules reminder</h2>
       </div>
       <ul className="space-y-2.5 text-sm leading-6 text-muted">
-        {TEST_RULES.map((rule) => (
+        {rules.map((rule) => (
           <li key={rule.title} className="flex gap-2">
             <CheckCircle2 size={16} className="mt-1 shrink-0 text-accent" />
             <span><span className="font-medium text-ink">{rule.title}.</span> {rule.body}</span>
@@ -2589,12 +6376,18 @@ function RulesPanel() {
 // What the proctoring captures — shown in the form-stage sidebar so the candidate
 // knows exactly what is recorded before they consent and start. Replaces the
 // empty live panels (camera/health/evidence) that have nothing to show yet.
-function WhatIsRecordedPanel() {
+function WhatIsRecordedPanel({ hasProblem }: { hasProblem: boolean }) {
   const items: Array<{ icon: React.ReactNode; label: string; detail: string }> = [
     { icon: <MonitorUp size={16} />, label: "Your entire screen", detail: "Recorded continuously and uploaded in short segments throughout the test." },
     { icon: <Camera size={16} />, label: "Camera (if available)", detail: "A small self-view; keep your face visible. Skipped if no camera is present." },
     { icon: <Mic size={16} />, label: "Microphone (if available)", detail: "Audio is captured alongside the screen when a microphone is present." },
     { icon: <Copy size={16} />, label: "Clipboard & paste activity", detail: "Copy/cut/paste inside the session is part of the integrity record." },
+    // Own-editor only: Slice 1 records every keystroke (full text + timing) in
+    // the coding workspace. The HackerRank fallback has no own editor, so this
+    // line is omitted there.
+    ...(hasProblem
+      ? [{ icon: <KeyRound size={16} />, label: "Editor keystrokes", detail: "Everything you type in the coding editor, including keystroke timing, is recorded." }]
+      : []),
     { icon: <Activity size={16} />, label: "Focus & network signals", detail: "Tab switches, hidden states, refreshes, exits, and IP changes are logged." }
   ];
   return (
@@ -2621,13 +6414,18 @@ function WhatIsRecordedPanel() {
 // PROMINENT, recoverable screen-share / start failure. Always offers an inline
 // Try-again that re-invokes the share prompt — never a page reload. The headline
 // makes the NOT-RECORDING state unmistakable.
-function ScreenShareErrorPanel({ startError, busy, onRetry, onDismiss }: { startError: { kind: RecorderStartErrorKind; message: string }; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
+function ScreenShareErrorPanel({ startError, stopped, busy, onRetry, onDismiss }: { startError: { kind: RecorderStartErrorKind; message: string }; stopped: boolean; busy: boolean; onRetry: () => void; onDismiss: () => void }) {
   const isInvalidSurface = startError.kind === "invalid_surface";
+  // UX-H3: once the session is live (`stopped`), "has NOT started" reads as a
+  // glitch to a candidate whose share dropped mid-exam — name the stopped
+  // state and the fix instead. Pre-start keeps the truthful never-started title.
   const heading = isInvalidSurface
     ? "Recording has NOT started — share your entire screen"
     : startError.kind === "unsupported"
       ? "Recording has NOT started — unsupported browser"
-      : "Recording has NOT started";
+      : stopped
+        ? "Recording stopped — restart your screen share"
+        : "Recording has NOT started";
   return (
     <div className="mt-5 rounded-lg border-2 border-danger/50 bg-danger/5 p-5 shadow-subtle">
       <div className="flex items-start gap-3">
@@ -2700,7 +6498,10 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
 }
 
 function EventRow({ event }: { event: ProctorEvent }) {
-  const message = typeof event.detail?.message === "string" ? event.detail.message : event.detail ? JSON.stringify(event.detail) : event.visibility_state;
+  // UX-M1: candidate-facing rows render the friendly message only — never the
+  // raw detail JSON (it carries internals like upload storage keys). Admin
+  // surfaces have their own event views and are unaffected.
+  const message = typeof event.detail?.message === "string" ? event.detail.message : event.visibility_state;
   return (
     <div className="grid gap-2 rounded-md border border-line bg-white/60 p-3 text-sm md:grid-cols-[180px_180px_1fr]">
       <span className="font-mono text-xs text-muted">{new Date(event.timestamp).toLocaleTimeString()}</span>

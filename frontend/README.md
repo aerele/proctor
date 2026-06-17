@@ -9,7 +9,7 @@ behind nginx.
 - `src/App.tsx` — both apps. Student: registration → screen-share recording (it
   **refuses to record** anything but an Entire-Screen / `monitor` surface),
   guided step banner, resume-after-reload, invalid-share/end-failure inline
-  recovery, integrity checkpoints, tab-close beacon. Admin: 5s auto-poll Live
+  recovery, tab-close beacon. Admin: 5s auto-poll Live
   stats + Live Alerts (archive, room/severity/source filters, video deep-links),
   remote session actions (approve/lock/unlock/bypass/end), alert-type toggles.
 - `src/useProctorRecorder.ts` — the recorder engine: `getDisplayMedia` capture,

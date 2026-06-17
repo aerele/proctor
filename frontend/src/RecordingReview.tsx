@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Check,
   ChevronDown,
@@ -21,26 +22,30 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchAdminSessions, fetchMyReviews, fetchRecordingSessions, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
-import type { AdminSessionDetail, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEvidence, SubmissionEvent } from "./types";
+import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
+import { describeRecordingContents } from "./admin/sessionDetail";
+import { DateTimeField } from "./admin/DateTimeField";
+import { candidateIdOf } from "./identity";
+import {
+  CHUNK_SECONDS,
+  buildPlaylist,
+  isSourceChunk,
+  type RecordingSource,
+  type TimelineChunk
+} from "./recordingPlaylist";
+import {
+  DEFAULT_LOG_FILTERS,
+  alertsForCandidate,
+  buildTimelineLog,
+  clusterMarkers,
+  filterTimelineLog,
+  type TimelineLogEntry,
+  type TimelineLogFilters
+} from "./recordingTimeline";
+import type { AdminSessionDetail, Alert, AlertSeverity, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SubmissionEvent } from "./types";
 
 // localStorage key for the reviewer's own name so a refresh keeps them reviewing.
 const REVIEWER_NAME_KEY = "proctor_reviewer_name";
-
-// Every recorded chunk is a fixed 30-second .webm (uploadConfig.chunk_seconds on
-// the backend). The playback timeline is built around this constant.
-const CHUNK_SECONDS = 30;
-
-// A single chunk placed on the test-relative timeline. offsetSec is the chunk's
-// START time in seconds relative to the test start; [offsetSec, offsetSec+CHUNK_SECONDS]
-// is the span it occupies. `url` is the signed download URL (refreshable).
-type TimelineChunk = {
-  index: number; // 1-based numeric index parsed from the chunk key
-  key: string;
-  url: string;
-  offsetSec: number; // start, relative to test start
-  endSec: number; // offsetSec + CHUNK_SECONDS
-};
 
 // A SUBMISSION-TIME MARKER placed on the test-relative timeline: offsetSec is the
 // submission's real time relative to the test start, valid drives GREEN/RED.
@@ -57,16 +62,8 @@ type TimelineGap = {
   toSec: number;
 };
 
-// Pull the numeric index out of a screen-chunk key, e.g.
-// ".../screen/chunk-00007.webm" → 7. Returns NaN for non-matching keys.
-function chunkIndexFromKey(key: string): number {
-  const match = key.match(/screen\/chunk-(\d+)\.(?:webm|bin)$/);
-  return match ? Number(match[1]) : NaN;
-}
-
-function isScreenChunk(evidence: SessionEvidence): boolean {
-  return /screen\/chunk-\d+\.(?:webm|bin)$/.test(evidence.key);
-}
+// F10.1: chunk-key parsing + playlist construction moved to recordingPlaylist.ts
+// (pure, vitest-covered) so the Screen/Camera source toggle filters one place.
 
 // Format seconds as mm:ss (or h:mm:ss past an hour). Negative inputs clamp to 0.
 function formatClock(totalSeconds: number): string {
@@ -91,49 +88,6 @@ function isoToLocalInput(value?: string): string {
 function localInputToMs(value: string): number {
   if (!value) return NaN;
   return new Date(value).getTime();
-}
-
-// Build the playlist for one session against a chosen test-start time.
-//
-// Each chunk is placed on the timeline by REAL time when its last_modified is
-// known: a chunk's object is finalized when its 30s window CLOSES, so its START
-// offset is (last_modified − CHUNK_SECONDS) relative to the test start. This is
-// what correctly handles late-joiners (their first chunk lands after 0) and
-// recording GAPS (a missing minute leaves a blank span). When last_modified is
-// missing we fall back to index-based contiguous placement anchored on the
-// session's created_at, so the playlist is still coherent.
-function buildPlaylist(
-  evidence: SessionEvidence[],
-  sessionCreatedAt: string | undefined,
-  testStartMs: number
-): TimelineChunk[] {
-  const createdMs = sessionCreatedAt ? Date.parse(sessionCreatedAt) : NaN;
-  const chunks = evidence
-    .filter(isScreenChunk)
-    .map((file) => ({ file, index: chunkIndexFromKey(file.key) }))
-    .filter((entry) => Number.isFinite(entry.index))
-    .sort((a, b) => a.index - b.index);
-
-  return chunks.map((entry) => {
-    const modifiedMs = entry.file.last_modified ? Date.parse(entry.file.last_modified) : NaN;
-    let offsetSec: number;
-    if (Number.isFinite(modifiedMs) && Number.isFinite(testStartMs)) {
-      offsetSec = (modifiedMs - CHUNK_SECONDS * 1000 - testStartMs) / 1000;
-    } else {
-      // Index-based contiguous fallback, anchored on created_at vs test start.
-      const anchorOffset = Number.isFinite(createdMs) && Number.isFinite(testStartMs)
-        ? (createdMs - testStartMs) / 1000
-        : 0;
-      offsetSec = (entry.index - 1) * CHUNK_SECONDS + anchorOffset;
-    }
-    return {
-      index: entry.index,
-      key: entry.file.key,
-      url: entry.file.download_url,
-      offsetSec,
-      endSec: offsetSec + CHUNK_SECONDS
-    };
-  });
 }
 
 // Pick the chunk whose [offset, end] span contains testTime; if none contains it
@@ -188,6 +142,20 @@ function tickIntervals(spanSeconds: number): { major: number; minor: number } {
   return { major: 15 * 60, minor: 5 * 60 }; // 15min labels, 5min minors
 }
 
+// F6.7: severity → marker/dot color classes shared by the timeline alert dots
+// and the activity-log rows (critical/warning/info on the standard palette).
+const SEVERITY_DOT: Record<AlertSeverity, string> = {
+  critical: "bg-danger",
+  warning: "bg-warning",
+  info: "bg-accent"
+};
+
+const SEVERITY_BADGE: Record<AlertSeverity, string> = {
+  critical: "bg-danger/10 text-danger",
+  warning: "bg-warning/10 text-warning",
+  info: "bg-accent/10 text-accent"
+};
+
 // Parse a "jump to time" string into seconds. Accepts mm:ss, h:mm:ss, a bare
 // minutes number (e.g. "75" → 75min) or a decimal minutes (e.g. "12.5"). Returns
 // NaN when the input can't be understood so callers can ignore it.
@@ -211,9 +179,20 @@ function parseTimeInput(raw: string): number {
 
 type Props = {
   password: string;
+  // Global contest filter (App.tsx alertFilters.contest_slug). When set, the
+  // recording-sessions picker is scoped to that contest. Empty/undefined = all.
+  contestSlug?: string;
+  // F6.3: state-based deep link from the admin Sessions detail card — load this
+  // candidate's recording on mount, preferring this exact session over the
+  // default newest-first pick. One-shot: consumed via onDeepLinkConsumed so a
+  // later manual visit to the tab starts blank as before.
+  // FIX-B1: `usernameNorm` is the session's exact stored key (person/legacy);
+  // when present the player resolves by it, not the display `username`.
+  deepLink?: { username: string; usernameNorm?: string; sessionId?: string } | null;
+  onDeepLinkConsumed?: () => void;
 };
 
-export function RecordingReview({ password }: Props) {
+export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkConsumed }: Props) {
   // Picker: the lightweight recording-sessions list (null until loaded; an empty
   // array means "endpoint not deployed" → manual username entry).
   const [recordingSessions, setRecordingSessions] = useState<RecordingSession[] | null>(null);
@@ -227,6 +206,16 @@ export function RecordingReview({ password }: Props) {
   // The selected user's SUBMISSION-TIME MARKERS (poller-sourced). Empty when the
   // user has none or the endpoint is not deployed (graceful — no markers shown).
   const [submissionEvents, setSubmissionEvents] = useState<SubmissionEvent[]>([]);
+  // F6.7: the active session's proctor EVENT stream (visibility/clipboard/IP/
+  // recording-state) + the candidate's ALERTS, for the activity overlay + log.
+  // Both degrade to empty (no markers) when unavailable — never block playback.
+  const [sessionEvents, setSessionEvents] = useState<SessionEventItem[]>([]);
+  // F6 review: true when the backend capped the event stream (the activity log
+  // shows a "first N events" note instead of presenting a partial log as full).
+  const [sessionEventsTruncated, setSessionEventsTruncated] = useState(false);
+  const [candidateAlerts, setCandidateAlerts] = useState<Alert[]>([]);
+  // Activity-log filter state — everything on by default (usability bar).
+  const [logFilters, setLogFilters] = useState<TimelineLogFilters>(DEFAULT_LOG_FILTERS);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [loadingUser, setLoadingUser] = useState(false);
   const [error, setError] = useState("");
@@ -236,12 +225,20 @@ export function RecordingReview({ password }: Props) {
 
   // Player state.
   const [currentPos, setCurrentPos] = useState(0); // playlist index of the loaded chunk
+  // F10.1: which chunk series plays — the screen recording or the separate
+  // low-res camera stream. The toggle renders only when camera chunks exist;
+  // both share the same test-relative timeline + overlays.
+  const [source, setSource] = useState<RecordingSource>("screen");
   const [playing, setPlaying] = useState(false);
   const [currentTestTime, setCurrentTestTime] = useState(0); // seconds, test-relative
   const [refreshNote, setRefreshNote] = useState("");
 
   // "Jump to time" input (mm:ss / h:mm:ss / bare-minutes), parsed on submit.
   const [jumpInput, setJumpInput] = useState("");
+  // A3: the summary-stats card is the first-class readout; the continuous scrubber
+  // + its footer are a "timeline detail" drill-down behind this toggle (default on
+  // so the existing scrubber stays visible until the operator collapses it).
+  const [showTimelineDetail, setShowTimelineDetail] = useState(true);
   // DRAG-SCRUB state: while the playhead is being dragged we show a live preview
   // time WITHOUT seeking the <video> on every mousemove (seek only on release, so
   // a 2-hour scrub stays smooth). `null` when not dragging.
@@ -284,12 +281,14 @@ export function RecordingReview({ password }: Props) {
   const [rewatchUsername, setRewatchUsername] = useState<string | null>(null);
   // The username currently loaded into the player (used to detect "no recording").
 
-  // ---- Load the lightweight picker list once. -----------------------------
+  // ---- Load the lightweight picker list. Re-runs when the global contest filter
+  // changes so the picker stays scoped to the selected contest. ---------------
   useEffect(() => {
     let cancelled = false;
+    setPickerLoaded(false);
     void (async () => {
       try {
-        const list = await fetchRecordingSessions(password);
+        const list = await fetchRecordingSessions(password, contestSlug || undefined);
         if (cancelled) return;
         if (list === null) {
           setEndpointAvailable(false);
@@ -306,7 +305,7 @@ export function RecordingReview({ password }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [password]);
+  }, [password, contestSlug]);
 
   // The active session object + its playlist, recomputed when the selection or
   // the test-start anchor changes.
@@ -317,10 +316,21 @@ export function RecordingReview({ password }: Props) {
 
   const testStartMs = useMemo(() => localInputToMs(testStartInput), [testStartInput]);
 
+  // F10.1: this session's camera-chunk count (from the signed evidence list —
+  // the authoritative signal). Drives the Screen/Camera toggle visibility and
+  // the recorded-camera wording in the contents line.
+  const cameraChunkCount = useMemo(
+    () => (activeSession?.evidence ?? []).filter((file) => isSourceChunk(file, "camera")).length,
+    [activeSession]
+  );
+  // A session without camera chunks always plays the screen series (also
+  // resets the toggle when switching from a camera-carrying session).
+  const activeSource: RecordingSource = cameraChunkCount > 0 ? source : "screen";
+
   const playlist = useMemo(() => {
     if (!activeSession) return [];
-    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs);
-  }, [activeSession, testStartMs]);
+    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs, activeSource);
+  }, [activeSession, testStartMs, activeSource]);
 
   // Timeline span: from the first chunk's start to the last chunk's end. Clamped
   // so a single-chunk or all-gap session still yields a usable bar.
@@ -371,18 +381,109 @@ export function RecordingReview({ password }: Props) {
   const validCount = useMemo(() => markers.filter((m) => m.event.valid).length, [markers]);
   const invalidCount = markers.length - validCount;
 
+  // A3: total recording-gap duration (seconds) across all gaps, for the summary card.
+  const totalGapSeconds = useMemo(() => gaps.reduce((sum, g) => sum + (g.toSec - g.fromSec), 0), [gaps]);
+
+  // ---- F6.7: activity overlay + log data ----------------------------------
+  // Fetch the active session's EVENT stream (per-session) and the candidate's
+  // ALERTS (per-candidate over the session's contest scope; archived included —
+  // a reviewer wants the full history). Re-runs when the active session
+  // changes; both fetches degrade to empty on failure/404.
+  useEffect(() => {
+    const session = activeSession;
+    const sessionId = session?.session_id ? String(session.session_id) : "";
+    if (!sessionId) {
+      setSessionEvents([]);
+      setSessionEventsTruncated(false);
+      setCandidateAlerts([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await fetchSessionEvents(password, sessionId);
+        if (!cancelled) {
+          setSessionEvents(result?.events ?? []);
+          setSessionEventsTruncated(result?.truncated === true);
+        }
+      } catch {
+        if (!cancelled) {
+          setSessionEvents([]);
+          setSessionEventsTruncated(false);
+        }
+      }
+      try {
+        const response = await fetchAlerts(password, {
+          contest_slug: session?.contest_slug || undefined,
+          include_archived: true
+        });
+        if (!cancelled) setCandidateAlerts(alertsForCandidate(response.alerts ?? [], session ?? {}));
+      } catch {
+        if (!cancelled) setCandidateAlerts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.session_id, password]);
+
+  // The merged, time-ordered activity entries (alerts + events + submissions)
+  // on the SAME test-relative scale, blackout-tagged via the gap spans — then
+  // the filtered view + the per-kind marker lists the overlay renders.
+  const logEntries = useMemo(
+    () => buildTimelineLog({ alerts: candidateAlerts, events: sessionEvents, submissions: submissionEvents, testStartMs, gaps }),
+    [candidateAlerts, sessionEvents, submissionEvents, testStartMs, gaps]
+  );
+  const visibleLog = useMemo(() => filterTimelineLog(logEntries, logFilters), [logEntries, logFilters]);
+  const alertMarkers = useMemo(() => visibleLog.filter((entry) => entry.kind === "alert"), [visibleLog]);
+  // Event ticks CLUSTER when closer than ~0.8% of the span (min 2s) so a dense
+  // stream stays individually hoverable instead of smearing into a blob.
+  const eventClusters = useMemo(
+    () => clusterMarkers(visibleLog.filter((entry) => entry.kind === "event"), Math.max(spanDuration * 0.008, 2)),
+    [visibleLog, spanDuration]
+  );
+  const logCounts = useMemo(
+    () => ({
+      alerts: logEntries.filter((entry) => entry.kind === "alert").length,
+      events: logEntries.filter((entry) => entry.kind === "event").length,
+      submissions: logEntries.filter((entry) => entry.kind === "submission").length
+    }),
+    [logEntries]
+  );
+
   // ---- Load a chosen user's sessions (with signed evidence). --------------
   // `silentIfEmpty` (review mode) suppresses the "No sessions found" banner so
   // ReviewModePanel can show its own "No recording found — score anyway" state.
+  // `preferSessionId` (F6.3 deep link) selects that exact session when it is
+  // among the loaded ones; otherwise the default newest-first pick applies.
+  // `contestScope` (S-D A1) restricts the search to one contest: BROWSE-mode
+  // call sites pass the global selector's slug (so the loaded sessions match
+  // the scoped picker), while REVIEW-mode calls stay unscoped — the review
+  // roster is server-driven and independent of the admin's selector.
+  const loadedScopeRef = useRef<string | undefined>(undefined);
+  // FIX-B1: the player resolves a candidate's sessions by the EXACT stored key
+  // (username_norm) when the caller knows it (picker rows + the Sessions deep
+  // link carry it). For PERSON-mode sessions username_norm = person_id
+  // ("{college_norm}~{uid_norm}"), which the candidate_id NEVER re-normalizes
+  // to — so the old candidate_id lookup returned nothing. `username` stays the
+  // DISPLAY label (candidate_id); `lookupNorm`, when given, is the lookup key
+  // and is held so a signed-URL refresh re-resolves the same session.
+  const loadedNormRef = useRef<string | undefined>(undefined);
   const loadUser = useCallback(
-    async (username: string, silentIfEmpty = false) => {
+    async (username: string, silentIfEmpty = false, preferSessionId?: string, contestScope?: string, lookupNorm?: string) => {
       const trimmed = username.trim();
-      if (!trimmed) return;
+      const norm = lookupNorm?.trim() || undefined;
+      // A caller may pass an empty display label as long as it supplies the
+      // exact stored key (person rows whose candidate_id is blank still resolve).
+      if (!trimmed && !norm) return;
       setLoadingUser(true);
       setError("");
       setRefreshNote("");
       try {
-        const response = await fetchAdminSessions(trimmed, password);
+        loadedScopeRef.current = contestScope;
+        loadedNormRef.current = norm;
+        const response = await fetchAdminSessions(trimmed, password, contestScope, norm);
         const loaded = response.sessions ?? [];
         setSessions(loaded);
         // Default to the newest session (sessions arrive newest-first from the
@@ -390,18 +491,22 @@ export function RecordingReview({ password }: Props) {
         const newest = [...loaded].sort((a, b) =>
           String(b.created_at || "").localeCompare(String(a.created_at || ""))
         )[0];
-        setSelectedSessionId(newest ? String(newest.session_id) : "");
-        setTestStartInput(isoToLocalInput(newest?.created_at));
+        const preferred = preferSessionId
+          ? loaded.find((s) => String(s.session_id) === preferSessionId)
+          : undefined;
+        const target = preferred ?? newest;
+        setSelectedSessionId(target ? String(target.session_id) : "");
+        setTestStartInput(isoToLocalInput(target?.created_at));
         setCurrentPos(0);
         setCurrentTestTime(0);
         setPlaying(false);
-        if (!loaded.length && !silentIfEmpty) setError(`No sessions found for "${trimmed}".`);
+        if (!loaded.length && !silentIfEmpty) setError(`No sessions found for "${trimmed || norm}".`);
 
-        // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the newest
+        // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the chosen
         // session's contest so the markers line up with that test; a 404 (or
         // null) just means no markers — never blocks the recording view.
         try {
-          const events = await fetchSubmissionEvents(password, trimmed, newest?.contest_slug || undefined);
+          const events = await fetchSubmissionEvents(password, trimmed, target?.contest_slug || undefined);
           setSubmissionEvents(events ?? []);
         } catch {
           setSubmissionEvents([]);
@@ -416,6 +521,17 @@ export function RecordingReview({ password }: Props) {
     },
     [password]
   );
+
+  // F6.3: consume the deep link from the Sessions detail card — load that
+  // candidate (preferring the exact session) in Browse mode, then tell the
+  // parent it was consumed so the link stays one-shot.
+  useEffect(() => {
+    if (!deepLink) return;
+    setMode("browse");
+    void loadUser(deepLink.username, false, deepLink.sessionId, contestSlug || undefined, deepLink.usernameNorm);
+    onDeepLinkConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLink]);
 
   // ---- REVIEW MODE actions ----------------------------------------------
   // Refresh this reviewer's own completed-verdict list (header count + re-watch
@@ -565,32 +681,48 @@ export function RecordingReview({ password }: Props) {
       setCurrentPos(0);
       setCurrentTestTime(0);
       setPlaying(false);
+      // F10.1: a different session starts back on the screen series.
+      setSource("screen");
     },
     [sessions]
   );
 
+  // F10.1: switch between the screen recording and the camera stream, holding
+  // the playhead position (the [playlist] effect reloads the matching chunk).
+  const switchSource = useCallback((next: RecordingSource) => {
+    setSource(next);
+    setPlaying(false);
+  }, []);
+
   // Refresh the signed evidence URLs (they expire ~1h) by re-calling
   // fetchAdminSessions, preserving the current selection/position. Returns the
   // fresh URL for the chunk at `posToKeep` so the caller can resume in place.
+  // Re-fetches with the SAME contest scope the current list was loaded under,
+  // so a URL refresh never changes which sessions are listed.
   const refreshUrls = useCallback(async (): Promise<string | null> => {
     if (refreshingRef.current || !activeSession) return null;
-    const username = activeSession.hackerrank_username;
-    if (!username) return null;
+    // FIX-B1: re-resolve by the SAME stored key the session was loaded under
+    // (works for person + legacy), falling back to the candidate_id lookup.
+    const username = candidateIdOf(activeSession);
+    const norm = (typeof activeSession.username_norm === "string" && activeSession.username_norm)
+      || loadedNormRef.current
+      || undefined;
+    if (!username && !norm) return null;
     refreshingRef.current = true;
     try {
-      const response = await fetchAdminSessions(String(username), password);
+      const response = await fetchAdminSessions(username, password, loadedScopeRef.current, norm);
       const fresh = response.sessions ?? [];
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
       const refreshed = fresh.find((s) => String(s.session_id) === selectedSessionId) ?? fresh[0];
-      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs);
+      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs, activeSource);
       return list[currentPos]?.url ?? null;
     } catch {
       return null;
     } finally {
       refreshingRef.current = false;
     }
-  }, [activeSession, password, selectedSessionId, currentPos, testStartMs]);
+  }, [activeSession, password, selectedSessionId, currentPos, testStartMs, activeSource]);
 
   // ---- Load the current chunk into the <video> and (optionally) play. -----
   // We set src imperatively (not via JSX) so we can also drive seek + play/pause
@@ -881,14 +1013,14 @@ export function RecordingReview({ password }: Props) {
   const playheadPct = Math.max(0, Math.min(100, ((displayTime - span.start) / spanDuration) * 100));
   const playedPct = Math.max(0, Math.min(100, ((currentTestTime - span.start) / spanDuration) * 100));
 
-  // Filtered picker list (search box). Case-insensitive over username + name + room.
+  // Filtered picker list (search box). Case-insensitive over candidate ID + name + room.
   const filteredSessions = useMemo(() => {
     if (!recordingSessions) return [];
     const q = searchText.trim().toLowerCase();
     if (!q) return recordingSessions.slice(0, 100);
     return recordingSessions
       .filter((s) =>
-        `${s.hackerrank_username} ${s.name} ${s.room}`.toLowerCase().includes(q)
+        `${candidateIdOf(s)} ${s.name} ${s.room}`.toLowerCase().includes(q)
       )
       .slice(0, 100);
   }, [recordingSessions, searchText]);
@@ -987,7 +1119,7 @@ export function RecordingReview({ password }: Props) {
                   <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
                   <input
                     className="focus-ring h-10 w-full rounded-md border border-line bg-white pl-9 pr-3 text-sm"
-                    placeholder="Search username, name, or room"
+                    placeholder="Search candidate ID, name, or room"
                     value={searchText}
                     onChange={(event) => setSearchText(event.target.value)}
                   />
@@ -1001,11 +1133,11 @@ export function RecordingReview({ password }: Props) {
                     <button
                       key={s.session_id}
                       type="button"
-                      onClick={() => void loadUser(s.hackerrank_username)}
+                      onClick={() => void loadUser(candidateIdOf(s), false, undefined, contestSlug || undefined, s.username_norm || undefined)}
                       className="focus-ring block w-full rounded-md border border-line bg-white/60 px-3 py-2 text-left hover:border-ink/40"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-sm font-semibold text-ink">{s.hackerrank_username}</span>
+                        <span className="truncate text-sm font-semibold text-ink">{candidateIdOf(s)}</span>
                         <span className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[10px] text-muted">
                           <Video size={10} /> {s.chunk_count}
                         </span>
@@ -1027,23 +1159,23 @@ export function RecordingReview({ password }: Props) {
           ) : (
             <>
               <p className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-                The recordings index endpoint is not deployed yet. Enter a HackerRank username to load that student's recording directly.
+                The recordings index endpoint is not deployed yet. Enter a Candidate ID to load that student's recording directly.
               </p>
               <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">HackerRank username</span>
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Candidate ID</span>
                 <input
                   className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
                   value={manualUsername}
                   onChange={(event) => setManualUsername(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") void loadUser(manualUsername);
+                    if (event.key === "Enter") void loadUser(manualUsername, false, undefined, contestSlug || undefined);
                   }}
                 />
               </label>
               <button
                 type="button"
                 className="focus-ring inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50"
-                onClick={() => void loadUser(manualUsername)}
+                onClick={() => void loadUser(manualUsername, false, undefined, contestSlug || undefined)}
                 disabled={loadingUser || !manualUsername.trim()}
               >
                 <Search size={16} /> Load recording
@@ -1090,28 +1222,55 @@ export function RecordingReview({ password }: Props) {
                     >
                       {sessions.map((s) => (
                         <option key={String(s.session_id)} value={String(s.session_id)}>
-                          {s.created_at ? new Date(s.created_at).toLocaleString() : String(s.session_id)} · {String(s.status ?? "")} · {(s.evidence ?? []).filter((e) => isScreenChunk(e)).length} chunks
+                          {s.created_at ? new Date(s.created_at).toLocaleString() : String(s.session_id)} · {String(s.status ?? "")} · {(s.evidence ?? []).filter((e) => isSourceChunk(e, "screen")).length} chunks
                         </option>
                       ))}
                     </select>
                   </label>
-                  <label className="block">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted">Test start time</span>
-                    <input
-                      type="datetime-local"
-                      className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
-                      value={testStartInput}
-                      onChange={(event) => setTestStartInput(event.target.value)}
-                    />
-                  </label>
+                  <DateTimeField label="Test start time" value={testStartInput} onChange={setTestStartInput} />
                 </div>
                 <p className="mt-2 text-xs text-muted">
                   {activeSession.name ? `${activeSession.name} · ` : ""}
-                  {activeSession.hackerrank_username}
+                  {candidateIdOf(activeSession)}
                   {activeSession.room ? ` · Room ${activeSession.room}` : ""}
                   {" · "}timeline labels are relative to the test start above ({formatClock(span.end)} long
                   {spanDuration >= 3600 ? ", h:mm:ss" : ", mm:ss"}).
                 </p>
+                {/* F6.6 — what THIS recording contains, from the session's
+                    last-reported capture state. F10.1: camera chunks in the
+                    evidence flip the camera fragment to "recorded separately". */}
+                <p className="mt-1 text-xs text-muted">
+                  Recording contains: {describeRecordingContents(activeSession.capture_state, cameraChunkCount)}.
+                </p>
+                {/* F10.1 — source toggle: only sessions that uploaded camera
+                    chunks offer the separate low-res camera stream. Both
+                    sources share the timeline + every overlay marker. */}
+                {cameraChunkCount > 0 ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted">Source</span>
+                    <div className="inline-flex overflow-hidden rounded-md border border-line">
+                      <button
+                        type="button"
+                        onClick={() => switchSource("screen")}
+                        className={`focus-ring inline-flex h-8 items-center gap-1.5 px-3 text-xs font-medium ${activeSource === "screen" ? "bg-ink text-white" : "bg-white text-ink hover:bg-line/30"}`}
+                      >
+                        <Film size={13} /> Screen
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => switchSource("camera")}
+                        className={`focus-ring inline-flex h-8 items-center gap-1.5 px-3 text-xs font-medium ${activeSource === "camera" ? "bg-ink text-white" : "bg-white text-ink hover:bg-line/30"}`}
+                      >
+                        <Video size={13} /> Camera
+                      </button>
+                    </div>
+                    <span className="text-xs text-muted">
+                      {activeSource === "camera"
+                        ? `low-res camera stream · ${cameraChunkCount} chunks`
+                        : `camera stream available (${cameraChunkCount} chunks)`}
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {/* PLAYER — focusable wrapper so ARROW KEYS nudge playback (±5s, Shift
@@ -1250,7 +1409,46 @@ export function RecordingReview({ password }: Props) {
                 </div>
               </div>
 
-              {/* TIMELINE scrubber */}
+              {/* SUMMARY STATS — a first-class readout of the loaded recording:
+                  chunks, sessions, events (valid/invalid), time range, and
+                  recording gaps. Always shown; the continuous scrubber below is a
+                  drill-down behind the "Show timeline detail" toggle. */}
+              <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">Summary</h2>
+                  <button
+                    type="button"
+                    onClick={() => setShowTimelineDetail((v) => !v)}
+                    aria-expanded={showTimelineDetail}
+                    className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                  >
+                    {showTimelineDetail ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {showTimelineDetail ? "Hide timeline detail" : "Show timeline detail"}
+                  </button>
+                </div>
+                <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                  <SummaryStat label="Total chunks" value={String(playlist.length)} />
+                  <SummaryStat label="Sessions covered" value={String(sessions.length)} />
+                  <SummaryStat
+                    label="Events processed"
+                    value={String(markers.length)}
+                    hint={markers.length ? `✓ ${validCount} valid · ✗ ${invalidCount} invalid` : "no submission events"}
+                  />
+                  <SummaryStat
+                    label="Time range"
+                    value={`${formatClock(span.start)}–${formatClock(span.end)}`}
+                  />
+                  <SummaryStat
+                    label="Recording gaps"
+                    value={String(gaps.length)}
+                    hint={gaps.length ? `${formatClock(totalGapSeconds)} total` : "no gaps"}
+                  />
+                </dl>
+              </div>
+
+              {/* TIMELINE scrubber — drill-down behind the summary toggle. */}
+              {showTimelineDetail ? (
+              <>
               {playlist.length ? (
                 <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
                   {/* The bar carries generous vertical padding: VALID submission
@@ -1354,6 +1552,38 @@ export function RecordingReview({ password }: Props) {
                       );
                     })}
 
+                    {/* ALERT MARKERS (F6.7) — severity-colored DOTS riding the
+                        track center: a distinct shape from the thin submission
+                        ticks above/below, white-ringed so they read against the
+                        fill and gaps. Hover gives headline + time (+ blackout);
+                        click jumps the recording there. */}
+                    {alertMarkers.map((entry) => {
+                      const clamped = Math.max(span.start, Math.min(entry.offsetSec, span.end));
+                      const left = ((clamped - span.start) / spanDuration) * 100;
+                      const label = `⚠ ${entry.label} · ${formatClock(entry.offsetSec)}${entry.duringGap ? " · during blackout" : ""}`;
+                      return (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          title={label}
+                          aria-label={label}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            seekToTestTime(clamped, wantPlaying());
+                          }}
+                          className="group absolute top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 cursor-pointer"
+                          style={{ left: `${left}%` }}
+                        >
+                          {/* Invisible widened hit-area for easy hover at density. */}
+                          <span className="absolute -inset-1.5" />
+                          <span
+                            className={`block h-2.5 w-2.5 rounded-full ring-2 ring-white ${SEVERITY_DOT[entry.severity ?? "info"]} transition-transform group-hover:scale-125`}
+                          />
+                        </button>
+                      );
+                    })}
+
                     {/* DRAGGABLE PLAYHEAD with a live readout (shown while dragging). */}
                     <div className="pointer-events-none absolute bottom-0 top-0 z-30" style={{ left: `${playheadPct}%` }}>
                       <div className="absolute top-1/2 h-7 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-ink" />
@@ -1366,7 +1596,43 @@ export function RecordingReview({ password }: Props) {
                     </div>
                   </div>
 
-                  <div className="mt-6 flex items-center justify-between text-[11px] text-muted">
+                  {/* EVENT LANE (F6.7) — the candidate's proctor events as
+                      SUBDUED ticks on a slim strip aligned under the scrubber
+                      (kept off the main bar so it stays clean at zoom-out).
+                      Near-coincident events cluster into one slightly wider
+                      tick whose tooltip lists them; click seeks to the first. */}
+                  {eventClusters.length ? (
+                    // mt-6 clears the major-tick labels hanging below the bar.
+                    <div className="relative mt-6 h-3 w-full" aria-label="Candidate events lane">
+                      {eventClusters.map((cluster) => {
+                        const clamped = Math.max(span.start, Math.min(cluster.offsetSec, span.end));
+                        const left = ((clamped - span.start) / spanDuration) * 100;
+                        const head = cluster.entries.slice(0, 3).map((entry) => entry.label);
+                        const more = cluster.entries.length - head.length;
+                        const label = `${head.join(" · ")}${more > 0 ? ` · +${more} more` : ""} · ${formatClock(cluster.offsetSec)}`;
+                        return (
+                          <button
+                            key={`evc-${cluster.entries[0].id}`}
+                            type="button"
+                            title={label}
+                            aria-label={label}
+                            onClick={() => seekToTestTime(clamped, wantPlaying())}
+                            className="group absolute top-0 -translate-x-1/2 cursor-pointer"
+                            style={{ left: `${left}%` }}
+                          >
+                            <span className="absolute -inset-x-1.5 inset-y-0" />
+                            <span
+                              className={`block h-2.5 ${cluster.entries.length > 1 ? "w-1 rounded-sm" : "w-0.5"} bg-muted/60 transition group-hover:bg-ink`}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {/* mt-6 clears the tick labels; the event lane (when shown)
+                      already did, so only a small gap is needed after it. */}
+                  <div className={`${eventClusters.length ? "mt-2" : "mt-6"} flex items-center justify-between text-[11px] text-muted`}>
                     <span>{formatClock(span.start)}</span>
                     <span>
                       {playlist.length} chunk(s) · {CHUNK_SECONDS}s each
@@ -1381,20 +1647,39 @@ export function RecordingReview({ password }: Props) {
                     focused · gaps shown as hatched blanks.
                   </p>
 
-                  {/* SUBMISSION-TIME MARKERS legend + counts. Hidden entirely when
-                      the student has no markers (no endpoint / no submissions). */}
-                  {markers.length ? (
+                  {/* MARKER LEGEND — submissions (ticks above/below), alerts
+                      (severity dots on the track) and events (subdued lane
+                      below). Hidden entirely when nothing is overlaid. */}
+                  {markers.length || alertMarkers.length || eventClusters.length ? (
                     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs text-muted">
-                      <span className="font-medium text-ink">Submissions on timeline:</span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="inline-block h-3.5 w-0.5 bg-emerald-500" /> above
-                        <span className="font-medium text-ink">✓ {validCount} valid</span>
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="inline-block h-3.5 w-0.5 bg-danger" /> below
-                        <span className="font-medium text-ink">✗ {invalidCount} invalid</span>
-                      </span>
-                      <span className="text-muted/70">Hover a tick for details · click to jump the recording there.</span>
+                      <span className="font-medium text-ink">On the timeline:</span>
+                      {markers.length ? (
+                        <>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="inline-block h-3.5 w-0.5 bg-emerald-500" /> above
+                            <span className="font-medium text-ink">✓ {validCount} valid</span>
+                          </span>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="inline-block h-3.5 w-0.5 bg-danger" /> below
+                            <span className="font-medium text-ink">✗ {invalidCount} invalid</span>
+                          </span>
+                        </>
+                      ) : null}
+                      {alertMarkers.length ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="inline-block h-2.5 w-2.5 rounded-full bg-danger ring-2 ring-white" />
+                          <span className="font-medium text-ink">{alertMarkers.length} alert{alertMarkers.length > 1 ? "s" : ""}</span>
+                          on the track
+                        </span>
+                      ) : null}
+                      {eventClusters.length ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="inline-block h-2.5 w-0.5 bg-muted/60" />
+                          <span className="font-medium text-ink">{logCounts.events} event{logCounts.events > 1 ? "s" : ""}</span>
+                          in the lane below
+                        </span>
+                      ) : null}
+                      <span className="text-muted/70">Hover a marker for details · click to jump the recording there.</span>
                     </div>
                   ) : null}
                 </div>
@@ -1404,11 +1689,189 @@ export function RecordingReview({ password }: Props) {
                   This session has no screen-recording chunks to play.
                 </div>
               )}
+              </>
+              ) : null}
+
+              {/* F6.7 ACTIVITY LOG — alerts + events + submissions merged
+                  time-ordered with kind/severity filters; click a row to jump
+                  the player there. Outside the timeline-detail toggle so the
+                  log keeps working with the scrubber collapsed. */}
+              {logEntries.length ? (
+                <ActivityLogPanel
+                  entries={visibleLog}
+                  counts={logCounts}
+                  filters={logFilters}
+                  onFilters={setLogFilters}
+                  eventsTruncated={sessionEventsTruncated}
+                  eventsShown={sessionEvents.length}
+                  onJump={(offsetSec) =>
+                    seekToTestTime(Math.max(span.start, Math.min(offsetSec, span.end)), wantPlaying())
+                  }
+                />
+              ) : null}
             </>
           )}
         </div>
       </div>
     </section>
+  );
+}
+
+// A3: one labeled metric cell inside the recording-review SUMMARY STATS card.
+function SummaryStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-md border border-line bg-white/60 p-3">
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-muted">{label}</dt>
+      <dd className="mt-1 font-mono text-lg font-semibold text-ink">{value}</dd>
+      {hint ? <dd className="mt-0.5 text-[11px] text-muted">{hint}</dd> : null}
+    </div>
+  );
+}
+
+// F6.7 — one kind-toggle chip in the activity-log header (Alerts / Events /
+// Submissions with their counts). Filled when active, outlined when off.
+function LogFilterChip({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`focus-ring inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${
+        active ? "border-ink bg-ink text-white" : "border-line bg-white text-muted hover:border-ink/40"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+// F6.7 — the ACTIVITY LOG card: the merged alert/event/submission entries as a
+// time-ordered, click-to-jump list. Each row carries the test-relative clock,
+// the absolute wall time, a one-line label + detail, the alert severity where
+// applicable, and a "during blackout" tag when the moment has no footage.
+function ActivityLogPanel({
+  entries,
+  counts,
+  filters,
+  onFilters,
+  eventsTruncated,
+  eventsShown,
+  onJump
+}: {
+  entries: TimelineLogEntry[];
+  counts: { alerts: number; events: number; submissions: number };
+  filters: TimelineLogFilters;
+  onFilters: (next: TimelineLogFilters) => void;
+  /** F6 review: the backend capped the event stream — say so (with the count
+   * actually shown) instead of presenting a partial log as the full story. */
+  eventsTruncated: boolean;
+  eventsShown: number;
+  onJump: (offsetSec: number) => void;
+}) {
+  const total = counts.alerts + counts.events + counts.submissions;
+  return (
+    <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted">
+          <Activity size={15} /> Activity log
+          <span className="font-normal normal-case text-muted/80">
+            {entries.length === total ? `${total} entries` : `${entries.length} of ${total}`}
+          </span>
+        </h2>
+        {/* Kind toggles + alert-severity narrowing (defaults: everything on). */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <LogFilterChip
+            active={filters.alerts}
+            label={`Alerts ${counts.alerts}`}
+            onClick={() => onFilters({ ...filters, alerts: !filters.alerts })}
+          />
+          <LogFilterChip
+            active={filters.events}
+            label={`Events ${counts.events}`}
+            onClick={() => onFilters({ ...filters, events: !filters.events })}
+          />
+          <LogFilterChip
+            active={filters.submissions}
+            label={`Submissions ${counts.submissions}`}
+            onClick={() => onFilters({ ...filters, submissions: !filters.submissions })}
+          />
+          <select
+            className="focus-ring h-7 rounded-md border border-line bg-white px-2 text-xs text-ink disabled:opacity-50"
+            value={filters.severity}
+            onChange={(event) => onFilters({ ...filters, severity: event.target.value as TimelineLogFilters["severity"] })}
+            disabled={!filters.alerts}
+            aria-label="Alert severity filter"
+            title="Narrow the alert rows by severity"
+          >
+            <option value="">All severities</option>
+            <option value="critical">Critical</option>
+            <option value="warning">Warning</option>
+            <option value="info">Info</option>
+          </select>
+        </div>
+      </div>
+
+      {eventsTruncated ? (
+        <p className="mt-2 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+          <AlertTriangle size={13} /> Showing the first {eventsShown} events — the event log was truncated server-side.
+        </p>
+      ) : null}
+
+      {entries.length ? (
+        <ol className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              <button
+                type="button"
+                onClick={() => onJump(entry.offsetSec)}
+                title={`Jump the recording to ${formatClock(entry.offsetSec)}`}
+                className="focus-ring flex w-full items-start gap-3 rounded px-1.5 py-2 text-left hover:bg-ink/5"
+              >
+                {/* Kind dot: alert = severity color, event = subdued, submission
+                    = green/red by validity (matches the timeline markers). */}
+                <span
+                  className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                    entry.kind === "alert"
+                      ? SEVERITY_DOT[entry.severity ?? "info"]
+                      : entry.kind === "submission"
+                        ? entry.valid
+                          ? "bg-emerald-500"
+                          : "bg-danger"
+                        : "bg-muted/60"
+                  }`}
+                />
+                <span className="w-16 shrink-0 pt-0.5 font-mono text-xs font-medium text-ink">
+                  {formatClock(entry.offsetSec)}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="text-sm font-medium text-ink">{entry.label}</span>
+                    {entry.kind === "alert" ? (
+                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase ${SEVERITY_BADGE[entry.severity ?? "info"]}`}>
+                        {entry.severity}
+                      </span>
+                    ) : null}
+                    {entry.duringGap ? (
+                      <span className="rounded-full border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">
+                        during blackout
+                      </span>
+                    ) : null}
+                  </span>
+                  {entry.detail ? <span className="mt-0.5 block truncate text-xs text-muted">{entry.detail}</span> : null}
+                </span>
+                <span className="shrink-0 pt-0.5 text-[11px] text-muted" title={entry.timestamp}>
+                  {new Date(entry.timestamp).toLocaleTimeString()}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-3 rounded-md border border-line bg-white/60 px-3 py-2 text-xs text-muted">
+          Nothing matches the current filters.
+        </p>
+      )}
+    </div>
   );
 }
 

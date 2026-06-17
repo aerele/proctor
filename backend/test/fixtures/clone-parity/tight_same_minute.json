@@ -1,0 +1,287 @@
+{
+  "meta": {
+    "slug": "c8",
+    "challenges": [
+      {
+        "slug": "hard-x",
+        "name": "hard-x",
+        "solved": 4,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      },
+      {
+        "slug": "easy-y",
+        "name": "easy-y",
+        "solved": 80,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "alice",
+        "rank": 1
+      },
+      {
+        "user": "bob",
+        "rank": 2
+      },
+      {
+        "user": "carol",
+        "rank": 3
+      }
+    ],
+    "submissions": [
+      {
+        "id": "70",
+        "user": "alice",
+        "ch": "hard-x",
+        "chName": "hard-x",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 60000
+      },
+      {
+        "id": "71",
+        "user": "bob",
+        "ch": "hard-x",
+        "chName": "hard-x",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 60010
+      },
+      {
+        "id": "72",
+        "user": "carol",
+        "ch": "hard-x",
+        "chName": "hard-x",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 60040
+      },
+      {
+        "id": "73",
+        "user": "alice",
+        "ch": "easy-y",
+        "chName": "easy-y",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 70000
+      },
+      {
+        "id": "74",
+        "user": "bob",
+        "ch": "easy-y",
+        "chName": "easy-y",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 70500
+      }
+    ]
+  },
+  "code": {
+    "70": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "71": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n",
+    "72": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "73": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "74": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n"
+  },
+  "expected": {
+    "recurring_pairs": [
+      {
+        "pair": [
+          "alice",
+          "bob"
+        ],
+        "ranks": [
+          1,
+          2
+        ],
+        "n_problems": 2,
+        "problems": [
+          "easy-y",
+          "hard-x"
+        ],
+        "n_hard": 1,
+        "hard_problems": [
+          "hard-x"
+        ]
+      },
+      {
+        "pair": [
+          "alice",
+          "carol"
+        ],
+        "ranks": [
+          1,
+          3
+        ],
+        "n_problems": 1,
+        "problems": [
+          "hard-x"
+        ],
+        "n_hard": 1,
+        "hard_problems": [
+          "hard-x"
+        ]
+      },
+      {
+        "pair": [
+          "bob",
+          "carol"
+        ],
+        "ranks": [
+          2,
+          3
+        ],
+        "n_problems": 1,
+        "problems": [
+          "hard-x"
+        ],
+        "n_hard": 1,
+        "hard_problems": [
+          "hard-x"
+        ]
+      }
+    ],
+    "exact_clusters": [
+      {
+        "ch": "hard-x",
+        "hardness": "hard",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 60000,
+            "lang": "python3",
+            "id": "70"
+          },
+          {
+            "user": "carol",
+            "rank": 3,
+            "tfs": null,
+            "created": 60040,
+            "lang": "python3",
+            "id": "72"
+          }
+        ]
+      },
+      {
+        "ch": "easy-y",
+        "hardness": "easy",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 70000,
+            "lang": "python3",
+            "id": "73"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 70500,
+            "lang": "python3",
+            "id": "74"
+          }
+        ]
+      }
+    ],
+    "skeleton_clusters": [
+      {
+        "ch": "hard-x",
+        "hardness": "hard",
+        "n_users": 3,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 60000,
+            "lang": "python3",
+            "id": "70"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 60010,
+            "lang": "python3",
+            "id": "71"
+          },
+          {
+            "user": "carol",
+            "rank": 3,
+            "tfs": null,
+            "created": 60040,
+            "lang": "python3",
+            "id": "72"
+          }
+        ]
+      },
+      {
+        "ch": "easy-y",
+        "hardness": "easy",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 70000,
+            "lang": "python3",
+            "id": "73"
+          },
+          {
+            "user": "bob",
+            "rank": 2,
+            "tfs": null,
+            "created": 70500,
+            "lang": "python3",
+            "id": "74"
+          }
+        ]
+      }
+    ],
+    "tight": [
+      {
+        "kind": "SAME-MINUTE",
+        "dt": 10,
+        "ch": "hard-x",
+        "a": "alice",
+        "b": "bob"
+      },
+      {
+        "kind": "SAME-MINUTE",
+        "dt": 30,
+        "ch": "hard-x",
+        "a": "bob",
+        "b": "carol"
+      },
+      {
+        "kind": "SAME-MINUTE",
+        "dt": 40,
+        "ch": "hard-x",
+        "a": "alice",
+        "b": "carol"
+      }
+    ]
+  }
+}

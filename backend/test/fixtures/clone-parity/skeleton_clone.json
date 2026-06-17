@@ -1,0 +1,83 @@
+{
+  "meta": {
+    "slug": "c2",
+    "challenges": [
+      {
+        "slug": "med-prob",
+        "name": "med-prob",
+        "solved": 25,
+        "total": 100,
+        "max_score": 100,
+        "difficulty": "x"
+      }
+    ],
+    "leaderboard": [
+      {
+        "user": "alice",
+        "rank": 1
+      },
+      {
+        "user": "carol",
+        "rank": 9
+      }
+    ],
+    "submissions": [
+      {
+        "id": "10",
+        "user": "alice",
+        "ch": "med-prob",
+        "chName": "med-prob",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 2000
+      },
+      {
+        "id": "11",
+        "user": "carol",
+        "ch": "med-prob",
+        "chName": "med-prob",
+        "lang": "python3",
+        "status": "Accepted",
+        "score": 100,
+        "tfs": null,
+        "created": 2100
+      }
+    ]
+  },
+  "code": {
+    "10": "def solve(n):\n    total = 0\n    for i in range(n):\n        total += i * i\n    return total\nprint(solve(int(input())))\n",
+    "11": "def compute(num):  # renamed everything\n    accum = 0\n    for idx in range(num):\n        accum += idx * idx\n    return accum\nprint(compute(int(input())))\n"
+  },
+  "expected": {
+    "recurring_pairs": [],
+    "exact_clusters": [],
+    "skeleton_clusters": [
+      {
+        "ch": "med-prob",
+        "hardness": "med",
+        "n_users": 2,
+        "members": [
+          {
+            "user": "alice",
+            "rank": 1,
+            "tfs": null,
+            "created": 2000,
+            "lang": "python3",
+            "id": "10"
+          },
+          {
+            "user": "carol",
+            "rank": 9,
+            "tfs": null,
+            "created": 2100,
+            "lang": "python3",
+            "id": "11"
+          }
+        ]
+      }
+    ],
+    "tight": []
+  }
+}
