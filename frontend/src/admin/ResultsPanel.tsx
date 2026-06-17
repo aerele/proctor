@@ -179,6 +179,11 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   const configured = data?.configured === true;
   const rows = configured ? data.rows : [];
   const problems = configured ? data.problems : [];
+  // 2026-06-18 exam-eve: a NO-ROSTER contest (no roster + no enrollments) has
+  // every identity self-entered, so every row is "unmatched" by design. When the
+  // backend flags no_roster we show NEUTRAL "self-entered" copy instead of the
+  // loud "not on the roster" framing. Rostered contests keep the loud behavior.
+  const noRoster = configured && data.no_roster === true;
   const colleges = useMemo(() => {
     const map = new Map<string, string>();
     for (const row of rows) if (row.college_norm) map.set(row.college_norm, row.college || row.college_norm);
@@ -371,14 +376,25 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
             </p>
           ) : null}
 
-          {/* KPR 2026-06-12: unmatched submitters are shown LOUDLY, never dropped. */}
+          {/* KPR 2026-06-12: unmatched submitters are shown LOUDLY, never dropped.
+              2026-06-18 exam-eve: a NO-ROSTER contest is all self-entered by
+              design — neutral copy, no alarm; rostered contests stay loud. */}
           {unmatchedTotal > 0 ? (
-            <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
-              <AlertTriangle size={16} className="mr-2 inline" />
-              <span className="font-semibold">{unmatchedTotal} submitter{unmatchedTotal === 1 ? "" : "s"} not on the roster</span>
-              {" — scores shown from submissions. "}
-              They joined without a roster match (for example after a roster clear), so their identity is the ID typed at login, not a verified roster person. Rows are badged "unmatched identity" and excluded from selection actions.
-            </div>
+            noRoster ? (
+              <div className="rounded-lg border border-line bg-ink/5 p-4 text-sm text-muted">
+                <Users size={16} className="mr-2 inline" />
+                <span className="font-semibold text-ink">{unmatchedTotal} self-entered candidate{unmatchedTotal === 1 ? "" : "s"}</span>
+                {" — scores shown from submissions. "}
+                No roster was uploaded for this contest, so each candidate's identity is the ID they typed at login. This is expected; scores and ranks are correct.
+              </div>
+            ) : (
+              <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
+                <AlertTriangle size={16} className="mr-2 inline" />
+                <span className="font-semibold">{unmatchedTotal} submitter{unmatchedTotal === 1 ? "" : "s"} not on the roster</span>
+                {" — scores shown from submissions. "}
+                They joined without a roster match (for example after a roster clear), so their identity is the ID typed at login, not a verified roster person. Rows are badged "unmatched identity" and excluded from selection actions.
+              </div>
+            )
           ) : null}
 
           <div className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -514,7 +530,13 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                         <div className="font-mono text-xs text-muted">
                           {row.display_id}
                           {row.from_snapshot ? <span className="ml-2 rounded bg-line/60 px-1 text-[10px] uppercase tracking-wide">snapshot</span> : null}
-                          {row.unmatched ? <span className="ml-2 rounded border border-warning/40 bg-warning/10 px-1 text-[10px] uppercase tracking-wide text-warning" title="This identity matched no roster enrollment — score computed from submissions; identity is as typed at login.">unmatched identity</span> : null}
+                          {row.unmatched ? (
+                            noRoster ? (
+                              <span className="ml-2 rounded border border-line bg-ink/5 px-1 text-[10px] uppercase tracking-wide text-muted" title="No roster was uploaded — identity is as typed at login by the candidate. This is expected; the score is correct.">self-entered identity</span>
+                            ) : (
+                              <span className="ml-2 rounded border border-warning/40 bg-warning/10 px-1 text-[10px] uppercase tracking-wide text-warning" title="This identity matched no roster enrollment — score computed from submissions; identity is as typed at login.">unmatched identity</span>
+                            )
+                          ) : null}
                         </div>
                       </td>
                       <td className="px-3 py-3 text-right font-semibold text-ink">{row.total}</td>
