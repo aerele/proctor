@@ -251,10 +251,13 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   // unmatched ones — the SAME identity_key the backend stamps on each scorecard.
   const rowKey = (row: ResultRow) => row.person_id || row.username_norm || "";
 
-  // P1: "Evaluate contest" — loop the batch endpoint carrying the returned
+  // P1: "Run evaluation" — loop the batch endpoint carrying the returned
   // cursor until done:true, surfacing the running evaluated count, then refetch
   // results (so the new scorecards land on the rows) and drop the stale corpus.
-  const onEvaluate = async () => {
+  // force=true bypasses the backend up-to-date skip-guard, re-evaluating every
+  // candidate from scratch (re-downloading all GCS evidence). Eval is always
+  // BUTTON-ONLY — never auto-run.
+  const onEvaluate = async (force = false) => {
     if (!configured || evalRunning) return;
     setEvalRunning(true);
     setEvalProgress(0);
@@ -264,7 +267,7 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
       let total = 0;
       // Bounded loop guard: even a large cohort terminates well under this.
       for (let guard = 0; guard < 10000; guard += 1) {
-        const res = await adminContestEvaluate(password, { contest: data.contest_slug, cursor });
+        const res = await adminContestEvaluate(password, { contest: data.contest_slug, cursor, force });
         total += res.evaluated;
         setEvalProgress(total);
         if (res.done) break;
@@ -278,6 +281,17 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
     } finally {
       setEvalRunning(false);
     }
+  };
+
+  // P1 (#73): force re-run behind a brief in-UI confirm — a force pass
+  // re-downloads every candidate's GCS evidence (~700 candidates), so it is
+  // heavy and may take a while; gate it so it can't be triggered by accident.
+  const onForceEvaluate = () => {
+    if (!configured || evalRunning) return;
+    if (!window.confirm(
+      "Force re-run evaluation?\n\nThis re-evaluates every candidate from scratch, ignoring the up-to-date skip. It re-downloads all evidence for ~700 candidates — this is heavy and may take a while. Use it only when scoring inputs or the evaluator changed."
+    )) return;
+    void onEvaluate(true);
   };
 
   // P1: lazily fetch the scorecard corpus the FIRST time any evidence drawer
@@ -471,15 +485,26 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
               ))}
               <span className="ml-auto" />
               {/* P1: run the cheating + talent evaluator over the whole contest.
-                  Loops the batch endpoint to completion, then refetches rows. */}
+                  Loops the batch endpoint to completion, then refetches rows.
+                  Incremental run skips up-to-date candidates; the force re-run
+                  beside it re-evaluates everyone (behind an in-UI confirm). */}
               <button
                 className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50"
                 disabled={busy || evalRunning}
-                onClick={() => void onEvaluate()}
-                title="Run the cheating + talent evaluator over this contest's submissions and telemetry"
+                onClick={() => void onEvaluate(false)}
+                title="Run the cheating + talent evaluator over this contest's submissions and telemetry (skips candidates already up to date)"
               >
                 <BrainCircuit size={14} className={evalRunning ? "animate-pulse" : undefined} />
-                {evalRunning ? `Evaluating ${evalProgress}…` : "Evaluate contest"}
+                {evalRunning ? `Evaluating ${evalProgress}…` : "Run evaluation"}
+              </button>
+              <button
+                className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm font-medium text-muted disabled:opacity-50"
+                disabled={busy || evalRunning}
+                onClick={onForceEvaluate}
+                title="Re-evaluate every candidate from scratch, re-downloading all evidence — heavy, may take a while"
+              >
+                <RefreshCw size={14} className={evalRunning ? "animate-spin" : undefined} />
+                Force re-run
               </button>
               <button
                 className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-accent px-4 text-sm font-medium text-white disabled:opacity-50"

@@ -68,8 +68,8 @@ export function makeEvaluation(ctx) {
     collections = {},
     editorEventsLabel = "editor-events",
     evaluateBatchLimit = 25,
-    sessionsQueryLimit = 2000,
-    submissionsQueryLimit = 50000,
+    sessionsQueryLimit = 6000,
+    submissionsQueryLimit = 120000,
     gcsConcurrency = 8,
   } = ctx;
 
