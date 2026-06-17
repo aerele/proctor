@@ -24,6 +24,7 @@ const {
   TEMPLATE_BOUNDS,
   SEED_TEMPLATES,
   normalizeProblemEntries,
+  normalizeTemplateEnforcement,
   validateTemplateInput
 } = await import("../src/templates.mjs");
 
@@ -177,9 +178,35 @@ test("validateTemplateInput: defaults normalized — every field present with sp
   assert.equal(d.identity_label, "Roll Number");
   assert.equal(d.room_gate_enabled, true);
   assert.deepEqual(d.camera_recording, { enabled: true, fps: 10, width: 640 });
-  assert.deepEqual(d.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 });
+  assert.deepEqual(d.enforcement, { mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, simplified_fullscreen_recovery: false });
   assert.equal(d.evidence_retention_days, 4);
   assert.deepEqual(d.languages, ["python", "cpp", "java", "javascript", "sql"]);
+});
+
+test("normalizeTemplateEnforcement: simplified_fullscreen_recovery — default false, boolean passthrough, garbage→false (#71)", () => {
+  // Default false: an enforcement block that never sets the flag (or no block at
+  // all) behaves byte-identically to today's two-step recovery.
+  assert.equal(normalizeTemplateEnforcement(undefined).simplified_fullscreen_recovery, false);
+  assert.equal(normalizeTemplateEnforcement({}).simplified_fullscreen_recovery, false);
+  assert.equal(
+    normalizeTemplateEnforcement({ mode: "block", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2 }).simplified_fullscreen_recovery,
+    false
+  );
+  // Boolean true passes through (the admin opted IN).
+  assert.equal(normalizeTemplateEnforcement({ simplified_fullscreen_recovery: true }).simplified_fullscreen_recovery, true);
+  // Explicit false stays false.
+  assert.equal(normalizeTemplateEnforcement({ simplified_fullscreen_recovery: false }).simplified_fullscreen_recovery, false);
+  // Garbage / truthy-but-not-boolean → false (only a real boolean true enables it).
+  for (const garbage of ["true", 1, "yes", {}, [], "on"]) {
+    assert.equal(
+      normalizeTemplateEnforcement({ simplified_fullscreen_recovery: garbage }).simplified_fullscreen_recovery,
+      false,
+      `expected ${JSON.stringify(garbage)} to normalize to false`
+    );
+  }
+  // The flag is additive — the other three fields are untouched by its presence.
+  const full = normalizeTemplateEnforcement({ mode: "alert_first", fullscreen_reentry_seconds: 33, fullscreen_exit_limit: 4, simplified_fullscreen_recovery: true });
+  assert.deepEqual(full, { mode: "alert_first", fullscreen_reentry_seconds: 33, fullscreen_exit_limit: 4, simplified_fullscreen_recovery: true });
 });
 
 test("validateTemplateInput: defaults bounds — garbage falls back, retention clamps, languages validated", () => {
@@ -198,7 +225,7 @@ test("validateTemplateInput: defaults bounds — garbage falls back, retention c
   assert.equal(d.identity_label, "Hall Ticket");
   assert.equal(d.room_gate_enabled, true);
   assert.deepEqual(d.camera_recording, { enabled: false, fps: 10, width: 320 });
-  assert.deepEqual(d.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 5 });
+  assert.deepEqual(d.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 5, simplified_fullscreen_recovery: false });
   assert.equal(d.evidence_retention_days, 30);
   assert.deepEqual(d.languages, ["python", "cpp"]);
 

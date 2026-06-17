@@ -403,3 +403,105 @@ test("contest-selection-done: unmatched rows are SKIPPED when stamping final sna
   assert.equal(res.body.enrollments_snapshotted, 3);
   assert.equal(firestore._collections.get("cr_enrollments").has(`${contest.slug}::`), false);
 });
+
+// ---- 2026-06-18 exam-eve: NO-ROSTER (self-entered) Results path ----------------
+// The live ~700-student exam uploads NO roster — every candidate self-enters
+// their id at login, so EVERY scoring identity necessarily lands in the
+// "unmatched" branch (there are no enrollments to consume them). That is NORMAL,
+// not an integrity failure, so computeContestResults flags no_roster:true and the
+// UI swaps the loud "not on the roster" banner/badge for neutral "self-entered"
+// copy. Scores/ranks must still be exactly correct. (This path was UNTESTED.)
+
+// A self-entered submission has person_id:null and username_norm = the bare
+// normalized typed id (the no-roster identity key). No roster is uploaded.
+function seedSelfEnteredSubmission(firestore, contestSlug, { norm, candidateId, problemId, score, createdAt }) {
+  const id = `${norm}:${problemId}:${createdAt}`;
+  firestore.collection("cr_submissions").doc(id).set({
+    session_id: `sess-${norm}`, contest_slug: contestSlug, username_norm: norm, person_id: null,
+    candidate_id: candidateId, problem_id: problemId, score, max_points: 100,
+    verdict: score >= 100 ? "accepted" : "wrong_answer", created_at: createdAt
+  });
+}
+
+test("contest-results: NO-ROSTER contest (enrollments:[] + self-entered submitters) — every row scored + ranked, no_roster:true, shape sane", async () => {
+  const firestore = freshClients();
+  seedProblem(firestore, "p1", "Sum Two");
+  seedProblem(firestore, "p2", "Reverse");
+  // NO uploadRoster() — this is the live exam-day case: students self-enter.
+  const contest = await createContest("Open Exam June 2026", [{ problem_id: "p1" }, { problem_id: "p2" }]);
+  await openContest(contest.slug);
+
+  // Three self-entered candidates typing their own roll numbers at login.
+  // 21CS010: p1 best 90 (two attempts), p2 60 = 150
+  seedSelfEnteredSubmission(firestore, contest.slug, { norm: "21cs010", candidateId: "21CS010", problemId: "p1", score: 50, createdAt: "2026-06-18T04:01:00.000Z" });
+  seedSelfEnteredSubmission(firestore, contest.slug, { norm: "21cs010", candidateId: "21CS010", problemId: "p1", score: 90, createdAt: "2026-06-18T04:05:00.000Z" });
+  seedSelfEnteredSubmission(firestore, contest.slug, { norm: "21cs010", candidateId: "21CS010", problemId: "p2", score: 60, createdAt: "2026-06-18T04:07:00.000Z" });
+  // 21CS011: p1 100 = 100
+  seedSelfEnteredSubmission(firestore, contest.slug, { norm: "21cs011", candidateId: "21CS011", problemId: "p1", score: 100, createdAt: "2026-06-18T04:09:00.000Z" });
+  // 21CS012: p2 30 = 30
+  seedSelfEnteredSubmission(firestore, contest.slug, { norm: "21cs012", candidateId: "21CS012", problemId: "p2", score: 30, createdAt: "2026-06-18T04:11:00.000Z" });
+  // A login-session doc enriches the typed-at-login name onto the row.
+  firestore.collection("cr_sessions").doc("s-010").set({
+    session_id: "s-010", contest_slug: contest.slug, username_norm: "21cs010",
+    candidate_id: "21CS010", person_id: null, name: "Asha R", status: "active",
+    created_at: "2026-06-18T04:00:00.000Z"
+  });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+
+  // Response shape is sane and configured.
+  assert.equal(res.body.configured, true);
+  assert.equal(res.body.no_roster, true, "no roster + no enrollments ⇒ self-entered contest");
+  assert.equal(res.body.multi_college, false);
+  assert.deepEqual(res.body.problems.map((p) => p.title), ["Sum Two", "Reverse"]);
+  assert.ok(res.body.generated_at, "carries a timestamp");
+
+  // Three scored candidates, ranked by total desc (150 > 100 > 30).
+  assert.equal(res.body.rows.length, 3);
+  assert.deepEqual(res.body.rows.map((r) => r.candidate_id), ["21CS010", "21CS011", "21CS012"]);
+  assert.deepEqual(res.body.rows.map((r) => r.rank), [1, 2, 3]);
+  assert.deepEqual(res.body.rows.map((r) => r.total), [150, 100, 30]);
+
+  // Per-problem BEST is taken (21CS010 p1 = 90, not 50; p2 = 60).
+  const top = res.body.rows[0];
+  assert.deepEqual(top.per_problem.map((c) => [c.problem_id, c.best_score]), [["p1", 90], ["p2", 60]]);
+  // Self-entered rows carry the typed id + (when a session exists) the typed name.
+  assert.equal(top.name, "Asha R");
+  assert.equal(top.person_id, "");           // no enrollment behind a self-entered row
+  assert.equal(top.username_norm, "21cs010"); // the no-roster identity key
+
+  // EVERY row is "unmatched" by design (no enrollments) — and unmatched_count
+  // equals the row count. The UI reads no_roster to neutralize the framing.
+  assert.equal(res.body.rows.every((r) => r.unmatched === true), true);
+  assert.equal(res.body.unmatched_count, 3);
+});
+
+test("contest-results: empty NO-ROSTER contest (no submissions yet) — no_roster:true, zero rows, still configured", async () => {
+  const firestore = freshClients();
+  seedProblem(firestore, "p1", "Sum Two");
+  const contest = await createContest("Empty Open Exam", [{ problem_id: "p1" }]);
+  await openContest(contest.slug);
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.configured, true);
+  assert.equal(res.body.no_roster, true);
+  assert.equal(res.body.rows.length, 0);
+  assert.equal(res.body.unmatched_count, 0);
+});
+
+test("contest-results: ROSTERED contest keeps no_roster:false (loud unmatched framing preserved)", async () => {
+  const firestore = freshClients();
+  const contest = await seedContest(firestore); // uploads a roster + has enrollments
+  // Add ONE genuinely-unmatched submitter to a contest that DOES have a roster.
+  seedSelfEnteredSubmission(firestore, contest.slug, { norm: "99zz999", candidateId: "99ZZ999", problemId: "p1", score: 100, createdAt: "2026-06-10T04:30:00.000Z" });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  // Roster present ⇒ NOT a no-roster contest, even though one row is unmatched.
+  assert.equal(res.body.no_roster, false);
+  assert.equal(res.body.unmatched_count, 1);
+  assert.equal(res.body.rows.some((r) => r.unmatched === true), true);
+  // The matched enrolled rows are unchanged (behavior-preserving).
+  const asha = res.body.rows.find((r) => r.person_id === KEC_001);
+  assert.equal(asha.total, 130);
+});

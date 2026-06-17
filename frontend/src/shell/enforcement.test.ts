@@ -93,6 +93,67 @@ describe("enforcementReducer — exit → ack flow (L1)", () => {
   });
 });
 
+// #71 — admin per-contest toggle that drops ONLY the typed-ack step. The
+// re-enter-fullscreen requirement and the exit-limit/countdown escalation are
+// UNCHANGED; only the typed-phrase condition is removed.
+describe("enforcementReducer — simplified fullscreen recovery (#71)", () => {
+  const simplified: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+
+  it("simplified: re-entering fullscreen ALONE resolves the episode — no phrase required", () => {
+    const blocking = exit(initialEnforcementState, T0, simplified).state;
+    expect(blocking.phase).toBe("blocking");
+    expect(blocking.ackOk).toBe(false);
+    const { state, effects } = enforcementReducer(blocking, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 5000 }, simplified);
+    expect(state.phase).toBe("idle");
+    expect(state.exitCount).toBe(1); // exit tally still survives the episode
+    expect(effects).toEqual([
+      { kind: "event", type: "fullscreen_enforcement_ack", detail: { exit_count: 1, remaining_ms: 15_000 } }
+    ]);
+  });
+
+  it("default (flag off): fullscreen re-entry alone does NOT resolve — the phrase is still required", () => {
+    const blocking = exit(initialEnforcementState).state;
+    const { state } = enforcementReducer(blocking, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 5000 }, config);
+    expect(state.phase).toBe("blocking");
+  });
+
+  it("simplified: still does NOT resolve without fullscreen (the fullscreen requirement is never dropped)", () => {
+    const blocking = exit(initialEnforcementState, T0, simplified).state;
+    // An ack that's somehow matched but NOT yet in fullscreen must still hold.
+    const { state } = enforcementReducer(blocking, { kind: "ack", matched: true, fullscreen: false, nowMs: T0 + 3000 }, simplified);
+    expect(state.phase).toBe("blocking");
+  });
+
+  it("simplified: alert_hold also resolves on fullscreen alone", () => {
+    const cfg: EnforcementConfig = { ...simplified, mode: "alert_first" };
+    const blocking = exit(initialEnforcementState, T0, cfg).state;
+    const hold = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, cfg).state;
+    expect(hold.phase).toBe("alert_hold");
+    const { state } = enforcementReducer(hold, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 30_000 }, cfg);
+    expect(state.phase).toBe("idle");
+  });
+
+  it("simplified: the exit-limit escalation is UNCHANGED (still locks past the limit)", () => {
+    // limit 2: third exit escalates to locking regardless of the recovery flag.
+    let state = exit(initialEnforcementState, T0, simplified).state;
+    state = exit(state, T0 + 1000, simplified).state;
+    const third = exit(state, T0 + 2000, simplified);
+    expect(third.state.phase).toBe("locking");
+    expect(third.effects).toEqual([
+      { kind: "report_violation", phase: "exit_limit", exitCount: 3 }
+    ]);
+  });
+
+  it("simplified: the countdown-expiry escalation is UNCHANGED (still locks on timeout)", () => {
+    const blocking = exit(initialEnforcementState, T0, simplified).state;
+    const { state, effects } = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, simplified);
+    expect(state.phase).toBe("locking");
+    expect(effects).toEqual([
+      { kind: "report_violation", phase: "countdown_expired", exitCount: 1 }
+    ]);
+  });
+});
+
 describe("enforcementReducer — countdown expiry", () => {
   it("block mode: deadline passing reports the violation and enters locking", () => {
     const blocking = exit(initialEnforcementState).state;
@@ -258,6 +319,56 @@ describe("enforcementReducer — exemption bypass + live config", () => {
     expect(state.phase).toBe("idle");
   });
 
+  // FIX 2 (exam-eve 2026-06-18): flipping simplified-fullscreen-recovery ON via
+  // the heartbeat while a candidate is ALREADY blocking AND already back in
+  // fullscreen must release them immediately — without this the overlay hides
+  // both the ack input AND (fullscreen already true) the re-enter button, so
+  // there is NO actionable element and the candidate is stranded until the
+  // countdown expires into alert_hold.
+  it("flip simplifiedFullscreenRecovery ON while blocking AND already in fullscreen → resolves to idle", () => {
+    const blocking = exit(initialEnforcementState).state;
+    expect(blocking.phase).toBe("blocking");
+    const cfg: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+    const { state, effects } = enforcementReducer(blocking, { kind: "config_change", nowMs: T0 + 5000, fullscreen: true }, cfg);
+    expect(state.phase).toBe("idle");
+    // The resolution emits the ack event (same as a normal resolve).
+    expect(effects.some((e) => e.kind === "event" && e.type === "fullscreen_enforcement_ack")).toBe(true);
+  });
+
+  // Guard: the fullscreen requirement is NEVER dropped. A candidate NOT in
+  // fullscreen when the flip lands must STAY blocking and re-enter to resolve.
+  it("flip simplifiedFullscreenRecovery ON while NOT in fullscreen → stays blocking (still requires fullscreen)", () => {
+    const blocking = exit(initialEnforcementState).state;
+    const cfg: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+    const { state, effects } = enforcementReducer(blocking, { kind: "config_change", nowMs: T0 + 5000, fullscreen: false }, cfg);
+    expect(state.phase).toBe("blocking");
+    expect(effects).toEqual([]);
+    // …and re-entering fullscreen then resolves (no typed ack needed).
+    const resolved = enforcementReducer(state, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 6000 }, cfg).state;
+    expect(resolved.phase).toBe("idle");
+  });
+
+  // The same live-release applies to alert_hold (candidate already past the
+  // countdown but in fullscreen) — flipping the flag releases them.
+  it("flip simplifiedFullscreenRecovery ON while in alert_hold AND in fullscreen → resolves to idle", () => {
+    const cfg: EnforcementConfig = { ...config, mode: "alert_first" };
+    const blocking = exit(initialEnforcementState, T0, cfg).state;
+    const hold = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 20_000 }, cfg).state;
+    expect(hold.phase).toBe("alert_hold");
+    const flipped: EnforcementConfig = { ...cfg, simplifiedFullscreenRecovery: true };
+    const { state } = enforcementReducer(hold, { kind: "config_change", nowMs: T0 + 21_000, fullscreen: true }, flipped);
+    expect(state.phase).toBe("idle");
+  });
+
+  // The flip is a no-op when idle (nothing to resolve) — must not spuriously
+  // emit an ack event or change state.
+  it("flip simplifiedFullscreenRecovery ON while idle → no-op", () => {
+    const cfg: EnforcementConfig = { ...config, simplifiedFullscreenRecovery: true };
+    const { state, effects } = enforcementReducer(initialEnforcementState, { kind: "config_change", nowMs: T0, fullscreen: true }, cfg);
+    expect(state).toBe(initialEnforcementState);
+    expect(effects).toEqual([]);
+  });
+
   it("session end releases any phase", () => {
     const blocking = exit(initialEnforcementState).state;
     const { state } = enforcementReducer(blocking, { kind: "session_ended", nowMs: T0 + 5000 }, config);
@@ -353,6 +464,28 @@ describe("enforcementHeadline / enforcementSubline (W5 — overlay tells the liv
     expect(enforcementHeadline("locking", true)).toBe("Test disabled");
     expect(enforcementSubline("locking", true, 3)).toContain("locked");
   });
+
+  // #71: with simplified recovery on there is a SINGLE action (re-enter
+  // fullscreen) — the copy must not promise "both steps" / plural "steps".
+  it("simplified recovery: copy reads in terms of the single re-enter-fullscreen action", () => {
+    // out of fullscreen: subline points at the one button, never "BOTH steps".
+    const subline = enforcementSubline("blocking", false, 1, true);
+    expect(subline).toContain("exit #1");
+    expect(subline).toContain("Return to fullscreen");
+    expect(subline).not.toMatch(/both steps/i);
+    expect(subline).not.toMatch(/steps/i);
+    // back-in-fullscreen headline is singular, not the plural "steps" wording.
+    expect(enforcementHeadline("blocking", true, true)).toBe("Return to fullscreen to continue");
+    expect(enforcementHeadline("alert_hold", true, true)).toBe("Return to fullscreen to continue");
+    expect(enforcementHeadline("blocking", true, true)).not.toMatch(/steps/i);
+  });
+
+  it("default path is unchanged when the simplified flag is explicitly false", () => {
+    expect(enforcementHeadline("blocking", true, false)).toBe("Finish the steps to continue");
+    expect(enforcementSubline("blocking", false, 1, false)).toContain("Complete BOTH steps");
+    // out-of-fullscreen headline ignores the flag (the exit wording is shared).
+    expect(enforcementHeadline("blocking", false, true)).toBe("You left fullscreen");
+  });
 });
 
 describe("alertHoldMessage", () => {
@@ -371,6 +504,19 @@ describe("alertHoldMessage", () => {
       expect(alertHoldMessage(violation)).toMatch(/proctor has been alerted/);
       expect(alertHoldMessage(violation)).toMatch(/both steps/i);
     }
+  });
+
+  // #71: simplified recovery banner names the single re-enter-fullscreen action.
+  it("simplified recovery: the banner says return to fullscreen, not both steps", () => {
+    for (const violation of ["countdown_expired", "exit_limit", null] as const) {
+      const msg = alertHoldMessage(violation, true);
+      expect(msg).toMatch(/proctor has been alerted/);
+      expect(msg).toMatch(/return to fullscreen/i);
+      expect(msg).not.toMatch(/both steps/i);
+    }
+    // the cause wording is still violation-specific (wave-3 rule preserved).
+    expect(alertHoldMessage("exit_limit", true)).toMatch(/exit/i);
+    expect(alertHoldMessage("countdown_expired", true)).toMatch(/^Time expired/);
   });
 });
 

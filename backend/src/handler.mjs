@@ -134,12 +134,22 @@ const execQueue = makeExecQueue({
 const INVIGILATOR_SESSIONS_LIMIT = 500;
 const INVIGILATOR_ALERTS_LIMIT = 100;
 const ALERTS_QUERY_LIMIT = 500;
-const SESSIONS_QUERY_LIMIT = 2000;
+// Exam-eve 2026-06-18: raised 2000→6000 for the ~700-student hall. This is the
+// EFFECTIVE production cap — it is passed into makeEvaluation() as
+// sessionsQueryLimit (overriding evaluation.mjs's matching default), so the
+// candidate-evaluation scan headroom lives HERE, not in the module default.
+const SESSIONS_QUERY_LIMIT = 6000;
 // S-J: the Results rollup scans a contest's submissions (one doc per submit).
 // A heavy multi-problem hall (5000 candidates × N problems × a few submits)
 // stays comfortably under this cap; bounded so a pathological contest can't
 // blow the request.
-const SUBMISSIONS_RESULTS_LIMIT = 50000;
+// Exam-eve 2026-06-18: raised 50000→120000 for the ~700-student hall — pure
+// headroom (700 students' submissions stay far under the old cap; the raise
+// only widens the ceiling). DUAL USE: this constant is BOTH the effective
+// submissionsQueryLimit passed into makeEvaluation() (overriding evaluation.mjs's
+// default) AND the cap on computeContestResults' submissions/evaluations scans
+// below — raising it is safe in both (it only widens, never tightens).
+const SUBMISSIONS_RESULTS_LIMIT = 120000;
 // S-G export/purge: the per-dataset ceiling the dedicated lifecycle readers use
 // (F9 D11 — never the capped admin helpers). Generous; a contest beyond it is a
 // deploy-time signal, surfaced by the manifest-count cross-check test.
@@ -3997,6 +4007,18 @@ async function computeContestResults(contest) {
   const problemEntries = contestProblemEntries(contest);
   const problemOrder = problemEntries.map((entry) => entry.problem_id);
 
+  // NO-ROSTER signal (2026-06-18 exam-eve): a contest with NO active enrollments
+  // AND no roster configured is a self-entered-identity contest — students typed
+  // their own id at login (vision §2.4 no-roster rule). In that case EVERY
+  // scoring identity necessarily lands in the "unmatched" branch below (there are
+  // no enrollments to consume them), which is NORMAL, not an integrity problem.
+  // We surface no_roster so the UI swaps the alarming "not on the roster" framing
+  // for neutral "self-entered" copy. A ROSTERED contest (roster meta present, or
+  // any active enrollment) keeps the loud genuine-unmatched behavior unchanged.
+  const hasActiveEnrollment = enrollments.some((e) => String(e?.status || "active") !== "removed");
+  const rosterMeta = await getContestRosterMeta(contest);
+  const noRoster = !hasActiveEnrollment && !rosterMeta;
+
   const submissionsSnap = await scopedQuery(getFirestore().collection(SUBMISSIONS_COLLECTION), contest)
     .limit(SUBMISSIONS_RESULTS_LIMIT)
     .get();
@@ -4059,6 +4081,10 @@ async function computeContestResults(contest) {
     // KPR 2026-06-12: count of scoring identities NOT consumed by any
     // enrollment — drives the loud "N submitters not on the roster" banner.
     unmatched_count: rows.filter((row) => row.unmatched).length,
+    // 2026-06-18 exam-eve: when the whole contest is self-entered (no roster, no
+    // enrollments), the UI shows NEUTRAL "self-entered" copy instead of the loud
+    // unmatched banner/badge. Rostered contests keep no_roster:false → loud.
+    no_roster: noRoster,
     generated_at: new Date().toISOString()
   };
 }
@@ -6313,7 +6339,12 @@ function enforcementConfig(settings) {
   return {
     fullscreen_reentry_seconds: intSettingOr(settings?.fullscreen_reentry_seconds, FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
     fullscreen_exit_limit: intSettingOr(settings?.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
-    mode: resolveEnforcementMode(settings?.enforcement_mode)
+    mode: resolveEnforcementMode(settings?.enforcement_mode),
+    // #71: mirror the person-contest flag (normalizeTemplateEnforcement) so a
+    // LEGACY (global-settings) session also carries the simplified-recovery
+    // toggle through start/resume + heartbeat. Default false; non-boolean →
+    // false — an untouched legacy exam is unchanged.
+    simplified_fullscreen_recovery: settings?.simplified_fullscreen_recovery === true
   };
 }
 

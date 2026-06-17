@@ -225,6 +225,21 @@ export function useEnforcement(opts: {
     if (exemptFullscreen) dispatch({ kind: "config_change", nowMs: Date.now() });
   }, [exemptFullscreen, dispatch]);
 
+  // #71 live-release: simplified-fullscreen-recovery flipped ON mid-episode.
+  // A candidate already in the red overlay AND already back in fullscreen has no
+  // actionable element after the flip (the ack input is hidden, the re-enter
+  // button is hidden because fullscreen is already true) → stranded until the
+  // countdown. Mirror the exemptFullscreen live-release: dispatch config_change
+  // carrying the CURRENT fullscreen truth so the reducer resolves an
+  // in-fullscreen candidate immediately. A candidate NOT in fullscreen stays
+  // blocking (the reducer's tryResolve still requires fullscreen).
+  const simplifiedFullscreenRecovery = config.simplifiedFullscreenRecovery;
+  useEffect(() => {
+    if (simplifiedFullscreenRecovery) {
+      dispatch({ kind: "config_change", nowMs: Date.now(), fullscreen: Boolean(document.fullscreenElement) });
+    }
+  }, [simplifiedFullscreenRecovery, dispatch]);
+
   // The server lock became visible through ANY channel (violation verdict or
   // the heartbeat's status flip): settle a pending report so the tick retry
   // loop stops POSTing against a session that is already locked.

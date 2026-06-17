@@ -101,8 +101,33 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   // W9: the single post-reload undo snapshot (one at a time — a problem or
   // language switch, the 20s expiry, or the Undo itself discards it).
   const [undoSnapshot, setUndoSnapshot] = useState<StubUndoSnapshot | null>(null);
+  // #70: the problem whose stub-reload confirmation modal is open (null = none).
+  // An IN-UI modal replaces window.confirm: the native dialog dropped the page
+  // out of fullscreen in Chrome, which the enforcement ladder then treated as an
+  // unexpected exit and threw the candidate into the red overlay. This modal
+  // renders inside the already-mounted (fullscreen) DOM, so fullscreen is never
+  // dropped. Its z-index stays BELOW EnforcementOverlay (z-[100]) so a real red
+  // screen always wins.
+  const [pendingReloadProblemId, setPendingReloadProblemId] = useState<string | null>(null);
   // Cooldown/undo countdown clock — ticks only while some countdown is live.
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // #70 a11y: when the stub-reload modal is open, Escape cancels it (same as the
+  // backdrop / Cancel button) and focus moves onto Cancel so keyboard/screen-
+  // reader users land on the safe default. Bound only while the modal is open.
+  const reloadCancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (pendingReloadProblemId == null) return;
+    reloadCancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setPendingReloadProblemId(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [pendingReloadProblemId]);
 
   const activeProblem = problems.find((p) => p.id === activeId) ?? problems[0];
   const activeIndex = problems.findIndex((p) => p.id === activeProblem.id);
@@ -205,13 +230,31 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
   // draft store and arm the 20s Undo. Monaco emits its own editor_replace for
   // the programmatic value change, so code replay stays consistent; the
   // stub_reloaded marker is additive context.
-  const doReloadStub = (problemId: string) => {
+  // #70: clicking "Reload stub" now OPENS the in-UI confirmation modal instead
+  // of firing window.confirm (which dropped fullscreen → false enforcement
+  // violation). The no-stub guard runs here so the button never opens an empty
+  // modal.
+  const onReloadStub = (problemId: string) => {
+    const state = panesRef.current[problemId];
+    const problem = problems.find((p) => p.id === problemId);
+    if (!state || !problem) return;
+    if (typeof problem.stubs?.[state.language] !== "string") return; // no stub → no-op
+    setPendingReloadProblemId(problemId);
+  };
+
+  // #70: the modal's "Reload stub" button runs the EXACT W9 body that used to
+  // sit after the window.confirm — snapshot, replace, arm the undo, emit the
+  // telemetry — then dismisses the modal. Re-resolves state/stub at confirm time
+  // (the language could have changed between open and confirm).
+  const confirmReloadStub = () => {
+    const problemId = pendingReloadProblemId;
+    if (problemId == null) return;
+    setPendingReloadProblemId(null);
     const state = panesRef.current[problemId];
     const problem = problems.find((p) => p.id === problemId);
     if (!state || !problem) return;
     const stub = problem.stubs?.[state.language];
     if (typeof stub !== "string") return; // no stub for this language → no-op
-    if (!window.confirm(reloadStubConfirmMessage(state.language))) return;
     const now = Date.now();
     setUndoSnapshot(takeUndoSnapshot(problemId, state.language, state.code, now));
     setNowMs(now); // arm the countdown immediately (clock may have been idle)
@@ -320,16 +363,61 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
       onEvent={(event) => batchers.add(activeProblem.id, event)}
       onRun={() => void doRun(activeProblem.id)}
       onSubmit={() => void doSubmit(activeProblem.id)}
-      onReloadStub={() => doReloadStub(activeProblem.id)}
+      onReloadStub={() => onReloadStub(activeProblem.id)}
       onUndoStubReload={doUndoStubReload}
     />
   );
 
+  // #70: the in-UI stub-reload confirmation modal. Rendered inside the mounted
+  // (fullscreen) DOM so it NEVER drops fullscreen the way window.confirm did.
+  // fixed + z-50: above the workspace, deliberately BELOW EnforcementOverlay
+  // (z-[100]) so a real red enforcement screen still wins. The copy source stays
+  // reloadStubConfirmMessage(language). Resolves the language at render time
+  // from the pending problem's pane so the message matches what will reload.
+  const reloadModalLanguage = pendingReloadProblemId != null
+    ? panes[pendingReloadProblemId]?.language ?? null
+    : null;
+  const reloadConfirmModal = pendingReloadProblemId != null && reloadModalLanguage != null ? (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={() => setPendingReloadProblemId(null)}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reload-stub-title"
+        className="w-full max-w-md rounded-xl border border-line bg-panel p-6 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2 id="reload-stub-title" className="text-lg font-semibold text-ink">Reload starter stub?</h2>
+        <p className="mt-2 text-sm text-muted">{reloadStubConfirmMessage(reloadModalLanguage)}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            ref={reloadCancelRef}
+            type="button"
+            className="focus-ring inline-flex h-10 items-center rounded-md border border-line bg-white px-4 text-sm font-medium text-ink hover:border-ink/40"
+            onClick={() => setPendingReloadProblemId(null)}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="focus-ring inline-flex h-10 items-center rounded-md bg-danger px-4 text-sm font-semibold text-white"
+            onClick={confirmReloadStub}
+          >
+            Reload stub
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   // §3 pin: single-problem contests + the legacy deployment render EXACTLY the
   // pre-S-I layout — no sidebar, no workspace header.
-  if (!sidebar) return paneView;
+  if (!sidebar) return (<>{paneView}{reloadConfirmModal}</>);
 
   return (
+    <>
     <div className="space-y-4">
       {/* Workspace header: current problem indicator + overall progress.
           (The S1 ExamTopBar stays frozen — spec §0.) */}
@@ -370,5 +458,7 @@ export function MultiProblemWorkspace({ sessionId, problems, submissionsSummary,
         <div className="min-w-0">{paneView}</div>
       </div>
     </div>
+    {reloadConfirmModal}
+    </>
   );
 }

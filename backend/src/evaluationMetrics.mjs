@@ -545,7 +545,7 @@ export function buildScorecard(input) {
       code: "superhuman_cadence",
       severity: "warning",
       problem_id: b.problem_id,
-      evidence: `Run of ${b.run_len} keystrokes at ${b.cps} chars/s (≥${THRESHOLDS.SUPERHUMAN_CPS}).`,
+      evidence: `Run of ${b.run_len} typed characters at ${b.cps} chars/s (≥${THRESHOLDS.SUPERHUMAN_CPS}).`,
     });
   }
   if (cadence.metronomic) {
@@ -553,7 +553,7 @@ export function buildScorecard(input) {
       code: "metronomic_cadence",
       severity: "warning",
       problem_id: null,
-      evidence: `Keystroke inter-key gaps show CV<${THRESHOLDS.METRONOMIC_CV} over ≥${THRESHOLDS.METRONOMIC_MIN_KEYS} keys (replayer-like).`,
+      evidence: `Inter-character timing gaps show CV<${THRESHOLDS.METRONOMIC_CV} over ≥${THRESHOLDS.METRONOMIC_MIN_KEYS} characters (replayer-like).`,
     });
   }
 
@@ -1453,7 +1453,7 @@ function deriveCrossFlags(key, patch) {
       code: "clone_cluster",
       severity: "warning",
       problem_id: r.problem_id,
-      evidence: `Member of a ${r.kind} clone cluster on ${r.problem_id} with ${r.others.join(", ")}.`,
+      evidence: `Member of ${r.kind === "exact" ? "an" : "a"} ${r.kind} clone cluster on ${r.problem_id} with ${r.others.join(", ")}.`,
     });
   }
 

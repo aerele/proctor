@@ -506,14 +506,16 @@ test("D2: grace is bounded — an admin-ended session older than the window is r
 
 // ---- D3: end-now must reach EVERY live session, past the per-query cap ------
 
-test("D3: end_now paginates past the 2000-doc query cap and ends every live session", async () => {
+test("D3: end_now paginates past the query cap and ends every live session", async () => {
   const { firestore } = freshFakes();
   await seedSettings(firestore);
-  // 2005 live sessions > SESSIONS_QUERY_LIMIT (2000): a single capped query
-  // strands the lexicographic tail. Direct store writes keep the seed fast.
-  // (collection() materializes the backing Map in _collections.)
+  // 6005 live sessions > SESSIONS_QUERY_LIMIT (raised 2000→6000 on exam-eve
+  // 2026-06-18): a single capped query strands the lexicographic tail, so the
+  // seed must stay ABOVE the cap to keep exercising the pagination path. Direct
+  // store writes keep the seed fast. (collection() materializes the backing Map
+  // in _collections.)
   firestore.collection(process.env.SESSION_COLLECTION);
-  const TOTAL = 2005;
+  const TOTAL = 6005;
   const store = firestore._collections.get(process.env.SESSION_COLLECTION);
   for (let i = 0; i < TOTAL; i += 1) {
     const id = `sess-${String(i).padStart(4, "0")}`;
@@ -523,7 +525,7 @@ test("D3: end_now paginates past the 2000-doc query cap and ends every live sess
   const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ended_count, TOTAL, "every live session ended, not just the first page");
-  assert.equal(store.get("sess-2004").status, "ended", "doc beyond the first 2000 reached");
+  assert.equal(store.get("sess-6004").status, "ended", "doc beyond the first 6000 (the cap) reached");
   assert.equal(store.get("sess-0000").status, "ended");
 });
 
