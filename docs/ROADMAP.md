@@ -122,6 +122,21 @@ Karthi's laptop                          Proctor backend (this app)          Adm
 4. **State vs session preservation** (2.x) — how much test state to restore on resume.
 5. **Event taxonomy** (4.1/4.5) — enumerate proctoring events and map each to notify-only vs go-to-room.
 
+## Epic 7 — Autonomous end-to-end integrated test suite  💡 PROPOSED (2026-06-18) — DISCUSS BEFORE BUILDING
+
+> Karthi (voice, 2026-06-18): an idea to capture, NOT to build yet — decide if it's worth it first.
+
+A **code-driven, no-AI E2E integrated test suite** that runs autonomously against a deployed (or local) instance and exercises ALL flows end-to-end on every deploy / minor change — driving **multiple real browsers in parallel** to simulate many concurrent students + admins:
+- multiple students attending simultaneously;
+- the duplicate-login / re-login / pending-approval flow;
+- the admin flow + the invigilator approval flow;
+- every other student/admin/invigilator flow, run in parallel;
+- screenshots **optional** (toggle per run).
+
+**Open decision — is it worth it?** Karthi is unsure: every code change would require rewriting/maintaining the suite, and if unit coverage is already solid the marginal confidence may not justify the maintenance. DISCUSS FIRST: (a) marginal value over the existing unit tests; (b) realistic per-change maintenance burden; (c) scope — which flows genuinely need cross-browser/concurrent E2E vs. plain unit coverage. **Build only if we conclude it's worth the effort; do not build without that discussion.**
+
+---
+
 ## Suggested first step (proposal)
 
 Start with the **Epic 1 iframe feasibility spike** as a standalone throwaway page — it's the highest-uncertainty, highest-leverage unknown, and its result reshapes Epics 1–3. Everything else (passcode removal, sessions, alerts, live eval) is buildable regardless, so it can be sequenced after we know the iframe answer.
