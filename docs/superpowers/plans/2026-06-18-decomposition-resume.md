@@ -37,6 +37,20 @@ backend **863/863**, frontend **779/779**, build OK. Guards intact: `canaryIsola
 ## Tonight's autonomous scope
 Execute **B2, B3, B5, B6, B7** on this branch (behavior-preserving, leaf, own test files, no raw-where, no exam-critical helpers; "obvious fixes: just do"). One at a time, full suite + 4 guards green per phase, commit each. Everything else → morning ratification + merge (Karthi's calls flagged above). The branch stays UNMERGED (does not touch the deployed/exam code) until Karthi ratifies.
 
+## ✅ TONIGHT'S PROGRESS (2026-06-18, autonomous)
+ALL 5 safe phases DONE — behavior-preserving, each independently green (backend 863/0, frontend 779/779, tsc clean) + committed on this branch:
+- **B2** adminTemplates → `routes/adminTemplates.mjs` (b8c9cea)
+- **B3** adminProblems → `routes/adminProblems.mjs` (5703975)
+- **B5** submissionEvents → `routes/submissionEvents.mjs` (62febda)
+- **B6** adminStats → `routes/adminStats.mjs` (3e12243)
+- **B7** adminPeople → `routes/adminPeople.mjs` (9277a58)
+
+handler.mjs: **6486 → 6041 lines** (≈445 extracted into 5 focused route factories mirroring invigilator/evaluation). Dispatch table byte-identical throughout; all guards (canary/scopingLint/routesAuthLint/envLint) green every phase; shared helpers kept single-source (passed via ctx, never duplicated).
+
+Branch `refactor/decomp-resume` pushed to origin, UNMERGED — for Karthi's morning ratification + merge.
+
+REMAINING (need Karthi's input — see Open questions): **B4**, **B8–B15** (esp. B9/B10 enforcement+alerts shared-helper threading; B13/B14 raw-where migration + scopingLint re-pin end-state), frontend **F0–F6**, api **A0–A9**.
+
 ## Open questions for Karthi (morning)
 1. B9/B10/F6 touch enforcement/recording/lazy-load — confirm no live-exam window before merging+deploying them.
 2. B8 boundary: extract only read/compute results; keep selection/adopt/export cluster together — confirm.
