@@ -12,6 +12,7 @@ import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
 import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
 import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
 import { makeSubmissionEventsRoutes } from "./routes/submissionEvents.mjs";
+import { makeAdminStatsRoutes } from "./routes/adminStats.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
@@ -421,6 +422,36 @@ const submissionEventsRoutes = makeSubmissionEventsRoutes({
   submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION
 });
 const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
+
+// Factory seam (decomp B6): the admin live-counts dashboard route domain. ctx
+// closes over THIS instance's live-client getter, the auth guard from makeAuth,
+// the contest-scope resolver + scopedQuery chokepoint, the settings reader, the
+// env-captured session collection name / query cap / disconnected-staleness
+// threshold, the ALL_CONTESTS identity sentinel (passed BY REFERENCE so
+// adminStats's `scope === ALL_CONTESTS` identity check holds), and the SHARED
+// room/staleness helpers (normalizeRoomFilter / distinctRooms / isStaleSession)
+// which stay RESIDENT in handler.mjs because adminSessionsList / adminIpReport /
+// the review-rooms helper (and routes/invigilator.mjs, via its own ctx) reuse
+// them. The returned route handler is destructured into the SAME name the
+// dispatch table uses, so the dispatch line stays byte-identical
+// (canaryIsolation). adminStats is auth-first (routesAuthLint) and a SCOPED GET
+// (canaryIsolation's SCOPED_GET_REQUESTS); all session reads go through
+// scopedQuery, so this move adds no raw contest_slug filter (scopingLint).
+const adminStatsRoutes = makeAdminStatsRoutes({
+  getFirestore,
+  requireAdmin,
+  contestScopeOf,
+  scopedQuery,
+  getSettings,
+  normalizeRoomFilter,
+  distinctRooms,
+  isStaleSession,
+  sessionCollection: SESSION_COLLECTION,
+  sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
+  disconnectedStalenessMs: DISCONNECTED_STALENESS_MS,
+  allContests: ALL_CONTESTS
+});
+const { adminStats } = adminStatsRoutes;
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
@@ -3150,70 +3181,14 @@ async function adminSessionEvents(req) {
 // B5); destructured at module scope above so the dispatch lines stay
 // byte-identical (canaryIsolation). Each route keeps its DIFFERENT auth guard.
 
-// Phase 2 (2.4 / Epic 6.4 / 4.4): live counts by status for the admin dashboard.
-// Counts are derived from the session docs; an optional ?contest_slug filters to
-// one contest, and an optional ?room scopes counts to a single room. "finished"
-// == ended; "live" == active; plus locked + pending. A derived `disconnected`
-// count flags active sessions whose last liveness signal (heartbeat or beacon)
-// is older than the staleness threshold. The distinct `rooms` list (computed
-// over the contest scope, BEFORE the room filter, so the dropdown stays full) is
-// returned so the console can populate a room dropdown.
-async function adminStats(req) {
-  requireAdmin(req);
-  const contestSlug = req.query?.contest_slug;
-  const scope = await contestScopeOf(contestSlug);
-  const room = normalizeRoomFilter(req.query?.room);
-
-  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
-    .limit(SESSIONS_QUERY_LIMIT)
-    .get();
-  const allDocs = snapshot.docs.map((doc) => doc.data());
-
-  // Distinct rooms come from the full contest scope (NOT the room-filtered set)
-  // so the dropdown always lists every room even while one is selected.
-  const rooms = distinctRooms(allDocs);
-
-  // Apply the room filter to the docs the counts are computed over.
-  const docs = room ? allDocs.filter((doc) => String(doc.room || "") === room) : allDocs;
-
-  const nowMs = Date.now();
-  const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, total: 0 };
-  for (const doc of docs) {
-    stats.total += 1;
-    if (doc.status === "active") {
-      stats.live += 1;
-      // Derived disconnected signal: an active session whose last heartbeat /
-      // beacon is older than the staleness threshold (default 45s).
-      if (isStaleSession(doc, nowMs)) stats.disconnected += 1;
-    } else if (doc.status === "locked") stats.locked += 1;
-    else if (doc.status === "pending_approval") stats.pending_approval += 1;
-    else if (doc.status === "ended") stats.finished += 1;
-  }
-  // "not started or total": with no roster the backend can't know who hasn't
-  // started, so we report total session docs as the closest defensible number
-  // (the frontend can subtract the started states to estimate yet-to-start once
-  // a roster exists).
-  stats.not_started_or_total = stats.total;
-
-  // S5: the console exam-time card rides on the existing 5 s stats poll, so the
-  // current end time + a server clock stamp come back with every poll.
-  // F3 (E2E live): a contest-scoped stats poll reports THAT contest's window —
-  // the legacy settings end_at said "time is up" while the scoped contest had
-  // hours left. ALL_CONTESTS keeps today's legacy schedule; the synthesized
-  // legacy contest mirrors the settings doc so its value is identical; an
-  // unknown slug (contestScopeOf's literal fallback carries no window) reports
-  // "" → the card renders "no schedule" instead of the wrong clock.
-  const settings = await getSettings();
-  return {
-    contest_slug: contestSlug ? String(contestSlug) : null,
-    room: room || null,
-    stats,
-    rooms,
-    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS,
-    end_at: scope === ALL_CONTESTS ? (settings?.end_at || "") : (scope.end_at || ""),
-    server_now: new Date().toISOString()
-  };
-}
+// Phase 2 (2.4 / Epic 6.4 / 4.4): the admin live-counts dashboard route
+// (adminStats, GET /api/admin/stats — by-status session counts + derived
+// disconnected + the contest-scope rooms list) moved VERBATIM to the
+// makeAdminStatsRoutes(ctx) factory in routes/adminStats.mjs (decomp B6);
+// destructured at module scope above so the dispatch line stays byte-identical
+// (canaryIsolation). The shared room/staleness helpers it uses
+// (normalizeRoomFilter / distinctRooms / isStaleSession) stay RESIDENT here —
+// other handler code reuses them — and are passed in via ctx by reference.
 
 // ---- S5: dynamic exam time + end-now (admin) -------------------------------
 //
