@@ -27,6 +27,11 @@ export type EnforcementConfigPayload = {
   fullscreen_reentry_seconds: number;
   fullscreen_exit_limit: number;
   mode: EnforcementMode;
+  /** #71: admin per-contest toggle that drops ONLY the typed-ack step from the
+   *  red-screen recovery (the "Enter full screen again" button stays). Absent on
+   *  an older backend = the full two-step recovery. Rides the enforcement object
+   *  so it propagates live via the heartbeat. */
+  simplified_fullscreen_recovery?: boolean;
 };
 
 // Per-session exemptions (admin session-action "exempt" / invigilator toggle).
@@ -1202,6 +1207,9 @@ export type ContestUpdateRequest = {
   /** S-I open-contest guard: typed contest slug confirming a points edit. */
   confirm_points_edit?: string;
   evidence_retention_days?: number;
+  /** #71: full enforcement object (updateContest does a full .set(), so the
+   *  admin must send EVERY field — existing knobs + simplified_fullscreen_recovery). */
+  enforcement?: EnforcementConfigPayload;
 };
 
 /** Per-contest pre-session config (GET /api/exam-config?contest=). */

@@ -354,6 +354,11 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
   const [endInput, setEndInput] = useState(() => isoToLocalInput(contest.end_at));
   const [roomsText, setRoomsText] = useState(() => (contest.rooms ?? []).join(", "));
   const [gateEnabled, setGateEnabled] = useState(contest.room_gate_enabled);
+  // #71: live per-contest toggle that removes ONLY the typed-ack step from the
+  // red-screen recovery. Reflects the contest's CURRENT enforcement; saving
+  // sends the FULL enforcement object (updateContest does a full .set(), so a
+  // partial would wipe the other knobs).
+  const simplifiedRecovery = contest.enforcement?.simplified_fullscreen_recovery === true;
   const [problemRows, setProblemRows] = useState<ProblemRow[]>(() => problemRowsOf(contest));
   const [addProblemId, setAddProblemId] = useState("");
   const [endNowArmed, setEndNowArmed] = useState(false);
@@ -405,6 +410,23 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
       }
       throw cause;
     }
+  });
+
+  // #71: flip the simplified-recovery flag. Sends the FULL enforcement object
+  // (existing knobs + the new bool) because updateContest .set()s the whole
+  // enforcement object — a partial payload would reset the other fields. Absent
+  // enforcement (older doc) falls back to the backend defaults (20 / 2 / block).
+  const toggleSimplifiedRecovery = (next: boolean) => runMutation(async () => {
+    const current = contest.enforcement;
+    await updateContestApi(password, {
+      slug: contest.slug,
+      enforcement: {
+        fullscreen_reentry_seconds: current?.fullscreen_reentry_seconds ?? 20,
+        fullscreen_exit_limit: current?.fullscreen_exit_limit ?? 2,
+        mode: current?.mode ?? "block",
+        simplified_fullscreen_recovery: next
+      }
+    });
   });
 
   const moveRow = (index: number, delta: number) => {
@@ -598,6 +620,24 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
               <input className="mt-1 h-4 w-4 accent-accent" type="checkbox" checked={gateEnabled} onChange={(event) => setGateEnabled(event.target.checked)} />
               <span><span className="font-medium text-ink">Room start codes (invigilator gate)</span> — candidates wait after recording starts until their room invigilator releases a 6-digit code (or presses Start now) from the per-contest invigilator link above.</span>
             </label>
+          </div>
+
+          {/* #71: Fullscreen-exit recovery — live per-contest toggle. */}
+          <div className="mb-4 rounded-md border border-line bg-white/60 p-4">
+            <h3 className="text-sm font-semibold text-ink">Fullscreen-exit recovery</h3>
+            <label className="mt-2 flex items-start gap-3 text-sm leading-6 text-muted">
+              <input
+                className="mt-1 h-4 w-4 accent-accent"
+                type="checkbox"
+                checked={simplifiedRecovery}
+                disabled={busy}
+                onChange={(event) => void toggleSimplifiedRecovery(event.target.checked)}
+              />
+              <span>
+                <span className="font-medium text-ink">Simplified fullscreen recovery (no typing)</span> — when a candidate leaves fullscreen, the red recovery screen shows only a warning and the "Enter full screen again" button. The candidate does NOT have to type the acknowledgement sentence first. The exit limit and re-entry countdown are unchanged.
+              </span>
+            </label>
+            <p className="mt-2 text-xs text-muted">Takes effect on in-progress sessions within ~15 seconds via the candidate heartbeat — no reload needed.</p>
           </div>
 
           {/* Roster — REUSE of the S-C section, scoped to this contest. */}

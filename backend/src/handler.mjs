@@ -6313,7 +6313,12 @@ function enforcementConfig(settings) {
   return {
     fullscreen_reentry_seconds: intSettingOr(settings?.fullscreen_reentry_seconds, FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
     fullscreen_exit_limit: intSettingOr(settings?.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
-    mode: resolveEnforcementMode(settings?.enforcement_mode)
+    mode: resolveEnforcementMode(settings?.enforcement_mode),
+    // #71: mirror the person-contest flag (normalizeTemplateEnforcement) so a
+    // LEGACY (global-settings) session also carries the simplified-recovery
+    // toggle through start/resume + heartbeat. Default false; non-boolean →
+    // false — an untouched legacy exam is unchanged.
+    simplified_fullscreen_recovery: settings?.simplified_fullscreen_recovery === true
   };
 }
 

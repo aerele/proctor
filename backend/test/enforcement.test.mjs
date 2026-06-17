@@ -261,10 +261,10 @@ test("public exam-config serves the enforcement block (defaults with no settings
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   const bare = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
   assert.equal(bare.statusCode, 200);
-  assert.deepEqual(bare.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block" });
+  assert.deepEqual(bare.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block", simplified_fullscreen_recovery: false });
   seedSettings(firestore, { fullscreen_reentry_seconds: 45, enforcement_mode: "alert_first" });
   const configured = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
-  assert.deepEqual(configured.body.enforcement, { fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 2, mode: "alert_first" });
+  assert.deepEqual(configured.body.enforcement, { fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 2, mode: "alert_first", simplified_fullscreen_recovery: false });
 });
 
 test("session start: doc gains enforcement_exemptions {}; response carries enforcement + exemptions + locked_reason", async () => {
@@ -274,7 +274,7 @@ test("session start: doc gains enforcement_exemptions {}; response carries enfor
   const res = await call(makeReq({ method: "POST", path: "/api/session/start",
     body: { hackerrank_username: "alice", name: "Alice", roll_number: "R1", email: "a@x.y", consent_accepted: true } }));
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 4, mode: "block" });
+  assert.deepEqual(res.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 4, mode: "block", simplified_fullscreen_recovery: false });
   assert.deepEqual(res.body.enforcement_exemptions, {});
   assert.equal(res.body.locked_reason, null);
   const doc = sessionDoc(firestore, res.body.session_id);
@@ -289,7 +289,7 @@ test("heartbeat response carries enforcement config + the session's exemptions",
   const res = await call(makeReq({ method: "POST", path: "/api/heartbeat",
     body: { session_id: "hb-1", recording_state: "combined:recording;screen:recording", visibility_state: "visible" } }));
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "alert_first" });
+  assert.deepEqual(res.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "alert_first", simplified_fullscreen_recovery: false });
   assert.deepEqual(res.body.enforcement_exemptions, { fullscreen: true });
 });
 

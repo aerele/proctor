@@ -6,9 +6,10 @@
 // already edited keep their code (correct), but had NO way to pull the fresh
 // stub. W9 adds an explicit, confirmed "Reload stub" action:
 //
-//   click → window.confirm warning ("all your edits will be gone") →
-//   snapshot the current editor content → replace with the stub →
-//   show "Undo (20s)" which restores the snapshot.
+//   click → in-UI confirmation modal warning ("all your edits will be gone";
+//   #70 — an in-DOM modal in MultiProblemWorkspace, NOT window.confirm, which
+//   used to drop fullscreen) → snapshot the current editor content →
+//   replace with the stub → show "Undo (20s)" which restores the snapshot.
 //
 // STUB SOURCE: the freshest stub the client has is problem.stubs[language]
 // from the latest start/resume payload (stubs ride PublicProblem — F12.2).
@@ -49,9 +50,10 @@ export function canReloadStub(
   return typeof problem?.stubs?.[language] === "string";
 }
 
-// The window.confirm copy (repo-standard confirm medium). Owner's words for
-// the spirit: "all your edits will be gone. Are you sure?" — scoped to THIS
-// problem + language.
+// The confirmation copy. Owner's words for the spirit: "all your edits will be
+// gone. Are you sure?" — scoped to THIS problem + language. #70: this is still
+// the single copy source; it is now rendered inside the in-UI modal (in
+// MultiProblemWorkspace) rather than passed to window.confirm.
 export function reloadStubConfirmMessage(language: string): string {
   return `Reload the starter stub for this problem (${language})? Your editor content will be replaced with the fresh stub — all your edits will be gone. Are you sure?`;
 }

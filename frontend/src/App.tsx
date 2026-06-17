@@ -547,7 +547,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       reentrySeconds: enforcementPayload?.fullscreen_reentry_seconds ?? 20,
       exitLimit: enforcementPayload?.fullscreen_exit_limit ?? 2,
       mode: enforcementPayload?.mode ?? "block",
-      exemptFullscreen: enforcementExemptions.fullscreen === true
+      exemptFullscreen: enforcementExemptions.fullscreen === true,
+      // #71: heartbeat-delivered (enforcementPayload refreshes each interval), so
+      // an admin flipping the toggle reaches live sessions within ~15s.
+      simplifiedFullscreenRecovery: enforcementPayload?.simplified_fullscreen_recovery ?? false
     },
     addEvent,
     onLocked: (reason) => {
@@ -616,6 +619,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       exitCount={enforcement.exitCount}
       ackOk={enforcement.ackOk}
       fullscreen={shell.fullscreen}
+      simplifiedRecovery={enforcementPayload?.simplified_fullscreen_recovery ?? false}
       onAckChange={enforcement.submitAck}
       onEnterFullscreen={shell.enterFullscreen}
     />
