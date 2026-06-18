@@ -9,6 +9,11 @@ import { makeSessionStore } from "./lib/sessionStore.mjs";
 import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
 import { makeEvaluation } from "./evaluation.mjs";
 import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
+import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
+import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
+import { makeSubmissionEventsRoutes } from "./routes/submissionEvents.mjs";
+import { makeAdminStatsRoutes } from "./routes/adminStats.mjs";
+import { makeAdminPeopleRoutes } from "./routes/adminPeople.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
@@ -328,6 +333,166 @@ const evaluationRoutes = makeEvaluationRoutes({
   evaluation
 });
 const { adminContestEvaluate, adminContestEvaluations } = evaluationRoutes;
+
+// Factory seam (decomp B2): the proctor-template admin CRUD route domain. ctx
+// closes over THIS instance's live-client getter, the auth guard from makeAuth,
+// the http transport helpers, the env-captured collection names + caps, the
+// template-domain store/validation fns (+ slugify/getBankProblem), and the
+// shared handler-resident isAlreadyExists (single source). The returned route
+// handlers are destructured into the SAME names the dispatch table uses, so the
+// dispatch lines stay byte-identical (canaryIsolation). The template-block
+// helpers it owns (templateRef / requireKnownProblems / createTemplateDoc /
+// bankProblemPoints) come back too — currently used only by these routes.
+const adminTemplatesRoutes = makeAdminTemplatesRoutes({
+  getFirestore,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  requireFields,
+  httpError,
+  httpErrorWith,
+  templatesCollection: TEMPLATES_COLLECTION,
+  problemsCollection: PROBLEMS_COLLECTION,
+  problemsQueryLimit: PROBLEMS_QUERY_LIMIT,
+  getTemplate,
+  listTemplates,
+  validateTemplateInput,
+  structuredCloneTemplate,
+  SEED_TEMPLATES,
+  TEMPLATE_BOUNDS,
+  slugify,
+  getBankProblem,
+  isAlreadyExists
+});
+const {
+  adminListTemplates, adminGetTemplate, adminCreateTemplate, adminUpdateTemplate,
+  adminArchiveTemplate, adminCloneTemplate, adminDeleteTemplate
+} = adminTemplatesRoutes;
+
+// Factory seam (decomp B3): the problem-bank admin authoring route domain. ctx
+// closes over THIS instance's live-client getter, the auth guard from makeAuth,
+// the http transport helpers, the env-captured collection names + caps, the
+// problem-domain store/validation fns (isValidProblemId/validateProblemInput/
+// getBankProblem), the pure contest-reference finder (+ the template lister it
+// reads through), and the legacy-settings store fns (the §1.4.3 silent-clear
+// path). The returned route handlers are destructured into the SAME names the
+// dispatch table uses, so the dispatch lines stay byte-identical
+// (canaryIsolation). The problem-bank helpers it owns (problemRef /
+// problemReferenceUniverse) come back too — currently used only by these routes.
+const adminProblemsRoutes = makeAdminProblemsRoutes({
+  getFirestore,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  httpError,
+  httpErrorWith,
+  problemsCollection: PROBLEMS_COLLECTION,
+  problemsQueryLimit: PROBLEMS_QUERY_LIMIT,
+  contestsCollection: CONTESTS_COLLECTION,
+  isValidProblemId,
+  validateProblemInput,
+  getBankProblem,
+  findProblemReferences,
+  listTemplates,
+  getSettings,
+  settingsRef
+});
+const {
+  adminListProblems, adminGetProblem, adminSaveProblem, adminDeleteProblem
+} = adminProblemsRoutes;
+
+// Factory seam (decomp B5): the poller-sourced submission-time markers route
+// domain. ctx closes over THIS instance's live-client getter, the env-captured
+// submission-events collection name, the http transport helpers, and the
+// username normalizer. The two routes keep their DIFFERENT auth guards: the
+// poller ingest uses requireApiKey (the x-api-key mechanism, like alerts
+// ingest); the admin recording-review read is auth-first with requireAdmin
+// (routesAuthLint). The returned route handlers are destructured into the SAME
+// names the dispatch table uses, so the dispatch lines stay byte-identical
+// (canaryIsolation). The submission-events helpers it owns (submissionEventsDocId
+// / submissionEventsRef / normalizeSubmissionEvent / mergeSubmissionEvents) come
+// back too — currently used only by these routes.
+const submissionEventsRoutes = makeSubmissionEventsRoutes({
+  getFirestore,
+  requireApiKey,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  httpError,
+  normalizeUsername,
+  submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION
+});
+const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
+
+// Factory seam (decomp B6): the admin live-counts dashboard route domain. ctx
+// closes over THIS instance's live-client getter, the auth guard from makeAuth,
+// the contest-scope resolver + scopedQuery chokepoint, the settings reader, the
+// env-captured session collection name / query cap / disconnected-staleness
+// threshold, the ALL_CONTESTS identity sentinel (passed BY REFERENCE so
+// adminStats's `scope === ALL_CONTESTS` identity check holds), and the SHARED
+// room/staleness helpers (normalizeRoomFilter / distinctRooms / isStaleSession)
+// which stay RESIDENT in handler.mjs because adminSessionsList / adminIpReport /
+// the review-rooms helper (and routes/invigilator.mjs, via its own ctx) reuse
+// them. The returned route handler is destructured into the SAME name the
+// dispatch table uses, so the dispatch line stays byte-identical
+// (canaryIsolation). adminStats is auth-first (routesAuthLint) and a SCOPED GET
+// (canaryIsolation's SCOPED_GET_REQUESTS); all session reads go through
+// scopedQuery, so this move adds no raw contest_slug filter (scopingLint).
+const adminStatsRoutes = makeAdminStatsRoutes({
+  getFirestore,
+  requireAdmin,
+  contestScopeOf,
+  scopedQuery,
+  getSettings,
+  normalizeRoomFilter,
+  distinctRooms,
+  isStaleSession,
+  sessionCollection: SESSION_COLLECTION,
+  sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
+  disconnectedStalenessMs: DISCONNECTED_STALENESS_MS,
+  allContests: ALL_CONTESTS
+});
+const { adminStats } = adminStatsRoutes;
+
+// Factory seam (decomp B7): the S-J §2.14 People tab route domain (the
+// cross-contest directory + the per-person cross-round scorecard). ctx closes
+// over THIS instance's live-client getter, the auth guard from makeAuth, the
+// badRequest transport helper, the identity-store fns (listAllPersons /
+// getCollegeNameMap / getPersonById / listEnrollmentsForPerson), the people.mjs
+// PURE helpers (filterDirectory / buildScorecardRows / buildScorecardCsv), the
+// shared utilities the scorecard join reuses (mapWithConcurrency / resolveContest
+// / scopedQuery / contestProblemEntries / computeScoreboard / summarizeIntegrity
+// and the handler-resident integrityByPersonFor — all BY REFERENCE so the SAME
+// implementations the Results table uses are shared, not forked), and the
+// env-captured directory cap / submissions collection name + query cap BY VALUE.
+// The returned route handlers are destructured into the SAME names the dispatch
+// table uses, so the dispatch lines stay byte-identical (canaryIsolation). Both
+// routes are auth-first (routesAuthLint) and SCOPED GETs (SCOPED_GET_REQUESTS):
+// the only raw .where() inside is on person_id over a scopedQuery handle (never a
+// raw contest_slug filter), so scopingLint's allowlist stays {handler.mjs: 4}.
+const adminPeopleRoutes = makeAdminPeopleRoutes({
+  getFirestore,
+  requireAdmin,
+  badRequest,
+  listAllPersons,
+  getCollegeNameMap,
+  getPersonById,
+  listEnrollmentsForPerson,
+  filterDirectory,
+  buildScorecardRows,
+  buildScorecardCsv,
+  mapWithConcurrency,
+  resolveContest,
+  scopedQuery,
+  contestProblemEntries,
+  computeScoreboard,
+  summarizeIntegrity,
+  integrityByPersonFor,
+  peopleDirectoryLimit: PEOPLE_DIRECTORY_LIMIT,
+  submissionsCollection: SUBMISSIONS_COLLECTION,
+  submissionsResultsLimit: SUBMISSIONS_RESULTS_LIMIT
+});
+const { adminPeople, adminPerson } = adminPeopleRoutes;
 
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
@@ -2058,318 +2223,20 @@ async function adminSaveSettings(req) {
 }
 
 // ---- S4: problem bank (admin authoring) ------------------------------------
-
-function problemRef(id) {
-  return getFirestore().collection(PROBLEMS_COLLECTION).doc(id);
-}
-
-async function adminListProblems(req) {
-  requireAdmin(req);
-  const snapshot = await getFirestore().collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
-  const problems = snapshot.docs
-    .map((doc) => doc.data())
-    .map((p) => ({
-      id: p.id,
-      title: p.title || "",
-      status: p.status || "draft",
-      points: p.points ?? 100,
-      scoring: p.scoring || "per_test",
-      languages: p.languages || [],
-      tags: Array.isArray(p.tags) ? p.tags : [], // S-I §1.2 (legacy docs → [])
-      sample_count: (p.sampleTests || []).length,
-      hidden_count: (p.hiddenTests || []).length,
-      updated_at: p.updated_at || ""
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  return { problems };
-}
-
-async function adminGetProblem(req) {
-  requireAdmin(req);
-  const id = String(req.query?.id || "");
-  if (!isValidProblemId(id)) return badRequest("invalid id");
-  const doc = await problemRef(id).get();
-  if (!doc.exists) throw httpError(404, "Problem not found");
-  // S-I §5.3: surface what references this problem so the editor can render
-  // the "Referenced by" line and pre-warn before delete/unpublish.
-  const refs = findProblemReferences(id, await problemReferenceUniverse());
-  // Full doc INCLUDING hiddenTests — admin-only surface.
-  return {
-    problem: doc.data(),
-    references: {
-      contests: refs.contests.map((contest) => contest.slug),
-      templates: refs.templates.map((template) => template.slug)
-    }
-  };
-}
-
-// ---- S-I §1.4.3: live-reference guard ----------------------------------------
-// Problem CONTENT stays live on contests (exec/start read the bank at serve
-// time), so destructive bank edits must be guarded:
-//   delete while referenced                  -> 409 problem_referenced
-//   unpublish while CONTEST-referenced       -> 409 problem_referenced
-//     (template-only references allow it — instantiation re-validates)
-//   hiddenTests edit while an OPEN contest references it -> typed confirm
-//     (body.confirm_live_edit === the problem id), else 409.
-
-// Bounded pre-fetch for findProblemReferences: real contest docs (limit 500;
-// archived filtered by the pure function) + templates with seeds merged. The
-// synthesized LEGACY contest is deliberately absent — its settings doc keeps
-// the original silent-clear branch below instead of a 409.
-async function problemReferenceUniverse() {
-  const [contestSnapshot, templates] = await Promise.all([
-    getFirestore().collection(CONTESTS_COLLECTION).limit(CONTESTS_REFERENCE_LIMIT).get(),
-    listTemplates()
-  ]);
-  return { contests: contestSnapshot.docs.map((doc) => doc.data()), templates };
-}
-const CONTESTS_REFERENCE_LIMIT = 500;
-
-async function adminSaveProblem(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const checked = validateProblemInput(body);
-  if (!checked.ok) return badRequest(checked.error);
-  const existing = await problemRef(checked.problem.id).get();
-  // Guard comparisons run against doc-or-seed (a draft doc shadowing a
-  // published seed IS an unpublish); created_at preservation stays doc-only.
-  const current = existing.exists ? existing.data() : await getBankProblem(checked.problem.id);
-  if (current) {
-    const unpublishing = current.status === "published" && checked.problem.status === "draft";
-    const hiddenChanged = JSON.stringify(current.hiddenTests || []) !== JSON.stringify(checked.problem.hiddenTests);
-    if (unpublishing || hiddenChanged) {
-      const refs = findProblemReferences(checked.problem.id, await problemReferenceUniverse());
-      if (unpublishing && refs.contests.length) {
-        throw httpErrorWith(409, "problem_referenced", {
-          contests: refs.contests.map((contest) => contest.slug),
-          templates: refs.templates.map((template) => template.slug)
-        });
-      }
-      const openContests = refs.contests.filter((contest) => contest.status === "open");
-      if (hiddenChanged && openContests.length && body.confirm_live_edit !== checked.problem.id) {
-        throw httpErrorWith(409, "live_edit_confirmation_required", {
-          contests: openContests.map((contest) => contest.slug)
-        });
-      }
-    }
-  }
-  const now = new Date().toISOString();
-  const item = {
-    ...checked.problem,
-    created_at: existing.exists ? (existing.data().created_at || now) : now,
-    updated_at: now
-  };
-  await problemRef(item.id).set(item);
-  return { ok: true, problem: item };
-}
-
-async function adminDeleteProblem(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const id = String(body.id || "");
-  if (!isValidProblemId(id)) return badRequest("invalid id");
-  // S-I §1.4.3: references found -> 409, NO silent clearing of contest or
-  // template assignments. (Replaces the old delete-clears-assignment rule.)
-  const refs = findProblemReferences(id, await problemReferenceUniverse());
-  if (refs.contests.length || refs.templates.length) {
-    throw httpErrorWith(409, "problem_referenced", {
-      contests: refs.contests.map((contest) => contest.slug),
-      templates: refs.templates.map((template) => template.slug)
-    });
-  }
-  await problemRef(id).delete();
-  // LEGACY contest path only (spec §1.4.3): the SETTINGS doc assignment is
-  // still silently cleared so legacy start/resume stop advertising a dead id.
-  const settings = await getSettings();
-  if (settings?.problem_id === id) {
-    await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
-  }
-  return { ok: true };
-}
+// The four admin problem-bank route bodies (adminListProblems / adminGetProblem
+// / adminSaveProblem / adminDeleteProblem) + their owned helpers (problemRef /
+// problemReferenceUniverse, with the CONTESTS_REFERENCE_LIMIT cap) moved VERBATIM
+// to the makeAdminProblemsRoutes(ctx) factory in routes/adminProblems.mjs
+// (decomp B3); destructured at module scope above so the dispatch lines stay
+// byte-identical (canaryIsolation). The §1.4.3 live-reference guard rules live
+// alongside the route bodies there.
 
 // ---- S-I §1.1/§2: proctor templates (admin CRUD) -----------------------------
-// Thin glue over src/templates.mjs (validation + seed shadowing live there).
-// Slug rules are the contest rules verbatim (slugify + -2 suffix, atomic
-// .create() decides ownership); SEED slugs are skipped at create so a new
-// template can never silently shadow the system-check preset.
-
-function templateRef(slug) {
-  return getFirestore().collection(TEMPLATES_COLLECTION).doc(slug);
-}
-
-const TEMPLATE_SLUG_COLLISION_LIMIT = 50;
-
-// Every template problem entry must reference an EXISTING bank problem at save
-// time. Drafts are fine in a template (spec §1.1) — instantiation re-validates
-// published — so this reads through getBankProblem, never getProblem.
-async function requireKnownProblems(entries) {
-  const unknown = [];
-  for (const entry of entries) {
-    if (!(await getBankProblem(entry.problem_id))) unknown.push(entry.problem_id);
-  }
-  if (unknown.length) throw httpErrorWith(400, "unknown_problems", { problems: unknown });
-}
-
-async function createTemplateDoc(template) {
-  const baseSlug = slugify(template.name);
-  if (!baseSlug) throw httpError(400, "name must contain letters or digits");
-  const now = new Date().toISOString();
-  for (let n = 1; n <= TEMPLATE_SLUG_COLLISION_LIMIT; n++) {
-    const slug = n === 1 ? baseSlug : `${baseSlug}-${n}`;
-    if (Object.hasOwn(SEED_TEMPLATES, slug)) continue; // presets keep their slug
-    const item = { slug, ...template, archived: false, created_at: now, updated_at: now };
-    try {
-      await templateRef(slug).create(item);
-      return item;
-    } catch (error) {
-      if (isAlreadyExists(error)) continue;
-      throw error;
-    }
-  }
-  throw httpError(409, "slug_collision_limit");
-}
-
-// points per bank problem id for the list totals: one bounded collection read;
-// per-id getBankProblem fallback catches seed problems (e.g. sum-two).
-async function bankProblemPoints() {
-  const points = new Map();
-  const snapshot = await getFirestore().collection(PROBLEMS_COLLECTION).limit(PROBLEMS_QUERY_LIMIT).get();
-  for (const doc of snapshot.docs) {
-    const p = doc.data();
-    points.set(p.id, p.points ?? 100);
-  }
-  return {
-    async effectiveFor(entry) {
-      if (entry.points !== null && entry.points !== undefined) return entry.points;
-      if (points.has(entry.problem_id)) return points.get(entry.problem_id);
-      const fallback = await getBankProblem(entry.problem_id);
-      const value = fallback ? (fallback.points ?? 100) : 0; // dangling ref counts 0
-      points.set(entry.problem_id, value);
-      return value;
-    }
-  };
-}
-
-async function adminListTemplates(req) {
-  requireAdmin(req);
-  const [templates, bank] = await Promise.all([listTemplates(), bankProblemPoints()]);
-  const rows = [];
-  for (const template of templates) {
-    const entries = template.problems || [];
-    let totalPoints = 0;
-    for (const entry of entries) totalPoints += await bank.effectiveFor(entry);
-    rows.push({
-      slug: template.slug,
-      name: template.name,
-      archived: Boolean(template.archived),
-      preset: Boolean(template.preset),
-      problem_count: entries.length,
-      total_points: totalPoints,
-      updated_at: template.updated_at || ""
-    });
-  }
-  return { templates: rows };
-}
-
-async function adminGetTemplate(req) {
-  requireAdmin(req);
-  const template = await getTemplate(req.query?.slug);
-  if (!template) throw httpError(404, "template_not_found");
-  return { template };
-}
-
-async function adminCreateTemplate(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const checked = validateTemplateInput(body);
-  if (!checked.ok) return badRequest(checked.error);
-  await requireKnownProblems(checked.template.problems);
-  return { ok: true, template: await createTemplateDoc(checked.template) };
-}
-
-// Partial update. THE rule (same as contests): a rename NEVER re-slugs — the
-// slug is referenced from contest provenance the moment one instantiates.
-// Updating a seed slug MATERIALIZES a shadow doc (customize-the-preset flow).
-async function adminUpdateTemplate(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug"]);
-  const existing = await getTemplate(body.slug);
-  if (!existing) throw httpError(404, "template_not_found");
-  const merged = {
-    name: body.name !== undefined ? body.name : existing.name,
-    description: body.description !== undefined ? body.description : existing.description,
-    problems: body.problems !== undefined ? body.problems : existing.problems,
-    defaults: {
-      ...existing.defaults,
-      ...(body.defaults && typeof body.defaults === "object" && !Array.isArray(body.defaults) ? body.defaults : {})
-    }
-  };
-  const checked = validateTemplateInput(merged);
-  if (!checked.ok) return badRequest(checked.error);
-  if (body.problems !== undefined) await requireKnownProblems(checked.template.problems);
-  const now = new Date().toISOString();
-  const item = {
-    slug: existing.slug,
-    ...checked.template,
-    archived: Boolean(existing.archived),
-    created_at: existing.created_at || now,
-    updated_at: now
-  };
-  await templateRef(item.slug).set(item);
-  return { ok: true, template: item };
-}
-
-// Archived templates disappear from the instantiate picker but stay listed
-// behind the UI toggle. Archiving a seed materializes its shadow doc too.
-async function adminArchiveTemplate(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug"]);
-  if (typeof body.archived !== "boolean") return badRequest("archived must be a boolean");
-  const existing = await getTemplate(body.slug);
-  if (!existing) throw httpError(404, "template_not_found");
-  const now = new Date().toISOString();
-  const { preset: _preset, ...rest } = existing;
-  const item = { ...rest, archived: body.archived, created_at: existing.created_at || now, updated_at: now };
-  await templateRef(item.slug).set(item);
-  return { ok: true, template: item };
-}
-
-// Clone verb = the §1.4 snapshot copy onto a NEW template doc: deep copy of
-// problems + defaults, fresh slug from the (default "Copy of …") name, fresh
-// timestamps, archived reset.
-async function adminCloneTemplate(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug"]);
-  const existing = await getTemplate(body.slug);
-  if (!existing) throw httpError(404, "template_not_found");
-  const name = (String(body.name ?? "").trim() || `Copy of ${existing.name}`).slice(0, TEMPLATE_BOUNDS.NAME_MAX);
-  const copy = structuredCloneTemplate(existing);
-  const checked = validateTemplateInput({
-    name, description: copy.description, problems: copy.problems, defaults: copy.defaults
-  });
-  if (!checked.ok) return badRequest(checked.error);
-  return { ok: true, template: await createTemplateDoc(checked.template) };
-}
-
-// Hard delete (FIX-B2 #58): permanently removes an author-owned template doc.
-// Archive is the soft-delete (the picker hides it but it stays listed); this is
-// the explicit "remove it for good" verb the Templates tab needs. A BARE seed
-// preset (no shadow doc — getTemplate returns preset:true) cannot be deleted —
-// it has no doc and would just reappear in the list; deleting a MATERIALIZED
-// shadow doc is allowed and simply restores the preset to its original form.
-async function adminDeleteTemplate(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug"]);
-  const existing = await getTemplate(body.slug);
-  if (!existing) throw httpError(404, "template_not_found");
-  if (existing.preset) throw httpError(400, "template_preset_undeletable");
-  await templateRef(existing.slug).delete();
-  return { ok: true };
-}
+// The seven admin template route bodies + their owned helpers (templateRef /
+// requireKnownProblems / createTemplateDoc / bankProblemPoints) moved VERBATIM
+// to the makeAdminTemplatesRoutes(ctx) factory in routes/adminTemplates.mjs
+// (decomp B2); destructured at module scope above so the dispatch lines stay
+// byte-identical (canaryIsolation). Thin glue over src/templates.mjs as before.
 
 // ---- S-B: contests (F9 §2 / F10 §2.7) — SHIPS DARK ---------------------------
 // Thin admin glue over src/contests.mjs (validation + slug/access-code minting
@@ -3346,209 +3213,23 @@ async function adminSessionEvents(req) {
 }
 
 // ---- Submission-time markers (poller-sourced) -----------------------------
-//
-// The contest-eval poller POSTs every code submission a student made (valid =
-// Accepted, invalid = a terminal failure; transient Processing/Queued are
-// skipped poller-side). They are stored as ONE doc per (username_norm,
-// contest_slug) holding a merged, de-duped-by-submission_id events array so a
-// re-post is idempotent. The admin recording-review timeline reads them back to
-// overlay GREEN (valid) / RED (invalid) markers at each submission's real time.
+// The two submission-events route bodies (ingestSubmissionEvents [requireApiKey
+// poller ingest] / adminSubmissionEvents [requireAdmin recording-review read,
+// scoped GET]) + their owned helpers (submissionEventsDocId / submissionEventsRef
+// / normalizeSubmissionEvent / mergeSubmissionEvents, with the
+// SUBMISSION_EVENTS_INGEST_LIMIT cap) moved VERBATIM to the
+// makeSubmissionEventsRoutes(ctx) factory in routes/submissionEvents.mjs (decomp
+// B5); destructured at module scope above so the dispatch lines stay
+// byte-identical (canaryIsolation). Each route keeps its DIFFERENT auth guard.
 
-const SUBMISSION_EVENTS_INGEST_LIMIT = 5000;
-
-// Deterministic doc id for a (username_norm, contest_slug) submission-events doc.
-function submissionEventsDocId(usernameNorm, contestSlug) {
-  return `${usernameNorm}:${contestSlug || "_"}`;
-}
-
-function submissionEventsRef(usernameNorm, contestSlug) {
-  return getFirestore().collection(SUBMISSION_EVENTS_COLLECTION).doc(submissionEventsDocId(usernameNorm, contestSlug));
-}
-
-// Validate + normalize one inbound submission event. submission_id is coerced to
-// a string so it is a stable de-dupe key whether the poller sends an int or str.
-function normalizeSubmissionEvent(event, index) {
-  if (!event || typeof event !== "object" || Array.isArray(event)) {
-    throw httpError(400, `events[${index}] must be an object`);
-  }
-  // S-C (F9 §1.2): candidate_id accepted as an alias FOREVER (lazy poller fleet).
-  if ((event.hackerrank_username === undefined || event.hackerrank_username === null || event.hackerrank_username === "")
-      && event.candidate_id !== undefined && event.candidate_id !== null && event.candidate_id !== "") {
-    event = { ...event, hackerrank_username: event.candidate_id };
-  }
-  for (const field of ["hackerrank_username", "submission_id", "submitted_at"]) {
-    const value = event[field];
-    if (value === undefined || value === null || value === "") {
-      throw httpError(400, `events[${index}].${field} is required`);
-    }
-  }
-  if (Number.isNaN(Date.parse(event.submitted_at))) {
-    throw httpError(400, `events[${index}].submitted_at must be a valid ISO 8601 date`);
-  }
-  const item = {
-    submission_id: String(event.submission_id),
-    hackerrank_username: String(event.hackerrank_username),
-    valid: event.valid === true,
-    submitted_at: new Date(event.submitted_at).toISOString()
-  };
-  if (event.contest_slug) item.contest_slug = String(event.contest_slug);
-  if (event.challenge_slug) item.challenge_slug = String(event.challenge_slug);
-  if (event.challenge_name) item.challenge_name = String(event.challenge_name);
-  if (event.lang) item.lang = String(event.lang);
-  if (event.status) item.status = String(event.status);
-  return item;
-}
-
-// Merge new events into an existing array, de-duping by submission_id (a later
-// post for the same id overwrites — e.g. a Processing→Accepted re-classification),
-// and keep the result sorted by submitted_at ascending.
-function mergeSubmissionEvents(existing, incoming) {
-  const byId = new Map();
-  for (const event of existing || []) {
-    if (event && event.submission_id !== undefined) byId.set(String(event.submission_id), event);
-  }
-  for (const event of incoming) byId.set(event.submission_id, event);
-  return [...byId.values()].sort((a, b) =>
-    String(a.submitted_at || "").localeCompare(String(b.submitted_at || ""))
-  );
-}
-
-// POST /api/submission-events — poller ingest, authenticated with the SAME
-// x-api-key mechanism as the alerts ingest. Groups the inbound events by
-// (username_norm, contest_slug) and upserts each group's doc with the merged,
-// de-duped array. Returns { ok, stored } = the count of events accepted.
-async function ingestSubmissionEvents(req) {
-  requireApiKey(req);
-  const body = parseBody(req);
-  const rawEvents = Array.isArray(body?.events) ? body.events : [];
-  if (!rawEvents.length) return badRequest("No events provided");
-  if (rawEvents.length > SUBMISSION_EVENTS_INGEST_LIMIT) {
-    return badRequest(`Too many events in one request (max ${SUBMISSION_EVENTS_INGEST_LIMIT})`);
-  }
-
-  const normalized = rawEvents.map((event, index) => normalizeSubmissionEvent(event, index));
-
-  // Group by the doc key so each (username_norm, contest_slug) doc is read +
-  // upserted exactly once even when a batch spans many users.
-  const groups = new Map();
-  for (const event of normalized) {
-    const usernameNorm = normalizeUsername(event.hackerrank_username);
-    const contestSlug = event.contest_slug || "";
-    const key = submissionEventsDocId(usernameNorm, contestSlug);
-    if (!groups.has(key)) groups.set(key, { usernameNorm, contestSlug, events: [] });
-    groups.get(key).events.push(event);
-  }
-
-  const now = new Date().toISOString();
-  await Promise.all([...groups.values()].map(async ({ usernameNorm, contestSlug, events }) => {
-    const ref = submissionEventsRef(usernameNorm, contestSlug);
-    const doc = await ref.get();
-    const existing = doc.exists ? (doc.data()?.events || []) : [];
-    const merged = mergeSubmissionEvents(existing, events);
-    await ref.set({
-      username_norm: usernameNorm,
-      contest_slug: contestSlug,
-      events: merged,
-      updated_at: now
-    }, { merge: true });
-  }));
-
-  return { ok: true, stored: normalized.length };
-}
-
-// GET /api/admin/submission-events?username=<u>&contest_slug=<optional> — admin
-// read for the recording-review timeline. When contest_slug is omitted, merges
-// events across every contest doc for that user. Always returns the events
-// sorted by submitted_at ascending.
-async function adminSubmissionEvents(req) {
-  requireAdmin(req);
-  const username = req.query?.username;
-  if (!username) return badRequest("username is required");
-  const usernameNorm = normalizeUsername(username);
-  const contestSlug = req.query?.contest_slug;
-
-  let docs;
-  if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
-    const doc = await submissionEventsRef(usernameNorm, String(contestSlug)).get();
-    docs = doc.exists ? [doc.data()] : [];
-  } else {
-    // No contest specified — gather every doc for this user and merge.
-    const snapshot = await getFirestore()
-      .collection(SUBMISSION_EVENTS_COLLECTION)
-      .where("username_norm", "==", usernameNorm)
-      .limit(50)
-      .get();
-    docs = snapshot.docs.map((doc) => doc.data());
-  }
-
-  const merged = mergeSubmissionEvents([], docs.flatMap((doc) => doc?.events || []));
-  return { events: merged };
-}
-
-// Phase 2 (2.4 / Epic 6.4 / 4.4): live counts by status for the admin dashboard.
-// Counts are derived from the session docs; an optional ?contest_slug filters to
-// one contest, and an optional ?room scopes counts to a single room. "finished"
-// == ended; "live" == active; plus locked + pending. A derived `disconnected`
-// count flags active sessions whose last liveness signal (heartbeat or beacon)
-// is older than the staleness threshold. The distinct `rooms` list (computed
-// over the contest scope, BEFORE the room filter, so the dropdown stays full) is
-// returned so the console can populate a room dropdown.
-async function adminStats(req) {
-  requireAdmin(req);
-  const contestSlug = req.query?.contest_slug;
-  const scope = await contestScopeOf(contestSlug);
-  const room = normalizeRoomFilter(req.query?.room);
-
-  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
-    .limit(SESSIONS_QUERY_LIMIT)
-    .get();
-  const allDocs = snapshot.docs.map((doc) => doc.data());
-
-  // Distinct rooms come from the full contest scope (NOT the room-filtered set)
-  // so the dropdown always lists every room even while one is selected.
-  const rooms = distinctRooms(allDocs);
-
-  // Apply the room filter to the docs the counts are computed over.
-  const docs = room ? allDocs.filter((doc) => String(doc.room || "") === room) : allDocs;
-
-  const nowMs = Date.now();
-  const stats = { live: 0, locked: 0, pending_approval: 0, finished: 0, disconnected: 0, total: 0 };
-  for (const doc of docs) {
-    stats.total += 1;
-    if (doc.status === "active") {
-      stats.live += 1;
-      // Derived disconnected signal: an active session whose last heartbeat /
-      // beacon is older than the staleness threshold (default 45s).
-      if (isStaleSession(doc, nowMs)) stats.disconnected += 1;
-    } else if (doc.status === "locked") stats.locked += 1;
-    else if (doc.status === "pending_approval") stats.pending_approval += 1;
-    else if (doc.status === "ended") stats.finished += 1;
-  }
-  // "not started or total": with no roster the backend can't know who hasn't
-  // started, so we report total session docs as the closest defensible number
-  // (the frontend can subtract the started states to estimate yet-to-start once
-  // a roster exists).
-  stats.not_started_or_total = stats.total;
-
-  // S5: the console exam-time card rides on the existing 5 s stats poll, so the
-  // current end time + a server clock stamp come back with every poll.
-  // F3 (E2E live): a contest-scoped stats poll reports THAT contest's window —
-  // the legacy settings end_at said "time is up" while the scoped contest had
-  // hours left. ALL_CONTESTS keeps today's legacy schedule; the synthesized
-  // legacy contest mirrors the settings doc so its value is identical; an
-  // unknown slug (contestScopeOf's literal fallback carries no window) reports
-  // "" → the card renders "no schedule" instead of the wrong clock.
-  const settings = await getSettings();
-  return {
-    contest_slug: contestSlug ? String(contestSlug) : null,
-    room: room || null,
-    stats,
-    rooms,
-    disconnected_staleness_ms: DISCONNECTED_STALENESS_MS,
-    end_at: scope === ALL_CONTESTS ? (settings?.end_at || "") : (scope.end_at || ""),
-    server_now: new Date().toISOString()
-  };
-}
+// Phase 2 (2.4 / Epic 6.4 / 4.4): the admin live-counts dashboard route
+// (adminStats, GET /api/admin/stats — by-status session counts + derived
+// disconnected + the contest-scope rooms list) moved VERBATIM to the
+// makeAdminStatsRoutes(ctx) factory in routes/adminStats.mjs (decomp B6);
+// destructured at module scope above so the dispatch line stays byte-identical
+// (canaryIsolation). The shared room/staleness helpers it uses
+// (normalizeRoomFilter / distinctRooms / isStaleSession) stay RESIDENT here —
+// other handler code reuses them — and are passed in via ctx by reference.
 
 // ---- S5: dynamic exam time + end-now (admin) -------------------------------
 //
@@ -4659,140 +4340,14 @@ async function sweepContestEvidence(contest, actor) {
 
 // ---- S-J §2.14 People tab (directory + cross-round scorecard) ----------------
 //
-// The People tab is the ONE sanctioned cross-contest surface. The directory +
-// the per-person enrollment scan use the explicit ALL_CONTESTS sentinel
-// (listAllPersons / listEnrollmentsForPerson, identity.mjs). The per-contest
-// score/integrity reads the scorecard fans out are EACH contest-scoped through
-// scopedQuery on the RESOLVED contest — so the F9 no-bleed invariant holds (the
-// sentinel is for the person/enrollment axis only, never contest evidence).
-
-// GET /api/admin/people?search=&college= — the directory. ADMIN-ONLY. Returns
-// the (capped) person list filtered by college/id/name, each with a contest
-// count, plus the college options for the filter dropdown.
-async function adminPeople(req) {
-  requireAdmin(req);
-  const people = await listAllPersons();
-  const collegeNames = await getCollegeNameMap();
-  const filtered = filterDirectory(people, {
-    search: req.query?.search ?? "",
-    college: req.query?.college ?? ""
-  });
-
-  // Per-person contest count: ONE bounded cross-contest enrollment scan, grouped
-  // by person_id (the directory needs the "attempted N rounds" badge). Capped to
-  // the filtered set so an empty search doesn't fan out unboundedly.
-  const rows = await mapWithConcurrency(filtered.slice(0, PEOPLE_DIRECTORY_LIMIT), 20, async (person) => {
-    const enrollments = await listEnrollmentsForPerson(person.person_id);
-    const active = enrollments.filter((e) => String(e.status || "active") !== "removed");
-    return {
-      person_id: person.person_id,
-      unique_id: person.unique_id || "",
-      name: person.name || "",
-      college_norm: person.college_norm || "",
-      college: collegeNames.get(person.college_norm) || person.college_norm || "",
-      contest_count: active.length
-    };
-  });
-  rows.sort((a, b) => String(a.college_norm).localeCompare(String(b.college_norm)) || String(a.unique_id).localeCompare(String(b.unique_id)));
-
-  return {
-    configured: true,
-    people: rows,
-    colleges: [...collegeNames.entries()].map(([college_norm, name]) => ({ college_norm, name }))
-      .sort((a, b) => a.college_norm.localeCompare(b.college_norm)),
-    total: rows.length
-  };
-}
-
-// GET /api/admin/person?person_id=&format= — one person's cross-round scorecard.
-// ADMIN-ONLY. Reads LIVE data per contest where it exists, falls back to the
-// frozen enrollment.final_snapshot after purge (vision §2.9 purge-survivor;
-// §10.2 snapshot scores VISIBLE, marked from a purged contest). CSV export when
-// format=csv.
-async function adminPerson(req) {
-  requireAdmin(req);
-  const personId = String(req.query?.person_id ?? req.query?.id ?? "").trim();
-  if (!personId) return badRequest("person_id is required");
-  const person = await getPersonById(personId);
-  if (!person) return { configured: false };
-
-  const data = await computePersonScorecard(person);
-  if (String(req.query?.format || "").toLowerCase() === "csv") {
-    return { csv: buildScorecardCsv(data.person, data.rows) };
-  }
-  return data;
-}
-
-// The cross-round join. ONE sanctioned cross-contest enrollment scan (sentinel)
-// gives the contests this person attempted; for EACH contest we resolve the
-// contest doc and read its LIVE submissions/alerts/reviews SCOPED to that
-// contest (the no-bleed guarantee — the sentinel never touches contest
-// evidence). buildScorecardRows (pure) does the live-vs-snapshot fallback.
-async function computePersonScorecard(person) {
-  const personId = person.person_id;
-  const enrollments = await listEnrollmentsForPerson(personId);
-  const activeEnrollments = enrollments.filter((e) => String(e.status || "active") !== "removed");
-
-  const liveByContest = {};
-  const liveIntegrityByContest = {};
-  const contests = {};
-  const collegeNames = await getCollegeNameMap();
-
-  await mapWithConcurrency(activeEnrollments, 8, async (enrollment) => {
-    const slug = String(enrollment.contest_slug || "");
-    if (!slug) return;
-    let contest;
-    try {
-      contest = await resolveContest(slug, { requireOpen: false });
-    } catch {
-      contest = { slug, name: slug };
-    }
-    contests[slug] = contest;
-
-    // A purged contest has no live data — skip the per-contest reads entirely
-    // (the pure builder reads its final_snapshot). Otherwise read this person's
-    // LIVE score + integrity, each SCOPED to this contest.
-    if (contest.db_purged_at) return;
-
-    const problemEntries = contestProblemEntries(contest);
-    const problemOrder = problemEntries.map((entry) => entry.problem_id);
-
-    const submissionsSnap = await scopedQuery(getFirestore().collection(SUBMISSIONS_COLLECTION), contest)
-      .where("person_id", "==", personId)
-      .limit(SUBMISSIONS_RESULTS_LIMIT)
-      .get();
-    const submissions = submissionsSnap.docs.map((doc) => doc.data());
-    liveByContest[slug] = computeScoreboard(submissions, problemOrder);
-
-    const integrity = await integrityByPersonFor(contest, [personId]);
-    const summary = integrity.get(personId);
-    liveIntegrityByContest[slug] = { [personId]: summarizeScorecardIntegrity(summary) };
-  });
-
-  const rows = buildScorecardRows({ enrollments: activeEnrollments, liveByContest, liveIntegrityByContest, contests });
-
-  return {
-    configured: true,
-    person: {
-      person_id: personId,
-      unique_id: person.unique_id || "",
-      name: person.name || "",
-      college_norm: person.college_norm || "",
-      college: collegeNames.get(person.college_norm) || person.college_norm || "",
-      email: person.email || ""
-    },
-    rows,
-    generated_at: new Date().toISOString()
-  };
-}
-
-// integrityByPersonFor returns raw { alerts:[], reviews:[] } per person; the
-// scorecard builder wants the SAME folded shape the Results table uses. Reuse
-// the pure summarizer so a person's integrity reads identically on both surfaces.
-function summarizeScorecardIntegrity(raw) {
-  const folded = summarizeIntegrity(raw || {});
-  return { alerts_by_severity: folded.alerts_by_severity, review_verdict: folded.review_verdict };
-}
+// adminPeople (GET /api/admin/people) + adminPerson (GET /api/admin/person), the
+// cross-round join computePersonScorecard, and the integrity folder
+// summarizeScorecardIntegrity moved to the makeAdminPeopleRoutes(ctx) factory in
+// routes/adminPeople.mjs (decomp B7); instantiated at module scope above. The
+// People tab is the ONE sanctioned cross-contest surface — the directory + the
+// per-person enrollment scan use the ALL_CONTESTS sentinel (identity.mjs), while
+// the per-contest score/integrity reads the scorecard fans out are EACH
+// contest-scoped through scopedQuery on the RESOLVED contest (F9 no-bleed holds).
 
 // Honor-system admin actor for audit + selection_by attribution (the admin
 // console may send actor_name; ip/ua are captured automatically).
