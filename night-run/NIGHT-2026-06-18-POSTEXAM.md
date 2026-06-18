@@ -62,6 +62,30 @@ Committed via PR #6 (credentials moved out of the printed guide; shared separate
 
 ---
 
+## STRETCH (only after items 1-8 are complete) — Talent + integrity evaluation module, calibrated on real data
+
+The next full module after "take the test + record data": decide **how good each student is and who is worth keeping** — talent + integrity — calibrated against real data instead of guessed thresholds.
+
+**Datasets (our advantage):**
+- **`tristridots`** — today's ~350 students: the full recorded field set (interaction / typing-dynamics analytics, alerts, focus/paste, timings, submissions). The live cohort under test.
+- **KPR Round 2** — a **heavily-monitored** prior round → very low chance of AI/copy assistance. Use it as the **clean human baseline / control** to calibrate what honest behaviour looks like. (Data preserved in the evidence bucket / Firestore — see `RESUME-ANCHOR.md` + the KPR-data-preserve note.)
+
+**Read first (be the expert — don't reinvent):**
+- ALL of `~/arogara/contest-eval/`: `METHODOLOGY.md`, `README.md`, `NOTES.md`, `ANGLES.md`, `ADDITIONAL-ANGLES.md`, `METHOD-handoff.md`, `CONVENTIONS.md`, the analysis scripts (analyze_candidate.py, clone_detect.py, build_profiles.py, build_report.py, reconcile.py, recover_verdicts.py), and prior runs (`KEC-Aerele-06-26`, `MCET-06-26`).
+- Proctor's own eval docs: `docs/superpowers/plans/2026-06-12-candidate-evaluation.md`, `docs/features/candidate-evaluation.md`, `docs/PROCTORING_RESEARCH.md` — including the earlier notes on items flagged **"only doable once we have data"** (we have it now → do them).
+- **Online research:** current best practice for typing-dynamics / interaction-pattern analysis, coding-assessment integrity, and talent signals (cite sources).
+
+**Objective / deliverable:**
+1. Using **both** datasets, derive the **exact settings + thresholds to keep** (separate genuine talent / honest work from AI-assisted / copied work). The clean KPR-R2 baseline anchors the "honest" distribution; `tristridots` is the cohort under test. Use **all** relevant recorded fields — primary signal of interest is the **typing-dynamics / interaction** data.
+2. Produce a **complete, written plan** for the evaluation module and **review it** (adversarial / independent lens) before calling it ready.
+3. Execute the previously **data-gated** interaction analyses now that the data exists.
+
+**Constraints:** never expose the raw-capture term in admin UI / user-facing text / commit messages — use "detailed test data" / "interaction analytics". Don't unsafely mutate real verdicts while exploring. Keep detection-method specifics out of anything public-facing.
+
+This is a **plan + review (+ the data-gated analyses)** deliverable — Karthi explicitly asked for "a complete plan… and review that plan," not necessarily a full ship tonight.
+
+---
+
 ## Blocked / need from Karthi
 - **Judge0 new key** (item 1) — paste when ready; everything else proceeds without it.
 - **Decision:** rotate the other ingest keys too? (item 1, last bullet) — morning.
