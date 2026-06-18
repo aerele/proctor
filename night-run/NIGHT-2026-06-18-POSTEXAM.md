@@ -4,7 +4,9 @@
 
 **Operating model:** Fable 5 coordinates (plans / dispatches / verifies); subagents do the reading/coding/testing (Opus floor for judgment work). I stand in Karthi's place — the bar is that things actually work end-to-end, not that work was dispatched.
 
-**Baseline:** `origin/master` = `4b2be10` (after the conductor one-pager, PR #6). All work branches off `origin/master`.
+**Use skills (Karthi's explicit instruction):** check for and invoke relevant skills BEFORE each phase, per the `using-superpowers` discipline (if there's even a 1% chance a skill applies, invoke it). Examples: **brainstorming** before designing the eval-module plan and the refactor approach; **systematic-debugging** for the run-evaluation bug; the **code-review** skills for the triple reviews; **writing-plans / test-driven** where they fit. Process skills first, then implementation skills.
+
+**Baseline:** `origin/master` = `afd21e7` at plan time (conductor one-pager PR #6 + night-plan PRs #7/#8). **On resume (post-compaction): `git fetch origin`, then branch off the latest `origin/master`.** A clean `work` branch tracking `origin/master` is currently checked out; the working tree is clean.
 
 **Gates (every item):**
 - Spec before code. Commit + push via **PR** (classifier blocks direct master push; no force-push to the public repo).
