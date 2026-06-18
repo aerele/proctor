@@ -54,5 +54,22 @@ export function makeEvaluationRoutes(ctx) {
     return evaluation.listEvaluations(contest.slug, identity);
   }
 
-  return { adminContestEvaluate, adminContestEvaluations };
+  // GET /api/admin/contest-evaluate-status?contest=<slug> — the current run
+  // progress {status,total,processed,cursor,run_id,...} from the `__job::{slug}`
+  // doc, so the UI can drive a "X / total" progress bar + resume from the SERVER
+  // cursor on a transient error. Auth-first (routesAuthLint). Unknown slug → 400.
+  async function adminContestEvaluateStatus(req) {
+    requireAdmin(req);
+    const slug = String(req.query?.contest ?? req.query?.contest_slug ?? "").trim();
+    if (!slug) return badRequest("contest is required");
+    let contest;
+    try {
+      contest = await resolveContest(slug, { requireOpen: false });
+    } catch {
+      return badRequest("unknown_contest");
+    }
+    return evaluation.evaluateStatus(contest.slug);
+  }
+
+  return { adminContestEvaluate, adminContestEvaluations, adminContestEvaluateStatus };
 }

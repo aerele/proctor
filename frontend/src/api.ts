@@ -1764,6 +1764,22 @@ export type ContestEvaluateResponse = {
   cursor?: string | null;
   done: boolean;
   meta_written?: boolean;
+  // Server-driven run progress (the `__job::{slug}` doc): the panel renders
+  // "Evaluating X / total…" from these + resumes from the SERVER cursor.
+  processed?: number;
+  total?: number;
+  run_id?: string | null;
+};
+
+// GET /api/admin/contest-evaluate-status — the current run progress so the panel
+// can show a precise "X / total" bar (and reflect a 409 "already running").
+export type ContestEvaluateStatusResponse = {
+  status: "idle" | "running" | "done" | "error";
+  total: number;
+  processed: number;
+  cursor?: string;
+  run_id?: string | null;
+  updated_at?: string | null;
 };
 
 // A stored scorecard flag (the evidence-drawer row). Severity + code + a
@@ -1824,6 +1840,25 @@ export async function adminContestEvaluations(
   }
   const query = contestSlug ? `?contest=${encodeURIComponent(contestSlug)}` : "";
   return request<ContestEvaluationsResponse>(`/api/admin/contest-evaluations${query}`, {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+}
+
+// GET /api/admin/contest-evaluate-status?contest=<slug> — the current run
+// progress from the server's job doc (status/total/processed). The panel reads
+// it to render a precise "X / total" bar and to reflect a 409 "already running".
+export async function adminContestEvaluateStatus(
+  password: string,
+  contestSlug: string
+): Promise<ContestEvaluateStatusResponse> {
+  if (demoMode) {
+    await wait(80);
+    assertDemoAdmin(password);
+    return demoContestEvaluateStatus(contestSlug);
+  }
+  const query = contestSlug ? `?contest=${encodeURIComponent(contestSlug)}` : "";
+  return request<ContestEvaluateStatusResponse>(`/api/admin/contest-evaluate-status${query}`, {
     method: "GET",
     headers: { "x-admin-password": password }
   });
@@ -2022,8 +2057,16 @@ function demoMarkSelectionDone(contestSlug: string) {
 // always — the panel's cursor loop terminates after a single pass.
 function demoContestEvaluate(body: { contest: string; limit?: number; cursor?: string | null; force?: boolean }): ContestEvaluateResponse {
   if (body.contest !== "demo-drive-r1") throw demoApiError(400, "contest must name a person-mode contest");
+  const total = DEMO_RESULT_SEEDS.length;
   const evaluated = DEMO_RESULT_SEEDS.filter((seed) => seed.evaluation).length;
-  return { evaluated, skipped: 0, cursor: null, done: true, meta_written: true };
+  // Demo runs in ONE chunk → processed reaches total; server-driven progress.
+  return { evaluated, skipped: 0, cursor: null, done: true, meta_written: true, processed: total, total };
+}
+
+function demoContestEvaluateStatus(contestSlug: string): ContestEvaluateStatusResponse {
+  if (contestSlug !== "demo-drive-r1") return { status: "idle", total: 0, processed: 0 };
+  const total = DEMO_RESULT_SEEDS.length;
+  return { status: "done", total, processed: total, cursor: "", run_id: "demo-run" };
 }
 
 // P1 demo parity: the scorecard corpus the evidence drawer reads. Built from the
