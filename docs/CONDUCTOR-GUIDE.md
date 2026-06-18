@@ -2,10 +2,9 @@
 
 *One page. Everything you need to run today's proctored coding test.*
 
-> **TODAY — fill in before you start**
-> • Admin console: `https://__________/admin`  • Admin password: `__________` *(from Aerele)*
-> • Candidate link (share with students): `__________`  • Exam window: `__:__ – __:__`
-> • **Stuck? Call / WhatsApp Aerele: `__________` — we answer instantly during the test.**
+> **TODAY**
+> • The **admin console URL, admin password, and the candidate (test) link** are sent to you **separately by message** — keep them handy. The admin URL and password are for you only; never share them with students.
+> • Exam window: `__:__ – __:__`  • **Stuck? Call / WhatsApp Aerele: `__________` — we answer instantly during the test.**
 
 ## What it is (10 seconds)
 
