@@ -11,8 +11,9 @@ import { AlertTriangle, Award, BrainCircuit, CheckCircle2, ChevronDown, ChevronR
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   adminContestEvaluate, adminContestEvaluations, fetchContestResults, markSelectionDone, setContestSelection,
-  type ContestScorecard
+  type ApiError, type ContestScorecard
 } from "../api";
+import { runEvaluateLoop } from "./evalBatchLoop";
 import {
   buildResultsCsv, canMarkSelectionDone, countUnmatched, evalFlagsLabel, filterResultRows, selectionCounts,
   type ContestResultsResponse, type EvalIntegrityFilter, type EvalTalentFilter,
@@ -147,6 +148,9 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   // expanded evidence drawers. evalsByKey===null = not fetched yet.
   const [evalRunning, setEvalRunning] = useState(false);
   const [evalProgress, setEvalProgress] = useState(0);
+  // Server-driven universe size so the button reads "Evaluating X / 361…"
+  // (0 = unknown yet → fall back to the bare count).
+  const [evalTotal, setEvalTotal] = useState(0);
   const [evalsByKey, setEvalsByKey] = useState<Map<string, ContestScorecard> | null>(null);
   const [evalsLoading, setEvalsLoading] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
@@ -172,6 +176,7 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
     setEvalsByKey(null);
     setExpandedRows(new Set());
     setEvalProgress(0);
+    setEvalTotal(0);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load is stable per inputs
   }, [contestSlug]);
@@ -251,33 +256,41 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   // unmatched ones — the SAME identity_key the backend stamps on each scorecard.
   const rowKey = (row: ResultRow) => row.person_id || row.username_norm || "";
 
-  // P1: "Run evaluation" — loop the batch endpoint carrying the returned
-  // cursor until done:true, surfacing the running evaluated count, then refetch
-  // results (so the new scorecards land on the rows) and drop the stale corpus.
-  // force=true bypasses the backend up-to-date skip-guard, re-evaluating every
-  // candidate from scratch (re-downloading all GCS evidence). Eval is always
-  // BUTTON-ONLY — never auto-run.
+  // P1: "Run evaluation" — drive the cursor-batched evaluator until done via the
+  // RESILIENT loop (eval-batch-progress-idempotent): each HTTP batch returns
+  // under the Cloud Run 120s timeout (server budget break), progress is driven by
+  // the SERVER "processed / total" (so it reads "Evaluating 115 / 361…"), and a
+  // transient 504/timeout RETRIES from the last SERVER cursor instead of aborting
+  // + re-skipping done identities from key-zero. A 409 eval_in_progress surfaces
+  // a precise "already running (X / total)" message. Then refetch results so the
+  // new scorecards land on the rows. force=true bypasses the up-to-date skip,
+  // re-evaluating every candidate from scratch. Eval is always BUTTON-ONLY.
   const onEvaluate = async (force = false) => {
     if (!configured || evalRunning) return;
     setEvalRunning(true);
     setEvalProgress(0);
     setError("");
     try {
-      let cursor: string | null | undefined;
-      let total = 0;
-      // Bounded loop guard: even a large cohort terminates well under this.
-      for (let guard = 0; guard < 10000; guard += 1) {
-        const res = await adminContestEvaluate(password, { contest: data.contest_slug, cursor, force });
-        total += res.evaluated;
-        setEvalProgress(total);
-        if (res.done) break;
-        cursor = res.cursor;
-      }
+      await runEvaluateLoop({
+        runBatch: (cursor) => adminContestEvaluate(password, { contest: data.contest_slug, cursor, force }),
+        onProgress: ({ processed, total }) => {
+          setEvalProgress(processed);
+          setEvalTotal(total);
+        }
+      });
       // Fresh scorecards exist now — invalidate the cached corpus + reload rows.
       setEvalsByKey(null);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const apiErr = cause as ApiError;
+      if (apiErr?.status === 409 && apiErr.code === "eval_in_progress") {
+        const body = apiErr.body as { processed?: number; total?: number } | undefined;
+        const p = Number(body?.processed) || 0;
+        const t = Number(body?.total) || 0;
+        setError(t > 0 ? `Evaluation already running (${p} / ${t}). Wait for it to finish, then refresh.` : "Evaluation already running. Wait for it to finish, then refresh.");
+      } else {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
       setEvalRunning(false);
     }
@@ -495,7 +508,7 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
                 title="Run the cheating + talent evaluator over this contest's submissions and telemetry (skips candidates already up to date)"
               >
                 <BrainCircuit size={14} className={evalRunning ? "animate-pulse" : undefined} />
-                {evalRunning ? `Evaluating ${evalProgress}…` : "Run evaluation"}
+                {evalRunning ? `Evaluating ${evalProgress}${evalTotal > 0 ? ` / ${evalTotal}` : ""}…` : "Run evaluation"}
               </button>
               <button
                 className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm font-medium text-muted disabled:opacity-50"

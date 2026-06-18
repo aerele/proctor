@@ -39,6 +39,16 @@ export function __setExecClockForTest(fn) {
   _execClock = fn || (() => Date.now());
 }
 
+// Injectable epoch-ms clock for the candidate-evaluation orchestrator (same seam
+// as __setExecClockForTest) so the per-batch wall-clock budget early break + the
+// idempotency-lock lease window are deterministically testable. Production uses
+// the real clock; pass null/undefined to restore it. Threaded into
+// makeEvaluation(ctx) as ctx.nowMs so evaluation.mjs reads NO global clock.
+let _evalClock = () => Date.now();
+export function __setEvalClockForTest(fn) {
+  _evalClock = fn || (() => Date.now());
+}
+
 // All env-derived configuration is read by config.mjs's loadConfig() and
 // destructured here at handler module scope (decomp B0). Because each test
 // imports the handler with a fresh ?<buster>, this destructure re-runs per
@@ -56,7 +66,8 @@ const {
   RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
-  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT
+  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
+  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS
 } = loadConfig();
 
 // ---- Non-env code constants (kept local to the handler) ---------------------
@@ -323,7 +334,13 @@ const evaluation = makeEvaluation({
   editorEventsLabel: EDITOR_EVENTS_COLLECTION,
   evaluateBatchLimit: EVALUATE_BATCH_LIMIT,
   sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
-  submissionsQueryLimit: SUBMISSIONS_RESULTS_LIMIT
+  submissionsQueryLimit: SUBMISSIONS_RESULTS_LIMIT,
+  // Orchestration knobs (eval-batch-progress-idempotent): the per-batch
+  // wall-clock budget + idempotency-lock lease, plus the injectable clock (the
+  // __setEvalClockForTest seam) so both are deterministically testable.
+  evalTimeBudgetMs: EVALUATE_TIME_BUDGET_MS,
+  evalLeaseMs: EVAL_LEASE_MS,
+  nowMs: () => _evalClock()
 });
 const evaluationRoutes = makeEvaluationRoutes({
   requireAdmin,
@@ -332,7 +349,7 @@ const evaluationRoutes = makeEvaluationRoutes({
   resolveContest,
   evaluation
 });
-const { adminContestEvaluate, adminContestEvaluations } = evaluationRoutes;
+const { adminContestEvaluate, adminContestEvaluations, adminContestEvaluateStatus } = evaluationRoutes;
 
 // Factory seam (decomp B2): the proctor-template admin CRUD route domain. ctx
 // closes over THIS instance's live-client getter, the auth guard from makeAuth,
@@ -581,6 +598,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/contest-results") return send(res, 200, await adminContestResults(req));
     if (req.method === "POST" && path === "/api/admin/contest-evaluate") return send(res, 200, await adminContestEvaluate(req));
     if (req.method === "GET" && path === "/api/admin/contest-evaluations") return send(res, 200, await adminContestEvaluations(req));
+    if (req.method === "GET" && path === "/api/admin/contest-evaluate-status") return send(res, 200, await adminContestEvaluateStatus(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection") return send(res, 200, await adminContestSelection(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection-done") return send(res, 200, await adminContestSelectionDone(req));
     if (req.method === "POST" && path === "/api/admin/contest-adopt") return send(res, 200, await adminContestAdopt(req));

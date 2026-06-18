@@ -59,6 +59,16 @@ export function loadConfig() {
     EXEC_MAX_QUEUE: Number(process.env.EXEC_MAX_QUEUE || "200"),
     DISCONNECTED_STALENESS_MS: Number(process.env.DISCONNECTED_STALENESS_MS || "45000"),
     EVALUATE_BATCH_LIMIT: Number(process.env.EVALUATE_BATCH_LIMIT || "25"),
+    // Per-batch wall-clock budget: evaluateContestBatch breaks its per-identity
+    // loop early (returns cursor + done:false) once elapsed exceeds this, so each
+    // HTTP batch returns well under the Cloud Run 120s request timeout regardless
+    // of one heavy candidate's GCS gather. Default 90s (< 120s with headroom).
+    EVALUATE_TIME_BUDGET_MS: positiveIntOr(process.env.EVALUATE_TIME_BUDGET_MS, 90000),
+    // Idempotency lease: a `__job::{slug}` doc whose status is "running" and whose
+    // heartbeat is within this window locks out a concurrent contest-evaluate POST
+    // (409 eval_in_progress); a staler heartbeat is reclaimable so a crashed run
+    // never wedges the button. Default 180s.
+    EVAL_LEASE_MS: positiveIntOr(process.env.EVAL_LEASE_MS, 180000),
     PUBLIC_APP_ORIGIN: process.env.PUBLIC_APP_ORIGIN || "*",
     // S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
     // silently disable the brute-force cap; fall back to the safe default of 20.

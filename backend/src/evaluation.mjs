@@ -30,6 +30,15 @@ import { makeHardness } from "./evaluationClone.mjs";
 
 // The meta doc id prefix — held out of the `evaluations` list by listEvaluations.
 const META_ID_PREFIX = "__meta::";
+// The per-contest job/status doc id prefix — mirrors META_ID_PREFIX. Holds the
+// run progress {status,total,processed,cursor,run_id,started_at,updated_at} so
+// the frontend can drive a "X / total" progress bar + resume from the SERVER
+// cursor, and so a concurrent POST is locked out (idempotency lease). Also held
+// out of the evaluations list (jobDocId has no schema_version/identity_key).
+const JOB_ID_PREFIX = "__job::";
+function jobDocId(slug) {
+  return `${JOB_ID_PREFIX}${slug}`;
+}
 
 // ---------------------------------------------------------------------------
 // PURE wrappers
@@ -71,6 +80,14 @@ export function makeEvaluation(ctx) {
     sessionsQueryLimit = 6000,
     submissionsQueryLimit = 120000,
     gcsConcurrency = 8,
+    // Orchestration knobs (eval-batch-progress-idempotent). evalTimeBudgetMs caps
+    // a single HTTP batch's per-identity loop so it returns well under the Cloud
+    // Run 120s request timeout; evalLeaseMs is the idempotency-lock heartbeat
+    // window; nowMs is the injectable epoch-ms clock (handler's __setEvalClock
+    // seam) — defaults to the real clock so production needs no wiring.
+    evalTimeBudgetMs = 90000,
+    evalLeaseMs = 180000,
+    nowMs = () => Date.now(),
   } = ctx;
 
   const evaluationsCollection = collections.evaluations;
@@ -237,6 +254,31 @@ export function makeEvaluation(ctx) {
     return `${slug}::${identityKey}`;
   }
 
+  // ---- job/status doc helpers ----------------------------------------------
+  // The `__job::{slug}` doc tracks one run's progress + holds the idempotency
+  // lease. updated_at_ms is the heartbeat the lock compares against the lease
+  // window (numeric so the injected clock drives it deterministically); the ISO
+  // timestamps are for human/UI display.
+  async function readJob(slug) {
+    const snap = await evaluationsCol().doc(jobDocId(slug)).get();
+    return snap.exists ? snap.data() : null;
+  }
+  async function writeJob(slug, patch) {
+    await evaluationsCol().doc(jobDocId(slug)).set(patch, { merge: true });
+  }
+
+  // The lock: a FRESH POST (no cursor — a brand-new "Run evaluation" click) is
+  // rejected with 409 when a run is already `running` AND its heartbeat is within
+  // the lease window. A cursor-carrying call is the SAME run resuming (the
+  // frontend loop), so it never self-conflicts. A stale lease (heartbeat older
+  // than evalLeaseMs) is reclaimable, so a crashed run never wedges the button.
+  function isFreshLease(job, now) {
+    if (!job || job.status !== "running") return false;
+    const hb = Number.isFinite(job.updated_at_ms) ? job.updated_at_ms : Date.parse(job.updated_at || "");
+    if (!Number.isFinite(hb)) return false;
+    return now - hb < evalLeaseMs;
+  }
+
   // ---- THE batch evaluator --------------------------------------------------
   async function evaluateContestBatch({ contestSlug, limit, cursor, force } = {}) {
     const contest = await resolveContest(String(contestSlug || "").trim(), { requireOpen: false });
@@ -244,6 +286,26 @@ export function makeEvaluation(ctx) {
     const batchLimit = Number.isFinite(Number(limit)) && Number(limit) > 0
       ? Math.floor(Number(limit))
       : evaluateBatchLimit;
+
+    const cursorKey = cursor != null && cursor !== "" ? String(cursor) : null;
+
+    // Idempotency lock (C): a FRESH start (no cursor) yields to a live run.
+    const lockNow = nowMs();
+    const existingJob = await readJob(slug);
+    if (cursorKey == null && isFreshLease(existingJob, lockNow)) {
+      const err = new Error("eval_in_progress");
+      err.statusCode = 409;
+      err.payload = {
+        processed: Number(existingJob.processed) || 0,
+        total: Number(existingJob.total) || 0,
+      };
+      throw err;
+    }
+    // Claim/refresh the lease. A fresh start mints a new run_id; a resume keeps
+    // the in-flight one (or mints one if the doc was lost mid-run).
+    const runId = cursorKey == null
+      ? `run-${lockNow}-${Math.random().toString(36).slice(2, 8)}`
+      : ((existingJob && existingJob.run_id) || `run-${lockNow}-${Math.random().toString(36).slice(2, 8)}`);
 
     // ONE submissions scan + ONE sessions scan + ONE enrollment scan, all scoped.
     const [submissionsSnap, sessionsSnap, enrollments] = await Promise.all([
@@ -278,19 +340,48 @@ export function makeEvaluation(ctx) {
     }
 
     const universe = buildIdentityUniverse(enrollments, submissions);
+    const total = universe.length;
+    // processed-so-far across prior chunks = universe identities at/before the
+    // resume cursor (monotonic; reaches total when done).
+    const processedBefore = cursorKey == null
+      ? 0
+      : universe.filter((u) => u.key <= cursorKey).length;
 
     // Resume from the cursor: process keys strictly greater than it.
-    const cursorKey = cursor != null && cursor !== "" ? String(cursor) : null;
     const pending = cursorKey == null
       ? universe
       : universe.filter((u) => u.key > cursorKey);
+
+    // Claim/heartbeat the job doc for THIS chunk's start (status running).
+    const startedAtIso = (existingJob && cursorKey != null && existingJob.started_at)
+      ? existingJob.started_at
+      : new Date(nowMs()).toISOString();
+    await writeJob(slug, {
+      status: "running", total, processed: processedBefore, cursor: cursorKey || "",
+      run_id: runId, started_at: startedAtIso,
+      updated_at: new Date(nowMs()).toISOString(), updated_at_ms: nowMs(),
+    });
 
     const slice = pending.slice(0, batchLimit);
     let evaluated = 0;
     let skipped = 0;
     let lastKey = cursorKey;
+    let budgetBroke = false;
+    // A. per-batch wall-clock budget: break early (return cursor, done:false) once
+    // elapsed exceeds evalTimeBudgetMs, so this HTTP request returns well under the
+    // Cloud Run 120s timeout regardless of one heavy candidate's GCS gather.
+    const batchStartMs = nowMs();
 
     for (const { key, identity } of slice) {
+      // Budget check BEFORE starting the next identity's heavy GCS gather — but
+      // only after at least one identity has been handled this chunk, so a single
+      // heavy candidate always makes forward progress (no zero-progress wedge).
+      // The work already done is preserved (its scorecards are written) and the
+      // returned cursor points at the last COMPLETED identity.
+      if (evaluated + skipped > 0 && nowMs() - batchStartMs > evalTimeBudgetMs) {
+        budgetBroke = true;
+        break;
+      }
       lastKey = key;
       const idSessions = sessionsByKey.get(key) || [];
       const idSubs = (submissionsByKey.get(key) || [])
@@ -352,17 +443,51 @@ export function makeEvaluation(ctx) {
       evaluated += 1;
     }
 
-    const remaining = pending.length - slice.length;
-    const done = remaining <= 0;
+    // done iff the full slice ran (no budget break) AND nothing pends beyond it.
+    const remainingBeyondSlice = pending.length - slice.length;
+    const done = !budgetBroke && remainingBeyondSlice <= 0;
 
-    const result = { evaluated, skipped, done };
+    // processed-so-far = identities at/before the last COMPLETED key (cursor),
+    // or the whole universe when done.
+    const processed = done
+      ? total
+      : universe.filter((u) => lastKey != null && u.key <= lastKey).length;
+
+    const result = { evaluated, skipped, done, run_id: runId };
     if (!done) {
       result.cursor = lastKey;
     } else {
       // End of the universe → cross-candidate pass over ALL scorecards.
       result.meta_written = await runCrossPass(contest, slug, problemList);
     }
+
+    // Update the job/status doc: `done` after runCrossPass, else still `running`
+    // with the fresh heartbeat (keeps the lease alive for the next resume chunk).
+    await writeJob(slug, {
+      status: done ? "done" : "running",
+      total, processed, cursor: done ? "" : (lastKey || ""), run_id: runId,
+      started_at: startedAtIso,
+      updated_at: new Date(nowMs()).toISOString(), updated_at_ms: nowMs(),
+    });
+
     return result;
+  }
+
+  // GET status: the current run progress for the contest's job doc. Absent doc
+  // (never evaluated) reads as idle with zero progress.
+  async function evaluateStatus(contestSlug) {
+    const contest = await resolveContest(String(contestSlug || "").trim(), { requireOpen: false });
+    const slug = contest.legacy_empty_slug ? "" : contest.slug;
+    const job = await readJob(slug);
+    if (!job) return { status: "idle", total: 0, processed: 0, cursor: "", run_id: null };
+    return {
+      status: job.status || "idle",
+      total: Number(job.total) || 0,
+      processed: Number(job.processed) || 0,
+      cursor: job.cursor || "",
+      run_id: job.run_id || null,
+      updated_at: job.updated_at || null,
+    };
   }
 
   // ---- cross-candidate pass over the full evaluations corpus ----------------
@@ -501,6 +626,8 @@ export function makeEvaluation(ctx) {
         meta = d;
         continue;
       }
+      // The job/status doc is not a scorecard — never surface it in the list.
+      if (isJobDoc(d)) continue;
       evaluations.push(d);
     }
     const wantKey = identity != null && identity !== "" ? String(identity) : null;
@@ -514,7 +641,18 @@ export function makeEvaluation(ctx) {
     return { evaluations: filtered, meta };
   }
 
-  return { evaluateContestBatch, listEvaluations };
+  return { evaluateContestBatch, listEvaluations, evaluateStatus };
+}
+
+// A stored doc is the per-contest job/status doc iff it carries a `status` field
+// (running|done|error) AND is neither a scorecard (no schema_version/identity_key)
+// nor the meta doc (no clusters/cohort/recurring_pairs). data() loses the id, so
+// we detect by shape — same defensive style as isMetaDoc.
+function isJobDoc(d) {
+  if (!d) return false;
+  if (d.identity_key || d.schema_version) return false;
+  if (isMetaDoc(d)) return false;
+  return typeof d.status === "string" && Number.isFinite(Number(d.total));
 }
 
 // A stored doc is the contest meta doc iff its identity_key marks it so — meta

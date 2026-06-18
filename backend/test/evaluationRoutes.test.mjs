@@ -32,9 +32,14 @@ process.env.ENROLLMENTS_COLLECTION = "ev_enrollments";
 process.env.ADMIN_AUDIT_COLLECTION = "ev_audit";
 process.env.EVALUATIONS_COLLECTION = "ev_evaluations";
 process.env.ADMIN_PASSWORD = "ev-admin-pass";
+// Tiny per-batch wall-clock budget + short idempotency lease so the time-budget
+// early-break and the eval lock are deterministically testable with an injected
+// clock (mirrors EXEC cooldown / access-code-clock env+seam pattern).
+process.env.EVALUATE_TIME_BUDGET_MS = "1000";
+process.env.EVAL_LEASE_MS = "180000";
 
 const handler = await import("../src/handler.mjs?evalroutes");
-const { api, __setClientsForTest } = handler;
+const { api, __setClientsForTest, __setEvalClockForTest } = handler;
 const { personIdOf, identityNorm } = await import("../src/identity.mjs");
 
 const ADMIN_HEADERS = { "x-admin-password": "ev-admin-pass" };
@@ -350,9 +355,9 @@ test("evaluate: cursor batching (limit:1 → cursor → resume → done)", async
   assert.equal(second.body.meta_written, true);
 
   const evalCol = firestore._collections.get("ev_evaluations");
-  // 2 scorecards + 1 meta.
+  // 2 scorecards + 1 meta + 1 job-status doc.
   const ids = [...evalCol.keys()];
-  assert.equal(ids.filter((id) => !id.startsWith("__meta::")).length, 2, ids.join(","));
+  assert.equal(ids.filter((id) => !id.startsWith("__meta::") && !id.startsWith("__job::")).length, 2, ids.join(","));
   assert.ok(ids.includes(`__meta::${slug}`));
 });
 
@@ -418,4 +423,137 @@ test("evaluations GET: a second contest's scorecard is invisible", async () => {
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.equal(res.body.evaluations.length, 2, "other contest's scorecard must not bleed in");
   assert.ok(res.body.evaluations.every((e) => e.contest_slug === slug));
+});
+
+// ---- A. per-batch wall-clock budget early break ----------------------------
+//
+// On a 1-CPU/256Mi proctor-api a batch's per-identity GCS gather could blow past
+// the Cloud Run 120s request timeout. evaluateContestBatch must capture a start
+// time and break the per-identity loop early — returning the current cursor +
+// done:false — once elapsed > EVALUATE_TIME_BUDGET_MS, EVEN IF batchLimit (25)
+// was not reached. A subsequent call resumes from that cursor and finishes.
+
+test("evaluate: time-budget early break returns cursor before batchLimit; resume completes", async () => {
+  const { slug, firestore } = await seedMixedFixture();
+  // The universe has 2 identities and the default batchLimit is 25, so without a
+  // budget BOTH would process in one call. Drive a clock that elapses the 1000ms
+  // budget right AFTER the first identity, forcing an early break at evaluated=1.
+  let t = 0;
+  // first read = loop start (0); after the first identity the elapsed check reads
+  // a value > budget so the loop breaks before the second identity.
+  __setEvalClockForTest(() => {
+    const v = t;
+    t += 5000; // each clock read jumps 5s → exceeds the 1000ms budget immediately after entry
+    return v;
+  });
+  try {
+    const first = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug } }));
+    assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+    assert.equal(first.body.done, false, "budget break → not done " + JSON.stringify(first.body));
+    assert.equal(first.body.evaluated, 1, "budget broke the loop after one identity (batchLimit=25 unreached)");
+    assert.ok(first.body.cursor, "returns the resume cursor of the last processed identity");
+
+    // Resume from the server cursor → completes the remaining identity + done.
+    const second = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug, cursor: first.body.cursor } }));
+    assert.equal(second.statusCode, 200, JSON.stringify(second.body));
+    assert.equal(second.body.done, true, JSON.stringify(second.body));
+    assert.equal(second.body.evaluated, 1, JSON.stringify(second.body));
+  } finally {
+    __setEvalClockForTest(null);
+  }
+
+  // ALL identities were processed across the two budget-bounded calls.
+  const evalCol = firestore._collections.get("ev_evaluations");
+  const ids = [...evalCol.keys()].filter((id) => !id.startsWith("__meta::") && !id.startsWith("__job::"));
+  assert.equal(ids.length, 2, "both identities evaluated across budget-bounded batches: " + ids.join(","));
+  assert.ok(evalCol.has(`__meta::${slug}`), "cross pass ran on the final (done) batch");
+});
+
+// ---- B. job/status doc + status endpoint -----------------------------------
+
+test("evaluate: job doc total/processed advance across chunks; status ends done", async () => {
+  const { slug, firestore } = await seedMixedFixture();
+  // limit:1 → first chunk processes 1 of 2 (status running), second finishes (done).
+  const first = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug, limit: 1 } }));
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+
+  const jobCol = firestore._collections.get("ev_evaluations");
+  const jobMid = jobCol.get(`__job::${slug}`);
+  assert.ok(jobMid, "job doc written on the first chunk");
+  assert.equal(jobMid.status, "running", JSON.stringify(jobMid));
+  assert.equal(jobMid.total, 2, "total = universe length");
+  assert.equal(jobMid.processed, 1, "processed advanced by the first chunk");
+  assert.ok(jobMid.run_id, "job doc carries a run_id");
+
+  const second = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug, limit: 1, cursor: first.body.cursor } }));
+  assert.equal(second.statusCode, 200, JSON.stringify(second.body));
+  assert.equal(second.body.done, true, JSON.stringify(second.body));
+
+  const jobDone = jobCol.get(`__job::${slug}`);
+  assert.equal(jobDone.status, "done", "status ends done after runCrossPass");
+  assert.equal(jobDone.total, 2);
+  assert.equal(jobDone.processed, 2, "processed reached total");
+});
+
+test("contest-evaluate-status GET: returns {status,total,processed}", async () => {
+  const { slug } = await seedMixedFixture();
+  await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug } }));
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-evaluate-status", headers: ADMIN_HEADERS, query: { contest: slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.status, "done", JSON.stringify(res.body));
+  assert.equal(res.body.total, 2, JSON.stringify(res.body));
+  assert.equal(res.body.processed, 2, JSON.stringify(res.body));
+});
+
+test("contest-evaluate-status GET: 401/403 without admin header", async () => {
+  freshClients();
+  const noHeader = await call(makeReq({ method: "GET", path: "/api/admin/contest-evaluate-status", query: { contest: "x" } }));
+  assert.ok([401, 403].includes(noHeader.statusCode), JSON.stringify(noHeader.body));
+});
+
+// ---- C. idempotency lock ---------------------------------------------------
+
+test("evaluate: 409 eval_in_progress when a fresh job doc is running; reclaimable when lease is stale", async () => {
+  const { slug, firestore } = await seedMixedFixture();
+
+  // Plant a FRESH running job doc (heartbeat = now) → the lock must reject.
+  const t0 = Date.parse("2026-06-18T10:00:00.000Z");
+  __setEvalClockForTest(() => t0);
+  await firestore.collection("ev_evaluations").doc(`__job::${slug}`).set({
+    status: "running", total: 361, processed: 115, cursor: "k::115",
+    run_id: "prior-run", started_at: new Date(t0 - 1000).toISOString(),
+    updated_at: new Date(t0 - 1000).toISOString(), updated_at_ms: t0 - 1000
+  });
+  const evalCol = firestore._collections.get("ev_evaluations");
+  try {
+    const busy = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug } }));
+    assert.equal(busy.statusCode, 409, JSON.stringify(busy.body));
+    assert.equal(busy.body.error, "eval_in_progress", JSON.stringify(busy.body));
+    assert.equal(busy.body.processed, 115, JSON.stringify(busy.body));
+    assert.equal(busy.body.total, 361, JSON.stringify(busy.body));
+  } finally {
+    __setEvalClockForTest(null);
+  }
+
+  // Now make the lease STALE: heartbeat older than EVAL_LEASE_MS (180_000) → a
+  // crashed run never wedges the button; the new run reclaims + completes.
+  const tStale = Date.parse("2026-06-18T10:10:00.000Z"); // 10 min later > 180s lease
+  __setEvalClockForTest(() => tStale);
+  evalCol.set(`__job::${slug}`, {
+    status: "running", total: 361, processed: 115, cursor: "",
+    run_id: "crashed-run", started_at: new Date(tStale - 600000).toISOString(),
+    updated_at: new Date(tStale - 600000).toISOString(), updated_at_ms: tStale - 600000
+  });
+  try {
+    const reclaimed = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug } }));
+    assert.equal(reclaimed.statusCode, 200, "stale lease is reclaimable " + JSON.stringify(reclaimed.body));
+    assert.equal(reclaimed.body.done, true, JSON.stringify(reclaimed.body));
+    assert.equal(reclaimed.body.evaluated, 2, JSON.stringify(reclaimed.body));
+  } finally {
+    __setEvalClockForTest(null);
+  }
+  // The reclaiming run took the doc to done with a fresh run_id.
+  const job = evalCol.get(`__job::${slug}`);
+  assert.equal(job.status, "done", JSON.stringify(job));
+  assert.notEqual(job.run_id, "crashed-run", "reclaim minted a fresh run_id");
 });
