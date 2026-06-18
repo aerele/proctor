@@ -51,6 +51,14 @@ Branch `refactor/decomp-resume` pushed to origin, UNMERGED — for Karthi's morn
 
 REMAINING (need Karthi's input — see Open questions): **B4**, **B8–B15** (esp. B9/B10 enforcement+alerts shared-helper threading; B13/B14 raw-where migration + scopingLint re-pin end-state), frontend **F0–F6**, api **A0–A9**.
 
+## 🔁 ON RESUME (Karthi instruction, 2026-06-18 — refactor SLATED, likely tomorrow after the test, before release)
+
+The codebase WILL have moved since this reconciliation. Do NOT re-review the whole plan/codebase from scratch each time. Instead:
+1. **Marked baseline = master `f6887df`** (the tip this reconciliation read; safe phases B2/B3/B5/B6/B7 sit on top in `refactor/decomp-resume`). The exam-fix code deployed today is this state.
+2. On resume: run `git log f6887df..<then-current-master>` and do a **commit-by-commit diff analysis** of what changed since the baseline. Update THIS plan (B-ladder line ranges, new god-file growth, new domains, any new code that landed inside the targeted blocks) from the DIFF ONLY. Re-run the deep review only for the parts the diff actually touched — not the whole codebase.
+3. Re-verify the guards + full suite are green on the new base before continuing the next phase.
+This keeps resume cheap (diff-driven) instead of a full re-review every time.
+
 ## Open questions for Karthi (morning)
 1. B9/B10/F6 touch enforcement/recording/lazy-load — confirm no live-exam window before merging+deploying them.
 2. B8 boundary: extract only read/compute results; keep selection/adopt/export cluster together — confirm.
