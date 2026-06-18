@@ -19,9 +19,15 @@ behind nginx.
   localStorage-backed fake of the session/alert lifecycle so the whole UI runs
   with no backend). Also the admin-unlock hashing (`VITE_ADMIN_PASSWORD_HASH`).
 - `src/types.ts` — the shared `Alert` contract + all request/response types.
-- `deploy-gcp.sh` — builds with `VITE_API_BASE_URL` + a **sha256 of**
-  `ADMIN_PASSWORD` (`VITE_ADMIN_PASSWORD_HASH`, so the plain password is never in
-  the bundle) and deploys to Cloud Run.
+- `deploy-gcp.sh` — **the only sanctioned way to deploy the frontend.** Builds with
+  `VITE_API_BASE_URL` + the **sha256 of** `ADMIN_PASSWORD` and `INVIGILATOR_PASSWORD`
+  (`VITE_ADMIN_PASSWORD_HASH` / `VITE_INVIGILATOR_PASSWORD_HASH`, so the plain
+  passwords are never in the bundle), **verifies both hashes are present in the
+  built bundle (aborts the deploy if either is missing)**, then deploys to Cloud
+  Run. Ad-hoc `npm run build` / `gcloud builds submit` are **forbidden** — they
+  skip the hash bake + verification, and an empty baked hash makes every
+  admin/invigilator login fail (this broke login before a ~700-student exam).
+  `deploy-gcp.guard.test.sh` unit-tests the verification gate.
 - `nginx.conf` / `Dockerfile` — static hosting.
 
 Run local: `npm run dev` (needs `VITE_API_BASE_URL`), or `VITE_DEMO_MODE=true npm
