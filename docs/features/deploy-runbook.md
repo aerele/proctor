@@ -160,22 +160,30 @@ The script ends by printing the **Backend URL** — copy it into `API_URL` befor
 
 **Source:** [`frontend/deploy-gcp.sh`](../../frontend/deploy-gcp.sh) · SPA entry `frontend/src/App.tsx`.
 
+> **This script is the ONLY sanctioned way to deploy the frontend.** Ad-hoc
+> `npm run build` + `gcloud builds submit` are **forbidden** — they skip the
+> password-hash bake and the post-build verification gate, which is exactly how a
+> deploy once shipped an empty `VITE_ADMIN_PASSWORD_HASH` and broke admin/invigilator
+> login before a ~700-student exam (every login fails when the baked hash is empty).
+
 Run **after** the backend is deployed and `API_URL` is filled:
 
 ```bash
-source .env.deploy.local   # must now include API_URL
+source .env.deploy.local   # must now include API_URL, ADMIN_PASSWORD, INVIGILATOR_PASSWORD
 bash frontend/deploy-gcp.sh
 ```
 
-It hard-fails if `PROJECT_ID`, `API_URL`, or `ADMIN_PASSWORD` are unset. Then it:
+It hard-fails if `PROJECT_ID`, `API_URL`, `ADMIN_PASSWORD`, or `INVIGILATOR_PASSWORD` are unset. Then it:
 
 1. Sets project, enables `run`/`cloudbuild`/`artifactregistry`, creates the Artifact Registry repo if missing.
-2. **Computes the admin password hash** (C1 hardening): `ADMIN_PASSWORD_HASH = sha256(ADMIN_PASSWORD)` (hex). The plaintext admin password is **never** put in the bundle — it stays a backend-only secret.
-3. **Builds the SPA** with two Vite env vars baked in:
+2. **Computes both password hashes** (C1 hardening): `sha256(ADMIN_PASSWORD)` and `sha256(INVIGILATOR_PASSWORD)` (hex). The plaintext passwords are **never** put in the bundle — they stay backend-only secrets.
+3. **Builds the SPA** with the Vite env vars baked in:
    - `VITE_API_BASE_URL = $API_URL`
-   - `VITE_ADMIN_PASSWORD_HASH = $ADMIN_PASSWORD_HASH`
-   The admin unlock gate hashes the typed password client-side and compares to this hash (it only controls hiding/showing the admin UI; the backend still independently checks the real password on every privileged call).
-4. Builds the image with Cloud Build and deploys to Cloud Run.
+   - `VITE_ADMIN_PASSWORD_HASH = sha256(ADMIN_PASSWORD)`
+   - `VITE_INVIGILATOR_PASSWORD_HASH = sha256(INVIGILATOR_PASSWORD)`
+   The unlock gates hash the typed password client-side and compare to these hashes (they only control hiding/showing the admin/invigilator UI; the backend still independently checks the real password on every privileged call).
+4. **Post-build verification gate** (`verify_dist_has_hashes`): greps the freshly built `frontend/dist` for **both** hash strings and **aborts the deploy (`exit 1`)** if either is missing — so a bundle with a missing/empty hash can never ship. The gate is factored into a function and unit-tested by `frontend/deploy-gcp.guard.test.sh`.
+5. Builds the image with Cloud Build and deploys to Cloud Run.
 
 ### Cloud Run deploy parameters (frontend)
 
@@ -190,20 +198,9 @@ It hard-fails if `PROJECT_ID`, `API_URL`, or `ADMIN_PASSWORD` are unset. Then it
 
 It prints the **Frontend URL** at the end.
 
-### Flagged invigilator-hash gap
+### Invigilator hash (now baked + verified by the script)
 
-The script bakes in **only** `VITE_ADMIN_PASSWORD_HASH`. The invigilator portal's client gate expects a `VITE_INVIGILATOR_PASSWORD_HASH` (sha256 hex of `INVIGILATOR_PASSWORD`) — confirmed required by the resume anchor's frontend-build note — but `frontend/deploy-gcp.sh` does **not** compute or pass it. To enable invigilator password unlock you must build with that var set yourself, e.g.:
-
-```bash
-INVIG_HASH="$(printf '%s' "$INVIGILATOR_PASSWORD" | sha256sum | awk '{print $1}')"
-VITE_API_BASE_URL="$API_URL" \
-VITE_ADMIN_PASSWORD_HASH="$(printf '%s' "$ADMIN_PASSWORD" | sha256sum | awk '{print $1}')" \
-VITE_INVIGILATOR_PASSWORD_HASH="$INVIG_HASH" \
-npm --workspace frontend run build
-# then gcloud builds submit / gcloud run deploy as the script does
-```
-
-*(The exact frontend env-var name `VITE_INVIGILATOR_PASSWORD_HASH` is taken from the resume anchor; verify against `frontend/src` before relying on the unlock in production.)* Note the invigilator portal's primary auth is the **tokenized name-only** link (the `?key=…` invigilator key) — see [invigilator-portal.md](./invigilator-portal.md); the password hash is the additional gate.
+The script bakes **both** `VITE_ADMIN_PASSWORD_HASH` and `VITE_INVIGILATOR_PASSWORD_HASH` (sha256 hex of `INVIGILATOR_PASSWORD`, verified against `frontend/src/api.ts` `invigilatorPasswordHash`). Just set `INVIGILATOR_PASSWORD` in `.env.deploy.local` and the script computes, bakes, and **verifies** it in the built bundle (aborting the deploy if it is missing). No manual build step is required. Note the invigilator portal's primary auth is the **tokenized name-only** link (the `?key=…` invigilator key) — see [invigilator-portal.md](./invigilator-portal.md); the password hash is the additional gate.
 
 ---
 
@@ -283,7 +280,7 @@ For a real ~700-candidate exam the project's capacity work settled on roughly `E
 
 - **`min-instances = 1` for a real exam.** Both backend and frontend scripts default `--min-instances 0` (fine for testing — scale-to-zero). For an exam, set the backend to `1` so the first candidate doesn't eat a cold start. Apply with `gcloud run services update "$BACKEND_SERVICE_NAME" --region "$REGION" --min-instances=1`.
 - **Lock CORS.** First deploy can keep `PUBLIC_APP_ORIGIN=*`. After the frontend URL exists, set `PUBLIC_APP_ORIGIN` to the exact frontend Cloud Run URL and redeploy the backend for a tighter production posture (per `.env.deploy.example`).
-- **Apply the operator-set env by hand.** Because the scripts don't set them: `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD`, `JUDGE0_API_KEY`/`JUDGE0_AUTH_TOKEN`, `VITE_INVIGILATOR_PASSWORD_HASH` (frontend build), and any `EXEC_*` overrides.
+- **Apply the operator-set env by hand.** Because the scripts don't set them: `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD` (backend service), `JUDGE0_API_KEY`/`JUDGE0_AUTH_TOKEN`, and any `EXEC_*` overrides. (The frontend's `VITE_INVIGILATOR_PASSWORD_HASH` is now baked + verified by `frontend/deploy-gcp.sh` — just set `INVIGILATOR_PASSWORD` for the frontend build too.)
 - **Create the Cloud Scheduler sweep job** (§5) — not automated by any script.
 - **NO git push — standing rule.** Deploy from local commits only; deploying does **not** require a push. Per the resume anchor §4, the repo must not be pushed until Karthi runs the history PII scrub. Treat "deploy ≠ push" as absolute.
 
@@ -317,8 +314,9 @@ source .env.deploy.local
 bash frontend/deploy-gcp.sh
 # 4. (optional) video worker
 bash video-worker/deploy-gcp.sh
-# 5. operator-apply: RETENTION_SWEEP_API_KEY, INVIGILATOR_PASSWORD, JUDGE0 keys,
-#    invigilator hash, EXEC_* tuning, min-instances=1, locked CORS, scheduler job
+# 5. operator-apply (backend): RETENTION_SWEEP_API_KEY, INVIGILATOR_PASSWORD, JUDGE0 keys,
+#    EXEC_* tuning, min-instances=1, locked CORS, scheduler job
+#    (frontend invigilator hash is baked + verified by frontend/deploy-gcp.sh)
 # NEVER git push.
 ```
 

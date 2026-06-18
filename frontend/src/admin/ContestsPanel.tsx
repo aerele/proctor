@@ -143,6 +143,9 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
   const [detailSlug, setDetailSlug] = useState("");
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Archived contests are hidden by default to keep the list uncluttered; the
+  // header toggle flips this and the load re-runs (effect dep) to refetch.
+  const [showArchived, setShowArchived] = useState(false);
 
   // Create-form state.
   const [newName, setNewName] = useState("");
@@ -155,7 +158,7 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
     setError("");
     try {
       const [list, templateList, problems] = await Promise.all([
-        fetchContests(password, true),
+        fetchContests(password, showArchived),
         fetchTemplates(password).catch(() => [] as ContestTemplateSummary[]),
         fetchProblems(password).catch(() => [] as ProblemSummary[])
       ]);
@@ -173,7 +176,7 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [showArchived]);
 
   const sorted = useMemo(() => sortContestsForList(contests ?? []), [contests]);
   const detail = sorted.find((contest) => contest.slug === detailSlug) ?? null;
@@ -217,7 +220,17 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
             <h1 className="text-2xl font-semibold">Contests</h1>
             <p className="mt-1 text-sm text-muted">Each contest is one administered round: its own window, roster, rooms and links. Create from a template or blank.</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-line px-3 text-sm font-medium text-muted">
+              <input
+                className="h-4 w-4 accent-accent"
+                type="checkbox"
+                checked={showArchived}
+                disabled={loading}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+              Show archived
+            </label>
             <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-line px-3 text-sm font-medium" onClick={() => void load()} disabled={loading}>
               <RefreshCw size={14} /> Refresh
             </button>

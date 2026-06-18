@@ -406,7 +406,7 @@ collection names) are applied **manually post-deploy** per `RESUME-ANCHOR.md` §
 | `VITE_DEMO_MODE` | `true` runs the entire UI on a localStorage fake (no backend). |
 | `VITE_ADMIN_PASSWORD` | Plain admin password (demo-mode local builds only). |
 | `VITE_ADMIN_PASSWORD_HASH` | sha256 of `ADMIN_PASSWORD` shipped in production by `deploy-gcp.sh`; the unlock gate hashes the typed password to compare. |
-| `VITE_INVIGILATOR_PASSWORD_HASH` | sha256 of `INVIGILATOR_PASSWORD` for the invigilator gate. **Note:** `RESUME-ANCHOR.md` §5 says the build needs this, but the committed `frontend/deploy-gcp.sh` only passes `VITE_ADMIN_PASSWORD_HASH` — pass this one alongside it at build time. |
+| `VITE_INVIGILATOR_PASSWORD_HASH` | sha256 of `INVIGILATOR_PASSWORD` for the invigilator gate. Baked **and verified** by `frontend/deploy-gcp.sh` — set `INVIGILATOR_PASSWORD` and the script handles it. |
 
 ### video-worker (`video-worker/`, OPTIONAL — not deployed on dev)
 
@@ -437,7 +437,11 @@ VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev
 copy `.env.deploy.example` → `.env.deploy.local`, fill it, then run the deploy
 scripts from the repo root in order: `backend/deploy-gcp.sh` →
 `frontend/deploy-gcp.sh` → (optional) `video-worker/deploy-gcp.sh`. The scripts
-enable APIs and create missing buckets/repos/indexes idempotently. **Note:** the
+enable APIs and create missing buckets/repos/indexes idempotently.
+**`frontend/deploy-gcp.sh` is the only sanctioned frontend deploy path** — ad-hoc
+`npm run build` / `gcloud builds submit` are forbidden because they skip the
+password-hash bake + the post-build verification gate (an empty baked hash breaks
+every admin/invigilator login, as it did before a ~700-student exam). **Note:** the
 backend script does not set every env var (see the env table above) — Judge0, the
 invigilator/sweep secrets, and the `EXEC_*` tuning are applied manually after the
 first deploy.

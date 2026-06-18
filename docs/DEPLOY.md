@@ -17,9 +17,11 @@ directly verifiable in code or an existing screenshot is marked **(unverified)**
 > (`EVIDENCE_BUCKET, ADMIN_PASSWORD, ALERTS_INGEST_API_KEY, ALERTS_COLLECTION,
 > PUBLIC_APP_ORIGIN, SESSION_COLLECTION, SETTINGS_COLLECTION, URL_EXPIRY_SECONDS`).
 > It does **not** set `INVIGILATOR_PASSWORD`, the `JUDGE0_*` keys,
-> `RETENTION_SWEEP_API_KEY`, or the `EXEC_*` tuning. `frontend/deploy-gcp.sh`
-> computes `VITE_ADMIN_PASSWORD_HASH` but **not** `VITE_INVIGILATOR_PASSWORD_HASH`.
-> For a real exam you must add those — see the call-outs in each section and the
+> `RETENTION_SWEEP_API_KEY`, or the `EXEC_*` tuning. (`frontend/deploy-gcp.sh`
+> now bakes **both** `VITE_ADMIN_PASSWORD_HASH` and `VITE_INVIGILATOR_PASSWORD_HASH`
+> and verifies them post-build — and is the **only** sanctioned frontend deploy
+> path; do not build/submit the frontend by hand.)
+> For a real exam you must add the backend vars above — see the call-outs in each section and the
 > [Required additions the scripts do NOT set](#required-additions-the-scripts-do-not-set)
 > table. The live dev stack (`aerele-proctor-dev`, api rev `proctor-api-00006-pjr`
 > / web rev `proctor-web-00006-d66`) was deployed via direct `gcloud builds submit`
@@ -261,44 +263,32 @@ gcloud scheduler jobs create http proctor-retention-sweep \
 SERVICE_NAME="$FRONTEND_SERVICE_NAME" ./frontend/deploy-gcp.sh
 ```
 
-`frontend/deploy-gcp.sh` (verified):
+> **`frontend/deploy-gcp.sh` is the ONLY sanctioned frontend deploy path.**
+> Ad-hoc `npm run build` + `gcloud builds submit` are **forbidden** — they skip
+> the password-hash bake and the post-build verification gate, which is exactly
+> how a deploy once shipped an empty `VITE_ADMIN_PASSWORD_HASH` and broke admin
+> /invigilator login before a ~700-student exam. Always run the script.
+
+`frontend/deploy-gcp.sh`:
 
 1. Enables `run`, `cloudbuild`, `artifactregistry`; creates the Artifact Registry repo if missing.
-2. Computes `ADMIN_PASSWORD_HASH = sha256hex(ADMIN_PASSWORD)` — the **plain
-   `ADMIN_PASSWORD` is never put in the bundle**; the unlock gate hashes the typed
-   password and compares to the embedded hash (`frontend/src/api.ts`).
-3. Builds: `VITE_API_BASE_URL=$API_URL VITE_ADMIN_PASSWORD_HASH=$ADMIN_PASSWORD_HASH npm --workspace frontend run build`.
-4. `gcloud builds submit frontend --tag $IMAGE`.
-5. `gcloud run deploy` — port `8080`, `128Mi`, cpu `1`, `--min-instances 0`,
+2. Asserts `PROJECT_ID`, `API_URL`, **`ADMIN_PASSWORD`, and `INVIGILATOR_PASSWORD`**
+   are set (fails fast otherwise).
+3. Computes `sha256hex` of **both** passwords — the **plain passwords are never
+   put in the bundle**; the unlock gates hash the typed password and compare to the
+   embedded hash (`frontend/src/api.ts`).
+4. Builds: `VITE_API_BASE_URL=$API_URL VITE_ADMIN_PASSWORD_HASH=… VITE_INVIGILATOR_PASSWORD_HASH=… npm --workspace frontend run build`.
+5. **Post-build verification gate:** greps `frontend/dist` for **both** expected
+   hash strings; if either is missing it prints a loud error and `exit 1` to
+   **abort the deploy** (so a hash-less bundle can never ship).
+6. `gcloud builds submit frontend --tag $IMAGE`.
+7. `gcloud run deploy` — port `8080`, `128Mi`, cpu `1`, `--min-instances 0`,
    `--max-instances 3`, `--concurrency 1000`.
 
 The admin console is the **same frontend URL** at `/admin`; the invigilator portal
-is at `/invigilator` (routed in `frontend/src/App.tsx`).
-
-> **Gap — the invigilator portal needs `VITE_INVIGILATOR_PASSWORD_HASH`.** The
-> invigilator unlock compares the typed password's sha256 hex (lowercase) against
-> `VITE_INVIGILATOR_PASSWORD_HASH` (`frontend/src/api.ts`:
-> `invigilatorPasswordHash`). **`frontend/deploy-gcp.sh` does NOT compute or pass
-> it.** For an exam where invigilators sign in with their own password, build with
-> it added:
->
-> ```bash
-> export ADMIN_PASSWORD_HASH="$(printf '%s' "$ADMIN_PASSWORD" | sha256sum | awk '{print $1}')"
-> export VITE_INVIGILATOR_PASSWORD_HASH="$(printf '%s' "$INVIGILATOR_PASSWORD" | sha256sum | awk '{print $1}')"
-> VITE_API_BASE_URL="$API_URL" \
->   VITE_ADMIN_PASSWORD_HASH="$ADMIN_PASSWORD_HASH" \
->   VITE_INVIGILATOR_PASSWORD_HASH="$VITE_INVIGILATOR_PASSWORD_HASH" \
->   npm --workspace frontend run build
-> gcloud builds submit frontend --tag "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/web:latest"
-> gcloud run deploy "$FRONTEND_SERVICE_NAME" \
->   --image "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/web:latest" \
->   --region "$REGION" --allow-unauthenticated --port 8080 \
->   --memory 128Mi --cpu 1 --min-instances 0 --max-instances 3 --concurrency 1000
-> ```
->
-> (The invigilator portal can also be entered via a tokenized `?contest=…&key=…`
-> link, and the admin password also unlocks it — `InvigilatorApp.tsx` accepts the
-> admin hash as a fallback.)
+is at `/invigilator` (routed in `frontend/src/App.tsx`). The invigilator portal can
+also be entered via a tokenized `?contest=…&key=…` link, and the admin password
+also unlocks it — `InvigilatorApp.tsx` accepts the admin hash as a fallback.
 
 ### Frontend build vars (verified `frontend/src/api.ts`)
 
@@ -306,7 +296,7 @@ is at `/invigilator` (routed in `frontend/src/App.tsx`).
 | --- | --- |
 | `VITE_API_BASE_URL` | Backend base URL the app calls (= `API_URL`). |
 | `VITE_ADMIN_PASSWORD_HASH` | sha256 hex of `ADMIN_PASSWORD`; admin unlock gate compares against it. |
-| `VITE_INVIGILATOR_PASSWORD_HASH` | sha256 hex (lowercase) of `INVIGILATOR_PASSWORD`; invigilator unlock gate. **Not set by the script.** |
+| `VITE_INVIGILATOR_PASSWORD_HASH` | sha256 hex (lowercase) of `INVIGILATOR_PASSWORD`; invigilator unlock gate. Baked + verified by the script. |
 | `VITE_ADMIN_PASSWORD` / `VITE_INVIGILATOR_PASSWORD` | Plain passwords — used only by demo-mode local builds; do NOT pass for production. |
 | `VITE_DEMO_MODE` | `true` runs the whole UI on a localStorage fake (no backend) — local demo only. |
 
@@ -385,7 +375,7 @@ the script's `--set-env-vars` line to include them).
 | Where | Var(s) | Action |
 | --- | --- | --- |
 | Backend service | `INVIGILATOR_PASSWORD`, `JUDGE0_API_KEY`, `JUDGE0_MODE`, `RETENTION_SWEEP_API_KEY`, `EXEC_SUBMIT_COOLDOWN_SECONDS`, `EXEC_MAX_SUBMISSIONS_PER_SESSION`, generous `EXEC_*_CONCURRENCY` / `EXEC_MAX_QUEUE` | Pass via `--update-env-vars` after `backend/deploy-gcp.sh`, or edit its `--set-env-vars` line. |
-| Frontend build | `VITE_INVIGILATOR_PASSWORD_HASH` | Compute sha256 hex of `INVIGILATOR_PASSWORD` and pass to the build (see §3 snippet). |
+| Frontend build | `VITE_INVIGILATOR_PASSWORD_HASH` | Handled by `frontend/deploy-gcp.sh` — set `INVIGILATOR_PASSWORD` and it bakes + verifies the hash (no manual step). |
 | Cloud Scheduler | retention-sweep daily job | Create manually (§2b). |
 
 ---
@@ -394,10 +384,15 @@ the script's `--set-env-vars` line to include them).
 
 From `RESUME-ANCHOR.md` §5 (verified pattern), build+tag then deploy directly:
 
+> **Frontend:** do **not** use this one-liner form for the frontend. A bare
+> `gcloud builds submit frontend` skips the password-hash bake + verification and
+> is what broke admin login before a ~700-student exam. Always deploy the frontend
+> via `frontend/deploy-gcp.sh` (§3).
+
 ```bash
 gcloud builds submit backend  --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/api:latest --async
-gcloud builds submit frontend --tag asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/web:latest --async
-# then: gcloud run deploy proctor-api … / gcloud run deploy proctor-web …
+# Frontend: use ./frontend/deploy-gcp.sh (NOT a bare gcloud builds submit) — see §3.
+# then: gcloud run deploy proctor-api …
 ```
 
 ---
