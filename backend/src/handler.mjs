@@ -1,7 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
-import { bucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
+import { bucket, signingBucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
 import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
 import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
 import { makeAuth } from "./lib/auth.mjs";
@@ -61,7 +61,7 @@ const {
   SUBMISSIONS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
   ROOM_GATES_COLLECTION, CONTESTS_COLLECTION, COLLEGES_COLLECTION, PERSONS_COLLECTION,
   ENROLLMENTS_COLLECTION, ADMIN_AUDIT_COLLECTION, TEMPLATES_COLLECTION, EVALUATIONS_COLLECTION,
-  EVIDENCE_BUCKET, JUDGE0_BASE_URL, JUDGE0_MODE, JUDGE0_API_KEY, JUDGE0_AUTH_TOKEN,
+  EVIDENCE_BUCKET, SIGNER_KEY_FILE, JUDGE0_BASE_URL, JUDGE0_MODE, JUDGE0_API_KEY, JUDGE0_AUTH_TOKEN,
   URL_EXPIRY_SECONDS, ADMIN_PASSWORD, INVIGILATOR_PASSWORD, ALERTS_INGEST_API_KEY,
   RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
@@ -200,6 +200,7 @@ const ENFORCEMENT_LOCK_REASON = "fullscreen_enforcement";
 configureClients({
   evidenceBucket: EVIDENCE_BUCKET,
   urlExpirySeconds: URL_EXPIRY_SECONDS,
+  signerKeyFile: SIGNER_KEY_FILE,
   judge0Config: {
     baseUrl: JUDGE0_BASE_URL, mode: JUDGE0_MODE,
     apiKey: JUDGE0_API_KEY, authToken: JUDGE0_AUTH_TOKEN
@@ -1446,7 +1447,7 @@ async function createUploadUrl(req) {
 
   const extension = String(body.content_type).includes("webm") ? "webm" : "bin";
   const objectKey = `${sessionPrefix(session)}${kind}/chunk-${String(effectiveIndex).padStart(5, "0")}.${extension}`;
-  const [uploadUrl] = await bucket()
+  const [uploadUrl] = await signingBucket()
     .file(objectKey)
     .getSignedUrl({
       version: "v4",
@@ -2959,7 +2960,10 @@ async function adminSessions(req) {
       // into ~400 simultaneous GCS/IAM calls and 500'd on the small Cloud Run
       // instance. Capping concurrency keeps a heavy session well under the timeout.
       const evidence = await mapWithConcurrency(files, 12, async (file) => {
-        const [downloadUrl] = await file.getSignedUrl({
+        // Listing fanned out via the main client above (getFiles); sign each
+        // chunk's read URL through the signing client (local crypto off the key,
+        // no token) so playback URLs don't hit the flaky external token endpoint.
+        const [downloadUrl] = await signingBucket().file(file.name).getSignedUrl({
           version: "v4",
           action: "read",
           expires: Date.now() + 3600 * 1000
@@ -4031,7 +4035,7 @@ async function adminContestExport(req) {
   await bucket().file(gcsKey).save(archiveBody, { contentType: "application/x-ndjson" });
   let signedUrl = "";
   try {
-    const [url] = await bucket().file(gcsKey).getSignedUrl({
+    const [url] = await signingBucket().file(gcsKey).getSignedUrl({
       version: "v4", action: "read", expires: Date.now() + URL_EXPIRY_SECONDS * 1000
     });
     signedUrl = url;
