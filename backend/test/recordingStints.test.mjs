@@ -176,8 +176,6 @@ function seedSettings(firestore, overrides = {}) {
   firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
     start_at: "2026-01-01T00:00:00.000Z",
     end_at: "2099-01-01T00:00:00.000Z",
-    contest_url: "https://www.hackerrank.com/contests/kec-2026",
-    contest_slug: "kec-2026",
     ...overrides
   });
 }

@@ -1,7 +1,7 @@
-// backend/src/lib/sessionStore.mjs — neutral session/settings read helpers +
-// GCS-prefix builders as a FACTORY (decomp B0, A2/A8c). makeSessionStore(ctx)
-// closes over ctx.getFirestore (the live-client getter, so __setClientsForTest
-// swaps propagate) and the collection names captured at handler load.
+// backend/src/lib/sessionStore.mjs — neutral session read helpers + GCS-prefix
+// builders as a FACTORY (decomp B0, A2/A8c). makeSessionStore(ctx) closes over
+// ctx.getFirestore (the live-client getter, so __setClientsForTest swaps
+// propagate) and the session collection name captured at handler load.
 //
 // Only the genuinely NEUTRAL store helpers move here in B0 — the contest-scoped
 // raw contest_slug equality-filter sites (findLiveSessionFor / endAllLiveSessions)
@@ -9,17 +9,12 @@
 // their scopingLint re-pin. Factory (not configure-mutated singleton) for the
 // same per-?buster-instance isolation reason as makeAuth.
 import { httpError } from "./http.mjs";
-import { sanitizeSegment } from "./sanitize.mjs";
 
 export function makeSessionStore(ctx) {
-  const { getFirestore, sessionCollection, settingsCollection, settingsId } = ctx;
+  const { getFirestore, sessionCollection } = ctx;
 
   function sessionRef(sessionId) {
     return getFirestore().collection(sessionCollection).doc(sessionId);
-  }
-
-  function settingsRef() {
-    return getFirestore().collection(settingsCollection).doc(settingsId);
   }
 
   async function getSession(sessionId) {
@@ -50,35 +45,15 @@ export function makeSessionStore(ctx) {
     return doc.exists ? doc.data() : null;
   }
 
-  async function getSettings() {
-    const doc = await settingsRef().get();
-    return doc.exists ? doc.data() : null;
-  }
-
   // ---- GCS contest-foldering (Phase 2, 2.1) ---------------------------------
-  // ONE place that turns a contest_url into a path slug, and ONE place that
-  // assembles the per-session GCS prefix. Every key-build site calls
-  // sessionPrefix(session) so upload, signing, and admin-evidence listing always
-  // agree. New shape: contests/<slug>/sessions/<username_norm>/<session_id>/...
-  // Legacy fallback (no/invalid contest_url): sessions/<username_norm>/<session_id>/...
+  // ONE place that assembles the per-session GCS prefix. Every key-build site
+  // calls sessionPrefix(session) so upload, signing, and admin-evidence listing
+  // always agree. Shape: contests/<slug>/sessions/<username_norm>/<session_id>/...
 
-  // Extract the contest slug from a contest_url: last non-empty path segment, then
-  // the existing sanitizeSegment. Empty/invalid url → "" (legacy, no contest folder).
-  function contestSlugFromUrl(contestUrl) {
-    if (!contestUrl) return "";
-    let pathname;
-    try {
-      pathname = new URL(String(contestUrl)).pathname;
-    } catch {
-      return "";
-    }
-    const segments = String(pathname).split("/").filter(Boolean);
-    if (!segments.length) return "";
-    return sanitizeSegment(segments[segments.length - 1]);
-  }
-
-  // Build the per-session prefix from parts. Slug present → contest folder; absent
-  // → legacy layout (and never a contests// double-slash).
+  // Build the per-session prefix from parts. A contest slug is always present on
+  // current sessions; the no-slug arm only ever serves a pre-Phase-2 doc that
+  // lacks storage_prefix (via sessionPrefix's fallback) and never emits a
+  // contests// double-slash.
   function buildStoragePrefix(contestSlug, usernameNorm, sessionId) {
     if (contestSlug) {
       return `contests/${contestSlug}/sessions/${usernameNorm}/${sessionId}/`;
@@ -87,8 +62,8 @@ export function makeSessionStore(ctx) {
   }
 
   // The prefix for an existing session doc. Prefer the persisted storage_prefix
-  // (zero extra reads); fall back to reconstructing from stored fields so legacy
-  // docs written before Phase 2 still resolve to their original legacy path.
+  // (zero extra reads); fall back to reconstructing from stored fields so old
+  // docs written before Phase 2 still resolve to their original path.
   function sessionPrefix(session) {
     if (session && session.storage_prefix) return session.storage_prefix;
     return buildStoragePrefix(session?.contest_slug, session?.username_norm, session?.session_id);
@@ -106,7 +81,7 @@ export function makeSessionStore(ctx) {
   }
 
   return {
-    sessionRef, settingsRef, getSession, getSessionOrNull, getSettings,
-    requireWritableSession, contestSlugFromUrl, buildStoragePrefix, sessionPrefix, candidateOf
+    sessionRef, getSession, getSessionOrNull,
+    requireWritableSession, buildStoragePrefix, sessionPrefix, candidateOf
   };
 }

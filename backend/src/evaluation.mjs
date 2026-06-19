@@ -282,7 +282,7 @@ export function makeEvaluation(ctx) {
   // ---- THE batch evaluator --------------------------------------------------
   async function evaluateContestBatch({ contestSlug, limit, cursor, force } = {}) {
     const contest = await resolveContest(String(contestSlug || "").trim(), { requireOpen: false });
-    const slug = contest.legacy_empty_slug ? "" : contest.slug;
+    const slug = contest.slug;
     const batchLimit = Number.isFinite(Number(limit)) && Number(limit) > 0
       ? Math.floor(Number(limit))
       : evaluateBatchLimit;
@@ -477,7 +477,7 @@ export function makeEvaluation(ctx) {
   // (never evaluated) reads as idle with zero progress.
   async function evaluateStatus(contestSlug) {
     const contest = await resolveContest(String(contestSlug || "").trim(), { requireOpen: false });
-    const slug = contest.legacy_empty_slug ? "" : contest.slug;
+    const slug = contest.slug;
     const job = await readJob(slug);
     if (!job) return { status: "idle", total: 0, processed: 0, cursor: "", run_id: null };
     return {

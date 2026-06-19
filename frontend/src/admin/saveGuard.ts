@@ -16,11 +16,9 @@
 import type { ApiError } from "../api";
 import type { ContestSummary, ProblemDoc } from "../types";
 
-/** Does a contest reference this problem — via the S-I problems[] array or the
- * legacy single-problem assignment (problem_id on the synth legacy row)? */
+/** Does a contest reference this problem via its S-I problems[] array? */
 function contestReferencesProblem(contest: ContestSummary, problemId: string): boolean {
-  if (Array.isArray(contest.problems) && contest.problems.some((p) => p.problem_id === problemId)) return true;
-  return contest.problem_id === problemId;
+  return Array.isArray(contest.problems) && contest.problems.some((p) => p.problem_id === problemId);
 }
 
 /** Every contest (any status) that references the problem. A blank id never

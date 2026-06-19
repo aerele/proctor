@@ -238,7 +238,7 @@ export function PeoplePanel({ password }: { password: string }) {
             <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">Loading directory…</div>
           ) : visiblePeople.length === 0 ? (
             <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">
-              {allPeople.length === 0 ? "No people yet. Upload a person-mode contest roster, or adopt a legacy contest from its detail page." : "No people match your search."}
+              {allPeople.length === 0 ? "No people yet. Upload a person-mode contest roster." : "No people match your search."}
             </div>
           ) : (
             <div className="overflow-x-auto rounded-lg border border-line bg-panel shadow-subtle">
