@@ -512,6 +512,131 @@ test("coverage confidence high/low", () => {
   assert.equal(low.coverage.confidence, "low");
 });
 
+// ---- MISSING-DATA / AVAILABILITY-GATE tests (2026-06-19) ----
+// The eval must NEVER accuse a candidate of cheating because evidence is MISSING
+// or UNREAD. Such cases are inconclusive/no-data, never a violation.
+
+test("MISSING DATA: no editor/shell evidence at all → integrity inconclusive, NOT flag; no zero_effort/paste", () => {
+  // This is the live "everyone flagged" shape: a candidate who fully solved a
+  // MED problem, but the eval read ZERO editor + ZERO shell events. Pre-fix this
+  // emitted a critical zero_effort_solve and tier "flag". It must now be
+  // "inconclusive" with no zero_effort and no high_paste flags.
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: [],
+      shellEvents: [],
+      hardness: () => "med",
+      submissions: [sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: "class S { int f(){ return 42; } }".repeat(20), created_at: tsAt(1500) })],
+    })
+  );
+  assert.equal(sc.coverage.editor_events_n, 0);
+  assert.equal(sc.coverage.shell_events_n, 0);
+  assert.equal(sc.coverage.confidence, "low");
+  assert.equal(sc.tiers.integrity, "inconclusive");
+  assert.equal(sc.integrity.zero_effort_solves.length, 0, "zero_effort must not fire without editor coverage");
+  assert.ok(!sc.flags.find((f) => f.code === "zero_effort_solve"), "no zero_effort flag");
+  assert.ok(!sc.flags.find((f) => f.code === "high_paste_ratio"), "no paste flag without paste telemetry");
+  assert.match(sc.tiers.one_line, /inconclusive/);
+});
+
+test("MISSING DATA: no paste/selection telemetry → large inserts NOT scored as paste (paste inconclusive)", () => {
+  // Today's cohort emitted no editor_paste / editor_selection events. A genuine
+  // large insert (e.g. a big edit) must NOT be inferred as pasted, so paste_ratio
+  // stays ~0 and no high_paste_ratio flag is raised. Editor coverage IS present
+  // here (so the candidate is not "no data" overall — only the paste axis is
+  // inconclusive), so the tier is clean, not inconclusive.
+  const bigCode = "class Solution {\n  int compute(int n){\n    int total = 0;\n    for(int i=0;i<n;i++){ total += i*i; }\n    return total;\n  }\n}\n";
+  const events = [ins("p1", 1000, bigCode, 1, 1), submitEv("p1", 1500)];
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: events,
+      submissions: [sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: bigCode, created_at: tsAt(1500) })],
+    })
+  );
+  assert.equal(sc.integrity.paste_ratio, 0, "no paste inference without paste/selection markers");
+  assert.ok(!sc.flags.find((f) => f.code === "high_paste_ratio"), "no false high_paste flag");
+  assert.equal(sc.tiers.integrity, "clean");
+});
+
+test("PRESENT DATA: zero_effort STILL fires when editor coverage present (real detection preserved)", () => {
+  // Same scenario as the D10 test but asserted here to prove the availability
+  // gate did NOT weaken real detection: with paste telemetry present and a real
+  // zero-effort solve, the critical flag still fires and the tier is "flag".
+  const code = "class S { int f(){ return 42; } }".repeat(20);
+  const events = [pasteEv("p1", 1000, code.length), replEv("p1", 1050, 0, code), submitEv("p1", 1500)];
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: events,
+      hardness: () => "med",
+      submissions: [sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: code, created_at: tsAt(1500) })],
+    })
+  );
+  assert.ok(sc.integrity.zero_effort_solves.includes("p1"));
+  assert.ok(sc.flags.find((f) => f.code === "zero_effort_solve" && f.severity === "critical"));
+  assert.equal(sc.tiers.integrity, "flag");
+});
+
+test("PRESENT DATA: high_paste_ratio STILL fires when paste telemetry present (real detection preserved)", () => {
+  const blob = "z".repeat(200);
+  const events = [pasteEv("p1", 1000, 200), replEv("p1", 1050, 0, blob), ins("p1", 2000, "ab", 1, 201)];
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: events,
+      submissions: [sub({ problem_id: "p1", verdict: "wrong_answer", score: 0, max_points: 100, source_code: blob, created_at: tsAt(3000) })],
+    })
+  );
+  assert.ok(sc.integrity.paste_ratio > 0.6);
+  assert.ok(sc.flags.find((f) => f.code === "high_paste_ratio" && f.severity === "critical"));
+});
+
+test("READ FAILURE: evidenceReadFailed → gcs_read_failed gap + inconclusive (distinct from real absence)", () => {
+  // A simulated transient GCS read failure: the orchestrator could not enumerate
+  // the evidence. This is a GAP, not "no data": coverage records gcs_read_failed,
+  // confidence drops, and the tier is inconclusive — never a violation. The
+  // one_line makes the read-failure reason explicit for the reviewer.
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: [],
+      shellEvents: [],
+      evidenceReadFailed: true,
+      hardness: () => "med",
+      submissions: [sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: "class S { int f(){ return 42; } }".repeat(20), created_at: tsAt(1500) })],
+    })
+  );
+  assert.ok(sc.coverage.gaps.includes("gcs_read_failed"));
+  assert.equal(sc.coverage.confidence, "low");
+  assert.equal(sc.tiers.integrity, "inconclusive");
+  assert.ok(!sc.flags.find((f) => f.code === "zero_effort_solve"));
+  assert.match(sc.tiers.one_line, /read failed/);
+});
+
+test("INCONCLUSIVE does NOT mask a real Firestore-derived recurring-pair clone (cross-pass)", () => {
+  // A candidate with no interaction evidence is inconclusive — UNLESS a
+  // code-similarity clone proof (recurring_pair_conclusive) is injected by the
+  // cross-pass. That proof is independent of the interaction stream, so it must
+  // still confirm. This guards against the inconclusive tier weakening real
+  // clone detection.
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: [],
+      shellEvents: [],
+      hardness: () => "hard",
+      submissions: [sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: "class S { int f(){ return 1; } }", created_at: tsAt(1500) })],
+    })
+  );
+  assert.equal(sc.tiers.integrity, "inconclusive"); // before cross-pass
+  const patch = {
+    clone_cluster_refs: [],
+    recurring_pair_refs: [{ other: "B", n_problems: 1, problems: ["p1"], n_hard: 1, conclusive: true }],
+    paste_match_edges: [],
+    tight_refs: [],
+    flags: [{ code: "recurring_pair_conclusive", severity: "critical", problem_id: null, evidence: "Recurring identical code with B." }],
+    integrity_escalation: "confirmed",
+  };
+  const patched = applyCrossPatches(sc, patch);
+  assert.equal(patched.tiers.integrity, "confirmed", "clone proof confirms even with no interaction evidence");
+});
+
 // ---- cross-candidate analysis ----
 
 function makeCandidate(key, opts) {
