@@ -29,8 +29,11 @@ import { candidateIdOf } from "./identity";
 import {
   CHUNK_SECONDS,
   buildPlaylist,
+  isManifestEvidence,
   isSourceChunk,
+  startedAtMapFromManifest,
   type RecordingSource,
+  type StartedAtByKey,
   type TimelineChunk
 } from "./recordingPlaylist";
 import {
@@ -233,6 +236,13 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // low-res camera stream. The toggle renders only when camera chunks exist;
   // both share the same test-relative timeline + overlays.
   const [source, setSource] = useState<RecordingSource>("screen");
+  // Recording-time anchor: storage_key → started_at (ISO) from the active
+  // session's manifest.json. buildPlaylist places each chunk at its TRUE
+  // recording-window start when present, so a Tier-1-buffered chunk that
+  // uploaded minutes late (late last_modified) no longer manufactures a phantom
+  // gap. Empty for legacy sessions / when manifest.json is absent or malformed
+  // (the placement then falls back to last_modified exactly as before).
+  const [startedAtByKey, setStartedAtByKey] = useState<StartedAtByKey>(() => new Map());
   const [playing, setPlaying] = useState(false);
   const [currentTestTime, setCurrentTestTime] = useState(0); // seconds, test-relative
   const [refreshNote, setRefreshNote] = useState("");
@@ -333,8 +343,39 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
 
   const playlist = useMemo(() => {
     if (!activeSession) return [];
-    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs, activeSource);
-  }, [activeSession, testStartMs, activeSource]);
+    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs, activeSource, startedAtByKey);
+  }, [activeSession, testStartMs, activeSource, startedAtByKey]);
+
+  // Recording-time anchor fetch: the active session's manifest.json (listed in
+  // the signed evidence at {prefix}/manifest.json) maps each chunk's storage_key
+  // → its true recording-window started_at. We fetch + parse it whenever the
+  // active session changes and feed the map into buildPlaylist. Degrades to an
+  // empty map on ANY failure (no manifest object, fetch/parse error, malformed
+  // body) so playback always falls back to the last_modified placement.
+  const manifestKey = useMemo(
+    () => (activeSession?.evidence ?? []).find(isManifestEvidence)?.download_url ?? "",
+    [activeSession]
+  );
+  useEffect(() => {
+    if (!manifestKey) {
+      setStartedAtByKey(new Map());
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(manifestKey);
+        if (!response.ok) throw new Error(`manifest ${response.status}`);
+        const parsed: unknown = await response.json();
+        if (!cancelled) setStartedAtByKey(startedAtMapFromManifest(parsed));
+      } catch {
+        if (!cancelled) setStartedAtByKey(new Map());
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [manifestKey]);
 
   // Timeline span: from the first chunk's start to the last chunk's end. Clamped
   // so a single-chunk or all-gap session still yields a usable bar.
@@ -733,14 +774,14 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
       const refreshed = fresh.find((s) => String(s.session_id) === selectedSessionId) ?? fresh[0];
-      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs, activeSource);
+      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs, activeSource, startedAtByKey);
       return list[currentPos]?.url ?? null;
     } catch {
       return null;
     } finally {
       refreshingRef.current = false;
     }
-  }, [activeSession, password, selectedSessionId, currentPos, testStartMs, activeSource]);
+  }, [activeSession, password, selectedSessionId, currentPos, testStartMs, activeSource, startedAtByKey]);
 
   // ---- Load the current chunk into the <video> and (optionally) play. -----
   // We set src imperatively (not via JSX) so we can also drive seek + play/pause
@@ -1950,6 +1991,10 @@ function ActivityLogPanel({
   // ---- ITEM 3: playback-synced auto-scroll + highlight --------------------
   const listRef = useRef<HTMLOListElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLLIElement>>(new Map());
+  // #115: explicit reviewer-facing on/off for auto-follow (default ON). When OFF,
+  // the log NEVER auto-scrolls — the reviewer reads/scrolls freely while the
+  // video plays. Separate from `autoFollow` (the transient manual-scroll pause).
+  const [followEnabled, setFollowEnabled] = useState(true);
   // The admin manually scrolled → suspend auto-follow until they idle. A short
   // timer re-arms it so a one-off nudge doesn't permanently kill following.
   const [autoFollow, setAutoFollow] = useState(true);
@@ -1968,22 +2013,33 @@ function ActivityLogPanel({
     return id;
   }, [entries, currentOffsetSec]);
 
-  // Auto-scroll the active row into view (smooth, centered) while playing and
-  // not suspended. We mark followingRef so our own programmatic scroll doesn't
-  // trip the manual-scroll suspend handler.
+  // Auto-scroll the active row into view (centered) while playing and not
+  // suspended. #115: we move ONLY the log container's scrollTop — NOT
+  // element.scrollIntoView(), which scrolls every scrollable ancestor INCLUDING
+  // the window and yanks the whole page (and the video) out of view. Centering
+  // the row inside the bounded <ol> keeps the page (and the player) perfectly
+  // still. We mark followingRef so our own programmatic scroll doesn't trip the
+  // manual-scroll suspend handler.
   useEffect(() => {
-    if (!playing || !autoFollow || !activeId) return;
+    if (!followEnabled || !playing || !autoFollow || !activeId) return;
     const row = rowRefs.current.get(activeId);
     const list = listRef.current;
     if (!row || !list) return;
+    // Center the active row within the container's viewport. offsetTop is
+    // relative to the offsetParent; the <li>'s offsetParent is the <ol>
+    // (positioned scroll container), so offsetTop is already container-relative.
+    const target = row.offsetTop - (list.clientHeight - row.clientHeight) / 2;
+    const maxScroll = list.scrollHeight - list.clientHeight;
+    const next = Math.max(0, Math.min(target, maxScroll));
+    if (Math.abs(next - list.scrollTop) < 1) return; // already there — no churn
     followingRef.current = true;
-    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    list.scrollTo({ top: next, behavior: "smooth" });
     // Release the guard after the smooth scroll settles.
     const t = window.setTimeout(() => {
       followingRef.current = false;
     }, 400);
     return () => window.clearTimeout(t);
-  }, [activeId, playing, autoFollow]);
+  }, [activeId, playing, autoFollow, followEnabled]);
 
   // Manual scroll suspends auto-follow; after a short idle we re-arm it so the
   // log resumes following the playhead (don't fight the user, but don't strand
@@ -2042,6 +2098,22 @@ function ActivityLogPanel({
             <option value="warning">Warning</option>
             <option value="info">Info</option>
           </select>
+          {/* #115: Follow on/off — when ON the log auto-scrolls (within its own
+              container only) to the entry at the playhead; when OFF the reviewer
+              scrolls freely while the video plays. Default ON. */}
+          <button
+            type="button"
+            onClick={() => setFollowEnabled((v) => !v)}
+            aria-pressed={followEnabled}
+            title={followEnabled ? "Auto-follow is on — the log tracks the playhead" : "Auto-follow is off — scroll the log freely"}
+            className={`focus-ring inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs font-medium ${
+              followEnabled
+                ? "border-accent/40 bg-accent/10 text-accent"
+                : "border-line bg-white text-muted hover:border-ink/40 hover:text-ink"
+            }`}
+          >
+            <Eye size={12} /> Follow {followEnabled ? "on" : "off"}
+          </button>
         </div>
       </div>
 
@@ -2099,8 +2171,9 @@ function ActivityLogPanel({
       ) : null}
 
       {/* Auto-follow status: shows when following is paused (manual scroll) so the
-          admin knows it will resume — and offers an instant resume. */}
-      {playing && !autoFollow ? (
+          admin knows it will resume — and offers an instant resume. Hidden when
+          the reviewer has turned Follow off entirely (#115). */}
+      {followEnabled && playing && !autoFollow ? (
         <button
           type="button"
           onClick={() => setAutoFollow(true)}
@@ -2111,7 +2184,7 @@ function ActivityLogPanel({
       ) : null}
 
       {entries.length ? (
-        <ol ref={listRef} onScroll={onListScroll} className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
+        <ol ref={listRef} onScroll={onListScroll} className="relative mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
           {entries.map((entry) => {
             const isActive = entry.id === activeId;
             return (
