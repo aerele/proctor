@@ -361,6 +361,34 @@ test("evaluate: cursor batching (limit:1 → cursor → resume → done)", async
   assert.ok(ids.includes(`__meta::${slug}`));
 });
 
+// ---- batch RESPONSE carries server progress (processed/total) --------------
+//
+// Regression guard: the HTTP response returned to the caller MUST include
+// numeric `processed` and `total` (it's what runEvaluateLoop drives the
+// "Evaluating X / N" progress bar from). The job doc already carried them; the
+// returned `result` object had dropped them, freezing the frontend counter.
+
+test("evaluate: BATCH RESPONSE includes numeric processed/total (progress fields)", async () => {
+  const { slug } = await seedMixedFixture();
+  // Partial chunk (limit:1 of a 2-identity universe): not done yet.
+  const first = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug, limit: 1 } }));
+  assert.equal(first.statusCode, 200, JSON.stringify(first.body));
+  assert.equal(first.body.done, false, JSON.stringify(first.body));
+  assert.equal(typeof first.body.total, "number", "response carries numeric total " + JSON.stringify(first.body));
+  assert.equal(typeof first.body.processed, "number", "response carries numeric processed " + JSON.stringify(first.body));
+  assert.equal(first.body.total, 2, "total = universe size " + JSON.stringify(first.body));
+  assert.equal(first.body.processed, 1, "processed advanced by the first chunk " + JSON.stringify(first.body));
+
+  // Final chunk: processed reaches total when done.
+  const second = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug, limit: 1, cursor: first.body.cursor } }));
+  assert.equal(second.statusCode, 200, JSON.stringify(second.body));
+  assert.equal(second.body.done, true, JSON.stringify(second.body));
+  assert.equal(typeof second.body.total, "number", "done response carries numeric total " + JSON.stringify(second.body));
+  assert.equal(typeof second.body.processed, "number", "done response carries numeric processed " + JSON.stringify(second.body));
+  assert.equal(second.body.total, 2, JSON.stringify(second.body));
+  assert.equal(second.body.processed, second.body.total, "processed equals total when done " + JSON.stringify(second.body));
+});
+
 // ---- idempotency + force ---------------------------------------------------
 
 test("evaluate: idempotent re-run skips, force recomputes", async () => {
