@@ -396,29 +396,17 @@ test("replay idempotency: re-posting the same session_id + identity returns the 
   assert.equal(replay.body.status, "active");
 });
 
-test("person start response carries the CONTEST window end_at, not the legacy settings end_at", async () => {
+test("person start response carries the CONTEST window end_at", async () => {
   const { firestore } = freshClients();
-  // A legacy settings doc exists with a DIFFERENT window + a problem assigned —
-  // none of it may leak into the person contest's response.
-  await firestore.collection("pi_settings").doc("active").set({
-    start_at: new Date(Date.now() - 2 * HOUR).toISOString(),
-    end_at: new Date(Date.now() + 9 * HOUR).toISOString(),
-    problem_id: "legacy-problem",
-    contest_url: "https://hackerrank.example/legacy-exam",
-    room_gate_enabled: true
-  });
   const contest = await createOpenContest("KEC June 2026");
   await uploadPersonRoster(contest.slug, [ROW_ASHA], { college_resolutions: { kec: { action: "create" } } });
   const res = await call(startReq({ contest: contest.slug, roster_unique_id: "21CS001", consent_accepted: true }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   const contestDoc = firestore._collections.get("pi_contests").get(contest.slug);
   assert.equal(res.body.end_at, contestDoc.end_at);
-  // S-I (landed at merge): the person contest serves ITS problems[], never the
-  // legacy settings problem_id — the alias must be the contest's own problem.
+  // The person contest serves ITS problems[]; the alias is the contest's own problem.
   assert.equal(res.body.problem?.id, "sum-two");
-  assert.equal(res.body.problems.some((p) => p.id === "legacy-problem"), false);
-  assert.equal(res.body.contest_url, ""); // contest_url is dead for person contests
-  assert.equal(res.body.room_gate_enabled, false); // contest doc, not settings
+  assert.equal(res.body.room_gate_enabled, false); // contest doc room_gate_enabled
 });
 
 // ---- wave-4 fix: contest-owned enforcement/camera/gate are SERVED, not dead ----
@@ -591,57 +579,6 @@ test("resume legacy leg: hackerrank_username verified via normalizeUsername exac
   assert.equal(ok.statusCode, 200);
   const wrong = await call(resumeReq({ session_id: "legacy-1", hackerrank_username: "bob" }));
   assert.equal(wrong.statusCode, 404);
-});
-
-// ---- THE LEGACY CANARY: today's start path, bit-for-bit -------------------------
-
-test("legacy start (no contest param) produces EXACTLY today's session doc — no person fields, same key set", async () => {
-  const { firestore } = freshClients();
-  await firestore.collection("pi_settings").doc("active").set({
-    start_at: new Date(Date.now() - HOUR).toISOString(),
-    end_at: new Date(Date.now() + HOUR).toISOString(),
-    contest_url: "https://hackerrank.example/contests/legacy-exam"
-  });
-  const res = await call(startReq({
-    hackerrank_username: "Alice", name: "Alice A", roll_number: "21CS009",
-    email: "alice@x.com", consent_accepted: true
-  }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
-  // EXACT key set — any person-layer field appearing here breaks the canary.
-  assert.deepEqual(Object.keys(session).sort(), [
-    "blocked_by_session_id", "camera_chunk_count", "chunk_count",
-    "clipboard_event_count", "consent_accepted", "contest_slug", "created_at",
-    "current_ip", "email", "enforcement_exemptions", "event_count",
-    "focus_event_count", "hackerrank_username", "heartbeat_count",
-    "ip_change_count", "name", "roll_number", "room", "roster_unique_id",
-    "roster_verified", "session_id", "start_ip", "status", "storage_prefix",
-    "updated_at", "upload_error_count", "username_norm"
-  ]);
-  assert.equal(session.hackerrank_username, "Alice");
-  assert.equal(session.username_norm, "alice");
-  assert.equal(session.contest_slug, "legacy-exam");
-  assert.equal(session.storage_prefix, `contests/legacy-exam/sessions/alice/${session.session_id}/`);
-});
-
-test("start naming the SYNTHESIZED legacy contest falls through to today's path bit-for-bit", async () => {
-  const { firestore } = freshClients();
-  await firestore.collection("pi_settings").doc("active").set({
-    start_at: new Date(Date.now() - HOUR).toISOString(),
-    end_at: new Date(Date.now() + HOUR).toISOString(),
-    contest_slug: "legacy-exam",
-    contest_url: "https://hackerrank.example/contests/legacy-exam"
-  });
-  const res = await call(startReq({
-    contest: "legacy-exam", // resolves to the synthesized legacy contest
-    hackerrank_username: "Alice", name: "Alice A", roll_number: "21CS009",
-    email: "alice@x.com", consent_accepted: true
-  }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
-  assert.equal(session.hackerrank_username, "Alice");
-  assert.equal(session.candidate_id, undefined);
-  assert.equal(session.person_id, undefined);
 });
 
 test("start naming an unknown contest → 400 unknown_contest; a draft person contest → 403 contest_not_open", async () => {

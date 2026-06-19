@@ -34,7 +34,7 @@ export type AdminNavGroup = {
 //   Authoring — the cross-contest libraries (problem bank, templates)
 //   People    — the cross-round person directory (single view)
 //   Health    — the pre-flight readiness probe the admin runs before a round
-//   Settings  — the legacy global gate (single view)
+//   Settings  — the global roster + alert-type config (single view)
 export const ADMIN_NAV_GROUPS: ReadonlyArray<AdminNavGroup> = [
   {
     key: "live",

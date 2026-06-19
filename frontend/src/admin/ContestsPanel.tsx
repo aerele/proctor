@@ -10,7 +10,6 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import {
   adjustContestExamTime,
-  adoptContestIntoPersonModel,
   createContestApi,
   exportContest,
   fetchContests,
@@ -51,14 +50,6 @@ function StatusChip({ status }: { status: ContestStatus }) {
   return (
     <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${STATUS_CHIP_CLASSES[contestStatusTone(status)]}`}>
       {status}
-    </span>
-  );
-}
-
-function LegacyBadge() {
-  return (
-    <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
-      legacy
     </span>
   );
 }
@@ -302,7 +293,7 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
                     <td className="py-2 pr-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <StatusChip status={contest.status} />
-                        {contest.legacy ? <LegacyBadge /> : <LifecycleBadge contest={contest} />}
+                        <LifecycleBadge contest={contest} />
                       </div>
                     </td>
                     <td className="py-2 pr-3 text-xs text-muted">{contestWindowLabel(contest.start_at, contest.end_at)}</td>
@@ -394,7 +385,6 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
 
   const candidateUrl = candidateUrlFor(origin, contest.slug);
   const invigilatorUrl = invigilatorUrlFor(origin, contest.slug, contest.invigilator_key);
-  const isLegacy = contest.legacy;
 
   // S-I §1.4.5 guard-aware problems save: open-contest ADDs need confirm:true,
   // points edits need the typed contest slug; removal of a problem with stored
@@ -461,36 +451,30 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
           <h2 className="flex flex-wrap items-center gap-2 text-xl font-semibold text-ink">
             {contest.name}
             <StatusChip status={contest.status} />
-            {isLegacy ? <LegacyBadge /> : <LifecycleBadge contest={contest} />}
+            <LifecycleBadge contest={contest} />
           </h2>
           <p className="mt-1 font-mono text-xs text-muted">{contest.slug}{contest.template_slug ? ` · from template ${contest.template_slug}` : ""}</p>
         </div>
-        {!isLegacy ? (
-          <div className="flex gap-2">
-            {contest.status === "draft" ? (
-              <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await setContestStatusApi(password, contest.slug, "open"); })}>
-                Open contest
-              </button>
-            ) : null}
-            {contest.status === "open" ? (
-              <button className="focus-ring inline-flex h-9 items-center rounded-md border border-danger/40 px-4 text-sm font-medium text-danger disabled:opacity-50" disabled={busy} onClick={() => { if (window.confirm("Archive this contest? Candidates can no longer start or resume.")) void runMutation(async () => { await setContestStatusApi(password, contest.slug, "archived"); }); }}>
-                Archive
-              </button>
-            ) : null}
-            {contest.status === "archived" ? (
-              <button className="focus-ring inline-flex h-9 items-center rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await setContestStatusApi(password, contest.slug, "open"); })}>
-                Reopen
-              </button>
-            ) : null}
-          </div>
-        ) : null}
+        <div className="flex gap-2">
+          {contest.status === "draft" ? (
+            <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await setContestStatusApi(password, contest.slug, "open"); })}>
+              Open contest
+            </button>
+          ) : null}
+          {contest.status === "open" ? (
+            <button className="focus-ring inline-flex h-9 items-center rounded-md border border-danger/40 px-4 text-sm font-medium text-danger disabled:opacity-50" disabled={busy} onClick={() => { if (window.confirm("Archive this contest? Candidates can no longer start or resume.")) void runMutation(async () => { await setContestStatusApi(password, contest.slug, "archived"); }); }}>
+              Archive
+            </button>
+          ) : null}
+          {contest.status === "archived" ? (
+            <button className="focus-ring inline-flex h-9 items-center rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" disabled={busy} onClick={() => void runMutation(async () => { await setContestStatusApi(password, contest.slug, "open"); })}>
+              Reopen
+            </button>
+          ) : null}
+        </div>
       </div>
 
-      {isLegacy ? (
-        <p className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
-          This is the legacy exam synthesized from the global Settings — it has no contest document, so links/codes/edits are not available here. It keeps running exactly as configured on the Settings tab.
-        </p>
-      ) : (
+      <>
         <>
           {/* Links + codes (vision §2.7: URLs are derived). */}
           <div className="mb-4 grid gap-3 lg:grid-cols-2">
@@ -659,13 +643,8 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
           {/* Data lifecycle (S-G/S-H, vision §2.16): export → triple-gated purge
               → tombstone + the evidence-retention countdown. */}
           <DataLifecycleSection password={password} contest={contest} busy={busy} runMutation={runMutation} />
-
-          {/* Legacy "Adopt into person model" (vision §2.15) — backfill a
-              contest that ran before the person layer into person_ids so it
-              shows up on cross-round scorecards. */}
-          <AdoptIntoPersonSection password={password} contest={contest} />
         </>
-      )}
+      </>
     </section>
   );
 }
@@ -827,124 +806,6 @@ function DataLifecycleSection({ password, contest, busy, runMutation }: {
       </div>
 
       <p className="mt-2 text-[11px] text-muted">Lifecycle phase: <b>{phase.label}</b></p>
-    </div>
-  );
-}
-
-// S-J §2.15 — the one-time legacy adoption action. Re-upload the contest's
-// roster WITH the college column; the backend mints persons/colleges/enrollments
-// and stamps person_id onto the existing sessions/submissions (username_norm
-// stays FROZEN). After adoption the contest appears on person scorecards and can
-// seed a carry-over Round 2. Reuses the S-C parseRoster + college map-or-confirm
-// gate, but POSTs to /api/admin/contest-adopt.
-function AdoptIntoPersonSection({ password, contest }: { password: string; contest: ContestSummary }) {
-  const [open, setOpen] = useState(false);
-  const [parsed, setParsed] = useState<ReturnType<typeof parseRoster> | null>(null);
-  const [fileName, setFileName] = useState("");
-  const [uniqueIdColumn, setUniqueIdColumn] = useState("");
-  const [mapping, setMapping] = useState<ReturnType<typeof suggestMapping>["mapping"]>({});
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const [collegeGate, setCollegeGate] = useState<{ new_colleges: { college_norm: string; name: string; rows: number }[] } | null>(null);
-  const [collegeDecisions, setCollegeDecisions] = useState<Record<string, string>>({});
-
-  const adoptedAt = (contest as ContestSummary & { adopted_into_person_model_at?: string }).adopted_into_person_model_at;
-
-  const onFile = async (file: File | null) => {
-    setMessage(""); setError(""); setCollegeGate(null);
-    if (!file) return;
-    const text = await file.text();
-    const result = parseRoster(text);
-    if (!result.columns.length || !result.rows.length) {
-      setParsed(null);
-      setError(result.errors[0] || "Could not read any rows from that file.");
-      return;
-    }
-    const suggestion = suggestMapping(result.columns);
-    setParsed(result);
-    setFileName(file.name);
-    setUniqueIdColumn(suggestion.uniqueIdColumn);
-    setMapping(suggestion.mapping);
-  };
-
-  const adopt = async (decisions?: Record<string, string>) => {
-    if (!parsed || !uniqueIdColumn) return;
-    setBusy(true); setMessage(""); setError("");
-    try {
-      const response = await adoptContestIntoPersonModel(password, {
-        contest: contest.slug,
-        unique_id_column: uniqueIdColumn,
-        columns: parsed.columns,
-        column_mapping: mapping,
-        rows: parsed.rows,
-        ...(decisions ? { college_resolutions: buildCollegeResolutions(decisions) } : {})
-      }) as Record<string, unknown>;
-      if (response.needs_college_confirmation) {
-        const newColleges = (response.new_colleges as { college_norm: string; name: string; rows: number }[]) ?? [];
-        setCollegeGate({ new_colleges: newColleges });
-        setCollegeDecisions(Object.fromEntries(newColleges.map((c) => [c.college_norm, ""])));
-        return;
-      }
-      setCollegeGate(null);
-      setMessage(
-        `Adopted into the person model: ${response.sessions_stamped ?? 0} session(s) and ${response.submissions_stamped ?? 0} submission(s) stamped, ` +
-        `${(response.persons as { created?: number })?.created ?? 0} person(s) created. This contest now appears on cross-round scorecards.`
-      );
-      setParsed(null); setFileName("");
-    } catch (cause) {
-      const apiError = cause as ApiError;
-      if (apiError?.code === "duplicate_unique_ids") { setError("Duplicate candidates in the file — fix the rows and re-upload. Nothing was changed."); return; }
-      if (apiError?.code === "college_required") { setError("A college cell is blank — every row needs a college. Nothing was changed."); return; }
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="mt-4 rounded-md border border-line bg-white/60 p-4">
-      <button className="focus-ring flex w-full items-center justify-between text-left" onClick={() => setOpen((value) => !value)}>
-        <span className="inline-flex items-center gap-2 text-sm font-semibold text-ink"><UserPlus size={15} /> Adopt into person model</span>
-        <span className="text-xs text-muted">{adoptedAt ? "Adopted" : open ? "Hide" : "Backfill legacy data"}</span>
-      </button>
-      {open ? (
-        <div className="mt-3 space-y-3 text-sm">
-          <p className="text-xs text-muted">
-            For a contest that ran before the person model: re-upload its roster <b>with a college column</b>. The candidates' existing sessions and scores get linked to durable persons (keys stay frozen), so this contest shows up on cross-round scorecards and can seed a Round 2.
-          </p>
-          {adoptedAt ? (
-            <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent">Already adopted on {new Date(adoptedAt).toLocaleString()}. Re-uploading refreshes the link (safe, idempotent).</p>
-          ) : null}
-          <input className="block w-full text-xs" type="file" accept=".csv,text/csv" onChange={(event) => void onFile(event.target.files?.[0] ?? null)} />
-          {parsed ? (
-            <div className="space-y-2">
-              <p className="text-xs text-muted">Loaded <b>{fileName}</b>: {parsed.rows.length} row(s). ID column: <span className="font-mono">{uniqueIdColumn}</span>.</p>
-              {!collegeGate ? (
-                <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-xs font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void adopt()}>
-                  <UserPlus size={14} /> {busy ? "Adopting…" : "Adopt this roster"}
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {collegeGate ? (
-            <div className="space-y-2 rounded-md border border-warning/40 bg-warning/10 p-3">
-              <p className="text-xs font-medium text-warning">This upload introduces new college name(s). Map each to an existing college or create it, then adopt.</p>
-              {collegeGate.new_colleges.map((c) => (
-                <div key={c.college_norm} className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-mono">{c.name} ({c.rows} row{c.rows === 1 ? "" : "s"})</span>
-                  <span className="text-muted">create as "{c.name}"</span>
-                </div>
-              ))}
-              <button className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-ink px-4 text-xs font-medium text-white disabled:opacity-50" disabled={busy} onClick={() => void adopt(collegeDecisions)}>
-                {busy ? "Adopting…" : "Confirm & adopt"}
-              </button>
-            </div>
-          ) : null}
-          {message ? <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent">{message}</p> : null}
-          {error ? <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</p> : null}
-        </div>
-      ) : null}
     </div>
   );
 }

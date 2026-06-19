@@ -922,13 +922,13 @@ test("exec membership: a session bound to a REAL contest may exec only that cont
   __setJudge0AdapterForTest(null);
 });
 
-test("legacy canary: contest_slug with NO real doc (synthesized legacy) keeps today's bank-only path", async () => {
+test("orphaned-slug canary: contest_slug with NO real doc keeps the bank-only path", async () => {
   advanceClock(3600_000);
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSecondProblem(firestore);
-  // No contest doc for this slug — the legacy deployment shape (slug derived
-  // from contest_url). Membership must NOT be enforced; bank/seed points apply.
+  // No contest doc for this slug (an orphaned session). Membership must NOT be
+  // enforced; bank/seed points apply.
   firestore.collection(process.env.SESSION_COLLECTION).doc("leg-1").set({
     session_id: "leg-1", status: "active", username_norm: "bob", contest_slug: "kec-aerele-2026"
   });

@@ -264,7 +264,7 @@ test("college canonicalization gate: unknown college → needs_college_confirmat
   for (const colName of ["ic_colleges", "ic_persons", "ic_enrollments"]) {
     assert.equal(firestore._collections.get(colName)?.size ?? 0, 0, colName);
   }
-  assert.equal(firestore._collections.get("ic_settings").has(rosterMetaIdFor(contest.slug)), false);
+  assert.equal(firestore._collections.get("ic_settings")?.has(rosterMetaIdFor(contest.slug)) ?? false, false);
 });
 
 test("confirmed re-post with create resolution: colleges/persons/enrollments/entries/meta written with exact shapes", async () => {
@@ -519,16 +519,8 @@ test("per-contest clear: purges the active version's entries + flips meta off; e
   assert.equal(firestore._collections.get("ic_enrollments").size, 1); // never deleted
 });
 
-test("per-contest roster upload refuses the legacy contest and unknown contests", async () => {
-  const { firestore } = freshClients();
-  // Legacy settings doc exists → a synthesized legacy contest with slug "legacy".
-  await firestore.collection("ic_settings").doc("active").set({
-    start_at: "2026-06-10T03:30:00.000Z", end_at: "2026-06-10T06:30:00.000Z"
-  });
-  const legacy = await call(uploadReq(personUpload("legacy", [ROW_ASHA])));
-  assert.equal(legacy.statusCode, 400);
-  assert.equal(legacy.body.error, "per_contest_roster_requires_person_contest");
-
+test("per-contest roster upload refuses unknown contests", async () => {
+  freshClients();
   const unknown = await call(uploadReq(personUpload("nope", [ROW_ASHA])));
   assert.equal(unknown.statusCode, 400);
   assert.equal(unknown.body.error, "unknown_contest");

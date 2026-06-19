@@ -1,19 +1,13 @@
 // backend/src/contests.mjs
-// S-B (SHIPS DARK): the proctor_contests collection + the two scoping
-// chokepoints every FUTURE contest-scoped read goes through.
+// S-B: the proctor_contests collection + the two scoping chokepoints every
+// contest-scoped read goes through.
 //
 // Specs:
 //   docs/superpowers/specs/2026-06-10-f10-product-vision.md  §2.7 (doc shape),
 //     §7 row S-B (identity_mode enum), §10.3 (typed access code)
 //   docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //     §2.1 (F9 contest doc, frozen), §2.3 (no-bleed mechanisms), §3 (lifecycle
-//     placeholders), §6 (legacy-contest synthesis)
-//
-// NOTHING in the production candidate/session flow reads any of this yet —
-// handler.mjs only wires the new ADMIN endpoints onto these functions. The
-// legacy exam keeps running off the SETTINGS_ID="active" doc bit-for-bit; it
-// surfaces here only as a READ-ONLY synthesized contest (legacy:true) so the
-// future Contests tab shows today's exam without migration.
+//     placeholders)
 import { randomBytes, randomInt } from "node:crypto";
 import { SUPPORTED_LANGUAGES } from "./problems.mjs";
 import {
@@ -26,9 +20,8 @@ import { contestProblemEntries } from "./contestProblems.mjs";
 
 export const CONTEST_STATUSES = ["draft", "open", "archived"];
 // F10 §7 row S-B: "unique_id" is deleted from the design before any code
-// exists. New contests are ALWAYS "person"; "legacy_username" exists only on
-// the synthesized legacy contest and can never be created or assigned.
-export const IDENTITY_MODES = ["person", "legacy_username"];
+// exists. Every contest is "person".
+export const IDENTITY_MODES = ["person"];
 
 const NAME_MAX = 200;
 const IDENTITY_LABEL_MAX = 80;
@@ -63,8 +56,8 @@ export const ALL_CONTESTS = Symbol("ALL_CONTESTS");
 // instance) so the __setClientsForTest fakes propagate here too — the exact
 // configureProblemStore pattern.
 let store = null;
-export function configureContestStore({ getFirestore, collection, settingsCollection, settingsId, dataCollections }) {
-  store = { getFirestore, collection, settingsCollection, settingsId, dataCollections: dataCollections || [] };
+export function configureContestStore({ getFirestore, collection, dataCollections }) {
+  store = { getFirestore, collection, dataCollections: dataCollections || [] };
 }
 
 // Injectable RNG seam for deterministic access-code collision tests (mirrors
@@ -85,11 +78,6 @@ function contestsCol() {
 
 function contestRef(slug) {
   return contestsCol().doc(slug);
-}
-
-async function getActiveSettings() {
-  const doc = await db().collection(store.settingsCollection).doc(store.settingsId).get();
-  return doc.exists ? doc.data() : null;
 }
 
 // ---- slugify (F8 decision 1 / F9 §2.1) --------------------------------------
@@ -116,7 +104,7 @@ export async function createContest(body) {
   const baseSlug = slugify(name);
   if (!baseSlug) throw httpError(400, "name must contain letters or digits");
   if (body?.identity_mode !== undefined && body.identity_mode !== "person") {
-    // "legacy_username" is synth-only; "unique_id" never ships (F10 §7 S-B).
+    // "unique_id" never ships (F10 §7 S-B); every contest is "person".
     throw httpError(400, "identity_mode must be \"person\"");
   }
 
@@ -145,20 +133,17 @@ export async function createContest(body) {
     && String(body.access_code).trim() !== "";
   const accessCode = hasCustomCode ? normalizeCustomAccessCode(body.access_code) : await mintAccessCode();
   if (hasCustomCode) await requireCodeFreeAmongOpenContests(accessCode, null);
-  const legacy = await synthesizeLegacyContest();
   const now = new Date().toISOString();
 
   // Atomic .create() decides slug ownership — two concurrent creates of the
   // same name can never overwrite each other; the loser walks to the next
-  // suffix. The synthesized legacy slug is skipped outright so a new contest
-  // can never shadow today's legacy exam data — and so is any HISTORIC legacy
-  // slug (wave-4 fix): sessions/submissions/alerts from earlier exam runs
-  // carry contest_slug values derived from old contest_url settings, which
-  // look exactly like slugify output. Adopting one would resolve that whole
-  // old population onto the new contest doc (contestForSession, scopedQuery).
+  // suffix. Any HISTORIC slug carrying orphaned data (wave-4 fix) is skipped:
+  // sessions/submissions/alerts from earlier exam runs carry contest_slug
+  // values that look exactly like slugify output. Adopting one would resolve
+  // that whole old population onto the new contest doc (contestForSession,
+  // scopedQuery).
   for (let n = 1; n <= SLUG_COLLISION_LIMIT; n++) {
     const slug = n === 1 ? baseSlug : `${baseSlug}-${n}`;
-    if (legacy && legacy.slug === slug) continue;
     if (await slugCarriesOrphanedData(slug)) continue;
     const item = {
       slug,
@@ -242,8 +227,7 @@ export async function updateContest(slugRaw, body) {
   if (body?.enforcement !== undefined) patch.enforcement = normalizeTemplateEnforcement(body.enforcement);
   if (body?.languages !== undefined) patch.languages = normalizeContestLanguages(body.languages);
   if (body?.room_gate_enabled !== undefined) patch.room_gate_enabled = requireBoolean(body.room_gate_enabled, "room_gate_enabled");
-  // S-D: per-contest rooms list (vision §2.12) — same sanitize/dedupe rules as
-  // the legacy settings rooms editor.
+  // S-D: per-contest rooms list (vision §2.12) — sanitize/dedupe rules below.
   if (body?.rooms !== undefined) patch.rooms = normalizeContestRooms(body.rooms);
   if (body?.name !== undefined) {
     const name = String(body.name).trim();
@@ -300,8 +284,7 @@ export async function setContestStatus(slugRaw, statusRaw) {
 // W4: set a CUSTOM test code (the admin's chosen handout code). Normalization
 // and shape mirror the minted codes — anything outside ACCESS_CODE_PATTERN
 // would be untypeable on the candidate landing page (candidateRouting.ts pins
-// the same 6-char alphabet client-side). The synthesized legacy contest 404s
-// via getRealContest like every other write path.
+// the same 6-char alphabet client-side).
 export async function setContestAccessCode(slugRaw, codeRaw) {
   const existing = await getRealContest(slugRaw);
   const code = normalizeCustomAccessCode(codeRaw);
@@ -313,7 +296,7 @@ export async function setContestAccessCode(slugRaw, codeRaw) {
 
 // S-D: regenerate one of the contest's two distribution secrets. The old value
 // dies instantly — printed handouts/links go stale by design (that is the
-// point of regenerating). Legacy contest -> 404 via getRealContest.
+// point of regenerating).
 export async function regenerateContestSecret(slugRaw, fieldRaw) {
   const field = String(fieldRaw ?? "");
   if (field !== "access_code" && field !== "invigilator_key") {
@@ -344,8 +327,7 @@ export async function resolveAccessCode(codeRaw) {
   return { slug: match.slug, name: match.name || match.slug };
 }
 
-// S-D: per-contest exam-time (S5 semantics moved onto the contest doc) —
-// mirrors the legacy /api/admin/exam-time contract field-for-field: exactly
+// S-D: per-contest exam-time (S5 semantics on the contest doc) — exactly
 // one of end_at | extend_minutes | end_now, schedule must already be set,
 // the end must stay after the start, end_at_updated_at stamps the edit.
 // The HANDLER ends live sessions on end_now (it owns the session collection).
@@ -390,9 +372,7 @@ export async function applyContestExamTime(slugRaw, body) {
   return { contest: item, field, now };
 }
 
-// A REAL contest doc or 404. The synthesized legacy contest deliberately falls
-// through to 404 here: it has no doc, so every write path refuses it (F9 §6 —
-// nothing legacy is ever rewritten).
+// A REAL contest doc or 404.
 async function getRealContest(slugRaw) {
   const slug = String(slugRaw ?? "").trim();
   if (!slug) throw httpError(404, "contest_not_found");
@@ -406,83 +386,26 @@ async function getRealContest(slugRaw) {
 export async function listContests({ includeArchived = false } = {}) {
   const snapshot = await contestsCol().limit(CONTESTS_QUERY_LIMIT).get();
   const realDocs = snapshot.docs.map((doc) => doc.data());
-  const contests = realDocs
+  return realDocs
     .filter((contest) => includeArchived || contest.status !== "archived")
-    .map((contest) => ({ ...contest, legacy: false }))
     .sort(
       (a, b) =>
         String(b.created_at || "").localeCompare(String(a.created_at || "")) ||
         String(a.slug || "").localeCompare(String(b.slug || ""))
     );
-  // Legacy synthesis rides the LIST read (F9 §6, read-only): today's exam shows
-  // up without migration — unless a real doc (future import/adoption) already
-  // owns that slug.
-  const legacy = await synthesizeLegacyContest();
-  if (legacy && !realDocs.some((contest) => contest.slug === legacy.slug)) {
-    contests.push(legacy);
-  }
-  return contests;
-}
-
-// ---- legacy-contest synthesis (F9 §6) --------------------------------------------
-// Derived ON READ from the SETTINGS_ID="active" doc; never written anywhere.
-// slug = settings.contest_slug || slug(contest_url) || "legacy". When neither
-// source yields a slug, this deployment's legacy sessions were stamped
-// contest_slug:"" — legacy_empty_slug:true makes scopedQuery translate to the
-// `== ""` filter.
-export async function synthesizeLegacyContest() {
-  const settings = await getActiveSettings();
-  if (!settings) return null;
-  const storedSlug = String(settings.contest_slug || "") || legacySlugFromUrl(settings.contest_url);
-  const slug = storedSlug || "legacy";
-  return {
-    slug,
-    name: slug,
-    legacy: true,
-    legacy_empty_slug: !storedSlug,
-    status: "open",
-    listed: true,
-    identity_mode: "legacy_username",
-    identity_label: IDENTITY_LABEL_DEFAULT,
-    access_code: null,
-    invigilator_key: null,
-    start_at: settings.start_at || null,
-    end_at: settings.end_at || null,
-    end_at_updated_at: settings.end_at_updated_at || null,
-    room_gate_enabled: Boolean(settings.room_gate_enabled),
-    rooms: Array.isArray(settings.rooms) ? settings.rooms : [],
-    // S-I: the legacy single-problem assignment rides the synthesized doc so
-    // contestProblemEntries (the §1.3 shim) reads it like any other contest.
-    problem_id: String(settings.problem_id || ""),
-    template_slug: null,
-    created_at: null,
-    updated_at: settings.updated_at || null,
-    selection_done_at: null,
-    evidence_retention_days: RETENTION_DAYS_DEFAULT,
-    evidence_purged_at: null,
-    db_purged_at: null,
-    evidence_prefixes: null,
-    last_export: null
-  };
 }
 
 // ---- resolveContest (F9 §2.3.1) ----------------------------------------------------
-// THE mandatory resolver for future candidate/contest-scoped paths: slug (or a
+// THE mandatory resolver for every candidate/contest-scoped path: slug (or a
 // req carrying ?contest= / {contest}) → contest doc, or 400 unknown_contest /
-// 403 contest_not_open. The synthesized legacy contest resolves read-only.
+// 403 contest_not_open.
 
 export async function resolveContest(reqOrSlug, { requireOpen = true } = {}) {
   const slug = contestParamOf(reqOrSlug);
   if (!slug) throw httpError(400, "unknown_contest");
-  let contest = null;
   const doc = await contestRef(slug).get();
-  if (doc.exists) {
-    contest = { ...doc.data(), legacy: false };
-  } else {
-    const legacy = await synthesizeLegacyContest();
-    if (legacy && legacy.slug === slug) contest = legacy;
-  }
-  if (!contest) throw httpError(400, "unknown_contest");
+  if (!doc.exists) throw httpError(400, "unknown_contest");
+  const contest = doc.data();
   if (requireOpen && contest.status !== "open") throw httpError(403, "contest_not_open");
   return contest;
 }
@@ -516,8 +439,7 @@ export function scopedQuery(queryable, contest) {
   if (!contest || typeof contest !== "object" || typeof contest.slug !== "string" || !contest.slug) {
     throw httpError(500, "scopedQuery requires a resolved contest or ALL_CONTESTS");
   }
-  const filterValue = contest.legacy_empty_slug ? "" : contest.slug;
-  return queryable.where("contest_slug", "==", filterValue);
+  return queryable.where("contest_slug", "==", contest.slug);
 }
 
 // ---- access code ----------------------------------------------------------------------
@@ -643,8 +565,7 @@ function normalizeRetentionDays(raw) {
 }
 
 // Window fields are OPTIONAL in draft (the publish gate enforces presence at
-// S-D); each provided value must parse, and when both are set start < end —
-// the same rule adminSaveSettings enforces today.
+// S-D); each provided value must parse, and when both are set start < end.
 function normalizeWindow(startRaw, endRaw) {
   const start_at = parseWindowDate(startRaw, "start_at");
   const end_at = parseWindowDate(endRaw, "end_at");
@@ -661,25 +582,7 @@ function parseWindowDate(raw, field) {
   return new Date(ms).toISOString();
 }
 
-// ---- small local helpers (kept module-local: importing them from handler.mjs
-// would make the dependency circular) ------------------------------------------------------
-
-// Mirrors handler.mjs sanitizeSegment + contestSlugFromUrl for the ONE legacy
-// derivation above: last non-empty path segment of contest_url, doc-id safe.
-function legacySlugFromUrl(contestUrl) {
-  if (!contestUrl) return "";
-  let pathname;
-  try {
-    pathname = new URL(String(contestUrl)).pathname;
-  } catch {
-    return "";
-  }
-  const segments = String(pathname).split("/").filter(Boolean);
-  if (!segments.length) return "";
-  const cleaned = String(segments[segments.length - 1]).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
-  return cleaned;
-}
+// ---- small local helpers ----------------------------------------------------
 
 function isAlreadyExists(err) {
   return err?.code === 6 || /ALREADY_EXISTS/i.test(String(err?.message || ""));

@@ -275,22 +275,17 @@ test("GET unknown problem -> 404; invalid id -> 400", async () => {
   assert.equal((await call(makeReq({ method: "GET", path: "/api/admin/problem", headers: ADMIN, query: { id: "a/b" } }))).statusCode, 400);
 });
 
-test("delete removes the doc and clears a matching active problem_id from settings", async () => {
+test("delete removes the doc when nothing references it", async () => {
   const { firestore } = freshClients();
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
-  firestore.collection("problems_settings").doc("active").set({
-    start_at: "2026-01-01T00:00:00.000Z", end_at: "2027-01-01T00:00:00.000Z", problem_id: "rev-str"
-  });
   const res = await call(makeReq({ method: "POST", path: "/api/admin/problem-delete", headers: ADMIN, body: { id: "rev-str" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(firestore._collections.get("problems_bank").has("rev-str"), false);
-  assert.equal(firestore._collections.get("problems_settings").get("active").problem_id, "");
 });
 
 // ---- S-I §1.4.3: live-reference guard ----------------------------------------
-// Deleting/unpublishing a referenced problem 409s with the referencing slugs;
-// silent assignment-clearing survives ONLY for the legacy settings doc. Hidden-
-// test edits on a problem referenced by an OPEN contest demand a typed confirm.
+// Deleting/unpublishing a referenced problem 409s with the referencing slugs.
+// Hidden-test edits on a problem referenced by an OPEN contest demand a typed confirm.
 
 function seedContest(firestore, slug, status, problems) {
   firestore.collection("proctor_contests").doc(slug).set({ slug, status, problems });
@@ -313,20 +308,15 @@ test("guard: delete of a contest/template-referenced problem -> 409 problem_refe
   assert.equal(firestore._collections.get("problems_bank").has("rev-str"), true); // nothing deleted
 });
 
-test("guard: archived contests/templates do NOT block deletion; the legacy settings clear still happens", async () => {
+test("guard: archived contests/templates do NOT block deletion", async () => {
   const { firestore } = freshClients();
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
   seedContest(firestore, "old-contest", "archived", [{ problem_id: "rev-str" }]);
   seedTemplateDoc(firestore, "old-tpl", [{ problem_id: "rev-str" }], true);
-  firestore.collection("problems_settings").doc("active").set({
-    start_at: "2026-01-01T00:00:00.000Z", end_at: "2027-01-01T00:00:00.000Z", problem_id: "rev-str"
-  });
 
   const res = await call(makeReq({ method: "POST", path: "/api/admin/problem-delete", headers: ADMIN, body: { id: "rev-str" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(firestore._collections.get("problems_bank").has("rev-str"), false);
-  // The LEGACY contest path keeps its silent clearing branch (spec §1.4.3).
-  assert.equal(firestore._collections.get("problems_settings").get("active").problem_id, "");
 });
 
 test("guard: unpublish while contest-referenced -> 409; while ONLY template-referenced -> allowed", async () => {
@@ -399,61 +389,10 @@ test("guard: adminGetProblem reports its references (contests + templates)", asy
   assert.deepEqual(res.body.references, { contests: ["kec-r1"], templates: ["apt-tpl"] });
 });
 
-// ---- Task 3: settings problem_id + public problem in start/resume -----------
-
-const GATE = { start_at: "2026-01-01T00:00:00.000Z", end_at: "2027-01-01T00:00:00.000Z" };
-
-test("settings save validates problem_id: unknown/draft -> 400; published bank doc or built-in seed -> saved + echoed", async () => {
-  freshClients();
-  const unknown = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
-    body: { ...GATE, problem_id: "ghost" } }));
-  assert.equal(unknown.statusCode, 400);
-
-  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem({ id: "draft-one", status: "draft" }) }));
-  const draft = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
-    body: { ...GATE, problem_id: "draft-one" } }));
-  assert.equal(draft.statusCode, 400);
-
-  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
-  const published = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
-    body: { ...GATE, problem_id: "rev-str" } }));
-  assert.equal(published.statusCode, 200);
-  assert.equal(published.body.problem_id, "rev-str");
-
-  // built-in seed counts as assignable even with no Firestore doc
-  const seed = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN,
-    body: { ...GATE, problem_id: "sum-two" } }));
-  assert.equal(seed.statusCode, 200);
-
-  const echoed = await call(makeReq({ method: "GET", path: "/api/admin/settings", headers: ADMIN }));
-  assert.equal(echoed.body.problem_id, "sum-two");
-});
-
-test("resume payload carries the PUBLIC problem view — never hiddenTests; null when unassigned", async () => {
-  const { firestore } = freshClients();
-  firestore.collection("problems_sessions").doc("s1").set({
-    session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
-  });
-  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
-  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
-
-  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.problem.id, "rev-str");
-  assert.equal(res.body.problem.title, "Reverse");
-  assert.equal(res.body.problem.points, 80);
-  assert.equal(res.body.problem.cpuTimeLimit, 2);
-  assert.deepEqual(res.body.problem.sampleTests, [{ input: "ab\n", expected: "ba" }]);
-  assert.equal(res.body.problem.hiddenTests, undefined); // the §9 lock extends to the bank
-  assert.equal(res.body.problem.status, undefined);      // lifecycle is admin-only
-
-  // unassigned -> problem: null (legacy link-flow fallback)
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
-  const bare = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
-  assert.equal(bare.body.problem, null);
-});
-
 // ---- S-I §3.4: multi-problem start/resume payload -------------------------------
+
+// A wide-open window for contest fixtures.
+const GATE = { start_at: "2026-01-01T00:00:00.000Z", end_at: "2027-01-01T00:00:00.000Z" };
 
 test("resume for a REAL-contest session serves the contest's ordered problems[] + summary + budget (S-I §3.4)", async () => {
   const { firestore } = freshClients();
@@ -469,7 +408,6 @@ test("resume for a REAL-contest session serves the contest's ordered problems[] 
     session_id: "ms1", status: "active", username_norm: "alice",
     contest_slug: "kec-r1", storage_prefix: "contests/kec-r1/sessions/alice/ms1/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ms1" } }));
   assert.equal(res.statusCode, 200);
@@ -498,7 +436,6 @@ test("resume restores submissions_summary from stored submissions (chips/totals 
     session_id: "ms2", status: "active", username_norm: "alice", contest_slug: "kec-r1",
     storage_prefix: "contests/kec-r1/sessions/alice/ms2/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
   // Two stored submissions for THIS session; one for another session (ignored).
   firestore.collection("problems_submissions").doc("a").set({
     session_id: "ms2", problem_id: "sum-two", score: 40, max_points: 100,
@@ -522,26 +459,6 @@ test("resume restores submissions_summary from stored submissions (chips/totals 
   assert.equal(cell.last_submitted_at, "2026-06-10T04:20:00.000Z");
 });
 
-test("legacy canary: a settings-assigned session keeps the EXACT problem shape; problems[] mirrors it with order 0", async () => {
-  const { firestore } = freshClients();
-  firestore.collection("problems_sessions").doc("s1").set({
-    session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
-  });
-  await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
-  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
-
-  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
-  // The alias is BYTE-IDENTICAL to the pre-S-I public problem view.
-  assert.deepEqual(Object.keys(res.body.problem).sort(),
-    ["cpuTimeLimit", "id", "languages", "memoryLimit", "points", "sampleTests", "statement", "title"]);
-  assert.equal(res.body.problem.points, 80);
-  // problems[] carries the same problem once, with order 0 added.
-  assert.equal(res.body.problems.length, 1);
-  assert.equal(res.body.problems[0].id, "rev-str");
-  assert.equal(res.body.problems[0].order, 0);
-  assert.equal(res.body.submit_budget, 50);
-});
-
 test("contest languages intersect per-problem languages at serve time (S-I §1.1 defaults)", async () => {
   const { firestore } = freshClients();
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN,
@@ -554,7 +471,6 @@ test("contest languages intersect per-problem languages at serve time (S-I §1.1
     session_id: "ls1", status: "active", username_norm: "alice", contest_slug: "lang-c",
     storage_prefix: "contests/lang-c/sessions/alice/ls1/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "ls1" } }));
   assert.deepEqual(res.body.problems[0].languages, ["python"]);
@@ -566,7 +482,6 @@ test("a problem UNPUBLISHED after assignment degrades to problem: null (no dead 
     session_id: "s1", status: "active", username_norm: "alice", contest_slug: "", storage_prefix: "sessions/alice/s1/"
   });
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem() }));
-  firestore.collection("problems_settings").doc("active").set({ ...GATE, problem_id: "rev-str" });
   await call(makeReq({ method: "POST", path: "/api/admin/problems", headers: ADMIN, body: validProblem({ status: "draft" }) }));
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
   assert.equal(res.body.problem, null);
@@ -635,7 +550,6 @@ test("F12.2: stubs ride the candidate problems[] payload for a contest session",
     session_id: "st1", status: "active", username_norm: "alice", contest_slug: "kec-r1",
     storage_prefix: "contests/kec-r1/sessions/alice/st1/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "st1" } }));
   assert.equal(res.statusCode, 200);
@@ -656,7 +570,6 @@ test("F12.2: a problem WITHOUT stubs serves NO stubs key in problems[] (byte-com
     session_id: "st2", status: "active", username_norm: "bob", contest_slug: "kec-r2",
     storage_prefix: "contests/kec-r2/sessions/bob/st2/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "st2" } }));
   assert.equal(res.statusCode, 200);
@@ -686,7 +599,6 @@ test("F12.2: stubs flow through a TEMPLATE-instantiated contest's candidate payl
     session_id: "st3", status: "active", username_norm: "carol", contest_slug: contestSlug,
     storage_prefix: `contests/${contestSlug}/sessions/carol/st3/`
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "st3" } }));
   assert.equal(res.statusCode, 200);
@@ -752,7 +664,6 @@ test("W6: statement_format rides the candidate problems[] payload + the one-rele
     session_id: "md1", status: "active", username_norm: "alice", contest_slug: "md-c",
     storage_prefix: "contests/md-c/sessions/alice/md1/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "md1" } }));
   assert.equal(res.statusCode, 200);
@@ -773,7 +684,6 @@ test("W6: a plain problem serves NO statement_format key in problems[] (byte-com
     session_id: "pl1", status: "active", username_norm: "bob", contest_slug: "pl-c",
     storage_prefix: "contests/pl-c/sessions/bob/pl1/"
   });
-  firestore.collection("problems_settings").doc("active").set({ ...GATE });
 
   const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "pl1" } }));
   assert.equal(res.statusCode, 200);

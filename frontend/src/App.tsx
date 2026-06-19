@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { adjustContestExamTime, adjustExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchCandidateRoute, fetchContests, fetchContestExamConfig, fetchExamConfig, fetchIpReport, fetchProctorSettings, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveProctorSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
+import { adjustContestExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchContests, fetchContestExamConfig, fetchIpReport, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
 import { addAllToSelection, isAllSelected, removeFromSelection, toggleId, usernamesForSelection } from "./alertSelection";
 import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
@@ -31,7 +31,7 @@ import { elapsedTimerActive, shellHeaderMode } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
-import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, rosterLookupErrorMessage, routeForNoParam, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
+import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, rosterLookupErrorMessage, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
 import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
@@ -44,9 +44,8 @@ import { candidateIdOf } from "./identity";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
 
 // S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
-// start/resume response (admin assigns settings.problem_id → public view; see
-// docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md). No problem
-// assigned → the legacy contest_url link flow renders instead.
+// start/resume response (the contest's problems[] → public view; see
+// docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md).
 //
 // Candidate-facing copy is surface-specific (studentCopy.ts): with a problem
 // assigned, no student string may direct the candidate to HackerRank. The copy
@@ -80,9 +79,7 @@ export function App() {
 
 // S-D candidate routing (vision C1 + §10.3). ?contest=<slug> pins the student
 // app to that contest's exam-config; a present-but-bad param shows the
-// access-code landing page; an ABSENT param keeps today's legacy flow while
-// the legacy settings doc exists (the /api/candidate-route probe fails OPEN
-// to legacy so today's deployment can never strand on the code box).
+// access-code landing page; an ABSENT param shows the access-code landing page.
 // Decisions are pure (shell/candidateRouting.ts); this component only fetches.
 function CandidateRouter() {
   const slug = useMemo(() => contestParamOf(window.location.search), []);
@@ -93,23 +90,20 @@ function CandidateRouter() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      if (slug) {
-        try {
-          const config = await fetchContestExamConfig(slug);
-          if (cancelled) return;
-          setPinnedConfig(config);
-          setRoute(routeForPinnedOutcome(slug, { ok: true }));
-        } catch (cause) {
-          const error = cause as ApiError;
-          if (!cancelled) setRoute(routeForPinnedOutcome(slug, { ok: false, status: error?.status, code: error?.code }));
-        }
+      if (!slug) {
+        // No ?contest= → the access-code landing page (every test is reached by
+        // a pinned slug URL or a typed access code).
+        if (!cancelled) setRoute({ kind: "landing", notice: "" });
         return;
       }
       try {
-        const probe = await fetchCandidateRoute();
-        if (!cancelled) setRoute(routeForNoParam({ ok: true, legacy_configured: probe.legacy_configured }));
-      } catch {
-        if (!cancelled) setRoute(routeForNoParam({ ok: false }));
+        const config = await fetchContestExamConfig(slug);
+        if (cancelled) return;
+        setPinnedConfig(config);
+        setRoute(routeForPinnedOutcome(slug, { ok: true }));
+      } catch (cause) {
+        const error = cause as ApiError;
+        if (!cancelled) setRoute(routeForPinnedOutcome(slug, { ok: false, status: error?.status, code: error?.code }));
       }
     })();
     return () => {
@@ -150,7 +144,8 @@ function CandidateRouter() {
   if (route.kind === "contest" && pinnedConfig) {
     return <StudentApp pinned={{ slug: route.slug, config: pinnedConfig }} />;
   }
-  return <StudentApp pinned={null} />;
+  // No resolvable pinned contest → the access-code landing page.
+  return <AccessCodeLanding notice="" />;
 }
 
 // S-D §10.3: the BARE access-code landing page — weak lab machines type a
@@ -222,15 +217,11 @@ type PinnedContest = { slug: string; config: ContestExamConfig };
 
 function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const pinnedSlug = pinned?.slug ?? "";
-  // Person contests take the person-layer start/resume (contest rides the
-  // body); a pinned LEGACY contest keeps the legacy wire calls untouched —
-  // legacy_empty_slug deployments stamp sessions contest_slug:"" so a pinned
-  // resume would 404 a perfectly valid token.
-  const personPinned = pinned?.config.identity_mode === "person";
-  // Per-contest resume token: person contests are keyed by slug so two browser
-  // tabs can run two contests; legacy keeps the historical bare key so
-  // already-deployed sessions survive this release.
-  const sessionKey = sessionStorageKeyFor(personPinned ? pinnedSlug : "");
+  // Every contest is person-mode: the start/resume contest rides the body when
+  // a contest is pinned. Per-contest resume token keyed by slug so two browser
+  // tabs can run two contests without evicting each other's token.
+  const personPinned = Boolean(pinned);
+  const sessionKey = sessionStorageKeyFor(pinnedSlug);
   const [form, setForm] = useState<StudentForm>(initialForm);
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [gate, setGate] = useState<StudentGate>("form");
@@ -238,7 +229,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [sessionId, setSessionId] = useState("");
   const [sessionConfig, setSessionConfig] = useState<SessionStartResponse | null>(null);
   const [identity, setIdentity] = useState<{ name: string; candidate_id: string; room: string } | null>(null);
-  const [contestUrl, setContestUrl] = useState("");
   const [startIp, setStartIp] = useState("");
   const [currentIp, setCurrentIp] = useState("");
   const [ipChanged, setIpChanged] = useState(false);
@@ -360,23 +350,18 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const preSessionEventsRef = useRef<ProctorEvent[]>([]);
 
   const rosterRequired = Boolean(examConfig?.roster_required);
-  const rosterConfirmed = Boolean(form.roster_unique_id);
-  // S-D: which identity form this candidate sees — legacy (lookup-confirm),
-  // person_roster (typed id resolved SERVER-side at start) or person_open
-  // (no-roster person contest: id + details). Pure (candidateRouting.ts).
-  const formMode = candidateFormMode(pinned?.config ?? null, rosterRequired);
-  // S2: while a LEGACY roster is required and unconfirmed, the details form
-  // stays hidden behind the identity-confirm step. Person contests have no
-  // lookup step — the server resolves the typed id at start.
-  const rosterGateActive = formMode === "legacy" && rosterRequired && !rosterConfirmed;
+  // S-D: which identity form this candidate sees — person_roster (typed id
+  // resolved SERVER-side at start) or person_open (no-roster person contest:
+  // id + details). Pure (candidateRouting.ts). Every contest is person-mode.
+  const formMode = candidateFormMode(rosterRequired);
   // S-C/S-D: a person-contest start can 409 with college_choices — the picker
   // renders those choices and the pick rides the retried start as `college`.
   const [collegeChoices, setCollegeChoices] = useState<CollegeChoice[] | null>(null);
   const [collegeChoice, setCollegeChoice] = useState("");
 
   const canStart = useMemo(
-    () => candidateFormReady(formMode, form, rosterRequired) && (!collegeChoices || Boolean(collegeChoice)),
-    [form, rosterRequired, formMode, collegeChoices, collegeChoice]
+    () => candidateFormReady(formMode, form) && (!collegeChoices || Boolean(collegeChoice)),
+    [form, formMode, collegeChoices, collegeChoice]
   );
 
   // S1 exam shell: EVERY proctor event (recorder onEvent + createUiEvent call
@@ -669,7 +654,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const applyServerStatus = (session: SessionStartResponse) => {
     setSessionConfig(session);
     setSessionId(session.session_id);
-    setContestUrl(session.contest_url || "");
     // S3: gate disabled (or absent on an older backend) → released immediately.
     setExamStarted(!session.room_gate_enabled);
     // F5.3/F5.5: enforcement knobs + exemptions + lock reason ride start/resume
@@ -787,20 +771,9 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // S-D: a PINNED contest already carries its exam-config (the router fetched
   // it via ?contest=) — no second fetch, the contest doc is authoritative.
   useEffect(() => {
-    if (pinned) {
-      setExamConfig(pinned.config);
-      if (pinned.config.enforcement) setEnforcementPayload((current) => current ?? pinned.config.enforcement ?? null);
-      return;
-    }
-    let cancelled = false;
-    void fetchExamConfig().then((config) => {
-      if (cancelled) return;
-      setExamConfig(config);
-      if (config.enforcement) setEnforcementPayload((current) => current ?? config.enforcement ?? null);
-    });
-    return () => {
-      cancelled = true;
-    };
+    if (!pinned) return;
+    setExamConfig(pinned.config);
+    if (pinned.config.enforcement) setEnforcementPayload((current) => current ?? pinned.config.enforcement ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1725,27 +1698,9 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
           {isFormStage ? (
             <>
-              {/* S2 (legacy contests only): the roster-lookup confirm flow.
-                  Person contests resolve the typed id SERVER-side at start —
-                  there is no public per-contest lookup endpoint by design. */}
-              {formMode === "legacy" && rosterRequired ? (
-                <IdentityLookupPanel
-                  label={examConfig?.unique_id_label ?? ""}
-                  value={uniqueIdInput}
-                  onChange={setUniqueIdInput}
-                  busy={lookupBusy}
-                  cooldown={lookupCooldownActive}
-                  error={lookupError}
-                  match={rosterMatch}
-                  confirmed={rosterConfirmed}
-                  confirmedId={form.roster_unique_id}
-                  onLookup={() => void lookupRosterId()}
-                  onConfirm={confirmRosterMatch}
-                  onReject={rejectRosterMatch}
-                  onReset={resetRosterIdentity}
-                />
-              ) : null}
-              {!rosterGateActive ? (
+              {/* Every contest is person-mode: the server resolves the typed id
+                  at /api/session/start (no public per-contest lookup endpoint). */}
+              <>
                 <>
                   <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">Your details</p>
                   <div className="grid gap-4 md:grid-cols-2">
@@ -1761,7 +1716,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                         />
                         <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
                       </>
-                    ) : formMode === "person_open" ? (
+                    ) : (
                       <>
                         {/* No-roster person contest (F9 §1.4): id + name +
                             email — no separate roll field (the identity label
@@ -1769,14 +1724,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                         <Field label={examConfig?.unique_id_label || "Candidate ID"} value={form.candidate_id} onChange={(value) => setForm({ ...form, candidate_id: value })} />
                         <Field label="Full name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} />
                         <Field label="Email" type="text" inputMode="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
-                        <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
-                      </>
-                    ) : (
-                      <>
-                        <Field label="Candidate ID" value={form.candidate_id} disabled={rosterConfirmed && Boolean(candidateIdOf(rosterMatch))} onChange={(value) => setForm({ ...form, candidate_id: value })} />
-                        <Field label="Full name" value={form.name} disabled={rosterConfirmed && Boolean(rosterMatch?.name)} onChange={(value) => setForm({ ...form, name: value })} />
-                        <Field label="Roll number" value={form.roll_number} disabled={rosterConfirmed && Boolean(rosterMatch?.roll_number)} onChange={(value) => setForm({ ...form, roll_number: value })} />
-                        <Field label="Email" type="text" inputMode="email" value={form.email} disabled={rosterConfirmed && Boolean(rosterMatch?.email_masked)} onChange={(value) => setForm({ ...form, email: value })} />
                         <RoomField rooms={examConfig?.rooms ?? []} value={form.room} onChange={(value) => setForm({ ...form, room: value })} />
                       </>
                     )}
@@ -1824,7 +1771,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                     </span>
                   </label>
                 </>
-              ) : null}
+              </>
             </>
           ) : null}
 
@@ -1870,19 +1817,6 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
               <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={status === "starting"} onClick={resumeRecording}>
                 <MonitorUp size={16} /> {status === "starting" ? "Resuming…" : "Resume recording"}
               </button>
-            ) : null}
-            {/* Legacy external-contest fallback: shown ONLY when no SERVER
-                problem is assigned. With a problem assigned the own-editor
-                CodingWorkspace below replaces this link entirely. */}
-            {!activeProblem && status === "recording" && mediaCapture.screen === "recording" && contestUrl && !error && !examGateActive ? (
-              <a
-                className="focus-ring inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-white"
-                href={contestUrl}
-                rel="noreferrer"
-                target="_blank"
-              >
-                <ExternalLink size={16} /> Start test
-              </a>
             ) : null}
             {status === "recording" ? (
               <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-danger px-4 py-2 text-sm font-medium text-white" onClick={() => setEndRequested(true)}>
@@ -2300,37 +2234,36 @@ function AdminApp() {
 
   // F3 (E2E live): the Live exam-time card follows the GLOBAL contest scope.
   // Where its display value comes from and where its quick-actions write:
-  //   - no scope            → the legacy settings schedule (clearly labeled)
-  //   - scoped, legacy row  → same legacy schedule (the synthesized contest IS
-  //                           the settings doc)
+  //   - no scope            → the global settings schedule shown read-only
+  //                           (clearly labeled; editing disabled)
   //   - scoped, real row    → THAT contest's window via contest-exam-time —
   //                           the same API the Contest → Detail panel uses
   //   - scoped, unknown slug (deep link / list still loading) → editor disabled,
   //     never silently writing the wrong schedule
   const examTimeScope: ExamTimeCardScope = (() => {
     const slug = alertFilters.contest_slug ?? "";
-    if (!slug) return { kind: "legacy" as const };
+    // Exam-time is per-contest: with no scoped contest there is nothing to edit.
+    if (!slug) return { kind: "unscoped" as const };
     const match = (adminContests ?? []).find((contest) => contest.slug === slug) ?? null;
     if (!match) return { kind: "unknown" as const, slug };
-    return match.legacy ? { kind: "legacy" as const, slug } : { kind: "contest" as const, slug };
+    return { kind: "contest" as const, slug };
   })();
 
   // S5: apply an exam-time change; outcomes surface through the existing
   // actionMessage banner, and stats reload so counts reflect an end-now.
-  // F3: a scoped real contest writes through contest-exam-time (its OWN
-  // end_at + end-now sweep over ITS sessions); legacy keeps /api/admin/exam-time.
+  // F3: exam-time is per-contest — only a scoped real contest can be edited,
+  // writing through contest-exam-time (its OWN end_at + end-now sweep over ITS
+  // sessions); any other scope is rejected before the request.
   const runExamTime = async (body: ExamTimeRequest) => {
-    if (examTimeScope.kind === "unknown") {
-      setError(`Contest "${examTimeScope.slug}" is not in the contests list — exam-time controls are disabled for this scope.`);
+    if (examTimeScope.kind !== "contest") {
+      setError("Select a contest from the filter to adjust its exam time.");
       return;
     }
     setExamTimeBusy(true);
     setError("");
     setActionMessage("");
     try {
-      const response = examTimeScope.kind === "contest"
-        ? await adjustContestExamTime(password, examTimeScope.slug, body)
-        : await adjustExamTime(password, body);
+      const response = await adjustContestExamTime(password, examTimeScope.slug, body);
       setExamEndAt(response.end_at);
       setExamSkewMs(computeClockSkewMs(response.server_now, Date.now()));
       setEndNowArmed(false);
@@ -2589,86 +2522,6 @@ function AdminApp() {
     setPassword(typed);
     setUnlocked(true);
     setPasswordInput("");
-  };
-
-  const loadSettings = async () => {
-    setSettingsLoading(true);
-    setError("");
-    setSettingsMessage("");
-    try {
-      const response = await fetchProctorSettings(password);
-      setSettings({
-        start_at: isoToLocalInput(response.start_at),
-        end_at: isoToLocalInput(response.end_at),
-        contest_url: response.contest_url || "",
-        room_gate_enabled: Boolean(response.room_gate_enabled),
-        enforcement_mode: response.enforcement_mode ?? "block",
-        problem_id: response.problem_id || "",
-        updated_at: response.updated_at
-      });
-      setReentrySecondsText(String(response.fullscreen_reentry_seconds ?? 20));
-      setExitLimitText(String(response.fullscreen_exit_limit ?? 2));
-      setRoomsText((response.rooms ?? []).join(", "));
-      const camera = normalizeCameraRecording(response.camera_recording);
-      setCameraRecEnabled(camera.enabled);
-      setCameraFpsText(String(camera.fps));
-      setCameraWidthText(String(camera.width));
-      setScreenMarkersEnabled(normalizeScreenMarkers(response.screen_markers).enabled);
-      setSettingsMessage("Loaded current gate.");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSettingsLoading(false);
-    }
-  };
-
-  const saveSettings = async () => {
-    setSettingsLoading(true);
-    setError("");
-    setSettingsMessage("");
-    try {
-      const response = await saveProctorSettings(password, {
-        start_at: localInputToIso(settings.start_at),
-        end_at: localInputToIso(settings.end_at),
-        contest_url: settings.contest_url,
-        room_gate_enabled: settings.room_gate_enabled === true,
-        // Wave-3: blank/invalid text falls back to the defaults (20 s / 2
-        // exits, never 0) — clearing the exit-limit field must not silently
-        // persist the harshest setting (lock on the FIRST exit).
-        ...enforcementSettingsFromForm({ reentrySeconds: reentrySecondsText, exitLimit: exitLimitText }),
-        enforcement_mode: settings.enforcement_mode,
-        problem_id: settings.problem_id,
-        // F10.1: blank/invalid fps/width text falls back to the defaults here
-        // (never 0); the server normalizes again with the same rules.
-        camera_recording: cameraRecordingFromForm({ enabled: cameraRecEnabled, fps: cameraFpsText, width: cameraWidthText }),
-        // OMR P1: boolean-only flag (size/contrast are code constants).
-        screen_markers: { enabled: screenMarkersEnabled },
-        // parseRosterInput = the existing comma/newline split + trim + dedupe.
-        rooms: parseRosterInput(roomsText)
-      });
-      setSettings({
-        start_at: isoToLocalInput(response.start_at),
-        end_at: isoToLocalInput(response.end_at),
-        contest_url: response.contest_url || "",
-        room_gate_enabled: Boolean(response.room_gate_enabled),
-        enforcement_mode: response.enforcement_mode ?? "block",
-        problem_id: response.problem_id || "",
-        updated_at: response.updated_at
-      });
-      setReentrySecondsText(String(response.fullscreen_reentry_seconds ?? 20));
-      setExitLimitText(String(response.fullscreen_exit_limit ?? 2));
-      setRoomsText((response.rooms ?? []).join(", "));
-      const savedCamera = normalizeCameraRecording(response.camera_recording);
-      setCameraRecEnabled(savedCamera.enabled);
-      setCameraFpsText(String(savedCamera.fps));
-      setCameraWidthText(String(savedCamera.width));
-      setScreenMarkersEnabled(normalizeScreenMarkers(response.screen_markers).enabled);
-      setSettingsMessage("Saved. The time window is now the only start gate (no passcode).");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSettingsLoading(false);
-    }
   };
 
   // S-D (A1): the review search is scoped by the GLOBAL contest selector like
@@ -3295,119 +3148,10 @@ function AdminApp() {
 
       {view === "settings" ? (
       <div className="space-y-5">
-      <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
-        <div className="mb-5 flex items-center gap-3">
-          <Lock size={20} />
-          <div>
-            <h1 className="text-2xl font-semibold">Proctoring gate</h1>
-            <p className="mt-1 text-sm text-muted">Set the allowed window and contest URL. The time window is the only start gate — there is no passcode and no end code.</p>
-          </div>
-        </div>
-        <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr]">
-          <DateTimeField label="Start time" value={settings.start_at} onChange={(value) => setSettings({ ...settings, start_at: value })} />
-          <DateTimeField label="End time" value={settings.end_at} onChange={(value) => setSettings({ ...settings, end_at: value })} />
-          <Field label="Contest URL" type="url" value={settings.contest_url ?? ""} onChange={(value) => setSettings({ ...settings, contest_url: value })} />
-          <Field label="Active problem ID" value={settings.problem_id ?? ""} onChange={(value) => setSettings({ ...settings, problem_id: value })} />
-          <Field label="Rooms (comma-separated)" value={roomsText} onChange={setRoomsText} />
-          {/* F5.3: fullscreen enforcement knobs. TEXT state (wave-3) so a
-              cleared field stays blank while typing; blank/invalid saves the
-              DEFAULTS (20 / 2), never 0 — the server normalizes again. */}
-          <Field
-            label="Fullscreen re-entry countdown (seconds, blank = 20)"
-            type="number"
-            value={reentrySecondsText}
-            onChange={setReentrySecondsText}
-          />
-          <Field
-            label="Fullscreen exit limit (exits beyond this lock, blank = 2)"
-            type="number"
-            value={exitLimitText}
-            onChange={setExitLimitText}
-          />
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted">Enforcement mode</span>
-            <select
-              className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm"
-              value={settings.enforcement_mode ?? "block"}
-              onChange={(event) => setSettings({ ...settings, enforcement_mode: event.target.value === "alert_first" ? "alert_first" : "block" })}
-            >
-              <option value="block">Block — countdown expiry / exit limit locks the test</option>
-              <option value="alert_first">Alert first — raise a critical alert, never auto-lock</option>
-            </select>
-          </label>
-          {/* F10.1: separate low-res camera recording. Default ON; tuned for
-              eye-movement evidence (glancing down at notes/a phone). Blank or
-              out-of-range fps/width saves the DEFAULT (10 / 640), never 0. */}
-          <div className="rounded-md border border-line bg-white/60 p-4 md:col-span-3">
-            <label className="flex items-start gap-3 text-sm leading-6 text-muted">
-              <input
-                className="mt-1 h-4 w-4 accent-accent"
-                type="checkbox"
-                checked={cameraRecEnabled}
-                onChange={(event) => setCameraRecEnabled(event.target.checked)}
-              />
-              <span>
-                <span className="font-medium text-ink">Camera recording (separate low-res stream)</span> — record the candidate's camera alongside the screen, low frame rate and resolution tuned to catch eye movement (repeated glances at notes or a phone). When off, the camera is live-monitored only and candidates are told so.
-              </span>
-            </label>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 md:max-w-md">
-              <Field
-                label={`Camera frame rate (fps, ${CAMERA_FPS_MIN}-${CAMERA_FPS_MAX})`}
-                type="number"
-                value={cameraFpsText}
-                onChange={setCameraFpsText}
-              />
-              <Field
-                label={`Camera width (px, ${CAMERA_WIDTH_MIN}-${CAMERA_WIDTH_MAX})`}
-                type="number"
-                value={cameraWidthText}
-                onChange={setCameraWidthText}
-              />
-            </div>
-            <p className="mt-2 text-xs text-muted">Blank or out-of-range values save the defaults (10 fps, 640 px). The camera picks its nearest supported resolution.</p>
-          </div>
-          {/* OMR P1: screen-marker fiducials flag — default OFF. Mirrors the
-              camera_recording toggle; v1 is boolean-only (size/contrast are
-              code constants until real recordings justify knobs). */}
-          <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
-            <input
-              className="mt-1 h-4 w-4 accent-accent"
-              type="checkbox"
-              checked={screenMarkersEnabled}
-              onChange={(event) => setScreenMarkersEnabled(event.target.checked)}
-            />
-            <span>
-              <span className="font-medium text-ink">Screen markers (overlay detection)</span> — render small tone-on-tone OMR-style markers at the edges and a few interior points of the candidate's exam screen. They ride into the screen recording so review-time analysis can detect windows drawn over the exam. Visual only — recording and telemetry behave exactly the same when off.
-            </span>
-          </label>
-          <label className="flex items-start gap-3 rounded-md border border-line bg-white/60 p-4 text-sm leading-6 text-muted md:col-span-3">
-            <input
-              className="mt-1 h-4 w-4 accent-accent"
-              type="checkbox"
-              checked={settings.room_gate_enabled === true}
-              onChange={(event) => setSettings({ ...settings, room_gate_enabled: event.target.checked })}
-            />
-            <span>
-              <span className="font-medium text-ink">Room start codes (invigilator gate)</span> — after recording starts, candidates wait until their room's invigilator releases a 6-digit code (or presses "Start now") from <code>/invigilator</code>. Unchecking this releases everyone.
-            </span>
-          </label>
-          <div className="mt-6 flex flex-wrap gap-3 md:col-span-3">
-            <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={loadSettings} disabled={settingsLoading}>
-              Load current
-            </button>
-            <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={saveSettings} disabled={settingsLoading || !settings.start_at || !settings.end_at}>
-              Save gate
-            </button>
-          </div>
-        </div>
-        {settingsMessage ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{settingsMessage}</div> : null}
-        {settings.updated_at ? <p className="mt-3 text-xs text-muted">Last updated: {new Date(settings.updated_at).toLocaleString()}</p> : null}
-      </section>
-
-      {/* S-C: the global contest filter (A1) doubles as the roster target until
-          the S-D selector lands — set it to a person contest's slug to upload
-          THAT contest's roster (college column compulsory); clear it for the
-          legacy global roster. */}
+      {/* S-C: the global contest filter (A1) doubles as the roster target —
+          set it to a person contest's slug to upload THAT contest's roster
+          (college column compulsory); clear it for the global (no-contest)
+          roster. */}
       <CandidateRosterSection password={password} contestSlug={alertFilters.contest_slug ?? ""} />
 
       <ReviewRosterSection
@@ -4233,7 +3977,7 @@ function ContestScopePicker({ contests, contestSlug, onSelect }: {
         <option value="">All contests</option>
         {known.map((contest) => (
           <option key={contest.slug} value={contest.slug}>
-            {contest.name} ({contest.slug}) — {contest.status}{contest.legacy ? " · legacy" : ""}
+            {contest.name} ({contest.slug}) — {contest.status}
           </option>
         ))}
         {unknownSelection ? <option value={contestSlug}>{contestSlug} (unknown slug)</option> : null}
@@ -4253,14 +3997,14 @@ function ContestScopePicker({ contests, contestSlug, onSelect }: {
 }
 
 // F3 (E2E live): where the Live exam-time card reads from / writes to.
-//   legacy  — the legacy settings schedule (no scope, or the synthesized
-//             legacy contest is scoped); writes via /api/admin/exam-time.
-//   contest — a real contest is scoped; the card shows ITS window and writes
-//             via contest-exam-time (the Contest → Detail panel's API).
-//   unknown — a scoped slug not in the contests list (deep link / still
-//             loading); the editor is disabled so nothing wrong gets written.
+//   unscoped — no contest scoped; the card shows the global settings schedule
+//              read-only (editing is disabled — there is nothing to write to).
+//   contest  — a real contest is scoped; the card shows ITS window and writes
+//              via contest-exam-time (the Contest → Detail panel's API).
+//   unknown  — a scoped slug not in the contests list (deep link / still
+//              loading); the editor is disabled so nothing wrong gets written.
 type ExamTimeCardScope =
-  | { kind: "legacy"; slug?: string }
+  | { kind: "unscoped" }
   | { kind: "contest"; slug: string }
   | { kind: "unknown"; slug: string };
 
@@ -4270,7 +4014,7 @@ type ExamTimeCardScope =
 // re-renders this card. "End exam now" is a deliberate two-click confirm.
 // F3 (E2E live): the card is scope-aware — an explicit chip says WHICH
 // schedule it shows/edits, so a scoped contest can never be confused with the
-// legacy schedule on exam day.
+// global settings schedule on exam day.
 function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteInput, onAbsoluteInputChange, onAdjust, scope }: {
   endAt: string;
   skewMs: number;
@@ -4289,9 +4033,9 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
   }, []);
   const left = remainingMs(endAt, Date.now(), skewMs);
   const over = left !== null && left <= 0;
-  // F3: an unknown scope disables every write (display still shows whatever
-  // the scoped stats poll reported — "" → the no-schedule line).
-  const editable = scope.kind !== "unknown";
+  // Exam-time is per-contest: only a scoped real contest is editable. An
+  // unscoped/unknown scope disables every write.
+  const editable = scope.kind === "contest";
   const buttonClass = "focus-ring inline-flex h-10 items-center justify-center rounded-md border border-line px-3 text-sm font-medium disabled:opacity-50";
   return (
     <section className="mb-5 rounded-lg border border-line bg-panel p-5 shadow-subtle">
@@ -4303,9 +4047,9 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
               <span className="inline-flex rounded-full border border-accent/40 bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent" title="This card shows and edits the scoped contest's exam window — the same window as Contests → Detail.">
                 Contest: {scope.slug}
               </span>
-            ) : scope.kind === "legacy" ? (
-              <span className="inline-flex rounded-full border border-line bg-white/60 px-2.5 py-0.5 text-xs font-semibold text-muted" title="This card shows and edits the LEGACY schedule (Settings), not any contest window. Scope to a contest (top-right) to control its window.">
-                Legacy schedule{scope.slug ? ` (${scope.slug})` : ""}
+            ) : scope.kind === "unscoped" ? (
+              <span className="inline-flex rounded-full border border-line bg-white/60 px-2.5 py-0.5 text-xs font-semibold text-muted" title="Scope to a contest (top-right) to view and control its exam window.">
+                No contest scoped
               </span>
             ) : (
               <span className="inline-flex rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 text-xs font-semibold text-warning" title="The scoped slug is not in the contests list — controls are disabled so the wrong schedule can never be edited.">
@@ -4326,7 +4070,7 @@ function ExamTimeCard({ endAt, skewMs, busy, endNowArmed, onArmEndNow, absoluteI
                 ? "No exam window configured for this contest yet — set it in Contests → Detail."
                 : scope.kind === "unknown"
                   ? "No schedule to show for this scope."
-                  : "No schedule configured yet — set the gate in Settings."}
+                  : "Scope to a contest to view its exam window."}
             </p>
           )}
         </div>

@@ -46,8 +46,7 @@ describe("formatRemaining", () => {
   });
 });
 
-// D1: mirrors the backend adminSaveSettings rule so the demo settings save
-// behaves exactly like production.
+// D1: a live exam-time adjustment must survive a stale settings-form save.
 describe("resolveSavedEndAt", () => {
   const start = "2026-06-09T09:00:00.000Z";
   const formEnd = "2026-06-09T11:00:00.000Z";
