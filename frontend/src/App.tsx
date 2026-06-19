@@ -7,6 +7,7 @@ import { groupAlerts, type AlertGroupBy } from "./alertGrouping";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, joinableSessions, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "./admin/alertActions";
 import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, viewEventsAffordance, viewRecordingAffordance } from "./admin/sessionDetail";
 import { chunkIndexBase, clearChunkContinuity, mergeManifest, readChunkHwm, readStintManifest, writeStintManifest } from "./chunkContinuity";
+import { clearChunkBuffer, resolveBufferCaps } from "./chunkBuffer";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, sessionElapsedAnchorMs } from "./examTime";
 import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
@@ -34,7 +35,7 @@ import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTi
 import { accessCodeReady, candidateFormMode, candidateFormReady, contestParamOf, contestUrlFor, landingErrorMessage, normalizeAccessCodeInput, rosterLookupErrorMessage, routeForPinnedOutcome, sessionStorageKeyFor, type CandidateRoute } from "./shell/candidateRouting";
 import { useEnforcement } from "./shell/useEnforcement";
 import { useExamShell } from "./shell/useExamShell";
-import { acquireCameraMicrophone, acquireScreenShareStream, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
+import { acquireCameraMicrophone, acquireScreenShareStream, BufferRequiredError, classifyStartError, createProctorRecorder, SETUP_SCREEN_CONSTRAINTS, type AcquiredMedia, type BufferStatus, type MediaCaptureState, type RecorderStartErrorKind } from "./useProctorRecorder";
 import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSeverity, AlertSource, CollegeChoice, ContestExamConfig, ContestSummary, EnforcementConfigPayload, EnforcementExemptions, ExamConfig, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorAlertTypeConfig, ProctorEvent, ProctorSettings, RecordingSession, ReviewRosterSummary, RosterLookupResult, RosterStatus, RosterUploadResponse, CollegeResolution, KnownCollege, NewCollegePreview, RosterDuplicate, ServerSessionStatus, SessionAction, SessionCardDetail, SessionDetail, SessionStartResponse, SessionStatus, StudentForm, SubmissionEvent, UploadManifestItem } from "./types";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "./roster/parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "./roster/rosterTemplate";
@@ -235,6 +236,11 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [events, setEvents] = useState<ProctorEvent[]>([]);
   const [queueDepth, setQueueDepth] = useState(0);
   const [uploadedCount, setUploadedCount] = useState(0);
+  // Tier-1 persistent chunk buffer: live pending count/bytes + the circuit-
+  // breaker mode, surfaced by the recorder. Drives the amber HealthPanel state
+  // and the end-of-test drain wait gate (ending_draining). {fallback,0,0} = the
+  // buffer is off (self-test failed or runtime-degraded) → today's behavior.
+  const [bufferStatus, setBufferStatus] = useState<BufferStatus>({ mode: "fallback", pendingCount: 0, pendingBytes: 0 });
   const [error, setError] = useState("");
   // Recoverable screen-share/start failure (invalid surface, share cancelled,
   // permission denied, unsupported, etc.). When set, the student is clearly NOT
@@ -525,7 +531,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
   // Stage-1 gate satisfied: the required screen share is live and confirmed —
   // or recording already runs (streams were handed to the recorder).
-  const permissionsReady = status === "recording" || status === "ending" ||
+  const permissionsReady = status === "recording" || status === "ending" || status === "ending_draining" ||
     (permissionsConfirmed && permissions.screen === "granted");
 
   // S1 exam shell: fullscreen truth, 1-5 stage, top-bar vanish/restore.
@@ -578,7 +584,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // without another interval. null (no end_at yet / old backend) → no countdown.
   // (Plan anchored this at isFormStage; it lives here because the shell chrome
   // below consumes it — the S1 exam shell replaced the old TimerBar.)
-  const examRemainingMs = status === "recording" || status === "ending" ? remainingMs(examEndAt, Date.now(), clockSkewMs) : null;
+  const examRemainingMs = status === "recording" || status === "ending" || status === "ending_draining" ? remainingMs(examEndAt, Date.now(), clockSkewMs) : null;
   const examTimeUp = examRemainingMs !== null && examRemainingMs <= 0;
 
   // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
@@ -847,7 +853,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (status !== "recording" && status !== "ending") return;
+      if (status !== "recording" && status !== "ending" && status !== "ending_draining") return;
       const message = "You must end the test from the proctor page before closing this tab.";
       event.preventDefault();
       event.returnValue = message;
@@ -892,7 +898,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (status !== "recording" && status !== "ending") return;
+      if (status !== "recording" && status !== "ending" && status !== "ending_draining") return;
       const key = event.key.toLowerCase();
       const isReloadShortcut = key === "f5" || ((event.metaKey || event.ctrlKey) && key === "r");
       if (!isReloadShortcut) return;
@@ -1045,6 +1051,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         setQueueDepth(depth);
         setUploadedCount(uploaded);
       },
+      // Tier-1: the recorder reports buffer mode + live pending count/bytes on
+      // every write/drain/evict/mode-flip. Drives the amber HealthPanel state +
+      // the end-of-test drain wait gate.
+      onBufferChange: setBufferStatus,
       onFatalError: (message) => {
         if (message.includes("Screen sharing stopped")) {
           // Recoverable: the session is still active server-side; the student can
@@ -1125,6 +1135,14 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // student is left in a clear NOT-RECORDING state with an inline Try-again button
   // (no page reload). Server/registration errors keep the generic message.
   const handleStartFailure = (cause: unknown) => {
+    // Tier-1: require_buffer venue + a failed buffer self-test → block start with
+    // the buffer remediation copy (only reachable when an admin opted in; default
+    // require_buffer=false never throws this — the session just runs in fallback).
+    if (cause instanceof BufferRequiredError) {
+      setStartError({ kind: "unknown", message: cause.message });
+      setStatus("idle");
+      return;
+    }
     const kind = classifyStartError(cause);
     let message: string;
     if (kind === "invalid_surface") {
@@ -1409,6 +1427,50 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     });
   };
 
+  // Tier-1 END-OF-TEST WAIT GATE: in buffering mode, BLOCK close while the
+  // session's pending buffer is non-empty. The recorder's drainer keeps running
+  // after recorder.stop() (it is gated by its own dispose flag, not stopping),
+  // so we just kick it and poll until pendingCount hits 0 — onBufferChange live-
+  // updates the overlay counters meanwhile. Returns when drained (or the buffer
+  // degraded to fallback mid-wait, in which case the gate releases = floor).
+  // FALLBACK mode never enters here (caller checks mode first), so the end path
+  // stays exactly today's behavior when buffering is off.
+  const waitForBufferDrain = async () => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.getBufferMode() !== "buffering") return;
+    let initial = await recorder.getBufferStatus();
+    if (initial.mode !== "buffering" || initial.pendingCount <= 0) return;
+    setStatus("ending_draining");
+    {
+      const event = createUiEvent("end_wait_for_drain", { pending_count: initial.pendingCount, pending_bytes: initial.pendingBytes });
+      addEvent(event);
+      if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
+    }
+    try {
+      // Poll until empty. The drainer (online + 12s timer + post-success kicks)
+      // owns the actual uploads; we kick once per poll as a belt-and-braces wake.
+      // The wait is intentionally long (the candidate must not close while
+      // footage is still pending — the overlay says "tell your invigilator"),
+      // but it BREAKS if a proctor admin-ends/locks the session mid-wait (the
+      // recorder self-stops + onStatusChange flips status away from
+      // ending_draining), so we never orphan an endless poll after the UI moved on.
+      for (let guard = 0; guard < 100_000; guard += 1) {
+        if (statusRef.current !== "ending_draining") break;
+        recorder.kickDrain();
+        const current = await recorder.getBufferStatus();
+        if (current.mode !== "buffering" || current.pendingCount <= 0) {
+          initial = current;
+          break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+    } finally {
+      const event = createUiEvent("end_drain_complete", { pending_count: initial.pendingCount });
+      addEvent(event);
+      if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
+    }
+  };
+
   const stop = async () => {
     if (!assuranceAccepted) {
       setError("Integrity assurance is required before ending the test.");
@@ -1424,9 +1486,14 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       }
       const finalManifest = await recorderRef.current?.stop();
       recorderStopped = true;
+      // Tier-1: BLOCK on the buffer drain BEFORE endSession (buffering mode
+      // only; no-op in fallback). The final chunks landed in `pending` during
+      // recorder.stop(); we do not call endSession until they are all in GCS.
+      await waitForBufferDrain();
       // F1: the submitted manifest covers EVERY stint of this session — the
-      // banked prior stints merged with the final recorder's own list.
-      const uploads = mergeManifest(stintManifestRef.current, finalManifest ?? []);
+      // banked prior stints merged with the final recorder's own list. After the
+      // drain wait the recorder's manifest includes the drained chunks too.
+      const uploads = mergeManifest(stintManifestRef.current, recorderRef.current?.getManifest() ?? finalManifest ?? []);
       setManifest(uploads);
       if (sessionId) {
         await endSession({ sessionId, manifest: uploads, assuranceAccepted });
@@ -1435,6 +1502,11 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       if (sessionId) {
         clearSessionDrafts(sessionId, window.localStorage);
         clearChunkContinuity(window.sessionStorage, sessionId);
+        // Tier-1: drop the durable buffer ONLY now — confirmed-empty drain +
+        // successful endSession. Both the recorder's handle and a standalone
+        // pass (in case the recorder is already gone) so the store is reclaimed.
+        await recorderRef.current?.clearBuffer();
+        await clearChunkBuffer(sessionId);
       }
       setStatus("ended");
       setGate("ended");
@@ -1462,6 +1534,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     setStatus("ending");
     setError("");
     try {
+      // Tier-1: re-drain BEFORE re-submitting end (buffering mode only). The
+      // durable buffer survived the failed first attempt, so a stuck chunk gets
+      // another chance and the gate releases only at empty.
+      await waitForBufferDrain();
       if (sessionId) {
         await endSession({ sessionId, manifest, assuranceAccepted });
       }
@@ -1469,6 +1545,9 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       if (sessionId) {
         clearSessionDrafts(sessionId, window.localStorage);
         clearChunkContinuity(window.sessionStorage, sessionId);
+        // Tier-1: drop the durable buffer ONLY after confirmed-empty + endSession.
+        await recorderRef.current?.clearBuffer();
+        await clearChunkBuffer(sessionId);
       }
       setEndFailed(false);
       setStatus("ended");
@@ -1570,7 +1649,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   }
 
   // gate === "form" (no session yet) or "running" (active session)
-  const isFormStage = gate === "form" && status !== "recording" && status !== "ending";
+  const isFormStage = gate === "form" && status !== "recording" && status !== "ending" && status !== "ending_draining";
 
   // W1 — the exam itself: an own-editor session, actively recording, released
   // into the exam. The coding workspace IS the page. Everything else tucks
@@ -1646,7 +1725,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             collapsed) so no telemetry/preview host ever unmounts. */}
         <div className={proctorPanelOpen ? "mb-5 space-y-5" : "hidden"}>
           <div className="grid gap-5 lg:grid-cols-3">
-            <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
+            <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} bufferStatus={bufferStatus} />
             <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
             <RulesPanel hasProblem={ownEditorCopy} />
           </div>
@@ -1678,12 +1757,17 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       {shellChrome}
       {enforcementOverlay}
       {status === "ending" ? <FinishingOverlay /> : null}
+      {/* Tier-1: the end-of-test drain wait gate — same blocking takeover with
+          live remaining segments/MB. awayBeaconActive() returns false for
+          ending_draining (it is NOT "recording"), so this long wait never fires
+          a spurious tab_hidden/closing beacon. */}
+      {status === "ending_draining" ? <FinishingOverlay draining={{ pendingCount: bufferStatus.pendingCount, pendingBytes: bufferStatus.pendingBytes }} /> : null}
       {markerLayer}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 
       {/* S5: end-time change notice + time-up banner. The countdown itself lives
           in the shell's ExamTopBar (the S1 replacement for the old TimerBar). */}
-      {examTimeNotice && (status === "recording" || status === "ending") ? (
+      {examTimeNotice && (status === "recording" || status === "ending" || status === "ending_draining") ? (
         <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-ink">{examTimeNotice}</div>
       ) : null}
       {examTimeUp && status === "recording" ? (
@@ -1715,7 +1799,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                     // UX-H3: with a problem assigned but recording down (share
                     // dropped / resume pending), "solve the problem below" points
                     // at a hidden workspace — name the paused state and the fix.
-                    ? status === "recording" || status === "ending"
+                    ? status === "recording" || status === "ending" || status === "ending_draining"
                       ? "Keep this tab open. Solve the problem in the coding workspace below and end the test here when you finish."
                       : "Your exam is paused — your work is saved. Restart your screen share below to get back to your code."
                     : "Keep this tab open. Open HackerRank with the Start test button and end the test here after you submit."}
@@ -1823,7 +1907,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
 
           {/* Recording stopped but the final submit failed — inline retry, no reload. */}
           {endFailed ? (
-            <EndRetryPanel error={error} busy={status === "ending"} onRetry={() => void retryEnd()} />
+            <EndRetryPanel error={error} busy={status === "ending" || status === "ending_draining"} onRetry={() => void retryEnd()} />
           ) : null}
 
           {reloadWarning ? (
@@ -1841,7 +1925,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
               </button>
             ) : null}
             {/* Active session restored on reload but recorder not yet running. */}
-            {gate === "running" && status !== "recording" && status !== "ending" && !startError ? (
+            {gate === "running" && status !== "recording" && status !== "ending" && status !== "ending_draining" && !startError ? (
               <button className="focus-ring inline-flex items-center gap-2 rounded-md bg-ink px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={status === "starting"} onClick={resumeRecording}>
                 <MonitorUp size={16} /> {status === "starting" ? "Resuming…" : "Resume recording"}
               </button>
@@ -1874,7 +1958,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           ) : (
             <>
               <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} />
-              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} />
+              <HealthPanel status={status} sessionId={sessionId} config={sessionConfig} queueDepth={queueDepth} uploadedCount={uploadedCount} manifest={manifest} mediaCapture={mediaCapture} startIp={startIp} currentIp={currentIp} ipChanged={ipChanged} bufferStatus={bufferStatus} />
               <EntryReviewPanel clipboardAudit={clipboardAudit} tabAudit={tabAudit} cookieAudit={cookieAudit} />
               <RulesPanel hasProblem={ownEditorCopy} />
             </>
@@ -2048,7 +2132,13 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
 // last window where a teardown-induced visibility change could be misread.
 // (The beacon away-signal is already gated off once status leaves "recording",
 // so this overlay is belt-and-braces on top of that root-cause fix.)
-function FinishingOverlay() {
+// Tier-1: when `draining` is set (status === "ending_draining"), the SAME
+// blocking takeover shows the live remaining-segments/MB drain progress + the
+// "tell your invigilator" line, and stays up for the FULL drain wait (the
+// buffer survived a force-close, so this gate re-enters on reopen). When absent
+// it is the original transient "finishing up" overlay (status === "ending").
+function FinishingOverlay({ draining }: { draining?: { pendingCount: number; pendingBytes: number } }) {
+  const mb = draining ? Math.max(0, draining.pendingBytes) / (1024 * 1024) : 0;
   return (
     <div
       role="alertdialog"
@@ -2059,12 +2149,25 @@ function FinishingOverlay() {
       <div className="w-full max-w-md rounded-lg border border-accent/30 bg-panel p-6 text-center shadow-subtle">
         <UploadCloud size={28} className="mx-auto text-accent" />
         <h2 id="finishing-title" className="mt-3 text-xl font-semibold text-ink">
-          Finishing and uploading your recording…
+          {draining ? "Waiting for upload to finish — do not close this tab" : "Finishing and uploading your recording…"}
         </h2>
-        <p className="mt-2 text-sm leading-6 text-muted">
-          Please do not close this tab or switch away yet. We are stopping the recording, uploading the
-          final segments, and releasing your screen share and camera. This only takes a moment.
-        </p>
+        {draining ? (
+          <>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Uploading your remaining recording: <strong className="text-ink">{draining.pendingCount}</strong>{" "}
+              {draining.pendingCount === 1 ? "segment" : "segments"} (<strong className="text-ink">{mb.toFixed(1)} MB</strong>) left.
+              Your recording is saved on this computer and is uploading automatically. Closing now would lose part of it.
+            </p>
+            <p className="mt-2 text-xs leading-5 text-muted">
+              If this stays stuck, tell your invigilator — they can help. Do not exit fullscreen or close this tab.
+            </p>
+          </>
+        ) : (
+          <p className="mt-2 text-sm leading-6 text-muted">
+            Please do not close this tab or switch away yet. We are stopping the recording, uploading the
+            final segments, and releasing your screen share and camera. This only takes a moment.
+          </p>
+        )}
         <div className="mt-4 flex items-center justify-center gap-2 text-xs font-medium text-muted">
           <RefreshCw size={14} className="animate-spin text-accent" /> Do not exit fullscreen until this finishes.
         </div>
@@ -5972,6 +6075,8 @@ function StatusPill({ status }: { status: SessionStatus }) {
     starting: "border-warning/30 bg-warning/10 text-warning",
     recording: "border-accent/30 bg-accent/10 text-accent",
     ending: "border-warning/30 bg-warning/10 text-warning",
+    // Tier-1: the end-of-test drain wait — same warning styling as "ending".
+    ending_draining: "border-warning/30 bg-warning/10 text-warning",
     ended: "border-accent/30 bg-accent/10 text-accent",
     error: "border-danger/30 bg-danger/10 text-danger"
   };
@@ -6059,14 +6164,26 @@ function RecentEventsPanel({ events }: { events: ProctorEvent[] }) {
 function recordingStateLabel(status: SessionStatus): { label: string; recording: boolean } {
   if (status === "recording") return { label: "Recording", recording: true };
   if (status === "ending") return { label: "Finishing up…", recording: true };
+  // Tier-1: the end-of-test drain wait — still "finishing", recording shown true
+  // so the chrome dot/labels stay consistent with the blocking overlay.
+  if (status === "ending_draining") return { label: "Finishing — uploading…", recording: true };
   return { label: "Not recording", recording: false };
 }
 
 // startIp/currentIp moved here from the deleted TimerBar (S1): close-up
 // diagnostics, not at-a-distance content. The ip-changed red treatment is
 // superseded by the shell's anomaly flow (ip_address_changed vanishes the bar).
-function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture, startIp, currentIp, ipChanged }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState; startIp: string; currentIp: string; ipChanged: boolean }) {
+function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, manifest, mediaCapture, startIp, currentIp, ipChanged, bufferStatus }: { status: SessionStatus; sessionId: string; config: SessionStartResponse | null; queueDepth: number; uploadedCount: number; manifest: UploadManifestItem[]; mediaCapture: MediaCaptureState; startIp: string; currentIp: string; ipChanged: boolean; bufferStatus: BufferStatus }) {
   const state = recordingStateLabel(status);
+  // Tier-1: amber reassurance when the buffer holds pending chunks (a live
+  // upload is failing but footage is saved locally + uploading automatically).
+  // Near-cap (>80% of either cap) escalates the copy to "keep this tab open".
+  const pending = bufferStatus.mode === "buffering" ? bufferStatus.pendingCount : 0;
+  const caps = resolveBufferCaps(config?.upload_config);
+  const nearCap =
+    pending > 0 &&
+    (bufferStatus.pendingBytes > caps.maxBytes * 0.8 || bufferStatus.pendingCount > caps.maxCount * 0.8);
+  const pendingMb = bufferStatus.pendingBytes / (1024 * 1024);
   return (
     <section className="rounded-lg border border-line bg-panel p-5">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -6078,6 +6195,14 @@ function HealthPanel({ status, sessionId, config, queueDepth, uploadedCount, man
           {state.label}
         </span>
       </div>
+      {pending > 0 ? (
+        <div className="mb-4 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs leading-5 text-warning">
+          <strong>{uploadedCount} uploaded · {pending} pending</strong> ({pendingMb.toFixed(1)} MB saved locally, uploading automatically).
+          {nearCap
+            ? " Your connection has been down a while — keep this tab open so your recording can finish uploading."
+            : " Your connection is slow; your recording is safe on this computer and will upload when it recovers."}
+        </div>
+      ) : null}
       <div className="space-y-3 text-sm">
         <Metric icon={<CheckCircle2 size={16} />} label="State" value={state.label} />
         <Metric icon={<UploadCloud size={16} />} label="Uploaded chunks" value={`${uploadedCount}${queueDepth ? ` (${queueDepth} pending)` : ""}`} />

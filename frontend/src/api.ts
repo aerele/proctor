@@ -601,6 +601,11 @@ export async function heartbeat(params: {
    *  enforcement countdown (true clears a stale open exit; false starts the
    *  clock when the exit event itself was lost). */
   fullscreen: boolean;
+  /** Tier-1 chunk buffer: live pending-upload depth + bytes for this session,
+   *  persisted on the session doc (post-exam telemetry; no admin UI yet). 0 in
+   *  fallback mode. Optional — older clients omit them (backend defaults 0). */
+  buffer_pending_chunks?: number;
+  buffer_pending_bytes?: number;
 }): Promise<HeartbeatResponse> {
   if (demoMode) {
     // B8: mirror the backend H3 write-guard so the lock-stop UX is testable in
