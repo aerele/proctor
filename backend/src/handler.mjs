@@ -3585,6 +3585,12 @@ async function adminContestSelectionDone(req) {
 const PURGE_DATASETS = [
   { key: "alerts", collection: () => ALERTS_COLLECTION },
   { key: "submission_events", collection: () => SUBMISSION_EVENTS_COLLECTION },
+  // run_events: execRun writes candidate source_code + denormalized identity
+  // (contest_slug/username_norm/candidate_id/person_id) on every run, so it is
+  // PII that MUST be erased on purge and included in an export. Each doc carries
+  // contest_slug, so the scopedQuery/readContestDataset/deleteDocsByIds spine
+  // selects exactly this contest's run docs — same as submission_events.
+  { key: "run_events", collection: () => RUN_EVENTS_COLLECTION },
   { key: "live_locks", collection: () => LIVE_LOCK_COLLECTION },
   { key: "room_gates", collection: () => ROOM_GATES_COLLECTION }
 ];

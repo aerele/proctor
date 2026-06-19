@@ -174,6 +174,11 @@ function promisifyTxn(txn: IDBTransactionLike): Promise<void> {
 export type ChunkBuffer = {
   selfTest(): Promise<boolean>;
   put(record: PendingChunk): Promise<void>;
+  /** Read a single pending chunk by its primary key, or null when it is gone.
+   *  The drainer uses this to re-check a record right before re-minting a URL:
+   *  if the concurrent LIVE upload already deleted the key, the drain is a
+   *  no-op (no duplicate segment, no inflated chunk_count). */
+  get(key: string): Promise<PendingChunk | null>;
   /** The N oldest pending chunks for a session, ascending by enqueuedAt then
    *  index — the drain order (oldest-first) AND the eviction order. */
   listOldest(sessionId: string, n: number): Promise<PendingChunk[]>;
@@ -257,6 +262,13 @@ export async function openBuffer(deps: ChunkBufferDeps): Promise<ChunkBuffer> {
       await withStore("readwrite", async (store) => {
         await promisifyRequest(store.put(normalizeRecord(record)));
       });
+    },
+
+    async get(key) {
+      const row = await withStore("readonly", (store) =>
+        promisifyRequest<unknown>(store.get(key))
+      );
+      return isPendingChunk(row) ? (row as PendingChunk) : null;
     },
 
     async listOldest(sessionId, n) {

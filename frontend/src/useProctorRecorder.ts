@@ -740,6 +740,17 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     const chainKey = record.kind === "screen" ? "screen" : "camera";
     const doUpload = async (): Promise<"ok" | "retry" | "fatal"> => {
       try {
+        // Re-check the buffer right before re-minting a URL. The drainer's
+        // listOldest is a standalone read; if it picked up a record whose LIVE
+        // upload was still in-flight, that live run deletes the key on its 2xx
+        // BEFORE this chained drain doUpload runs (both share the per-kind serial
+        // chain). If the key is already GONE, the live upload finished the job —
+        // re-minting here would upload a DUPLICATE segment (the backend hwm guard
+        // re-keys to hwm+1) and inflate chunk_count + duration. So no-op: don't
+        // re-mint, don't upload, don't push a manifest entry, don't bump attempts
+        // or emit chunk_drained. Just let the drain chain advance.
+        const stillPending = await buffer!.get(record.key);
+        if (!stillPending) return "ok";
         const fresh = await getUploadUrl({
           session_id: options.sessionId,
           kind: chainKey,

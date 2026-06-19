@@ -38,6 +38,7 @@ function sampleDatasets() {
     ],
     alerts: [{ _id: "a1", contest_slug: "kec-r1", username_norm: "21cs001", severity: "warning" }],
     submission_events: [],
+    run_events: [{ _id: "run1", contest_slug: "kec-r1", username_norm: "21cs001", source_code: "print(1)", kind: "run" }],
     enrollments: [{ _id: "kec-r1::col~21cs001", contest_slug: "kec-r1", person_id: "col~21cs001" }],
     persons: [{ _id: "col~21cs001", unique_id: "21 CS 001", college_norm: "col" }],
     colleges: [{ _id: "col", college_norm: "col", name: "KEC" }],
@@ -81,6 +82,22 @@ test("buildExportBundle: manifest carries schema_version, contest snapshot, exac
   assert.equal(bundle.manifest.counts.persons, 1);
   assert.equal(bundle.manifest.counts.colleges, 1);
   assert.equal(bundle.manifest.counts.submission_events, 0);
+  // run_events (candidate source_code + denormalized PII) is a counted dataset.
+  assert.equal(bundle.manifest.counts.run_events, 1);
+});
+
+test("buildExportBundle: run_events ships as its own jsonl entry (source_code + PII purgeable/exportable)", () => {
+  const bundle = buildExportBundle({
+    contest: sampleContest,
+    datasets: sampleDatasets(),
+    results: sampleResults,
+    exportedAt: "2026-06-11T10:00:00.000Z"
+  });
+  const runEvents = bundle.entries.find((e) => e.name === "run_events.jsonl");
+  assert.ok(runEvents, "run_events.jsonl present in the bundle");
+  const parsed = JSON.parse(runEvents.body.trim());
+  assert.equal(parsed._id, "run1");
+  assert.equal(parsed.source_code, "print(1)");
 });
 
 test("buildExportBundle: emits one ndjson entry per dataset + the manifest + results rollup", () => {
