@@ -27,7 +27,7 @@ import { normalizeScreenMarkers } from "./screenMarkers";
 import { MarkerLayer } from "./markers/MarkerLayer";
 import { enforcementSettingsFromForm } from "./enforcementSettings";
 import { autofillSuppressionProps } from "./shell/autofill";
-import { elapsedTimerActive, shellHeaderMode } from "./shell/examShell";
+import { awayBeaconActive, elapsedTimerActive, shellHeaderMode } from "./shell/examShell";
 import { EnforcementOverlay } from "./shell/EnforcementOverlay";
 import { ExamShellChrome } from "./shell/ExamShellChrome";
 import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind, type PermissionChecklist, type PermissionKey } from "./shell/permissions";
@@ -335,6 +335,18 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   };
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   cameraStreamRef.current = cameraStream;
+  // Live mirror of `status` for the beacon listener (mounted once on sessionId).
+  // The away-signal beacon must read the CURRENT status without re-subscribing —
+  // same statusRef pattern useExamShell uses to gate anomaly dispatch on
+  // `recording`. Why this exists: the tab_hidden alert is raised SOLELY by the
+  // backend on a hidden/closing beacon (visibility_change via /api/events is
+  // never a sure-shot). The beacon below must therefore only fire while the exam
+  // is genuinely live — once End is pressed (status ending/ended/error) the
+  // recorder teardown, fullscreen exit, or the candidate switching away to close
+  // the tab all flip visibilityState to hidden, and without this gate each one
+  // raised a spurious end-of-session tab_hidden.
+  const statusRef = useRef(status);
+  statusRef.current = status;
   // F5.1 permissions-first onboarding (stage 1, before fullscreen): the
   // checklist mirrors the per-permission prompt results; the acquired streams
   // wait here until beginRecording hands them to the recorder (start() then
@@ -849,13 +861,27 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // visibilitychange→hidden sends kind:'hidden'; pagehide sends kind:'closing'.
   // Guarded on having an active session_id so the form/ended screens stay silent.
   // navigator.sendBeacon survives unload; demo mode no-ops the network call.
+  //
+  // Away-signal beacons (hidden/closing) only fire while the exam is GENUINELY
+  // live (statusRef.current === "recording"). Once End is pressed the status
+  // moves to ending → ended (or error), and the recorder teardown, fullscreen
+  // exit, and the candidate switching away to close the tab each flip the tab to
+  // hidden — none of those are a mid-exam tab-switch, so gating here is what
+  // stops the end-of-session tab_hidden false positive (the backend raises that
+  // alert SOLELY from this beacon). A 'visible' return-to-foreground beacon stays
+  // unconditional liveness — it never raises an alert.
   useEffect(() => {
     if (!sessionId) return;
     const onVisibility = () => {
-      if (document.visibilityState === "hidden") sendSessionBeacon(sessionId, "hidden");
-      else if (document.visibilityState === "visible") sendSessionBeacon(sessionId, "visible");
+      if (document.visibilityState === "visible") {
+        sendSessionBeacon(sessionId, "visible");
+      } else if (document.visibilityState === "hidden" && awayBeaconActive(statusRef.current)) {
+        sendSessionBeacon(sessionId, "hidden");
+      }
     };
-    const onPageHide = () => sendSessionBeacon(sessionId, "closing");
+    const onPageHide = () => {
+      if (awayBeaconActive(statusRef.current)) sendSessionBeacon(sessionId, "closing");
+    };
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("pagehide", onPageHide);
     return () => {
@@ -1532,9 +1558,10 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         {identity ? <IdentityCard identity={identity} /> : null}
         <section className="mx-auto max-w-xl rounded-lg border border-accent/30 bg-accent/5 p-6 text-center shadow-subtle">
           <CheckCircle2 size={28} className="mx-auto text-accent" />
-          <h1 className="mt-3 text-2xl font-semibold text-ink">Test ended</h1>
+          <h1 className="mt-3 text-2xl font-semibold text-ink">Done — it&rsquo;s safe to exit</h1>
           <p className="mt-2 text-sm leading-6 text-muted">
-            Your proctoring session is complete and the recording has been submitted for review. You may now close this tab.
+            Your proctoring session is complete and the recording has been fully uploaded for review. It is now
+            safe to exit fullscreen and close this tab.
           </p>
           {manifest.length ? <p className="mt-3 text-xs text-muted">{manifest.length} recording segment(s) uploaded.</p> : null}
         </section>
@@ -1650,6 +1677,7 @@ function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     <Shell padTop={shellPadTop}>
       {shellChrome}
       {enforcementOverlay}
+      {status === "ending" ? <FinishingOverlay /> : null}
       {markerLayer}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 
@@ -2006,6 +2034,40 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
         <button className="focus-ring rounded-md border border-line px-4 py-2 text-sm font-medium" onClick={onCancel}>
           Continue test
         </button>
+      </div>
+    </div>
+  );
+}
+
+// Blocking "finishing up" takeover shown while status === "ending" — the window
+// between End being pressed and the recorder fully stopping + chunks flushing +
+// screen-share/camera released (the whole stop() body). role=alertdialog, fixed
+// over EVERYTHING (same treatment as the enforcement takeover). It holds the
+// candidate on the page so they do NOT exit fullscreen / switch away / close the
+// tab during teardown — which (a) is the UX Karthi asked for and (b) closes the
+// last window where a teardown-induced visibility change could be misread.
+// (The beacon away-signal is already gated off once status leaves "recording",
+// so this overlay is belt-and-braces on top of that root-cause fix.)
+function FinishingOverlay() {
+  return (
+    <div
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="finishing-title"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/80 p-6 backdrop-blur-sm"
+    >
+      <div className="w-full max-w-md rounded-lg border border-accent/30 bg-panel p-6 text-center shadow-subtle">
+        <UploadCloud size={28} className="mx-auto text-accent" />
+        <h2 id="finishing-title" className="mt-3 text-xl font-semibold text-ink">
+          Finishing and uploading your recording…
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-muted">
+          Please do not close this tab or switch away yet. We are stopping the recording, uploading the
+          final segments, and releasing your screen share and camera. This only takes a moment.
+        </p>
+        <div className="mt-4 flex items-center justify-center gap-2 text-xs font-medium text-muted">
+          <RefreshCw size={14} className="animate-spin text-accent" /> Do not exit fullscreen until this finishes.
+        </div>
       </div>
     </div>
   );
