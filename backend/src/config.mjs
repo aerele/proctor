@@ -41,6 +41,11 @@ export function loadConfig() {
     JUDGE0_API_KEY: process.env.JUDGE0_API_KEY,
     JUDGE0_AUTH_TOKEN: process.env.JUDGE0_AUTH_TOKEN,
     URL_EXPIRY_SECONDS: Number(process.env.URL_EXPIRY_SECONDS || "900"),
+    // Signer key file used ONLY for local v4 URL signing (no token/network).
+    // When set, tokens still come from the reliable metadata-server ADC; only
+    // signing uses the key. Undefined → all clients fall back to the main ADC
+    // client (current behavior).
+    SIGNER_KEY_FILE: process.env.SIGNER_KEY_FILE,
 
     // ---- Credentials / API keys (closed-by-default when unset) -----------------
     ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
