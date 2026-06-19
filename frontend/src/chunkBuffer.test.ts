@@ -569,3 +569,81 @@ describe("drainBuffer (oldest-first, fatal-stop)", () => {
     expect(drained).toBe(1);
   });
 });
+
+describe("buffer.get (drain re-check before re-mint)", () => {
+  it("returns the record when present, null when gone", async () => {
+    const buf = await openBuffer(makeDeps().deps);
+    expect(await buf.get(pendingKey("s1", "screen", 1))).toBeNull();
+    await buf.put(chunk("s1", "screen", 1, { bytes: 1234 }));
+    const got = await buf.get(pendingKey("s1", "screen", 1));
+    expect(got?.key).toBe(pendingKey("s1", "screen", 1));
+    expect(got?.bytes).toBe(1234);
+    await buf.delete(pendingKey("s1", "screen", 1));
+    expect(await buf.get(pendingKey("s1", "screen", 1))).toBeNull();
+  });
+
+  // Models the drain doUpload re-check (useProctorRecorder.ts): the drainer's
+  // listOldest is a standalone read, so it can pick up a record whose LIVE
+  // upload is still in-flight. The live run deletes the key on its 2xx BEFORE
+  // the chained drain doUpload runs (shared per-kind serial chain). The fix:
+  // doUpload re-checks buffer.get(record.key) first; if GONE → no-op (no
+  // getUploadUrl, no upload, no manifest push), else upload + delete once.
+  const makeDoUpload = (
+    buf: Awaited<ReturnType<typeof openBuffer>>,
+    spies: { getUploadUrl: number; uploads: number; manifest: number[]; drainedEmits: number[] }
+  ) => {
+    return async (record: PendingChunk): Promise<DrainOutcome> => {
+      // Re-check FIRST — closes the double-upload window.
+      const stillPending = await buf.get(record.key);
+      if (!stillPending) return "ok"; // live upload already finished it → no-op
+      spies.getUploadUrl += 1; // stand-in for getUploadUrl()
+      spies.uploads += 1; // stand-in for uploadBlob()
+      spies.manifest.push(record.index); // stand-in for manifest.push(...)
+      spies.drainedEmits.push(record.index); // stand-in for emit("chunk_drained")
+      await buf.delete(record.key);
+      return "ok";
+    };
+  };
+
+  it("a drain of a record deleted by a concurrent live upload is a NO-OP (no re-mint/upload/manifest)", async () => {
+    const buf = await openBuffer(makeDeps().deps);
+    const rec = chunk("s1", "screen", 5, { enqueuedAt: 5 });
+    await buf.put(rec);
+    const spies = { getUploadUrl: 0, uploads: 0, manifest: [] as number[], drainedEmits: [] as number[] };
+    const doUpload = makeDoUpload(buf, spies);
+
+    // listOldest snapshots the still-pending record...
+    const [listed] = await buf.listOldest("s1", 5);
+    expect(listed.key).toBe(rec.key);
+    // ...then the concurrent LIVE upload completes + deletes the key BEFORE the
+    // chained drain doUpload runs.
+    await buf.delete(rec.key);
+
+    const outcome = await doUpload(listed);
+    expect(outcome).toBe("ok"); // resolves as a no-op success (NOT a failure)
+    expect(spies.getUploadUrl).toBe(0); // never re-minted a signed URL
+    expect(spies.uploads).toBe(0); // never re-uploaded the bytes (no duplicate)
+    expect(spies.manifest).toEqual([]); // never pushed a duplicate manifest entry
+    expect(spies.drainedEmits).toEqual([]); // never emitted chunk_drained
+    // attempts unchanged (the no-op path never re-puts with attempts+1).
+    expect(await buf.count("s1")).toBe(0);
+  });
+
+  it("the normal drain path (record still present) uploads + deletes exactly once", async () => {
+    const buf = await openBuffer(makeDeps().deps);
+    const rec = chunk("s1", "screen", 7, { enqueuedAt: 7 });
+    await buf.put(rec);
+    const spies = { getUploadUrl: 0, uploads: 0, manifest: [] as number[], drainedEmits: [] as number[] };
+    const doUpload = makeDoUpload(buf, spies);
+
+    const [listed] = await buf.listOldest("s1", 5);
+    const outcome = await doUpload(listed); // record still present → real upload
+    expect(outcome).toBe("ok");
+    expect(spies.getUploadUrl).toBe(1); // minted exactly once
+    expect(spies.uploads).toBe(1); // uploaded exactly once
+    expect(spies.manifest).toEqual([7]); // one manifest entry
+    expect(spies.drainedEmits).toEqual([7]); // one chunk_drained
+    expect(await buf.get(rec.key)).toBeNull(); // deleted after the 2xx
+    expect(await buf.count("s1")).toBe(0);
+  });
+});

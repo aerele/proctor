@@ -44,6 +44,10 @@ const JSONL_DATASETS = [
   "submissions",
   "alerts",
   "submission_events",
+  // run_events: candidate source_code + denormalized identity from execRun —
+  // PII that must round-trip in an export and be purgeable (paired with the
+  // run_events entry in handler.mjs PURGE_DATASETS).
+  "run_events",
   "enrollments",
   "persons",
   "roster_entries",
