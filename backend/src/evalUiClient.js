@@ -146,7 +146,7 @@ function candidateRow(c, opts) {
       deltaChip(c),
       badge(c.integrity_tier),
       el("div", { class: "scorewrap" },
-        el("div", { class: "scoreline" }, el("b", { text: String(c.composite) }), " talent"),
+        el("div", { class: "scoreline" }, el("b", { text: String(c.composite) }), " talent", c.talent_tier ? " · " + c.talent_tier : ""),
         el("div", { class: "bar" }, el("i", { style: "width:" + pct(c.composite) + "%" })),
         el("div", { class: "scoreline", text: "raw " + c.total_score + (c.max_total ? "/" + c.max_total : "") }),
       ),
