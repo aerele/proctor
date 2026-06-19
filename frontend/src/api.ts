@@ -1918,6 +1918,40 @@ export async function runRetentionSweep(password: string): Promise<RetentionSwee
   });
 }
 
+// ---- Pre-flight health check (admin) ---------------------------------------
+// POST /api/admin/health-check runs a battery of readiness probes and returns a
+// single green/red verdict. The frontend renders `checks[]` GENERICALLY (no
+// hardcoded ids/labels) so the backend can add/remove/reword probes freely.
+// `mode: "light"` skips the paid Judge0 exec probe; `"full"` runs it (2 metered
+// submissions — the seed 'sum-two' 2-case batch).
+export type HealthCheckStatus = "green" | "red" | "skip";
+export type HealthCheckMode = "light" | "full";
+
+export interface HealthCheckItem {
+  id: string;
+  label: string;
+  status: HealthCheckStatus;
+  latency_ms: number;
+  detail: string;
+}
+
+export interface HealthCheckResponse {
+  overall: "green" | "red";
+  mode: HealthCheckMode;
+  ran_at: string;
+  duration_ms: number;
+  checks: HealthCheckItem[];
+  cleanup: { ok: boolean; detail: string };
+}
+
+export async function runHealthCheck(password: string, mode: HealthCheckMode): Promise<HealthCheckResponse> {
+  return request<HealthCheckResponse>("/api/admin/health-check", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ mode })
+  });
+}
+
 // ---- demo Results dataset (parity for the NEW tab — acceptance bar S4) ------
 // Deterministic ranked rows for the demo contest (demo-drive-r1), with
 // selection_status persisted in localStorage so the bulk-selection UI + "Mark
