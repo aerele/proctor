@@ -32,7 +32,7 @@ export type AdminNavGroup = {
 //   Evidence  — post-hoc human review of candidates and recordings
 //   Authoring — the cross-contest libraries (problem bank, templates)
 //   People    — the cross-round person directory (single view)
-//   Settings  — the legacy global gate (single view)
+//   Settings  — the global roster + alert-type config (single view)
 export const ADMIN_NAV_GROUPS: ReadonlyArray<AdminNavGroup> = [
   {
     key: "live",

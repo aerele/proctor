@@ -180,17 +180,6 @@ test("create mints a URL-safe invigilator_key; update cannot edit it", async () 
   assert.equal(res.statusCode, 400);
 });
 
-test("legacy synthesized contest carries invigilator_key:null", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({
-    contest_slug: "legacy-exam", start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z"
-  });
-  const res = await call(makeReq({ method: "GET", path: "/api/admin/contests", headers: ADMIN_HEADERS }));
-  const legacy = res.body.contests.find((c) => c.legacy);
-  assert.ok(legacy);
-  assert.equal(legacy.invigilator_key, null);
-});
-
 // ---- POST /api/admin/contest-regenerate ---------------------------------------
 
 test("regenerate access_code mints a fresh valid code; invigilator_key untouched", async () => {
@@ -221,14 +210,12 @@ test("regenerate invigilator_key mints a fresh key; access_code untouched", asyn
   assert.equal(updated.access_code, contest.access_code);
 });
 
-test("regenerate: unknown slug -> 404; bad field -> 400; legacy contest -> 404; admin auth required", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({ contest_slug: "legacy-exam" });
+test("regenerate: unknown slug -> 404; bad field -> 400; admin auth required", async () => {
+  freshDb();
   const make = (body, headers = ADMIN_HEADERS) => call(makeReq({
     method: "POST", path: "/api/admin/contest-regenerate", headers, body
   }));
   assert.equal((await make({ slug: "ghost", field: "access_code" })).statusCode, 404);
-  assert.equal((await make({ slug: "legacy-exam", field: "access_code" })).statusCode, 404);
   const contest = await createContest({ name: "Auth Check" });
   assert.equal((await make({ slug: contest.slug, field: "nope" })).statusCode, 400);
   assert.equal((await make({ slug: contest.slug, field: "access_code" }, {})).statusCode, 401);
@@ -340,11 +327,9 @@ test("set-code: create accepts an assigned code under the same format + uniquene
   assert.equal(badFormat.statusCode, 400);
 });
 
-test("set-code: unknown slug → 404; legacy contest → 404; missing field → 400; admin auth required", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({ contest_slug: "legacy-exam" });
+test("set-code: unknown slug → 404; missing field → 400; admin auth required", async () => {
+  freshDb();
   assert.equal((await call(setCodeReq({ slug: "ghost", access_code: "AAA222" }))).statusCode, 404);
-  assert.equal((await call(setCodeReq({ slug: "legacy-exam", access_code: "AAA222" }))).statusCode, 404);
   const contest = await createContest({ name: "Auth For Code" });
   assert.equal((await call(setCodeReq({ slug: contest.slug }))).statusCode, 400);
   assert.equal((await call(setCodeReq({ slug: contest.slug, access_code: "AAA222" }, {}))).statusCode, 401);
@@ -440,7 +425,7 @@ function seedSession(firestore, { id, contestSlug, createdAt }) {
   });
 }
 
-test("admin sessions search: ?contest_slug= scopes the username search; absent stays cross-contest; legacy translates to the empty-slug filter; unknown slug filters literally", async () => {
+test("admin sessions search: ?contest_slug= scopes the username search; absent stays cross-contest; unknown slug filters literally", async () => {
   const firestore = freshDb();
   const round1 = await createContest({ name: "Scope Round 1" });
   const round2 = await createContest({ name: "Scope Round 2" });
@@ -448,10 +433,6 @@ test("admin sessions search: ?contest_slug= scopes the username search; absent s
   // exactly the case the review search must keep apart.
   await seedSession(firestore, { id: "s-r1", contestSlug: round1.slug, createdAt: "2026-06-10T01:00:00.000Z" });
   await seedSession(firestore, { id: "s-r2", contestSlug: round2.slug, createdAt: "2026-06-10T02:00:00.000Z" });
-  await seedSession(firestore, { id: "s-legacy", contestSlug: "", createdAt: "2026-06-10T03:00:00.000Z" });
-  // Legacy settings doc with NO derivable slug -> synthesized "legacy" contest
-  // with legacy_empty_slug:true (F9 §6).
-  await firestore.collection("sd_settings").doc("active").set({ updated_at: "2026-06-09T00:00:00.000Z" });
 
   const search = (query) => call(makeReq({
     method: "GET", path: "/api/admin/sessions", headers: ADMIN_HEADERS, query
@@ -461,15 +442,10 @@ test("admin sessions search: ?contest_slug= scopes the username search; absent s
   assert.equal(scoped.statusCode, 200, JSON.stringify(scoped.body));
   assert.deepEqual(scoped.body.sessions.map((s) => s.session_id), ["s-r2"]);
 
-  // No param -> ALL contests (today's behavior, explicit ALL_CONTESTS sentinel).
+  // No param -> ALL contests (explicit ALL_CONTESTS sentinel).
   const all = await search({ username: "21cs001" });
   assert.equal(all.statusCode, 200);
-  assert.equal(all.body.sessions.length, 3);
-
-  // Selecting the synthesized legacy contest matches legacy contest_slug:"" docs.
-  const legacy = await search({ username: "21cs001", contest_slug: "legacy" });
-  assert.equal(legacy.statusCode, 200);
-  assert.deepEqual(legacy.body.sessions.map((s) => s.session_id), ["s-legacy"]);
+  assert.equal(all.body.sessions.length, 2);
 
   // Unknown slug filters literally -> empty list, never an error (F9 D10).
   const ghost = await search({ username: "21cs001", contest_slug: "ghost" });
@@ -535,78 +511,23 @@ test("exam-config?contest=: no roster -> roster_required:false; draft -> 403; un
   assert.equal(unknown.body.error, "unknown_contest");
 });
 
-test("exam-config WITHOUT ?contest= keeps today's settings-driven shape bit-for-bit", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({
-    rooms: ["Hall A"], room_gate_enabled: true
-  });
+test("exam-config WITHOUT ?contest= is rejected (the param is mandatory)", async () => {
+  freshDb();
   const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(
-    Object.keys(res.body).sort(),
-    ["camera_recording", "enforcement", "rooms", "roster_required", "unique_id_label"]
-  );
-  assert.deepEqual(res.body.rooms, ["Hall A"]);
-});
-
-test("exam-config?contest=<legacy slug> serves the settings-driven config with the contest header fields", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({
-    contest_slug: "legacy-exam", rooms: ["Hall B"], room_gate_enabled: true,
-    start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z"
-  });
-  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: "legacy-exam" } }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.equal(res.body.contest_slug, "legacy-exam");
-  assert.deepEqual(res.body.rooms, ["Hall B"]);
-  assert.equal(res.body.room_gate_enabled, true);
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "unknown_contest");
 });
 
 // S-D candidate routing: the pinned candidate app forks its identity UX on the
-// contest's identity_mode (person -> server-resolved id + college picker;
-// legacy_username -> today's roster-lookup confirm flow). The payload must say
-// which one it is — the two branches are otherwise shape-identical.
-test("exam-config?contest= carries identity_mode: person contest vs legacy slug", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({
-    contest_slug: "legacy-exam", rooms: ["Hall B"], room_gate_enabled: false
-  });
+// contest's identity_mode. Every contest is "person", and the payload says so.
+test("exam-config?contest= carries identity_mode: person", async () => {
+  freshDb();
   const contest = await createContest({ name: "Mode Check" });
   await openContest(contest.slug);
 
   const person = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
   assert.equal(person.statusCode, 200, JSON.stringify(person.body));
   assert.equal(person.body.identity_mode, "person");
-
-  const legacy = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: "legacy-exam" } }));
-  assert.equal(legacy.statusCode, 200, JSON.stringify(legacy.body));
-  assert.equal(legacy.body.identity_mode, "legacy_username");
-});
-
-// ---- GET /api/candidate-route (PUBLIC) -----------------------------------------
-// The no-?contest= candidate URL must keep serving today's legacy form while
-// the legacy settings doc exists (bit-for-bit deployment guarantee) and show
-// the access-code landing page once there is no legacy exam to serve. The
-// locked no-param /api/exam-config payload cannot carry this signal, so the
-// router asks this tiny public endpoint instead.
-
-test("candidate-route: legacy_configured true while the active settings doc exists", async () => {
-  const firestore = freshDb();
-  await firestore.collection("sd_settings").doc("active").set({
-    contest_slug: "legacy-exam", start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z"
-  });
-  const res = await call(makeReq({ method: "GET", path: "/api/candidate-route" }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.deepEqual(res.body, { legacy_configured: true });
-});
-
-test("candidate-route: legacy_configured false with no settings doc, even when real contests exist", async () => {
-  freshDb();
-  const contest = await createContest({ name: "Pure Contest World" });
-  await openContest(contest.slug);
-  const res = await call(makeReq({ method: "GET", path: "/api/candidate-route" }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  assert.deepEqual(res.body, { legacy_configured: false });
 });
 
 // ---- POST /api/admin/contest-exam-time --------------------------------------------
@@ -667,20 +588,13 @@ test("contest-exam-time validations: exactly-one-of, window sanity, unconfigured
 
 // ---- F3 (E2E live): GET /api/admin/stats end_at follows the contest scope ----------
 // The Live exam-time card rides on the stats poll; a contest-scoped poll must
-// report THAT contest's window, not the legacy settings schedule (which said
-// "time is up" while the scoped contest had ~22h left).
+// report THAT contest's window. Unscoped/unknown carry no window → "".
 
-test("admin stats: contest_slug scope reports the CONTEST's end_at; unscoped keeps legacy; unknown slug reports none (F3)", async () => {
-  const firestore = freshDb();
+test("admin stats: contest_slug scope reports the CONTEST's end_at; unscoped + unknown slug report none (F3)", async () => {
+  freshDb();
   const contest = await createContest({
     name: "Stats Window",
     start_at: "2026-06-12T03:00:00.000Z", end_at: "2026-06-12T16:00:00.000Z"
-  });
-  // Legacy settings schedule that already expired — the F3 bug surfaced this
-  // one on a scoped Live screen.
-  await firestore.collection("sd_settings").doc("active").set({
-    contest_slug: "legacy-exam",
-    start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T19:30:00.000Z"
   });
 
   const stats = (query) => call(makeReq({
@@ -691,15 +605,10 @@ test("admin stats: contest_slug scope reports the CONTEST's end_at; unscoped kee
   assert.equal(scoped.statusCode, 200, JSON.stringify(scoped.body));
   assert.equal(scoped.body.end_at, "2026-06-12T16:00:00.000Z");
 
-  // Unscoped (All contests) keeps today's legacy schedule.
+  // Unscoped (ALL contests) carries no single window → "".
   const unscoped = await stats({});
   assert.equal(unscoped.statusCode, 200);
-  assert.equal(unscoped.body.end_at, "2026-06-10T19:30:00.000Z");
-
-  // The synthesized legacy contest mirrors the settings doc — same value.
-  const legacy = await stats({ contest_slug: "legacy-exam" });
-  assert.equal(legacy.statusCode, 200);
-  assert.equal(legacy.body.end_at, "2026-06-10T19:30:00.000Z");
+  assert.equal(unscoped.body.end_at, "");
 
   // Unknown slug: contestScopeOf's literal fallback carries no window → ""
   // (the card says "no schedule" instead of showing the wrong clock).

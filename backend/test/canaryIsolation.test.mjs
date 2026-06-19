@@ -68,18 +68,16 @@ const SCOPED_GET_REQUESTS = {
   "/api/admin/sessions-list": () => adminGet("/api/admin/sessions-list", { contest_slug: A }),
   "/api/admin/stats": () => adminGet("/api/admin/stats", { contest_slug: A }),
   "/api/admin/submission-events": () => adminGet("/api/admin/submission-events", { username: "21 CS 001", contest_slug: A }),
-  // Invigilator endpoints scope to the SETTINGS contest (per-contest token auth
-  // lands at S-D) — the fixture pins settings.contest_slug = contest A.
-  "/api/invigilator/overview": () => makeReq({ method: "GET", path: "/api/invigilator/overview", headers: INVIG_HEADERS }),
-  "/api/invigilator/room": () => makeReq({ method: "GET", path: "/api/invigilator/room", headers: INVIG_HEADERS, query: { room: "Lab A" } })
+  // Invigilator endpoints scope to the contest named by ?contest= (the global
+  // password view across ALL contests is the no-param fallback).
+  "/api/invigilator/overview": () => makeReq({ method: "GET", path: "/api/invigilator/overview", headers: INVIG_HEADERS, query: { contest: A } }),
+  "/api/invigilator/room": () => makeReq({ method: "GET", path: "/api/invigilator/room", headers: INVIG_HEADERS, query: { contest: A, room: "Lab A" } })
 };
 
 // GET endpoints that are NOT contest-scoped — each with the reason it is
 // exempt. A new GET route must land in exactly one of these two tables.
 const EXEMPT_GETS = {
-  "/api/exam-config": "legacy/public pre-session config; ?contest= routing lands at S-D",
-  "/api/candidate-route": "public routing boolean (does the legacy settings doc exist?) — carries no contest data at all",
-  "/api/admin/settings": "the global legacy settings doc itself",
+  "/api/exam-config": "public pre-session config keyed by ?contest=; serves only that contest's own published fields",
   "/api/admin/contests": "the contest list — inherently cross-contest",
   "/api/admin/problems": "global problem bank (assignment is per-contest, content is not)",
   "/api/admin/problem": "global problem bank",
@@ -203,8 +201,6 @@ async function seedTwoContestFixture() {
       room_gate_enabled: false, rooms: [], created_at: now, updated_at: now
     });
   }
-  // Invigilator endpoints scope off the settings doc — pin it to contest A.
-  await firestore.collection("cn_settings").doc("active").set({ contest_slug: A });
 
   // SAME person/candidate id in BOTH contests (the F9 §2.3.4 seed).
   const sessionBase = {
@@ -350,21 +346,6 @@ test("canary positive control: the same endpoints scoped to contest B DO return 
     assert.equal(res.statusCode, 200, `${req.path}: ${JSON.stringify(res.body)}`);
     assert.ok(JSON.stringify(res.body).includes(CANARY), `${req.path} positive control found no canary`);
   }
-});
-
-test("scopedQuery legacy translation: selecting the synthesized legacy contest matches contest_slug:\"\" sessions", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  // Settings doc with NO slug sources → legacy contest synthesizes as "legacy"
-  // with legacy_empty_slug:true.
-  await firestore.collection("cn_settings").doc("active").set({ updated_at: "2026-06-10T00:00:00.000Z" });
-  await firestore.collection("cn_sessions").doc("lg1").set({
-    session_id: "lg1", hackerrank_username: "alice", username_norm: "alice",
-    contest_slug: "", status: "active", created_at: "2026-06-10T01:00:00.000Z"
-  });
-  const res = await call(adminGet("/api/admin/stats", { contest_slug: "legacy" }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.stats.total, 1); // pre-S-C this filter matched NOTHING
 });
 
 // ---- the coverage meta-test ----------------------------------------------------------

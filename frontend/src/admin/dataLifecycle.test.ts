@@ -16,7 +16,6 @@ function contest(over: Partial<LifecycleContest> = {}): LifecycleContest {
   return {
     slug: "kec-r1",
     status: "archived",
-    legacy: false,
     last_export_at: null,
     selection_done_at: null,
     evidence_retention_days: 4,

@@ -40,10 +40,7 @@ export function makeAdminProblemsRoutes(ctx) {
     getBankProblem,
     // contest-reference finder (pure) + the template lister it reads through
     findProblemReferences,
-    listTemplates,
-    // legacy-settings store fns (the §1.4.3 legacy-contest silent-clear path)
-    getSettings,
-    settingsRef
+    listTemplates
   } = ctx;
 
   // ---- S4: problem bank (admin authoring) ------------------------------------
@@ -103,8 +100,8 @@ export function makeAdminProblemsRoutes(ctx) {
 
   // Bounded pre-fetch for findProblemReferences: real contest docs (limit 500;
   // archived filtered by the pure function) + templates with seeds merged. The
-  // synthesized LEGACY contest is deliberately absent — its settings doc keeps
-  // the original silent-clear branch below instead of a 409.
+  // global/settings problem path is not contest-referenced, so it keeps the
+  // silent-clear branch below instead of a 409.
   async function problemReferenceUniverse() {
     const [contestSnapshot, templates] = await Promise.all([
       getFirestore().collection(contestsCollection).limit(CONTESTS_REFERENCE_LIMIT).get(),
@@ -167,12 +164,6 @@ export function makeAdminProblemsRoutes(ctx) {
       });
     }
     await problemRef(id).delete();
-    // LEGACY contest path only (spec §1.4.3): the SETTINGS doc assignment is
-    // still silently cleared so legacy start/resume stop advertising a dead id.
-    const settings = await getSettings();
-    if (settings?.problem_id === id) {
-      await settingsRef().set({ ...settings, problem_id: "", updated_at: new Date().toISOString() });
-    }
     return { ok: true };
   }
 

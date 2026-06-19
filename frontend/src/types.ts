@@ -84,7 +84,6 @@ export type SessionStartResponse = {
   storage_prefix?: string;
   blocked_by_session_id?: string | null;
   start_ip?: string;
-  contest_url?: string;
   /** S3: when true the client holds at the room-code screen until released. */
   room_gate_enabled?: boolean;
   /** F5.3: enforcement knobs + this session's exemptions + lock reason. */
@@ -184,14 +183,14 @@ export type UploadManifestItem = {
 
 export type ReviewNature = "clipboard" | "tabs" | "cookies";
 
+// Demo-mode global defaults store (no backend). The real product is fully
+// per-contest; this only seeds the demo harness's window + enforcement/camera
+// defaults so the no-backend demo renders without a contest API.
 export type ProctorSettings = {
   start_at: string;
   end_at: string;
-  contest_url?: string;
   /** S3: opt-in room start gate (invigilator OTP / start-now). */
   room_gate_enabled?: boolean;
-  /** S4: id of the problem-bank problem assigned to this contest. */
-  problem_id?: string;
   // S2: admin-configured room labels for the student room dropdown.
   rooms?: string[];
   // F5.3: fullscreen enforcement knobs (defaults 20 / 2 / "block").
@@ -241,8 +240,9 @@ export type AdminStatsResponse = {
   server_now?: string;
 };
 
-// S5: POST /api/admin/exam-time — live end-time control. EXACTLY ONE field set:
-// an absolute end_at, a signed extend_minutes delta, or end_now (force-end).
+// S5/F3: POST /api/admin/contest-exam-time — live end-time control for a scoped
+// contest. EXACTLY ONE field set: an absolute end_at, a signed extend_minutes
+// delta, or end_now (force-end).
 export type ExamTimeRequest = {
   end_at?: string;
   extend_minutes?: number;
@@ -1099,28 +1099,22 @@ export type ProblemSubmissionSummary = {
 
 export type ContestStatus = "draft" | "open" | "archived";
 
-/** One contest doc from GET /api/admin/contests. The synthesized legacy
- * contest rides the same list with legacy:true (read-only — no doc exists). */
+/** One contest doc from GET /api/admin/contests. */
 export type ContestSummary = {
   slug: string;
   name: string;
   status: ContestStatus;
-  legacy: boolean;
-  /** Set only on the synthesized legacy contest of an empty-slug deployment. */
-  legacy_empty_slug?: boolean;
   listed: boolean;
   identity_label: string;
-  /** Typed 6-char candidate access code (vision §10.3); null on legacy. */
+  /** Typed 6-char candidate access code (vision §10.3). */
   access_code: string | null;
-  /** Per-contest invigilator portal token (vision §2.7); null on legacy. */
+  /** Per-contest invigilator portal token (vision §2.7). */
   invigilator_key: string | null;
   start_at: string | null;
   end_at: string | null;
   end_at_updated_at?: string | null;
-  /** Ordered problems snapshot (S-I). Absent on the legacy synth row. */
+  /** Ordered problems snapshot (S-I). */
   problems?: ContestProblemEntry[];
-  /** Legacy synth carries the single-problem assignment instead. */
-  problem_id?: string;
   rooms: string[];
   room_gate_enabled: boolean;
   template_slug: string | null;
@@ -1218,11 +1212,10 @@ export type ContestExamConfig = ExamConfig & {
   contest_name: string;
   identity_label: string;
   /**
-   * Forks the pinned candidate identity UX (S-D): "person" = typed id is
-   * resolved server-side at start (college picker on 409 college_choices);
-   * "legacy_username" = today's roster-lookup confirm flow.
+   * The pinned candidate identity UX: "person" = typed id is resolved
+   * server-side at start (college picker on 409 college_choices).
    */
-  identity_mode: "person" | "legacy_username";
+  identity_mode: "person";
   room_gate_enabled: boolean;
   start_at: string | null;
   end_at: string | null;

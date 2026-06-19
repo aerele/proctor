@@ -5,16 +5,13 @@
 //
 //   ?contest=<slug> pins the app to that contest (per-contest exam-config).
 //   A PRESENT-but-bad param (unknown / not open) -> the access-code landing
-//   page. An ABSENT param keeps TODAY'S legacy flow while the legacy settings
-//   doc exists (bit-for-bit deployment guarantee) and shows the landing page
-//   once it doesn't. Transient fetch failures NEVER land on the code page:
-//   a pinned link degrades to a retry screen, a failed legacy probe fails
-//   OPEN to the legacy flow.
+//   page. An ABSENT param shows the access-code landing page. Transient fetch
+//   failures NEVER land on the code page: a pinned link degrades to a retry
+//   screen.
 //
 // The fetch/DOM glue lives in App.tsx; everything here is vitest-tested.
 
 export type CandidateRoute =
-  | { kind: "legacy" }
   | { kind: "contest"; slug: string }
   /** Access-code landing. `notice` explains WHY when a bad link sent us here. */
   | { kind: "landing"; notice: string }
@@ -43,16 +40,6 @@ export function routeForPinnedOutcome(
   // Anything else (network, 5xx) is transient: the link may be perfectly
   // valid, so hold the candidate on a retry screen.
   return { kind: "config_error", slug };
-}
-
-/** With NO ?contest= param, the /api/candidate-route probe decides. */
-export function routeForNoParam(
-  outcome: { ok: true; legacy_configured: boolean } | { ok: false }
-): CandidateRoute {
-  // Probe failure fails OPEN to the legacy flow — today's deployment must
-  // keep working even if the (new) routing endpoint is unreachable.
-  if (!outcome.ok || outcome.legacy_configured) return { kind: "legacy" };
-  return { kind: "landing", notice: "" };
 }
 
 // Mint alphabet parity with backend contests.mjs ACCESS_CODE_ALPHABET:
@@ -114,17 +101,14 @@ export function contestUrlFor(slug: string): string {
 }
 
 // ---- pinned-contest form mode -------------------------------------------------
-// Person contests have NO public roster-lookup endpoint by design (S-C: the
-// server resolves identity at /api/session/start, 409 college_choices on
-// genuine ambiguity) — so the pinned form forks here, never on a fetch.
+// Every contest is person-mode. Person contests have NO public roster-lookup
+// endpoint by design (S-C: the server resolves identity at /api/session/start,
+// 409 college_choices on genuine ambiguity) — so the pinned form forks here on
+// roster_required, never on a fetch.
 
-export type CandidateFormMode = "legacy" | "person_roster" | "person_open";
+export type CandidateFormMode = "person_roster" | "person_open";
 
-export function candidateFormMode(
-  pinned: { identity_mode?: string } | null | undefined,
-  rosterRequired: boolean
-): CandidateFormMode {
-  if (!pinned || pinned.identity_mode !== "person") return "legacy";
+export function candidateFormMode(rosterRequired: boolean): CandidateFormMode {
   return rosterRequired ? "person_roster" : "person_open";
 }
 
@@ -148,32 +132,20 @@ export function isCandidateEmailValid(email: string): boolean {
   return EMAIL_FORMAT.test(email.trim());
 }
 
-// What "Start proctoring" needs per mode. legacy = the shipped rule verbatim;
+// What "Start proctoring" needs per mode.
 // person_roster = the roster supplies name/roll/email server-side, so only the
 // typed id + room + consent gate the button; person_open = the backend's
 // no-roster person contract (id + name + email required, roll optional).
 export function candidateFormReady(
   mode: CandidateFormMode,
-  form: CandidateFormFields,
-  rosterRequired: boolean
+  form: CandidateFormFields
 ): boolean {
   if (mode === "person_roster") {
     return Boolean(form.roster_unique_id.trim() && form.room.trim() && form.consent_accepted);
   }
-  if (mode === "person_open") {
-    return Boolean(
-      form.candidate_id.trim() &&
-      form.name.trim() &&
-      isCandidateEmailValid(form.email) &&
-      form.room.trim() &&
-      form.consent_accepted
-    );
-  }
   return Boolean(
-    (!rosterRequired || form.roster_unique_id) &&
     form.candidate_id.trim() &&
     form.name.trim() &&
-    form.roll_number.trim() &&
     isCandidateEmailValid(form.email) &&
     form.room.trim() &&
     form.consent_accepted
