@@ -15,7 +15,6 @@ import {
   landingErrorMessage,
   rosterLookupErrorMessage,
   normalizeAccessCodeInput,
-  routeForNoParam,
   routeForPinnedOutcome,
   sessionStorageKeyFor
 } from "./candidateRouting";
@@ -53,20 +52,6 @@ describe("routeForPinnedOutcome (?contest= present)", () => {
     expect(network).toEqual({ kind: "config_error", slug: "kec-r1" });
     const server = routeForPinnedOutcome("kec-r1", { ok: false, status: 500 });
     expect(server.kind).toBe("config_error");
-  });
-});
-
-describe("routeForNoParam (no ?contest=)", () => {
-  it("legacy settings doc exists -> today's legacy flow unchanged", () => {
-    expect(routeForNoParam({ ok: true, legacy_configured: true })).toEqual({ kind: "legacy" });
-  });
-
-  it("no legacy doc -> access-code landing", () => {
-    expect(routeForNoParam({ ok: true, legacy_configured: false })).toEqual({ kind: "landing", notice: "" });
-  });
-
-  it("route check failed -> FAIL OPEN to the legacy flow (today's deployment keeps working)", () => {
-    expect(routeForNoParam({ ok: false })).toEqual({ kind: "legacy" });
   });
 });
 
@@ -142,15 +127,9 @@ describe("contestUrlFor", () => {
 });
 
 describe("candidateFormMode", () => {
-  it("unpinned or pinned-legacy keeps today's legacy form (roster-lookup confirm flow)", () => {
-    expect(candidateFormMode(null, true)).toBe("legacy");
-    expect(candidateFormMode({ identity_mode: "legacy_username" }, true)).toBe("legacy");
-    expect(candidateFormMode({ identity_mode: "legacy_username" }, false)).toBe("legacy");
-  });
-
   it("pinned person contest: roster -> server-resolved id entry; no roster -> open details form", () => {
-    expect(candidateFormMode({ identity_mode: "person" }, true)).toBe("person_roster");
-    expect(candidateFormMode({ identity_mode: "person" }, false)).toBe("person_open");
+    expect(candidateFormMode(true)).toBe("person_roster");
+    expect(candidateFormMode(false)).toBe("person_open");
   });
 });
 
@@ -165,41 +144,28 @@ describe("candidateFormReady", () => {
     roster_unique_id: "21 CS 001"
   };
 
-  it("legacy keeps the existing rule (all fields + roster id when required)", () => {
-    expect(candidateFormReady("legacy", full, true)).toBe(true);
-    expect(candidateFormReady("legacy", { ...full, roster_unique_id: "" }, true)).toBe(false);
-    expect(candidateFormReady("legacy", { ...full, roster_unique_id: "" }, false)).toBe(true);
-    expect(candidateFormReady("legacy", { ...full, roll_number: " " }, false)).toBe(false);
-  });
-
-  it("legacy: a malformed email blocks the button (F12 email-format gap)", () => {
-    expect(candidateFormReady("legacy", { ...full, email: "asha-at-example" }, false)).toBe(false);
-    expect(candidateFormReady("legacy", { ...full, email: "asha@example" }, false)).toBe(false);
-    expect(candidateFormReady("legacy", { ...full, email: "asha@example.com" }, false)).toBe(true);
-  });
-
   it("person_roster: typed id + room + consent — the roster supplies the rest server-side", () => {
     const minimal = { ...full, candidate_id: "", name: "", roll_number: "", email: "" };
-    expect(candidateFormReady("person_roster", minimal, true)).toBe(true);
-    expect(candidateFormReady("person_roster", { ...minimal, roster_unique_id: " " }, true)).toBe(false);
-    expect(candidateFormReady("person_roster", { ...minimal, room: "" }, true)).toBe(false);
-    expect(candidateFormReady("person_roster", { ...minimal, consent_accepted: false }, true)).toBe(false);
+    expect(candidateFormReady("person_roster", minimal)).toBe(true);
+    expect(candidateFormReady("person_roster", { ...minimal, roster_unique_id: " " })).toBe(false);
+    expect(candidateFormReady("person_roster", { ...minimal, room: "" })).toBe(false);
+    expect(candidateFormReady("person_roster", { ...minimal, consent_accepted: false })).toBe(false);
   });
 
   it("person_open: id + name + email + room + consent (roll optional, F9 §1.4)", () => {
     const noRoll = { ...full, roll_number: "", roster_unique_id: "" };
-    expect(candidateFormReady("person_open", noRoll, false)).toBe(true);
-    expect(candidateFormReady("person_open", { ...noRoll, email: "" }, false)).toBe(false);
-    expect(candidateFormReady("person_open", { ...noRoll, email: "asha@example" }, false)).toBe(false);
-    expect(candidateFormReady("person_open", { ...noRoll, name: "" }, false)).toBe(false);
-    expect(candidateFormReady("person_open", { ...noRoll, candidate_id: "" }, false)).toBe(false);
+    expect(candidateFormReady("person_open", noRoll)).toBe(true);
+    expect(candidateFormReady("person_open", { ...noRoll, email: "" })).toBe(false);
+    expect(candidateFormReady("person_open", { ...noRoll, email: "asha@example" })).toBe(false);
+    expect(candidateFormReady("person_open", { ...noRoll, name: "" })).toBe(false);
+    expect(candidateFormReady("person_open", { ...noRoll, candidate_id: "" })).toBe(false);
   });
 
   it("person_roster: email is roster-supplied, so its format never gates the button", () => {
     // person_roster never types an email — a blank/garbage email must NOT block.
     const minimal = { ...full, candidate_id: "", name: "", roll_number: "", email: "" };
-    expect(candidateFormReady("person_roster", minimal, true)).toBe(true);
-    expect(candidateFormReady("person_roster", { ...minimal, email: "not-an-email" }, true)).toBe(true);
+    expect(candidateFormReady("person_roster", minimal)).toBe(true);
+    expect(candidateFormReady("person_roster", { ...minimal, email: "not-an-email" })).toBe(true);
   });
 });
 

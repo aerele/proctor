@@ -51,7 +51,6 @@ export function makeAdminStatsRoutes(ctx) {
     requireAdmin,
     contestScopeOf,
     scopedQuery,
-    getSettings,
     // shared helpers (owned by + kept resident in handler.mjs), by reference
     normalizeRoomFilter,
     distinctRooms,
@@ -111,20 +110,16 @@ export function makeAdminStatsRoutes(ctx) {
 
     // S5: the console exam-time card rides on the existing 5 s stats poll, so the
     // current end time + a server clock stamp come back with every poll.
-    // F3 (E2E live): a contest-scoped stats poll reports THAT contest's window —
-    // the legacy settings end_at said "time is up" while the scoped contest had
-    // hours left. ALL_CONTESTS keeps today's legacy schedule; the synthesized
-    // legacy contest mirrors the settings doc so its value is identical; an
-    // unknown slug (contestScopeOf's literal fallback carries no window) reports
-    // "" → the card renders "no schedule" instead of the wrong clock.
-    const settings = await getSettings();
+    // F3 (E2E live): a contest-scoped stats poll reports THAT contest's window;
+    // ALL_CONTESTS (unscoped) and an unknown slug (contestScopeOf's literal
+    // fallback carries no window) report "" → the card renders "no schedule".
     return {
       contest_slug: contestSlug ? String(contestSlug) : null,
       room: room || null,
       stats,
       rooms,
       disconnected_staleness_ms: disconnectedStalenessMs,
-      end_at: scope === allContests ? (settings?.end_at || "") : (scope.end_at || ""),
+      end_at: scope === allContests ? "" : (scope.end_at || ""),
       server_now: new Date().toISOString()
     };
   }

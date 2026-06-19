@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 process.env.EVIDENCE_BUCKET = "examtime-bucket";
 process.env.SESSION_COLLECTION = "examtime_sessions";
 process.env.SETTINGS_COLLECTION = "examtime_settings";
+process.env.CONTESTS_COLLECTION = "examtime_contests";
 process.env.ALERTS_COLLECTION = "examtime_alerts";
 process.env.LIVE_LOCK_COLLECTION = "examtime_live_locks";
 process.env.ADMIN_PASSWORD = "examtime-admin-pass";
@@ -197,17 +198,23 @@ function freshFakes() {
 
 // Seed the active settings doc with an OPEN window (started 60 min ago, ends in
 // 60 min) plus extra fields a merge-write must preserve (S2 adds rooms etc.).
+const CONTEST_SLUG = "kec-2026";
+
+// Seed an OPEN no-roster person contest (slug kec-2026). The window rides on the
+// contest doc — every session-bound serve path (start/resume/heartbeat/stats)
+// reads end_at from THIS contest.
 async function seedSettings(firestore, overrides = {}) {
   const item = {
+    slug: CONTEST_SLUG, name: CONTEST_SLUG, status: "open", listed: true,
+    identity_mode: "person", identity_label: "Candidate ID",
     start_at: isoMinutesFromNow(-60),
     end_at: isoMinutesFromNow(60),
-    contest_url: "https://www.hackerrank.com/contests/kec-2026",
-    contest_slug: "kec-2026",
-    rooms: ["Lab A-1"],
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: ["Lab A-1"], room_gate_enabled: false,
     updated_at: new Date().toISOString(),
     ...overrides
   };
-  await firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set(item);
+  await firestore.collection(process.env.CONTESTS_COLLECTION).doc(CONTEST_SLUG).set(item);
   return item;
 }
 
@@ -217,7 +224,7 @@ test("POST /api/session/start response carries end_at + server_now", async () =>
   const { firestore } = freshFakes();
   const seeded = await seedSettings(firestore);
   const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
-    hackerrank_username: "alice", name: "Alice", roll_number: "R1",
+    contest: CONTEST_SLUG, candidate_id: "alice", name: "Alice", roll_number: "R1",
     email: "a@example.com", consent_accepted: true
   } }));
   assert.equal(res.statusCode, 200);
@@ -229,10 +236,10 @@ test("POST /api/session/resume response carries end_at + server_now", async () =
   const { firestore } = freshFakes();
   const seeded = await seedSettings(firestore);
   await firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
-    session_id: "s1", status: "active", username_norm: "alice",
-    contest_slug: "kec-2026", storage_prefix: "contests/kec-2026/sessions/alice/s1/"
+    session_id: "s1", status: "active", candidate_id: "alice", username_norm: "alice",
+    contest_slug: CONTEST_SLUG, storage_prefix: `contests/${CONTEST_SLUG}/sessions/alice/s1/`
   });
-  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1" } }));
+  const res = await call(makeReq({ method: "POST", path: "/api/session/resume", body: { session_id: "s1", contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.end_at, seeded.end_at);
   assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
@@ -243,8 +250,8 @@ test("POST /api/heartbeat response carries end_at + server_now (the student's li
   const seeded = await seedSettings(firestore);
   // No start_ip/current_ip on the seed → heartbeat sees no IP change (no alert path).
   await firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
-    session_id: "s1", status: "active", username_norm: "alice",
-    contest_slug: "kec-2026", storage_prefix: "contests/kec-2026/sessions/alice/s1/"
+    session_id: "s1", status: "active", candidate_id: "alice", username_norm: "alice",
+    contest_slug: CONTEST_SLUG, storage_prefix: `contests/${CONTEST_SLUG}/sessions/alice/s1/`
   });
   const res = await call(makeReq({ method: "POST", path: "/api/heartbeat", body: {
     session_id: "s1", recording_state: "combined:recording;screen:recording", visibility_state: "visible"
@@ -255,177 +262,17 @@ test("POST /api/heartbeat response carries end_at + server_now (the student's li
   assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
 });
 
-// ---- Task 2: POST /api/admin/exam-time + stats end_at -----------------------
-
-test("POST /api/admin/exam-time validation: admin auth, configured schedule, exactly-one field, sane values", async () => {
-  const { firestore } = freshFakes();
-
-  // 401 without the admin password
-  const noAuth = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", body: { end_now: true } }));
-  assert.equal(noAuth.statusCode, 401);
-
-  // 400 when the schedule was never configured
-  const unconfigured = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
-  assert.equal(unconfigured.statusCode, 400);
-
-  await seedSettings(firestore);
-  // exactly ONE of the three fields
-  const none = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: {} }));
-  assert.equal(none.statusCode, 400);
-  const two = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true, extend_minutes: 5 } }));
-  assert.equal(two.statusCode, 400);
-  // bad values
-  const badIso = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_at: "not-a-date" } }));
-  assert.equal(badIso.statusCode, 400);
-  const zero = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 0 } }));
-  assert.equal(zero.statusCode, 400);
-  const falseEnd = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: false } }));
-  assert.equal(falseEnd.statusCode, 400);
-  // window inversion: new end before start
-  const beforeStart = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_at: isoMinutesFromNow(-120) } }));
-  assert.equal(beforeStart.statusCode, 400);
-});
-
-test("POST /api/admin/exam-time {end_at}: sets the new end WITHOUT clobbering other settings fields (merge-write)", async () => {
-  const { firestore } = freshFakes();
-  await seedSettings(firestore);
-  const newEnd = isoMinutesFromNow(120);
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_at: newEnd } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.ok, true);
-  assert.equal(res.body.end_at, newEnd);
-  assert.equal(res.body.ended_count, 0);
-  assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
-  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
-  assert.equal(stored.end_at, newEnd);
-  assert.ok(stored.end_at_updated_at);
-  // merge:true preserved everything else (incl. fields other features add)
-  assert.equal(stored.contest_url, "https://www.hackerrank.com/contests/kec-2026");
-  assert.deepEqual(stored.rooms, ["Lab A-1"]);
-  assert.equal(stored.contest_slug, "kec-2026");
-  assert.equal(stored.start_at !== undefined, true);
-});
-
-test("POST /api/admin/exam-time {extend_minutes}: positive extends, negative shortens, never inverts the window", async () => {
-  const { firestore } = freshFakes();
-  const seeded = await seedSettings(firestore);
-
-  const plus = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 30 } }));
-  assert.equal(plus.statusCode, 200);
-  assert.equal(Date.parse(plus.body.end_at), Date.parse(seeded.end_at) + 30 * 60_000);
-
-  // deltas compose against the CURRENT (already-extended) end
-  const minus = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: -45 } }));
-  assert.equal(minus.statusCode, 200);
-  assert.equal(Date.parse(minus.body.end_at), Date.parse(seeded.end_at) - 15 * 60_000);
-
-  // a shorten that would land before start_at → 400, end unchanged
-  const invert = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: -10000 } }));
-  assert.equal(invert.statusCode, 400);
-  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
-  assert.equal(Date.parse(stored.end_at), Date.parse(seeded.end_at) - 15 * 60_000);
-});
-
-test("POST /api/admin/exam-time {end_now}: ends every non-ended session in the contest scope, releases live locks", async () => {
-  const { firestore } = freshFakes();
-  await seedSettings(firestore);
-  const sessions = firestore.collection(process.env.SESSION_COLLECTION);
-  await sessions.doc("s-active").set({ session_id: "s-active", status: "active", username_norm: "alice", contest_slug: "kec-2026" });
-  await sessions.doc("s-locked").set({ session_id: "s-locked", status: "locked", username_norm: "bob", contest_slug: "kec-2026" });
-  await sessions.doc("s-pending").set({ session_id: "s-pending", status: "pending_approval", username_norm: "cara", contest_slug: "kec-2026" });
-  await sessions.doc("s-done").set({ session_id: "s-done", status: "ended", username_norm: "dan", contest_slug: "kec-2026" });
-  await sessions.doc("s-other").set({ session_id: "s-other", status: "active", username_norm: "eve", contest_slug: "other-contest" });
-  // alice's live-slot lock must be released so a legitimate later start works
-  await firestore.collection(process.env.LIVE_LOCK_COLLECTION).doc("live:alice:kec-2026").set({
-    username_norm: "alice", contest_slug: "kec-2026", session_id: "s-active", acquired_at: new Date().toISOString()
-  });
-
-  const before = Date.now();
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.ok, true);
-  assert.equal(res.body.ended_count, 3);
-  // end_at moved to ~now
-  const endMs = Date.parse(res.body.end_at);
-  assert.ok(endMs >= before && endMs <= Date.now());
-
-  const store = firestore._collections.get(process.env.SESSION_COLLECTION);
-  for (const id of ["s-active", "s-locked", "s-pending"]) {
-    assert.equal(store.get(id).status, "ended", `${id} force-ended`);
-    assert.equal(store.get(id).ended_reason, "exam_ended_by_admin");
-    assert.ok(store.get(id).ended_at);
-  }
-  assert.equal(store.get("s-done").ended_reason, undefined, "already-ended session untouched");
-  assert.equal(store.get("s-other").status, "active", "other contest untouched");
-  assert.equal(firestore._collections.get(process.env.LIVE_LOCK_COLLECTION).has("live:alice:kec-2026"), false, "live slot released");
-});
+// ---- Task 2: per-contest exam-time lives in contestAdminSD; here we only
+// pin that admin/stats surfaces the (contest-scoped) end_at for the card ------
 
 test("GET /api/admin/stats carries end_at + server_now for the console exam-time card", async () => {
   const { firestore } = freshFakes();
   const seeded = await seedSettings(firestore);
-  const res = await call(makeReq({ method: "GET", path: "/api/admin/stats", headers: ADMIN }));
+  // The exam-time card reads the CONTEST window — the scoped stats poll reports it.
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/stats", headers: ADMIN, query: { contest_slug: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.end_at, seeded.end_at);
   assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
-});
-
-// ---- D1: a stale Settings-form save must never clobber S5 exam-time state ---
-
-test("D1: stale settings save (same start_at) cannot revert a live exam-time change", async () => {
-  const { firestore } = freshFakes();
-  const seeded = await seedSettings(firestore);
-
-  // Live adjustment via the S5 endpoint: +30 minutes.
-  const extended = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 30 } }));
-  assert.equal(extended.statusCode, 200);
-  const liveEndAt = extended.body.end_at;
-
-  // A Settings form loaded BEFORE the extend posts the original end_at back
-  // (same start_at = same exam window) alongside a legitimate rooms edit.
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {
-    start_at: seeded.start_at, end_at: seeded.end_at,
-    contest_url: seeded.contest_url, rooms: ["Lab A-1", "Lab B-2"]
-  } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.end_at, liveEndAt, "response reports the preserved live end_at");
-  assert.deepEqual(res.body.rooms, ["Lab A-1", "Lab B-2"], "non-exam-time fields still save");
-
-  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
-  assert.equal(stored.end_at, liveEndAt, "live-adjusted end_at survives the stale save");
-  assert.ok(stored.end_at_updated_at, "exam-time ownership stamp survives the full set()");
-});
-
-test("D1: a settings save with a NEW start_at is a new schedule — submitted end_at applies, stamp clears", async () => {
-  const { firestore } = freshFakes();
-  await seedSettings(firestore);
-  // Take exam-time ownership first (end-now stamps end_at_updated_at).
-  const extended = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { extend_minutes: 30 } }));
-  assert.equal(extended.statusCode, 200);
-
-  const newStart = isoMinutesFromNow(-10);
-  const newEnd = isoMinutesFromNow(200);
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {
-    start_at: newStart, end_at: newEnd, contest_url: "https://www.hackerrank.com/contests/kec-2026"
-  } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.end_at, newEnd, "new schedule takes the submitted end_at");
-
-  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
-  assert.equal(stored.end_at, newEnd);
-  assert.equal(stored.end_at_updated_at, undefined, "old exam's live-adjust stamp does not shackle the new schedule");
-});
-
-test("D1: with no prior exam-time adjustment the settings save sets end_at normally", async () => {
-  const { firestore } = freshFakes();
-  const seeded = await seedSettings(firestore);
-  const newEnd = isoMinutesFromNow(90);
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: ADMIN, body: {
-    start_at: seeded.start_at, end_at: newEnd, contest_url: seeded.contest_url
-  } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.end_at, newEnd);
-  const stored = firestore._collections.get(process.env.SETTINGS_COLLECTION).get("active");
-  assert.equal(stored.end_at, newEnd, "form remains the end_at owner until exam-time is used");
 });
 
 // ---- D2: bounded grace for the final chunk + manifest after an admin end ----
@@ -522,7 +369,7 @@ test("D3: end_now paginates past the query cap and ends every live session", asy
     store.set(id, { session_id: id, status: "active", username_norm: `u${i}`, contest_slug: "kec-2026" });
   }
 
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/exam-time", headers: ADMIN, body: { end_now: true } }));
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/contest-exam-time", headers: ADMIN, body: { slug: CONTEST_SLUG, end_now: true } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.ended_count, TOTAL, "every live session ended, not just the first page");
   assert.equal(store.get("sess-6004").status, "ended", "doc beyond the first 6000 (the cap) reached");

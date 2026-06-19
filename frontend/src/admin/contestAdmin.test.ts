@@ -20,7 +20,6 @@ function contest(overrides: Partial<ContestSummary>): ContestSummary {
     slug: "c",
     name: "C",
     status: "open",
-    legacy: false,
     listed: true,
     identity_label: "Candidate ID",
     access_code: "ABC234",
@@ -37,7 +36,7 @@ function contest(overrides: Partial<ContestSummary>): ContestSummary {
   };
 }
 
-describe("derived contest URLs (vision §2.7 — contest_url is dead)", () => {
+describe("derived contest URLs (vision §2.7 — URLs derive from the slug)", () => {
   it("builds the candidate portal URL from origin + slug", () => {
     expect(candidateUrlFor("https://exam.aerele.in", "kec-r1")).toBe("https://exam.aerele.in/?contest=kec-r1");
   });
@@ -47,9 +46,9 @@ describe("derived contest URLs (vision §2.7 — contest_url is dead)", () => {
       .toBe("https://exam.aerele.in/invigilator?contest=kec-r1&key=k7Jq%2Bx");
   });
 
-  it("invigilator URL without a key (legacy contest) omits the key param", () => {
-    expect(invigilatorUrlFor("https://exam.aerele.in", "legacy", null))
-      .toBe("https://exam.aerele.in/invigilator?contest=legacy");
+  it("invigilator URL without a key omits the key param", () => {
+    expect(invigilatorUrlFor("https://exam.aerele.in", "no-key", null))
+      .toBe("https://exam.aerele.in/invigilator?contest=no-key");
   });
 });
 
@@ -87,11 +86,6 @@ describe("defaultContestSelection (S-D: single open contest rule)", () => {
   it("an unknown URL param is preserved (old slug filters literally — empty lists, never an error)", () => {
     expect(defaultContestSelection([contest({ slug: "a" })], "ghost")).toBe("ghost");
   });
-
-  it("the legacy contest counts as open for the single-open rule", () => {
-    const contests = [contest({ slug: "legacy-exam", legacy: true, status: "open" })];
-    expect(defaultContestSelection(contests, "")).toBe("legacy-exam");
-  });
 });
 
 describe("searchWithContestParam (per-tab URL persistence)", () => {
@@ -108,16 +102,15 @@ describe("searchWithContestParam (per-tab URL persistence)", () => {
 });
 
 describe("sortContestsForList", () => {
-  it("orders open before draft before archived, legacy last within its status, newest first within a group", () => {
+  it("orders open before draft before archived, newest first within a group", () => {
     const contests = [
       contest({ slug: "arch", status: "archived", created_at: "2026-06-09T00:00:00.000Z" }),
-      contest({ slug: "legacy-exam", legacy: true, status: "open", created_at: null }),
       contest({ slug: "draft-1", status: "draft", created_at: "2026-06-08T00:00:00.000Z" }),
       contest({ slug: "open-old", status: "open", created_at: "2026-06-01T00:00:00.000Z" }),
       contest({ slug: "open-new", status: "open", created_at: "2026-06-10T00:00:00.000Z" })
     ];
     expect(sortContestsForList(contests).map((c) => c.slug)).toEqual([
-      "open-new", "open-old", "legacy-exam", "draft-1", "arch"
+      "open-new", "open-old", "draft-1", "arch"
     ]);
   });
 });

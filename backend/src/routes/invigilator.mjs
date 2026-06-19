@@ -27,10 +27,8 @@ export function makeInvigilatorRoutes(ctx) {
   const {
     getFirestore,
     requireInvigilatorFor,
-    getSettings,
     sessionRef,
     candidateOf,
-    contestSlugFromUrl,
     // collection names (captured at handler load, per ?buster instance)
     sessionCollection,
     alertsCollection,
@@ -55,9 +53,10 @@ export function makeInvigilatorRoutes(ctx) {
   } = ctx;
 
   // Room-scoped console (NO signed-QR verification — deferred by design). Auth =
-  // requireInvigilator. Scope is ALWAYS the active contest from the settings doc;
-  // invigilators never pick a contest. Least privilege: these endpoints expose NO
-  // emails, NO IP addresses, NO signed media URLs.
+  // requireInvigilator. Scope is the contest named by ?contest= (the global
+  // password falls back to a no-contest staff view across ALL contests). Least
+  // privilege: these endpoints expose NO emails, NO IP addresses, NO signed
+  // media URLs.
 
   // GET /api/invigilator/overview — room-picker bootstrap: distinct room labels
   // (same helper the admin dropdowns use), whether blank-room sessions exist
@@ -65,8 +64,7 @@ export function makeInvigilatorRoutes(ctx) {
   async function invigilatorOverview(req) {
     const contest = await invigilatorContestOf(req);
     requireInvigilatorFor(req, contest);
-    const settings = contest ? null : await getSettings();
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    const contestSlug = invigilatorContestSlug(contest);
     const scope = contest || await contestScopeOf(contestSlug);
     const snapshot = await scopedQuery(getFirestore().collection(sessionCollection), scope)
       .limit(sessionsQueryLimit)
@@ -79,7 +77,7 @@ export function makeInvigilatorRoutes(ctx) {
       : distinctRooms(docs);
     return {
       contest_slug: contestSlug || null,
-      room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
+      room_gate_enabled: Boolean(contest?.room_gate_enabled),
       rooms,
       has_unassigned: docs.some((doc) => !String(doc.room || "").trim())
     };
@@ -130,15 +128,6 @@ export function makeInvigilatorRoutes(ctx) {
     };
   }
 
-  // Gate mutations require the admin to have ENABLED the room gate (the admin
-  // checkbox is also the admin-side master bypass: turning it off releases
-  // everyone on their next poll).
-  async function requireGateEnabledSettings() {
-    const settings = await getSettings();
-    if (!settings?.room_gate_enabled) badRequest("room_gate_disabled");
-    return settings;
-  }
-
   // POST /api/invigilator/release-code — mint (or re-display) the room's 6-digit
   // start OTP. Idempotent by default: an existing OTP is returned unchanged so a
   // portal reload never silently invalidates the code already on the board; pass
@@ -149,8 +138,8 @@ export function makeInvigilatorRoutes(ctx) {
     requireInvigilatorFor(req, contest);
     const body = parseBody(req);
     requireFields(body, ["room"]);
-    const settings = await requireGateEnabledFor(contest);
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    requireGateEnabledFor(contest);
+    const contestSlug = invigilatorContestSlug(contest);
     const roomKey = gateRoomKey(body.room);
     const existing = await getRoomGate(contestSlug, roomKey);
     if (existing && existing.mode === "otp" && existing.otp && body.regenerate !== true) {
@@ -185,8 +174,8 @@ export function makeInvigilatorRoutes(ctx) {
     requireInvigilatorFor(req, contest);
     const body = parseBody(req);
     requireFields(body, ["room"]);
-    const settings = await requireGateEnabledFor(contest);
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    requireGateEnabledFor(contest);
+    const contestSlug = invigilatorContestSlug(contest);
     const roomKey = gateRoomKey(body.room);
     const existing = await getRoomGate(contestSlug, roomKey);
     const now = new Date().toISOString();
@@ -215,17 +204,16 @@ export function makeInvigilatorRoutes(ctx) {
   // namespace from the start OTP: in an OTP-gated room every candidate personally
   // typed the start code, so accepting it for unlocks made the L2 lock
   // self-serve. Idempotent like release-code (reload re-displays the same code;
-  // regenerate:true mints fresh). Deliberately NOT behind
-  // requireGateEnabledSettings — with the default config (enforcement "block",
-  // start gate off) this is the room proctor's ONLY code path, and an unlock
-  // code must always be mintable.
+  // regenerate:true mints fresh). Deliberately NOT behind the room start-gate
+  // check — with the default config (enforcement "block", start gate off) this
+  // is the room proctor's ONLY code path, and an unlock code must always be
+  // mintable.
   async function invigilatorUnlockCode(req) {
     const contest = await invigilatorContestOf(req);
     requireInvigilatorFor(req, contest);
     const body = parseBody(req);
     requireFields(body, ["room"]);
-    const settings = contest ? null : await getSettings();
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    const contestSlug = invigilatorContestSlug(contest);
     const roomKey = gateRoomKey(body.room);
     const existing = await getRoomGate(contestSlug, roomKey);
     if (existing && existing.unlock_otp && body.regenerate !== true) {
@@ -278,8 +266,7 @@ export function makeInvigilatorRoutes(ctx) {
     requireInvigilatorFor(req, contest);
     const body = parseBody(req);
     requireFields(body, ["room", "username"]);
-    const settings = contest ? null : await getSettings();
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    const contestSlug = invigilatorContestSlug(contest);
     const roomKey = gateRoomKey(body.room);
     const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
     const usernameNorm = rowUsernameNorm(body);
@@ -319,15 +306,14 @@ export function makeInvigilatorRoutes(ctx) {
   // candidate by room + username/username_norm (rows never expose session_id —
   // it is the candidate's write-endpoint bearer token), the backend resolves the
   // LIVE session in that room, and the response never echoes the token either.
-  // Deliberately NOT behind requireGateEnabledSettings — exemptions are an
+  // Deliberately NOT behind the room start-gate check — exemptions are an
   // enforcement tool, independent of the room start gate.
   async function invigilatorExempt(req) {
     const contest = await invigilatorContestOf(req);
     requireInvigilatorFor(req, contest);
     const body = parseBody(req);
     requireFields(body, ["room", "username", "exemptions"]);
-    const settings = contest ? null : await getSettings();
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    const contestSlug = invigilatorContestSlug(contest);
     const roomKey = gateRoomKey(body.room);
     const roomLabel = roomKey === "_" ? "" : sanitizeRoom(body.room);
     const usernameNorm = rowUsernameNorm(body);
@@ -363,8 +349,7 @@ export function makeInvigilatorRoutes(ctx) {
     if (roomParam === undefined || roomParam === null || roomParam === "") {
       return badRequest("room is required");
     }
-    const settings = contest ? null : await getSettings();
-    const contestSlug = invigilatorContestSlug(contest, settings);
+    const contestSlug = invigilatorContestSlug(contest);
     const contestScope = contest || await contestScopeOf(contestSlug);
     const roomKey = gateRoomKey(roomParam);
     const roomLabel = roomKey === "_" ? "" : sanitizeRoom(roomParam);
@@ -464,7 +449,7 @@ export function makeInvigilatorRoutes(ctx) {
       contest_slug: contestSlug || null,
       room: roomLabel || null,
       room_key: roomKey,
-      room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
+      room_gate_enabled: Boolean(contest?.room_gate_enabled),
       stats,
       sessions,
       gate,
@@ -477,9 +462,10 @@ export function makeInvigilatorRoutes(ctx) {
   }
 
   // S-D: the OPTIONAL ?contest=/body.contest param on invigilator endpoints.
-  // Absent -> null (the legacy settings-driven portal, bit-for-bit). Present ->
-  // the resolved contest doc (or 400 unknown_contest). requireOpen:false —
-  // invigilators set rooms up before the window opens and stay on after close.
+  // Absent -> null (the global-password Aerele-staff view across ALL contests).
+  // Present -> the resolved contest doc (or 400 unknown_contest). requireOpen:
+  // false — invigilators set rooms up before the window opens and stay on after
+  // close.
   async function invigilatorContestOf(req) {
     let slug = String(req.query?.contest ?? "").trim();
     if (!slug) slug = String(parseBody(req)?.contest ?? "").trim();
@@ -488,23 +474,17 @@ export function makeInvigilatorRoutes(ctx) {
   }
 
   // The contest_slug value gate docs / session scoping use for this portal view:
-  // contest-mode -> the contest's slug ("" for an empty-slug legacy deployment,
-  // matching what its sessions were stamped with); legacy-mode -> the settings
-  // derivation used since S3.
-  function invigilatorContestSlug(contest, settings) {
-    if (contest) return contest.legacy_empty_slug ? "" : contest.slug;
-    return settings?.contest_slug || contestSlugFromUrl(settings?.contest_url) || "";
+  // the contest's slug, or "" for the no-contest staff view (contestScopeOf("")
+  // → ALL_CONTESTS).
+  function invigilatorContestSlug(contest) {
+    return contest ? contest.slug : "";
   }
 
-  // Contest-mode gate-enable check (the contest OWNS room_gate_enabled, S-I
-  // snapshot field); legacy mode keeps requireGateEnabledSettings. Returns the
-  // settings doc only in legacy mode (contest mode never needs it).
-  async function requireGateEnabledFor(contest) {
-    if (contest) {
-      if (!contest.room_gate_enabled) badRequest("room_gate_disabled");
-      return null;
-    }
-    return await requireGateEnabledSettings();
+  // The contest OWNS room_gate_enabled (S-I snapshot field). Gate mutations
+  // require a named contest — the no-contest staff view has no room gate.
+  function requireGateEnabledFor(contest) {
+    if (!contest) badRequest("room_gate_disabled");
+    if (!contest.room_gate_enabled) badRequest("room_gate_disabled");
   }
 
   return {
@@ -523,7 +503,6 @@ export function makeInvigilatorRoutes(ctx) {
     getRoomGate,
     generateRoomOtp,
     publicRoomGate,
-    requireGateEnabledSettings,
     requireGateEnabledFor,
     invigilatorContestOf,
     invigilatorContestSlug

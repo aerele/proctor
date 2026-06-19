@@ -12,29 +12,20 @@ import {
 
 // ---- contestProblemEntries: THE shim, the only reader -------------------------
 
-test("shim precedence: non-empty problems[] wins; legacy problem_id second; else []", () => {
-  // problems[] present -> served sorted, legacy field ignored.
+test("reader: non-empty problems[] served sorted; else []", () => {
+  // problems[] present -> served sorted.
   const both = contestProblemEntries({
-    problems: [{ problem_id: "b", points: 50, order: 1 }, { problem_id: "a", points: null, order: 0 }],
-    problem_id: "legacy-one"
+    problems: [{ problem_id: "b", points: 50, order: 1 }, { problem_id: "a", points: null, order: 0 }]
   });
   assert.deepEqual(both.map((e) => e.problem_id), ["a", "b"]);
-
-  // legacy problem_id only (the SETTINGS doc and legacy contests).
-  assert.deepEqual(contestProblemEntries({ problem_id: "sum-two" }), [
-    { problem_id: "sum-two", points: null, order: 0 }
-  ]);
-
-  // empty problems[] does NOT mask a legacy problem_id.
-  assert.deepEqual(contestProblemEntries({ problems: [], problem_id: "sum-two" }).map((e) => e.problem_id), ["sum-two"]);
 
   // nothing assigned.
   assert.deepEqual(contestProblemEntries({}), []);
   assert.deepEqual(contestProblemEntries(null), []);
-  assert.deepEqual(contestProblemEntries({ problem_id: "" }), []);
+  assert.deepEqual(contestProblemEntries({ problems: [] }), []);
 });
 
-test("shim: entries come back ordered by `order` with points defaulting to null", () => {
+test("reader: entries come back ordered by `order` with points defaulting to null", () => {
   const entries = contestProblemEntries({
     problems: [
       { problem_id: "c", order: 2 },
@@ -66,20 +57,20 @@ const CONTESTS = [
   { slug: "open-multi", status: "open", problems: [{ problem_id: "p1" }, { problem_id: "p2" }] },
   { slug: "draft-multi", status: "draft", problems: [{ problem_id: "p1" }] },
   { slug: "archived-multi", status: "archived", problems: [{ problem_id: "p1" }] },
-  { slug: "legacy-style", status: "open", problem_id: "p3" }
+  { slug: "solo-p3", status: "open", problems: [{ problem_id: "p3" }] }
 ];
 const TEMPLATES = [
   { slug: "tpl-live", archived: false, problems: [{ problem_id: "p1" }] },
   { slug: "tpl-archived", archived: true, problems: [{ problem_id: "p1" }] }
 ];
 
-test("findProblemReferences: matches contest problems[], the legacy field, and live templates; archived excluded", () => {
+test("findProblemReferences: matches contest problems[] and live templates; archived excluded", () => {
   const p1 = findProblemReferences("p1", { contests: CONTESTS, templates: TEMPLATES });
   assert.deepEqual(p1.contests.map((c) => c.slug), ["open-multi", "draft-multi"]);
   assert.deepEqual(p1.templates.map((t) => t.slug), ["tpl-live"]);
 
   const p3 = findProblemReferences("p3", { contests: CONTESTS, templates: TEMPLATES });
-  assert.deepEqual(p3.contests.map((c) => c.slug), ["legacy-style"]);
+  assert.deepEqual(p3.contests.map((c) => c.slug), ["solo-p3"]);
   assert.deepEqual(p3.templates, []);
 
   const none = findProblemReferences("ghost", { contests: CONTESTS, templates: TEMPLATES });
