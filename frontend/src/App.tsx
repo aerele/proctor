@@ -3132,10 +3132,13 @@ function AdminApp() {
   }
 
   return (
-    // Recordings + Results are data-dense (the recording player/timeline and the
-    // ranked results table) — render them full-width (max-w-screen-2xl, header
-    // kept) instead of the default max-w-6xl. Every other admin view stays narrow.
-    <Shell variant={view === "recordings" || view === "results" ? "wide" : "page"}>
+    // #116: ALL admin views share ONE container width (the "wide"
+    // max-w-screen-2xl). Previously only Recordings + Results were wide and every
+    // other view was max-w-6xl, so navigating between admin pages SNAPPED the
+    // container width. A single width across views makes navigation feel calm; a
+    // page whose CONTENT would look stretched at full width constrains itself
+    // internally (an inner max-width wrapper), never by shrinking the shell.
+    <Shell variant="wide">
       {/* W3: grouped admin nav. Top row: SECTIONS (left) + the global contest
           scope (top-right — it scopes EVERY screen, so it sits ABOVE them all;
           A1/S-D: the selection persists in this tab's URL ?contest= param).

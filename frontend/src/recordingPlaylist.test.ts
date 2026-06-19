@@ -148,9 +148,15 @@ describe("buildPlaylist", () => {
 // The Tier-1 chunk buffer uploads an offline-recorded chunk minutes after it
 // was recorded, so its GCS last_modified is late and the OLD (last_modified −
 // CHUNK_SECONDS) math placed it late → a phantom gap + a timeline clock jump.
-// The recorder manifest records each chunk's TRUE recording-window started_at
-// keyed by storage_key (== the GCS object key), which buildPlaylist now uses as
-// the primary anchor (started_at is the window START → NO CHUNK_SECONDS subtract).
+// The recorder manifest records each chunk's started_at keyed by storage_key
+// (== the GCS object key), which buildPlaylist uses as the primary anchor.
+// CRITICAL: the recorder stamps started_at at the chunk window CLOSE (the single
+// dataavailable/stop event ~CHUNK_SECONDS after recorder.start() —
+// useProctorRecorder.ts L1254-1257 + L511/550/597), so it maps to the window
+// START via − CHUNK_SECONDS, same form as the last_modified path. The ONLY
+// difference is the SOURCE (recording-close time vs upload time), which is
+// exactly what fixes buffered chunks (started_at carries the real recording time
+// even when the upload lands minutes late).
 describe("startedAtMapFromManifest", () => {
   it("maps storage_key → started_at from a well-formed manifest body", () => {
     const map = startedAtMapFromManifest({
@@ -198,38 +204,46 @@ describe("isManifestEvidence", () => {
 describe("buildPlaylist — recording-time anchor (manifest started_at)", () => {
   const testStartMs = Date.parse("2026-06-05T09:00:00.000Z");
 
-  // (a) BUFFERED chunk: started_at is continuous but last_modified is +60s late
-  // (the buffer drained it long after recording). Placement uses started_at, so
-  // there is NO phantom gap — the chunk lands contiguously.
-  it("(a) places a buffered chunk at started_at, not its late last_modified — no phantom gap", () => {
+  // (a) BUFFERED chunk: started_at is the window CLOSE (so chunk 1 of a test that
+  // starts at T0 stamps started_at = T0 + CHUNK_SECONDS, chunk 2 = T0 + 2·CHUNK).
+  // last_modified is +60s/+90s late (the buffer drained the chunk long after
+  // recording). Placement uses started_at − CHUNK_SECONDS, so chunk 1 lands at the
+  // window OPEN (offset 0) with NO phantom gap — the late upload time is ignored.
+  it("(a) places a buffered chunk at its window-open offset, not its late last_modified — no phantom gap", () => {
     const evidence = [
-      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
-      // Recorded 09:00:30→09:01:00, but the buffer uploaded it at 09:02:00 (+60s late).
-      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:02:00.000Z")
+      // Recorded 09:00:00→09:00:30, but the buffer uploaded it at 09:01:30 (+60s late).
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:01:30.000Z"),
+      // Recorded 09:00:30→09:01:00, uploaded at 09:02:30 (+90s late).
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:02:30.000Z")
     ];
     const startedAt = new Map([
-      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
-      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:00:30.000Z"]
+      // started_at = window CLOSE: chunk 1 closes at T0+30, chunk 2 at T0+60.
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"],
+      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.000Z"]
     ]);
     const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    // Window-CLOSE started_at − CHUNK_SECONDS → window-OPEN offsets 0 and 30.
     expect(playlist.map((c) => c.offsetSec)).toEqual([0, 30]);
     // Contiguous: chunk-2 starts exactly when chunk-1 ends — no gap.
     expect(playlist[1].offsetSec - playlist[0].endSec).toBe(0);
   });
 
-  // (b) REAL gap: the recording actually stopped — started_at jumps by far more
-  // than CHUNK_SECONDS. The gap STILL renders from the corrected offsets.
+  // (b) REAL gap: the recording actually stopped — started_at (window CLOSE)
+  // jumps by far more than CHUNK_SECONDS. The gap STILL renders from the
+  // corrected (− CHUNK_SECONDS) offsets.
   it("(b) preserves a real recording gap when started_at jumps past one window", () => {
     const evidence = [
       file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
       file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:05:30.000Z")
     ];
     const startedAt = new Map([
-      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
-      // Recording stopped ~5 min; resumed at 09:05:00.
-      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:05:00.000Z"]
+      // Chunk 1 recorded 09:00:00→09:00:30, closes (started_at) at 09:00:30.
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"],
+      // Recording stopped ~4.5 min; chunk 2 recorded 09:05:00→09:05:30, closes at 09:05:30.
+      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:05:30.000Z"]
     ]);
     const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    // Window-OPEN offsets: chunk 1 at 0, chunk 2 at 300 (09:05:00).
     expect(playlist.map((c) => c.offsetSec)).toEqual([0, 300]);
     // A real 270s blank between chunk-1's end (30) and chunk-2's start (300).
     expect(playlist[1].offsetSec - playlist[0].endSec).toBe(270);
@@ -248,44 +262,54 @@ describe("buildPlaylist — recording-time anchor (manifest started_at)", () => 
     expect(withMap.map((c) => c.offsetSec)).toEqual(noMap.map((c) => c.offsetSec));
   });
 
-  // (d) NON-buffered session: started_at ≈ last_modified − 30s (the window close
-  // approximates upload time). Placement is within ~1s of today's behavior.
+  // (d) NON-buffered session (REALISTIC producer data): both started_at and
+  // last_modified are the window CLOSE within ~1-2s of each other (started_at is
+  // the recorder's dataavailable/stop time, last_modified is GCS's finalize time
+  // for the same direct upload). Anchored placement (started_at − CHUNK_SECONDS)
+  // must stay within ~1s of the legacy (last_modified − CHUNK_SECONDS) placement —
+  // i.e. NO regression on direct uploads vs today.
   it("(d) non-buffered placement is unchanged (within ~1s) vs last_modified", () => {
     const evidence = [
-      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
-      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.500Z")
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:31.200Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:01.400Z")
     ];
     const startedAt = new Map([
-      // started_at ≈ last_modified − 30s (direct upload, no buffering delay).
-      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
-      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:00:30.300Z"]
+      // started_at ≈ last_modified (both window close; direct upload, no buffer delay).
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.500Z"],
+      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.700Z"]
     ]);
     const anchored = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
     const legacy = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen");
     anchored.forEach((c, i) => {
       expect(Math.abs(c.offsetSec - legacy[i].offsetSec)).toBeLessThanOrEqual(1);
     });
+    // And both land within ~1s of the window-open offsets 0 / 30.
+    expect(Math.abs(anchored[0].offsetSec - 0)).toBeLessThanOrEqual(1);
+    expect(Math.abs(anchored[1].offsetSec - 30)).toBeLessThanOrEqual(1);
   });
 
   // (e) Activity-log markers use real event timestamps on the SAME test-relative
-  // base ((eventMs − testStartMs)/1000). With chunks now placed at started_at
-  // (also test-relative), an event recorded mid-chunk lands inside that chunk's
-  // span — the two are aligned. (RecordingReview computes both; this pins the math.)
+  // base ((eventMs − testStartMs)/1000). With chunks placed at the window OPEN
+  // (started_at − CHUNK_SECONDS, also test-relative), an event recorded mid-chunk
+  // lands inside that chunk's span — the two are aligned. (RecordingReview
+  // computes both; this pins the math.)
   it("(e) an event at a chunk's real time lands inside that chunk's placed span", () => {
-    const evidence = [file(`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:11:00.000Z")];
+    const evidence = [file(`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:11:30.000Z")];
     const startedAt = new Map([
-      // Buffered: recorded at 09:01:00 but uploaded 10 min late.
-      [`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:01:00.000Z"]
+      // Buffered: recorded over the window [09:01:00, 09:01:30] so started_at (the
+      // window CLOSE) is 09:01:30 — but the buffer uploaded it ~10 min late.
+      [`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:01:30.000Z"]
     ]);
     const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
-    // An event fired at 09:01:15 (mid-window) → marker offset 75s.
+    // started_at (09:01:30) − CHUNK_SECONDS → window-OPEN offset 60s.
+    expect(playlist[0].offsetSec).toBe(60);
+    // An event fired at 09:01:15 (mid-window) → marker offset 75s, inside [60, 90].
     const markerOffset = (Date.parse("2026-06-05T09:01:15.000Z") - testStartMs) / 1000;
     expect(markerOffset).toBe(75);
     expect(markerOffset).toBeGreaterThanOrEqual(playlist[0].offsetSec);
     expect(markerOffset).toBeLessThan(playlist[0].endSec);
-    // Had we used the late last_modified, the chunk would be placed at offset 630
+    // Had we used the late last_modified, the chunk would be placed at offset ~630
     // (10.5 min in) and the real event would fall OUTSIDE it — the old desync.
-    expect(playlist[0].offsetSec).toBe(60);
   });
 
   // (f) Partial manifest: only some chunks have started_at → per-chunk fallback,
@@ -295,11 +319,11 @@ describe("buildPlaylist — recording-time anchor (manifest started_at)", () => 
       file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:02:00.000Z"), // late upload
       file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.000Z") // direct upload
     ];
-    // Only chunk-1 is in the manifest map.
-    const startedAt = new Map([[`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"]]);
+    // Only chunk-1 is in the manifest map; its started_at is the window CLOSE.
+    const startedAt = new Map([[`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"]]);
     const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
     const byKey = Object.fromEntries(playlist.map((c) => [c.key, c.offsetSec]));
-    // chunk-1: started_at anchor → 0 (NOT the +120s its late last_modified implies).
+    // chunk-1: started_at (− CHUNK_SECONDS) anchor → 0 (NOT the +120s its late last_modified implies).
     expect(byKey[`${PREFIX}screen/chunk-00001.webm`]).toBe(0);
     // chunk-2: no started_at → last_modified − CHUNK_SECONDS → 30.
     expect(byKey[`${PREFIX}screen/chunk-00002.webm`]).toBe(30);
@@ -311,13 +335,45 @@ describe("buildPlaylist — recording-time anchor (manifest started_at)", () => 
       file(`${PREFIX}camera/chunk-00001.webm`, "2026-06-05T09:09:00.000Z")
     ];
     const startedAt = new Map([
-      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
-      [`${PREFIX}camera/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"]
+      // started_at = window CLOSE for chunk 1 of a test starting at 09:00:00.
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"],
+      [`${PREFIX}camera/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"]
     ]);
     const screen = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
     const camera = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "camera", startedAt);
     expect(screen[0].offsetSec).toBe(0);
     expect(camera[0].offsetSec).toBe(screen[0].offsetSec);
+  });
+
+  // (GUARD — regression sentinel) The recorder stamps started_at at the chunk
+  // window CLOSE, so buildPlaylist MUST subtract CHUNK_SECONDS to recover the
+  // window OPEN. This test feeds window-CLOSE started_at values and asserts that
+  // an activity-log marker for an event fired DURING the recording window lands
+  // inside the placed chunk span. It FAILS against the buggy no-subtraction code
+  // (which would place the chunk CHUNK_SECONDS too late, pushing the event before
+  // the chunk's start) and PASSES after the correction — so the ~30s over-shift
+  // regression can never silently return.
+  it("(GUARD) window-close started_at keeps the chunk aligned to its mid-window activity marker", () => {
+    // Chunk recorded over the window [09:02:00, 09:02:30]; the recorder stamps
+    // started_at at the CLOSE (09:02:30). A direct upload, so last_modified is the
+    // same close time — the failure mode here is purely the CHUNK_SECONDS offset.
+    const evidence = [file(`${PREFIX}screen/chunk-00005.webm`, "2026-06-05T09:02:30.000Z")];
+    const startedAt = new Map([[`${PREFIX}screen/chunk-00005.webm`, "2026-06-05T09:02:30.000Z"]]);
+    const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+
+    // CORRECT placement: window OPEN = started_at − CHUNK_SECONDS = 09:02:00 → 120s.
+    // The buggy code (no subtraction) would place it at 150s — off by CHUNK_SECONDS.
+    expect(playlist[0].offsetSec).toBe(120);
+    expect(playlist[0].endSec).toBe(150);
+
+    // An event fired at 09:02:10 (10s into the real recording window) → marker
+    // offset 130s. It MUST sit inside [offsetSec, endSec). Under the buggy +30s
+    // placement the chunk span would be [150, 180) and 130 would fall OUTSIDE it
+    // (before the chunk) — the exact activity-marker desync this guards against.
+    const markerOffset = (Date.parse("2026-06-05T09:02:10.000Z") - testStartMs) / 1000;
+    expect(markerOffset).toBe(130);
+    expect(markerOffset).toBeGreaterThanOrEqual(playlist[0].offsetSec);
+    expect(markerOffset).toBeLessThan(playlist[0].endSec);
   });
 });
 
@@ -345,8 +401,9 @@ describe("RecordingReview manifest join (composition)", () => {
       session_id: "s1",
       ended_at: "2026-06-05T09:02:00.000Z",
       manifest: [
-        { kind: "screen", index: 1, storage_key: `${PREFIX}screen/chunk-00001.webm`, started_at: "2026-06-05T09:00:00.000Z" },
-        { kind: "screen", index: 2, storage_key: `${PREFIX}screen/chunk-00002.webm`, started_at: "2026-06-05T09:00:30.000Z" }
+        // started_at = window CLOSE (chunk 1 closes at +30, chunk 2 at +60).
+        { kind: "screen", index: 1, storage_key: `${PREFIX}screen/chunk-00001.webm`, started_at: "2026-06-05T09:00:30.000Z" },
+        { kind: "screen", index: 2, storage_key: `${PREFIX}screen/chunk-00002.webm`, started_at: "2026-06-05T09:01:00.000Z" }
       ]
     };
     const playlist = joinAndBuild(evidence, manifestBody);
