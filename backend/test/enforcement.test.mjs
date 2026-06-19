@@ -2,9 +2,9 @@
 //
 // F5.3-6 — fullscreen enforcement ladder + per-session exemptions + switch-away
 // episode alerting:
-//   - admin settings gain fullscreen_reentry_seconds / fullscreen_exit_limit /
-//     enforcement_mode (NaN-guarded, defaulted), served via exam-config,
-//     start/resume, and the heartbeat response.
+//   - the contest's enforcement snapshot carries fullscreen_reentry_seconds /
+//     fullscreen_exit_limit / mode (NaN-guarded, defaulted), served via
+//     exam-config, start/resume, and the heartbeat response.
 //   - POST /api/session/enforcement-violation: candidate self-report; server
 //     raises the critical alert and (block mode only) LOCKS the session with
 //     locked_reason "fullscreen_enforcement".
@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 process.env.EVIDENCE_BUCKET = "enf-bucket";
 process.env.SESSION_COLLECTION = "enf_sessions";
 process.env.SETTINGS_COLLECTION = "enf_settings";
+process.env.CONTESTS_COLLECTION = "enf_contests";
 process.env.ALERTS_COLLECTION = "enf_alerts";
 process.env.ROOM_GATES_COLLECTION = "enf_room_gates";
 process.env.LIVE_LOCK_COLLECTION = "enf_live_locks";
@@ -173,24 +174,44 @@ function makeFakeStorage() {
 
 // ---- Seed helpers -----------------------------------------------------------
 
+const CONTEST_SLUG = "kec-2026";
+
+// Seed an OPEN no-roster person contest carrying the enforcement snapshot the
+// session-bound serve paths read (enforcementConfigFor(contest)). The flat
+// overrides map onto the contest's `enforcement` object (and top-level
+// room_gate_enabled), so the call sites keep their pre-change shape.
 function seedSettings(firestore, overrides = {}) {
-  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+  const {
+    fullscreen_reentry_seconds, fullscreen_exit_limit, enforcement_mode,
+    simplified_fullscreen_recovery, room_gate_enabled = true, ...rest
+  } = overrides;
+  const enforcement = {};
+  if (fullscreen_reentry_seconds !== undefined) enforcement.fullscreen_reentry_seconds = fullscreen_reentry_seconds;
+  if (fullscreen_exit_limit !== undefined) enforcement.fullscreen_exit_limit = fullscreen_exit_limit;
+  if (enforcement_mode !== undefined) enforcement.mode = enforcement_mode;
+  if (simplified_fullscreen_recovery !== undefined) enforcement.simplified_fullscreen_recovery = simplified_fullscreen_recovery;
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(CONTEST_SLUG).set({
+    slug: CONTEST_SLUG, name: CONTEST_SLUG, status: "open", listed: true,
+    identity_mode: "person", identity_label: "Candidate ID",
     start_at: "2026-01-01T00:00:00.000Z",
     end_at: "2099-01-01T00:00:00.000Z",
-    contest_url: "https://www.hackerrank.com/contests/kec-2026",
-    contest_slug: "kec-2026",
-    room_gate_enabled: true,
-    ...overrides
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [], room_gate_enabled,
+    ...(Object.keys(enforcement).length ? { enforcement } : {}),
+    ...rest
   });
 }
 
 function seedSession(firestore, id, overrides = {}) {
   firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({
     session_id: id, status: "active",
-    hackerrank_username: "Alice", username_norm: "alice",
+    // candidate_id makes personContestForSession resolve the contest (so the
+    // session-bound enforcement serve reads the contest's snapshot); the frozen
+    // hackerrank_username stays for the row/response fields that surface it.
+    candidate_id: "alice", hackerrank_username: "Alice", username_norm: "alice",
     name: "Alice A", roll_number: "R1", email: "a@x.y", room: "Lab A-1",
-    contest_slug: "kec-2026",
-    storage_prefix: `contests/kec-2026/sessions/alice/${id}/`,
+    contest_slug: CONTEST_SLUG,
+    storage_prefix: `contests/${CONTEST_SLUG}/sessions/alice/${id}/`,
     created_at: "2026-06-09T09:00:00.000Z",
     last_heartbeat_at: new Date().toISOString(),
     ...overrides
@@ -208,62 +229,17 @@ function sessionDoc(firestore, id) {
 const adminHeaders = { "x-admin-password": "enf-admin-pass" };
 const invigHeaders = { "x-invigilator-password": "enf-invig-pass" };
 
-// ---- 1: settings fields (defaults, validation, NaN guard) ------------------
+// ---- 1: enforcement snapshot field (contest doc) ---------------------------
 
-test("admin settings: enforcement fields persist and round-trip", async () => {
+test("public exam-config serves the enforcement block (defaults when the contest never set it)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: {
-      start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z",
-      fullscreen_reentry_seconds: 30, fullscreen_exit_limit: 5, enforcement_mode: "alert_first"
-    } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.fullscreen_reentry_seconds, 30);
-  assert.equal(res.body.fullscreen_exit_limit, 5);
-  assert.equal(res.body.enforcement_mode, "alert_first");
-  const get = await call(makeReq({ method: "GET", path: "/api/admin/settings", headers: adminHeaders }));
-  assert.equal(get.body.fullscreen_reentry_seconds, 30);
-  assert.equal(get.body.fullscreen_exit_limit, 5);
-  assert.equal(get.body.enforcement_mode, "alert_first");
-});
-
-test("admin settings: an older payload WITHOUT enforcement fields preserves the stored values", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore, { fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 0, enforcement_mode: "alert_first" });
-  // Same rooms-style rule: a stale admin UI that doesn't know these fields
-  // must not silently reset them to defaults.
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: { start_at: "2026-01-01T00:00:00.000Z", end_at: "2099-01-01T00:00:00.000Z" } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.fullscreen_reentry_seconds, 45);
-  assert.equal(res.body.fullscreen_exit_limit, 0);
-  assert.equal(res.body.enforcement_mode, "alert_first");
-});
-
-test("admin settings: garbage enforcement values fall back to defaults (NaN guard)", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: {
-      start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z",
-      fullscreen_reentry_seconds: "garbage", fullscreen_exit_limit: -3, enforcement_mode: "explode"
-    } }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.fullscreen_reentry_seconds, 20);
-  assert.equal(res.body.fullscreen_exit_limit, 2);
-  assert.equal(res.body.enforcement_mode, "block");
-});
-
-test("public exam-config serves the enforcement block (defaults with no settings doc)", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  const bare = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
+  seedSettings(firestore); // contest with no enforcement override
+  const bare = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(bare.statusCode, 200);
   assert.deepEqual(bare.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 2, mode: "block", simplified_fullscreen_recovery: false });
   seedSettings(firestore, { fullscreen_reentry_seconds: 45, enforcement_mode: "alert_first" });
-  const configured = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
+  const configured = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.deepEqual(configured.body.enforcement, { fullscreen_reentry_seconds: 45, fullscreen_exit_limit: 2, mode: "alert_first", simplified_fullscreen_recovery: false });
 });
 
@@ -272,7 +248,7 @@ test("session start: doc gains enforcement_exemptions {}; response carries enfor
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore, { fullscreen_exit_limit: 4 });
   const res = await call(makeReq({ method: "POST", path: "/api/session/start",
-    body: { hackerrank_username: "alice", name: "Alice", roll_number: "R1", email: "a@x.y", consent_accepted: true } }));
+    body: { contest: CONTEST_SLUG, candidate_id: "alice", name: "Alice", roll_number: "R1", email: "a@x.y", consent_accepted: true } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.enforcement, { fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 4, mode: "block", simplified_fullscreen_recovery: false });
   assert.deepEqual(res.body.enforcement_exemptions, {});
@@ -374,14 +350,14 @@ async function lockViaViolation(firestore, sessionId) {
 
 async function mintRoomOtp() {
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code", headers: invigHeaders,
-    body: { room: "Lab A-1", invigilator_name: "Invy" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Invy" } }));
   assert.equal(res.statusCode, 200);
   return res.body.gate.otp;
 }
 
 async function mintUnlockCode(regenerate = false) {
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock-code", headers: invigHeaders,
-    body: { room: "Lab A-1", invigilator_name: "Invy", ...(regenerate ? { regenerate: true } : {}) } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Invy", ...(regenerate ? { regenerate: true } : {}) } }));
   assert.equal(res.statusCode, 200);
   return res.body.gate.unlock_otp;
 }
@@ -521,7 +497,7 @@ test("invigilator unlock-code mints a 6-digit code even with the room gate DISAB
   seedSettings(firestore, { room_gate_enabled: false });
   // Contrast: the START-gate mint is still (correctly) refused.
   const release = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code", headers: invigHeaders,
-    body: { room: "Lab A-1", invigilator_name: "Invy" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Invy" } }));
   assert.equal(release.statusCode, 400);
   assert.equal(release.body.error, "room_gate_disabled");
   // The UNLOCK code mints fine — and the full candidate release loop works.
@@ -539,7 +515,7 @@ test("invigilator unlock-code: 401 without auth; idempotent re-display; regenera
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
   const noAuth = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock-code",
-    body: { room: "Lab A-1" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1" } }));
   assert.equal(noAuth.statusCode, 401);
   const startOtp = await mintRoomOtp();
   const first = await mintUnlockCode();
@@ -550,7 +526,7 @@ test("invigilator unlock-code: 401 without auth; idempotent re-display; regenera
   assert.equal(gateDoc.otp, startOtp);          // start code untouched
   assert.equal(gateDoc.unlock_otp, first);
   const regen = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock-code", headers: invigHeaders,
-    body: { room: "Lab A-1", invigilator_name: "Asha", regenerate: true } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Asha", regenerate: true } }));
   assert.match(regen.body.gate.unlock_otp, /^\d{6}$/);
   assert.equal(regen.body.gate.unlock_released_by, "Asha"); // rewrite proven (random code could collide)
   assert.equal(regen.body.gate.otp, startOtp);  // regenerating the unlock code never touches the start code
@@ -562,11 +538,11 @@ test("release-code and open-room PRESERVE a minted unlock code (no clobber on fu
   seedSettings(firestore);
   const code = await mintUnlockCode();
   const release = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code", headers: invigHeaders,
-    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   assert.equal(release.statusCode, 200);
   assert.equal(release.body.gate.unlock_otp, code);
   const open = await call(makeReq({ method: "POST", path: "/api/invigilator/open-room", headers: invigHeaders,
-    body: { room: "Lab A-1", invigilator_name: "Asha" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Asha" } }));
   assert.equal(open.statusCode, 200);
   assert.equal(open.body.gate.unlock_otp, code);
 });
@@ -577,7 +553,7 @@ test("invigilator room response carries the unlock code fields on the gate proje
   seedSettings(firestore, { room_gate_enabled: false });
   const code = await mintUnlockCode();
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room", headers: invigHeaders,
-    query: { room: "Lab A-1" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.gate.unlock_otp, code);
   assert.equal(res.body.gate.unlock_released_by, "Invy");
@@ -589,10 +565,10 @@ test("POST /api/invigilator/unlock releases an ENFORCEMENT-locked student by roo
   seedSettings(firestore, { room_gate_enabled: false });
   await lockViaViolation(firestore, "iu-1");
   const noAuth = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
-    body: { room: "Lab A-1", username: "alice" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "alice" } }));
   assert.equal(noAuth.statusCode, 401);
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "alice" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "alice" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.username, "Alice");
   assert.equal(res.body.status, "active");
@@ -609,12 +585,12 @@ test("invigilator unlock refuses ADMIN locks; 404 when no locked session for tha
   seedSettings(firestore);
   seedSession(firestore, "iu-2", { status: "locked" }); // admin lock: no locked_reason
   const adminLock = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "alice" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "alice" } }));
   assert.equal(adminLock.statusCode, 403);
   assert.equal(adminLock.body.error, "not_enforcement_locked");
   assert.equal(sessionDoc(firestore, "iu-2").status, "locked");
   const none = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "nobody" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "nobody" } }));
   assert.equal(none.statusCode, 404);
   assert.equal(none.body.error, "no_locked_session_in_room");
 });
@@ -629,7 +605,7 @@ test("invigilator room rows carry locked_reason so the portal can offer Unlock o
     hackerrank_username: "Bob", username_norm: "bob"
   }); // admin lock
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room", headers: invigHeaders,
-    query: { room: "Lab A-1" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" } }));
   assert.equal(res.statusCode, 200);
   const alice = res.body.sessions.find((row) => row.hackerrank_username === "Alice");
   const bob = res.body.sessions.find((row) => row.hackerrank_username === "Bob");
@@ -677,10 +653,10 @@ test("invigilator exempt: requires auth, finds the live session by room+username
   seedSettings(firestore);
   seedSession(firestore, "x-3");
   const noAuth = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt",
-    body: { room: "Lab A-1", username: "alice", exemptions: { fullscreen: true } } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "alice", exemptions: { fullscreen: true } } }));
   assert.equal(noAuth.statusCode, 401);
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "alice", exemptions: { fullscreen: true } } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "alice", exemptions: { fullscreen: true } } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.enforcement_exemptions, { fullscreen: true });
   assert.deepEqual(sessionDoc(firestore, "x-3").enforcement_exemptions, { fullscreen: true });
@@ -695,10 +671,10 @@ test("invigilator exempt: 404 when no live session for that username in that roo
   seedSession(firestore, "x-4", { room: "Lab B-2" }); // different room
   seedSession(firestore, "x-5", { username_norm: "bob", hackerrank_username: "Bob", status: "ended" });
   const wrongRoom = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "alice", exemptions: { fullscreen: true } } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "alice", exemptions: { fullscreen: true } } }));
   assert.equal(wrongRoom.statusCode, 404);
   const endedOnly = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "bob", exemptions: { fullscreen: true } } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "bob", exemptions: { fullscreen: true } } }));
   assert.equal(endedOnly.statusCode, 404);
 });
 
@@ -708,7 +684,7 @@ test("invigilator room rows carry enforcement_exemptions", async () => {
   seedSettings(firestore);
   seedSession(firestore, "x-6", { enforcement_exemptions: { switch_away: true } });
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room", headers: invigHeaders,
-    query: { room: "Lab A-1" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.sessions[0].enforcement_exemptions, { switch_away: true });
 });
@@ -1033,7 +1009,7 @@ test("every unlock path RESETS the server-side exit counter — one later accide
   seedSession(firestore, "rs-3", { status: "locked", locked_reason: "fullscreen_enforcement", fullscreen_exit_count: 3, fullscreen_out_since: "2026-06-10T10:00:00.000Z",
     hackerrank_username: "Cara", username_norm: "cara" });
   await call(makeReq({ method: "POST", path: "/api/invigilator/unlock", headers: invigHeaders,
-    body: { room: "Lab A-1", username: "cara" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "cara" } }));
   doc = sessionDoc(firestore, "rs-3");
   assert.equal(doc.status, "active");
   assert.equal(doc.fullscreen_exit_count, 0);

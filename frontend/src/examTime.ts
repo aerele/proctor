@@ -53,12 +53,12 @@ export function sessionElapsedAnchorMs(
   return Math.min(anchor, clientNowMs);
 }
 
-// D1 — which end_at does a Settings-form save actually persist? Mirrors the
-// backend adminSaveSettings rule (demo parity): once the exam-time endpoint has
-// adjusted the end (end_at_updated_at stamp) and the save keeps the SAME
-// start_at (same exam window), the stored end_at + stamp survive — a stale
-// form value can never revert a live extend/shorten/end-now. A changed
-// start_at is a new schedule: the submitted end_at applies and the stamp clears.
+// D1 — which end_at does a settings save actually persist? Pure rule (demo
+// parity): once the exam-time endpoint has adjusted the end (end_at_updated_at
+// stamp) and the save keeps the SAME start_at (same exam window), the stored
+// end_at + stamp survive — a stale form value can never revert a live
+// extend/shorten/end-now. A changed start_at is a new schedule: the submitted
+// end_at applies and the stamp clears.
 export function resolveSavedEndAt(
   existing: { start_at?: string; end_at?: string; end_at_updated_at?: string } | null | undefined,
   submitted: { start_at: string; end_at: string }

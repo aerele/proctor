@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 process.env.EVIDENCE_BUCKET = "camrec-bucket";
 process.env.SESSION_COLLECTION = "camrec_sessions";
 process.env.SETTINGS_COLLECTION = "camrec_settings";
+process.env.CONTESTS_COLLECTION = "camrec_contests";
 process.env.ALERTS_COLLECTION = "camrec_alerts";
 process.env.ROOM_GATES_COLLECTION = "camrec_room_gates";
 process.env.LIVE_LOCK_COLLECTION = "camrec_live_locks";
@@ -175,14 +176,38 @@ function makeFakeStorage() {
 
 // ---- Seed helpers -----------------------------------------------------------
 
-function seedSettings(firestore, overrides = {}) {
-  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+const CONTEST_SLUG = "kec-2026";
+
+// Seed an OPEN, no-roster person contest directly. camera_recording overrides
+// ride straight onto the contest doc (S-I snapshot field) — the same shape the
+// session-bound serve paths read via cameraRecordingConfigFor.
+function seedContest(firestore, { camera_recording } = {}) {
+  const doc = {
+    slug: CONTEST_SLUG,
+    name: CONTEST_SLUG,
+    status: "open",
+    identity_mode: "person",
+    identity_label: "Candidate ID",
     start_at: "2026-01-01T00:00:00.000Z",
     end_at: "2099-01-01T00:00:00.000Z",
-    contest_url: "https://www.hackerrank.com/contests/kec-2026",
-    contest_slug: "kec-2026",
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [],
+    room_gate_enabled: false
+  };
+  if (camera_recording !== undefined) doc.camera_recording = camera_recording;
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(CONTEST_SLUG).set(doc);
+}
+
+function startBody(overrides = {}) {
+  return {
+    contest: CONTEST_SLUG,
+    candidate_id: "alice",
+    name: "Alice A",
+    email: "a@x.y",
+    roll_number: "R1",
+    consent_accepted: true,
     ...overrides
-  });
+  };
 }
 
 function seedSession(firestore, id, overrides = {}) {
@@ -208,76 +233,52 @@ const adminHeaders = { "x-admin-password": "camrec-admin-pass" };
 
 const CAMERA_DEFAULTS = { enabled: true, fps: 10, width: 640 };
 
-// ---- 1: settings field (defaults, validation, preservation) ----------------
+// ---- 1: camera_recording snapshot field (defaults, validation) -------------
 
-test("admin settings: camera_recording defaults to enabled 10fps 640w when never configured", async () => {
+test("exam-config: camera_recording defaults to enabled 10fps 640w when the contest never configured it", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore);
-  const res = await call(makeReq({ method: "GET", path: "/api/admin/settings", headers: adminHeaders }));
+  seedContest(firestore);
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.camera_recording, CAMERA_DEFAULTS);
 });
 
-test("admin settings: camera_recording round-trips through save and get", async () => {
+test("exam-config: camera_recording reflects the contest's snapshot value", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: {
-      start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z",
-      camera_recording: { enabled: false, fps: 5, width: 800 }
-    } }));
+  seedContest(firestore, { camera_recording: { enabled: false, fps: 5, width: 800 } });
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.camera_recording, { enabled: false, fps: 5, width: 800 });
-  const get = await call(makeReq({ method: "GET", path: "/api/admin/settings", headers: adminHeaders }));
-  assert.deepEqual(get.body.camera_recording, { enabled: false, fps: 5, width: 800 });
 });
 
-test("admin settings: invalid camera_recording values fall back to defaults (never 0)", async () => {
+test("exam-config: invalid camera_recording values on the contest fall back to defaults (never 0)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   // fps 0 (the blank-saves-0 hazard), width out of range, enabled non-boolean.
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: {
-      start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z",
-      camera_recording: { enabled: "yes", fps: 0, width: 5000 }
-    } }));
+  seedContest(firestore, { camera_recording: { enabled: "yes", fps: 0, width: 5000 } });
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.camera_recording, CAMERA_DEFAULTS);
 });
 
-test("admin settings: out-of-range fps (16+) and width (<320) fall back to defaults", async () => {
+test("exam-config: out-of-range fps (16+) and width (<320) fall back to defaults", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: {
-      start_at: "2026-06-10T03:00:00.000Z", end_at: "2026-06-10T08:00:00.000Z",
-      camera_recording: { enabled: true, fps: 16, width: 100 }
-    } }));
+  seedContest(firestore, { camera_recording: { enabled: true, fps: 16, width: 100 } });
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.camera_recording, CAMERA_DEFAULTS);
-});
-
-test("admin settings: an older payload WITHOUT camera_recording preserves the stored value", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore, { camera_recording: { enabled: false, fps: 3, width: 320 } });
-  const res = await call(makeReq({ method: "POST", path: "/api/admin/settings", headers: adminHeaders,
-    body: { start_at: "2026-01-01T00:00:00.000Z", end_at: "2099-01-01T00:00:00.000Z" } }));
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.body.camera_recording, { enabled: false, fps: 3, width: 320 });
 });
 
 // ---- 2: session start serves the camera config inside upload_config --------
 
-test("session start: upload_config carries the camera recording config from settings", async () => {
+test("session start: upload_config carries the camera recording config from the contest", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore, { camera_recording: { enabled: true, fps: 8, width: 480 } });
-  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
-    hackerrank_username: "alice", name: "Alice A", roll_number: "R1", email: "a@x.y",
-    consent_accepted: true
-  } }));
+  seedContest(firestore, { camera_recording: { enabled: true, fps: 8, width: 480 } });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: startBody() }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.upload_config.camera, { enabled: true, fps: 8, width: 480 });
   // The screen constraints are untouched by the camera block.
@@ -285,14 +286,11 @@ test("session start: upload_config carries the camera recording config from sett
   assert.equal(res.body.upload_config.max_frame_rate, 4);
 });
 
-test("session start: camera config defaults to enabled when settings never configured it", async () => {
+test("session start: camera config defaults to enabled when the contest never configured it", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore);
-  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
-    hackerrank_username: "alice", name: "Alice A", roll_number: "R1", email: "a@x.y",
-    consent_accepted: true
-  } }));
+  seedContest(firestore);
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: startBody() }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.upload_config.camera, CAMERA_DEFAULTS);
 });
@@ -300,8 +298,8 @@ test("session start: camera config defaults to enabled when settings never confi
 test("public exam-config: serves the camera_recording block (consent copy is pre-session)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore, { camera_recording: { enabled: false, fps: 10, width: 640 } });
-  const res = await call(makeReq({ method: "GET", path: "/api/exam-config" }));
+  seedContest(firestore, { camera_recording: { enabled: false, fps: 10, width: 640 } });
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.camera_recording, { enabled: false, fps: 10, width: 640 });
 });
@@ -311,7 +309,6 @@ test("public exam-config: serves the camera_recording block (consent copy is pre
 test("upload-url: kind camera signs camera/chunk-{index:05d}.webm and counts camera_chunk_count", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore);
   seedSession(firestore, "s-cam-1");
   const res = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
     session_id: "s-cam-1", kind: "camera", chunk_index: 3, content_type: "video/webm"
@@ -327,7 +324,6 @@ test("upload-url: kind camera signs camera/chunk-{index:05d}.webm and counts cam
 test("upload-url: kind screen still owns chunk_count and never touches camera_chunk_count", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore);
   seedSession(firestore, "s-scr-1");
   const res = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
     session_id: "s-scr-1", kind: "screen", chunk_index: 1, content_type: "video/webm"
@@ -342,7 +338,6 @@ test("upload-url: kind screen still owns chunk_count and never touches camera_ch
 test("upload-url: rejects any kind other than screen/camera (path-traversal hardening)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore);
   seedSession(firestore, "s-kind-1");
   for (const kind of ["webcam", "../secrets", "camera/../../x", "events", ""]) {
     const res = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
@@ -359,7 +354,6 @@ test("upload-url: rejects any kind other than screen/camera (path-traversal hard
 test("upload-url: camera chunk_index must be a non-negative integer", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  seedSettings(firestore);
   seedSession(firestore, "s-idx-1");
   for (const chunkIndex of [-1, 1.5, "seven", null]) {
     const res = await call(makeReq({ method: "POST", path: "/api/upload-url", body: {
@@ -375,7 +369,6 @@ test("session end: manifest with screen AND camera entries is accepted and store
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
-  seedSettings(firestore);
   seedSession(firestore, "s-end-1", { chunk_count: 2, camera_chunk_count: 2 });
   const res = await call(makeReq({ method: "POST", path: "/api/session/end", body: {
     session_id: "s-end-1",

@@ -14,6 +14,7 @@ process.env.ALERTS_INGEST_API_KEY = "phase2b-ingest-key-placeholder-not-a-real-s
 process.env.ALERTS_COLLECTION = "phase2b_alerts";
 process.env.SESSION_COLLECTION = "phase2b_sessions";
 process.env.SETTINGS_COLLECTION = "phase2b_settings";
+process.env.CONTESTS_COLLECTION = "phase2b_contests";
 process.env.EVIDENCE_BUCKET = "phase2b-bucket";
 process.env.ADMIN_PASSWORD = TEST_ADMIN_PASSWORD;
 process.env.DISCONNECTED_STALENESS_MS = "45000";
@@ -187,24 +188,36 @@ async function call(req) {
 
 const ADMIN_HEADERS = { "x-admin-password": TEST_ADMIN_PASSWORD };
 
-function seedSettings(firestore, { contestUrl = "https://www.hackerrank.com/contests/coding-contest-mcet-june-2026-slot-2" } = {}) {
-  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+const CONTEST_SLUG = "coding-contest-mcet-june-2026-slot-2";
+
+// Seed an OPEN no-roster person contest; start() pins ?contest= to it.
+function seedSettings(firestore, { slug = CONTEST_SLUG } = {}) {
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(slug).set({
+    slug, name: slug, status: "open", listed: true,
+    identity_mode: "person", identity_label: "Candidate ID",
     start_at: new Date(Date.now() - 3600 * 1000).toISOString(),
     end_at: new Date(Date.now() + 3600 * 1000).toISOString(),
-    contest_url: contestUrl,
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [], room_gate_enabled: false,
     updated_at: new Date().toISOString()
   });
 }
 
+// The candidate id rides on candidate_id (person path: candidate_id ??
+// hackerrank_username). A caller passing the legacy hackerrank_username key
+// means THAT as the id, so the default candidate_id "Alice" is omitted then.
 function detailsBody(overrides = {}) {
-  return {
-    hackerrank_username: "Alice",
+  const base = {
+    contest: CONTEST_SLUG,
     name: "Alice Example",
     roll_number: "R-1",
     email: "alice@example.com",
-    consent_accepted: true,
-    ...overrides
+    consent_accepted: true
   };
+  if (!("hackerrank_username" in overrides) && !("candidate_id" in overrides)) {
+    base.candidate_id = "Alice";
+  }
+  return { ...base, ...overrides };
 }
 
 async function start(firestore, storage, overrides = {}) {

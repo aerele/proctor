@@ -21,7 +21,6 @@ function contest(overrides: Partial<ContestSummary>): ContestSummary {
     slug: "c",
     name: "C",
     status: "open",
-    legacy: false,
     listed: true,
     identity_label: "Candidate ID",
     access_code: "ABC234",
@@ -49,13 +48,6 @@ describe("contestsReferencingProblem", () => {
       contest({ slug: "kec-r2", problems: [problemRef("dijkstra")] })
     ];
     expect(contestsReferencingProblem("two-sum", contests).map((c) => c.slug)).toEqual(["kec-r1"]);
-  });
-
-  it("matches a problem on the LEGACY single-problem assignment (problem_id)", () => {
-    const contests = [
-      contest({ slug: "legacy", legacy: true, problems: undefined, problem_id: "two-sum" })
-    ];
-    expect(contestsReferencingProblem("two-sum", contests).map((c) => c.slug)).toEqual(["legacy"]);
   });
 
   it("returns [] when no contest references the problem", () => {

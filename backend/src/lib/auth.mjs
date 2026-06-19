@@ -40,13 +40,12 @@ export function makeAuth(ctx) {
   // is (a) the admin password, (b) THE NAMED CONTEST's invigilator_key, or
   // (c) the global INVIGILATOR_PASSWORD (demoted to Aerele-staff fallback).
   // A contest key never authenticates another contest (the compare runs against
-  // the resolved contest only) and never authenticates the legacy no-param
-  // portal. All compares are timing-safe via safeEqual.
+  // the resolved contest only). All compares are timing-safe via safeEqual.
   function requireInvigilatorFor(req, contest) {
     const invig = req.get?.("x-invigilator-password") || req.headers?.["x-invigilator-password"] || "";
     const admin = req.get?.("x-admin-password") || req.headers?.["x-admin-password"] || "";
     if (adminPassword && (safeEqual(admin, adminPassword) || safeEqual(invig, adminPassword))) return;
-    if (contest && !contest.legacy && contest.invigilator_key && safeEqual(invig, contest.invigilator_key)) return;
+    if (contest && contest.invigilator_key && safeEqual(invig, contest.invigilator_key)) return;
     if (!invigilatorPassword) {
       if (!warnedMissingInvigilatorPassword) {
         console.warn("INVIGILATOR_PASSWORD is not set; rejecting invigilator-password requests.");

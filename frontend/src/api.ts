@@ -85,7 +85,6 @@ import { emptyPersonRosterState, evaluatePersonRosterUpload, identityNorm, type 
 import { normalizeCameraRecording } from "./cameraRecording";
 import { normalizeScreenMarkers } from "./screenMarkers";
 import { sessionStartPayload } from "./identity";
-import { resolveSavedEndAt } from "./examTime";
 import { roomKeyForLabel } from "./invigilator/gateLogic";
 import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
 
@@ -243,17 +242,6 @@ function demoStoragePrefix(contestSlug: string, usernameNorm: string, sessionId:
   return `sessions/${usernameNorm}/${sessionId}/`;
 }
 
-function contestSlugFromUrl(contestUrl?: string) {
-  if (!contestUrl) return "";
-  try {
-    const segments = new URL(contestUrl).pathname.split("/").filter(Boolean);
-    if (!segments.length) return "";
-    return segments[segments.length - 1].replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-  } catch {
-    return "";
-  }
-}
-
 // F5.3 demo parity: the same NaN-guarded normalization the backend's
 // enforcementConfig applies (defaults 20 / 2 / "block").
 function enforcementIntOr(raw: unknown, fallback: number, minimum: number): number {
@@ -294,15 +282,14 @@ function demoCameraRecording() {
 // the demo settings store; default OFF, garbage falls back to disabled.
 function demoScreenMarkers(contest?: ContestSummary | null) {
   return normalizeScreenMarkers(
-    contest && !contest.legacy ? contest.screen_markers : getDemoSettings()?.screen_markers
+    contest ? contest.screen_markers : getDemoSettings()?.screen_markers
   );
 }
 
-function demoSessionResponse(session: DemoSession, contestUrl: string, contest?: ContestSummary | null): SessionStartResponse {
-  // S-I §3.4 parity: ordered problems[] (contest-owned for person contests,
-  // legacy settings problem_id otherwise), the one-release `problem` alias
-  // (= problems[0] minus `order`), the per-problem submissions summary and
-  // the submit budget.
+function demoSessionResponse(session: DemoSession, contest?: ContestSummary | null): SessionStartResponse {
+  // S-I §3.4 parity: ordered problems[] (contest-owned), the one-release
+  // `problem` alias (= problems[0] minus `order`), the per-problem submissions
+  // summary and the submit budget.
   const problems = demoContestProblems(contest ?? null);
   let problemAlias: PublicProblem | null = null;
   if (problems.length) {
@@ -319,12 +306,11 @@ function demoSessionResponse(session: DemoSession, contestUrl: string, contest?:
     storage_prefix: session.storage_prefix,
     blocked_by_session_id: session.blocked_by_session_id,
     start_ip: session.start_ip,
-    contest_url: contestUrl,
     // S3: mirror the backend startResponse — the candidate client needs the
     // gate flag to know whether to hold at the room-code screen (demo parity).
     // S-D: person-contest sessions read the gate flag from the CONTEST doc
     // (backend startResponse parity: the contest owns its snapshot fields).
-    room_gate_enabled: contest && !contest.legacy
+    room_gate_enabled: contest
       ? contest.room_gate_enabled === true
       : getDemoSettings()?.room_gate_enabled === true,
     // F5.3/F5.5: enforcement knobs + exemptions + lock reason (backend parity).
@@ -354,7 +340,7 @@ function demoSessionResponse(session: DemoSession, contestUrl: string, contest?:
     heartbeat_interval_seconds: 15,
     // S5: demo sessions read the exam end time from the demo settings store.
     // S-D: person-contest sessions read the exam end time from the CONTEST doc.
-    end_at: (contest && !contest.legacy ? contest.end_at : getDemoSettings()?.end_at) || "",
+    end_at: (contest ? contest.end_at : getDemoSettings()?.end_at) || "",
     server_now: new Date().toISOString()
   };
 }
@@ -448,7 +434,7 @@ function demoPersonStart(
   if (existingSessionId) {
     const replay = readDemoSessions().find((item) => item.session_id === existingSessionId);
     if (replay && replay.username_norm === identity.username_norm && replay.contest_slug === contest.slug) {
-      return demoSessionResponse(replay, "", contest);
+      return demoSessionResponse(replay, contest);
     }
   }
   const existingLive = readDemoSessions().find(
@@ -469,7 +455,7 @@ function demoPersonStart(
     start_ip: "demo.local"
   };
   upsertDemoSession(session);
-  return demoSessionResponse(session, "", contest);
+  return demoSessionResponse(session, contest);
 }
 
 export async function startSession(
@@ -479,77 +465,12 @@ export async function startSession(
 ): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(250);
-    // S-D: a pinned NON-legacy contest takes the person-layer start; the
-    // pinned legacy contest (or no pin) keeps the legacy branch bit-for-bit
-    // (backend resolvePersonContestForStart parity).
-    if (opts?.contest) {
-      const pinned = demoContestsList().find((contest) => contest.slug === opts.contest);
-      if (!pinned) throw demoApiError(400, "unknown_contest");
-      if (!pinned.legacy) return demoPersonStart(form, pinned, opts.college, existingSessionId);
-    }
-    const settings = getDemoSettings();
-    // Phase 3: no passcode. Start is gated by configured-and-valid time window only.
-    if (!settings?.start_at || !settings?.end_at) {
-      throw new Error("Proctoring is not configured yet. Ask the administrator to set the schedule.");
-    }
-    const now = Date.now();
-    if (now < Date.parse(settings.start_at)) {
-      throw new Error("Proctoring has not started yet.");
-    }
-    if (now > Date.parse(settings.end_at)) {
-      throw new Error("Proctoring has ended.");
-    }
-
-    const contestUrl = settings.contest_url || "";
-    const contestSlug = contestSlugFromUrl(contestUrl);
-
-    // S2 roster gate (demo parity with the backend): roster configured -> start
-    // requires a roster match, and roster-mapped fields win over typed ones.
-    const demoRosterHit = form.roster_unique_id ? demoRosterEntryFor(form.roster_unique_id) : null;
-    if (getDemoRoster()) {
-      if (!form.roster_unique_id) throw demoApiError(403, "roster_id_required");
-      if (!demoRosterHit) throw demoApiError(403, "not_on_roster");
-    }
-    const demoMapping = demoRosterHit?.roster.column_mapping ?? {};
-    const rosterUsername = demoRosterHit && demoMapping.hackerrank_username
-      ? (demoRosterHit.row[demoMapping.hackerrank_username] ?? "").trim() : "";
-    const rosterName = demoRosterHit && demoMapping.name
-      ? (demoRosterHit.row[demoMapping.name] ?? "").trim() : "";
-    const effectiveUsername = rosterUsername || form.candidate_id.trim();
-    const usernameNorm = normalizeUsername(effectiveUsername);
-
-    // Idempotent replay: same session_id this browser already owns → return it.
-    if (existingSessionId) {
-      const replay = readDemoSessions().find((item) => item.session_id === existingSessionId);
-      if (replay && replay.username_norm === usernameNorm && replay.contest_slug === contestSlug) {
-        return demoSessionResponse(replay, contestUrl);
-      }
-    }
-
-    // Single-session reconciliation: a non-ended session for the same
-    // (username, contest) forces the new one to pending_approval.
-    const existingLive = readDemoSessions().find(
-      (item) => item.username_norm === usernameNorm && item.contest_slug === contestSlug && item.status !== "ended"
-    );
-    const sessionId = crypto.randomUUID();
-    const hasConflict = Boolean(existingLive);
-    const session: DemoSession = {
-      session_id: sessionId,
-      status: hasConflict ? "pending_approval" : "active",
-      hackerrank_username: effectiveUsername,
-      username_norm: usernameNorm,
-      name: rosterName || form.name.trim(),
-      roster_unique_id: demoRosterHit
-        ? (demoRosterHit.row[demoRosterHit.roster.unique_id_column] ?? "").trim()
-        : "",
-      room: form.room.trim(),
-      contest_slug: contestSlug,
-      storage_prefix: demoStoragePrefix(contestSlug, usernameNorm, sessionId),
-      blocked_by_session_id: hasConflict ? existingLive!.session_id : null,
-      start_ip: "demo.local"
-    };
-    upsertDemoSession(session);
-    return demoSessionResponse(session, contestUrl);
+    // Every start REQUIRES a resolvable person contest (backend
+    // resolvePersonContestForStart parity).
+    if (!opts?.contest) throw demoApiError(400, "unknown_contest");
+    const pinned = demoContestsList().find((contest) => contest.slug === opts.contest);
+    if (!pinned) throw demoApiError(400, "unknown_contest");
+    return demoPersonStart(form, pinned, opts.college, existingSessionId);
   }
 
   // S-A: dual-field body — candidate_id AND the frozen hackerrank_username
@@ -587,8 +508,7 @@ export async function resumeSession(
     const pinned = opts?.contest
       ? demoContestsList().find((contest) => contest.slug === opts.contest) ?? null
       : null;
-    const contestUrl = pinned && !pinned.legacy ? "" : getDemoSettings()?.contest_url || "";
-    return demoSessionResponse(session, contestUrl, pinned);
+    return demoSessionResponse(session, pinned);
   }
 
   // S-A: when an identity value rides resume, send it dual-field (candidate_id
@@ -601,101 +521,6 @@ export async function resumeSession(
       ...(candidateId ? { candidate_id: candidateId, hackerrank_username: candidateId } : {}),
       ...(opts?.contest ? { contest: opts.contest } : {})
     })
-  });
-}
-
-export async function fetchProctorSettings(password: string): Promise<ProctorSettings> {
-  if (demoMode) {
-    await wait(100);
-    assertDemoAdmin(password);
-    const settings = getDemoSettings();
-    return settings
-      ? {
-          ...settings,
-          // F5.3: GET always reports normalized enforcement values (backend parity).
-          ...normalizeEnforcementSettings(settings),
-          // F10.1: always normalized on read — a legacy store reports the
-          // defaults (enabled / 10 fps / 640 w), exactly like the backend.
-          camera_recording: normalizeCameraRecording(settings.camera_recording),
-          // OMR P1: same rule — a legacy store reports the default (DISABLED).
-          screen_markers: normalizeScreenMarkers(settings.screen_markers),
-          passcode: "",
-          end_code: "",
-          passcode_set: Boolean(settings.passcode),
-          passcode_preview: maskPasscode(settings.passcode),
-          end_code_set: Boolean(settings.end_code),
-          end_code_preview: maskPasscode(settings.end_code)
-        }
-      : { start_at: "", end_at: "", ...normalizeEnforcementSettings(null), camera_recording: normalizeCameraRecording(null), screen_markers: normalizeScreenMarkers(null), passcode_set: false, end_code_set: false };
-  }
-
-  return request<ProctorSettings>("/api/admin/settings", {
-    method: "GET",
-    headers: {
-      "x-admin-password": password
-    }
-  });
-}
-
-export async function saveProctorSettings(password: string, settings: ProctorSettings): Promise<ProctorSettings> {
-  if (demoMode) {
-    await wait(150);
-    assertDemoAdmin(password);
-    // Phase 3: only the time window is required to save the gate.
-    if (!settings.start_at || !settings.end_at) {
-      throw new Error("Start time and end time are required.");
-    }
-    if (Date.parse(settings.start_at) >= Date.parse(settings.end_at)) {
-      throw new Error("Start time must be before end time.");
-    }
-    const next = {
-      start_at: settings.start_at,
-      // D1 (backend parity): a live exam-time adjustment owns end_at for the
-      // current window — a stale form value cannot revert it (pure rule in
-      // examTime.ts; spreads end_at + the end_at_updated_at stamp when owned).
-      ...resolveSavedEndAt(getDemoSettings(), { start_at: settings.start_at, end_at: settings.end_at }),
-      contest_url: settings.contest_url || "",
-      room_gate_enabled: settings.room_gate_enabled === true,
-      // F5.3: persist the enforcement knobs through the same NaN-guarded
-      // normalization the backend applies (defaults 20 / 2 / "block"); an
-      // absent field preserves the stored value (backend parity).
-      ...normalizeEnforcementSettings({
-        fullscreen_reentry_seconds: settings.fullscreen_reentry_seconds ?? getDemoSettings()?.fullscreen_reentry_seconds,
-        fullscreen_exit_limit: settings.fullscreen_exit_limit ?? getDemoSettings()?.fullscreen_exit_limit,
-        enforcement_mode: settings.enforcement_mode ?? getDemoSettings()?.enforcement_mode
-      }),
-      // F10.1: same preserve-when-absent + normalize rules as the backend.
-      camera_recording: normalizeCameraRecording(
-        settings.camera_recording !== undefined ? settings.camera_recording : getDemoSettings()?.camera_recording),
-      // OMR P1: same preserve-when-absent + normalize rules (default OFF).
-      screen_markers: normalizeScreenMarkers(
-        settings.screen_markers !== undefined ? settings.screen_markers : getDemoSettings()?.screen_markers),
-      problem_id: settings.problem_id || "",
-      rooms: settings.rooms ?? getDemoSettings()?.rooms ?? [],
-      // Passcodes are removed from the start/end flow, but we keep persisting any
-      // value an older field still sends so the stored doc stays compatible.
-      passcode: settings.passcode || getDemoSettings()?.passcode || "",
-      end_code: settings.end_code || getDemoSettings()?.end_code || "",
-      updated_at: new Date().toISOString()
-    };
-    window.localStorage.setItem(demoSettingsKey, JSON.stringify(next));
-    return {
-      ...next,
-      passcode: "",
-      end_code: "",
-      passcode_set: Boolean(next.passcode),
-      passcode_preview: maskPasscode(next.passcode),
-      end_code_set: Boolean(next.end_code),
-      end_code_preview: maskPasscode(next.end_code)
-    };
-  }
-
-  return request<ProctorSettings>("/api/admin/settings", {
-    method: "POST",
-    headers: {
-      "x-admin-password": password
-    },
-    body: JSON.stringify(settings)
   });
 }
 
@@ -1616,13 +1441,13 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
     }
     stats.not_started_or_total = stats.total;
     // F3 (E2E live) backend parity: a contest-scoped poll reports THAT
-    // contest's end_at (the legacy demo contest mirrors the settings doc);
-    // unscoped keeps the legacy schedule; an unknown slug reports "".
+    // contest's end_at; unscoped reports the global settings schedule's end_at;
+    // an unknown slug reports "".
     const scopedContest = contestSlug
       ? demoContestsList().find((c) => c.slug === contestSlug) ?? null
       : null;
     const endAt = contestSlug
-      ? (scopedContest && !scopedContest.legacy ? scopedContest.end_at || "" : scopedContest ? getDemoSettings()?.end_at || "" : "")
+      ? (scopedContest ? scopedContest.end_at || "" : scopedContest ? getDemoSettings()?.end_at || "" : "")
       : getDemoSettings()?.end_at || "";
     return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000, end_at: endAt, server_now: new Date().toISOString() };
   }
@@ -2116,7 +1941,6 @@ function demoContestEvaluations(contestSlug: string): ContestEvaluationsResponse
 
 function demoExportContest(contestSlug: string): ContestExportResponse {
   const contest = findDemoContest(contestSlug);
-  if (contest.legacy) throw demoApiError(400, "contest must name a person-mode contest");
   const at = new Date().toISOString();
   const gcs_key = `exports/${contestSlug}/${at.replace(/[:.]/g, "-")}.zip`;
   const counts = { sessions: 18, submissions: 24, enrollments: 18, persons: 18, colleges: 2 };
@@ -2126,7 +1950,6 @@ function demoExportContest(contestSlug: string): ContestExportResponse {
 
 function demoPurgeContest(body: { contest: string; confirm: boolean; slug: string; include_evidence?: boolean }): ContestPurgeResponse {
   const contest = findDemoContest(body.contest);
-  if (contest.legacy) throw demoApiError(400, "contest must name a person-mode contest");
   // Idempotent re-purge: a tombstoned contest is a flagged no-op (mirrors server).
   if (contest.purged_at || contest.db_purged_at) return { ok: true, contest: contest.slug, already_purged: true };
   // Server-enforced triple gate (the UI mirrors it; the server is the authority).
@@ -2220,25 +2043,6 @@ export async function fetchPersonScorecard(
   }
 }
 
-// POST /api/admin/contest-adopt — legacy "Adopt into person model" backfill
-// (vision §2.15). Same roster-upload body shape; may return the college-
-// confirmation preview (needs_college_confirmation) which the caller re-posts
-// with college_resolutions, exactly like a normal roster upload.
-export async function adoptContestIntoPersonModel(
-  password: string,
-  body: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  if (demoMode) {
-    await wait(200);
-    assertDemoAdmin(password);
-    return demoAdoptIntoPersonModel(body);
-  }
-  return request("/api/admin/contest-adopt", {
-    method: "POST",
-    headers: { "x-admin-password": password },
-    body: JSON.stringify(body)
-  });
-}
 
 // ---- demo People dataset (parity for the NEW tab — acceptance bar S4) -------
 // Two demo persons with CROSS-ROUND rows: a Round-1 LIVE row + a Round-2 PURGED
@@ -2329,20 +2133,6 @@ function demoPersonScorecard(personId: string): PersonScorecardResponse {
   };
 }
 
-function demoAdoptIntoPersonModel(body: Record<string, unknown>) {
-  const rows = Array.isArray(body.rows) ? body.rows.length : 0;
-  return {
-    ok: true,
-    contest: String(body.contest ?? body.contest_slug ?? "demo"),
-    adopted_at: new Date().toISOString(),
-    sessions_stamped: rows,
-    submissions_stamped: rows,
-    persons: { created: rows, updated: 0 },
-    enrollments: { created: rows, reactivated: 0, removed: 0 },
-    count: rows
-  };
-}
-
 // S7 — GET /api/admin/ip-report: IP-wise counts of logged-in users (the
 // proxy-detection signal). Returns null on 404 (endpoint not deployed yet) so
 // the IP-report tab degrades gracefully, mirroring fetchSessionsList. The demo
@@ -2421,57 +2211,6 @@ export async function sessionAction(password: string, body: SessionActionRequest
     headers: {
       "x-admin-password": password
     },
-    body: JSON.stringify(body)
-  });
-}
-
-// S5: live exam-time control — set an absolute end_at, shift it by
-// extend_minutes, or end_now (which also force-ends every live session). The
-// demo branch mirrors the backend exactly: merge-update the demo settings, and
-// for end_now mark every non-ended demo session ended so the demo heartbeat
-// throws the same 409 session_ended the real backend would (B8 parity).
-export async function adjustExamTime(password: string, body: ExamTimeRequest): Promise<ExamTimeResponse> {
-  if (demoMode) {
-    await wait(150);
-    assertDemoAdmin(password);
-    const settings = getDemoSettings();
-    if (!settings?.start_at || !settings?.end_at) {
-      throw new Error("Proctoring schedule is not configured yet.");
-    }
-    const now = new Date().toISOString();
-    let newEndMs: number;
-    if (body.end_now === true) {
-      newEndMs = Date.parse(now);
-    } else if (body.end_at) {
-      newEndMs = Date.parse(body.end_at);
-      if (!Number.isFinite(newEndMs)) throw new Error("end_at must be a valid ISO 8601 date");
-    } else {
-      const delta = Number(body.extend_minutes);
-      if (!Number.isFinite(delta) || delta === 0) throw new Error("extend_minutes must be a non-zero number");
-      newEndMs = Date.parse(settings.end_at) + delta * 60_000;
-    }
-    if (newEndMs <= Date.parse(settings.start_at)) {
-      throw new Error("End time must be after the start time.");
-    }
-    const newEndAt = new Date(newEndMs).toISOString();
-    // D1: end_at_updated_at stamps exam-time ownership of end_at (backend
-    // parity) so a stale Settings-form save cannot revert this live change.
-    window.localStorage.setItem(demoSettingsKey, JSON.stringify({ ...settings, end_at: newEndAt, end_at_updated_at: now, updated_at: now }));
-    let endedCount = 0;
-    if (body.end_now === true) {
-      for (const session of readDemoSessions()) {
-        if (session.status !== "ended") {
-          upsertDemoSession({ ...session, status: "ended", blocked_by_session_id: null });
-          endedCount += 1;
-        }
-      }
-    }
-    return { ok: true, start_at: settings.start_at, end_at: newEndAt, server_now: now, ended_count: endedCount };
-  }
-
-  return request<ExamTimeResponse>("/api/admin/exam-time", {
-    method: "POST",
-    headers: { "x-admin-password": password },
     body: JSON.stringify(body)
   });
 }
@@ -3470,29 +3209,6 @@ function demoRosterEntryFor(uniqueId: string): { roster: RosterUploadRequest; ro
   return row ? { roster, row } : null;
 }
 
-// GET /api/exam-config — public student-page config. FAIL-OPEN on any error:
-// the roster gate is re-enforced server-side at /api/session/start, so a config
-// fetch failure can never bypass it — it only degrades the form UI.
-export async function fetchExamConfig(): Promise<ExamConfig> {
-  if (demoMode) {
-    await wait(80);
-    const roster = getDemoRoster();
-    return {
-      roster_required: Boolean(roster),
-      unique_id_label: roster?.unique_id_column ?? "",
-      rooms: getDemoSettings()?.rooms ?? [],
-      enforcement: demoEnforcement(),
-      // F10.1: the consent disclosure renders pre-session off exam-config.
-      camera_recording: demoCameraRecording()
-    };
-  }
-  try {
-    return await request<ExamConfig>("/api/exam-config", { method: "GET" });
-  } catch {
-    return { roster_required: false, unique_id_label: "", rooms: [] };
-  }
-}
-
 // POST /api/roster/lookup — unique-ID-confirm login, step 1. Throws ApiError
 // (status 404, code not_on_roster/roster_not_configured) when unmatched.
 export async function rosterLookup(uniqueId: string): Promise<RosterLookupResult> {
@@ -3767,8 +3483,8 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
 // ---- S-D: contests administration (Contests tab + selector + routing) -------
 // Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5/§10.3.
 // Demo parity: a localStorage contests store seeded with one OPEN demo contest
-// whose access code is the fixed "DEMO42", plus the synthesized legacy row
-// derived from the demo settings doc (mirrors backend legacy synthesis).
+// whose access code is the fixed "DEMO42" (plus the lifecycle-state demo
+// contests added below).
 
 // v2: S-I reseeded demo-drive-r1 with THREE ordered problems (sum-two,
 // reverse-words ×150 pts, max-window-sum ×50 pts) so the multi-problem
@@ -3796,7 +3512,6 @@ function seedDemoContests(): ContestSummary[] {
       slug: "demo-drive-r1",
       name: "Demo Drive — Round 1",
       status: "open",
-      legacy: false,
       listed: true,
       identity_label: "Roll Number",
       access_code: DEMO_ACCESS_CODE,
@@ -3822,7 +3537,6 @@ function seedDemoContests(): ContestSummary[] {
       slug: "demo-drive-r0",
       name: "Demo Drive — Pilot (mid-retention)",
       status: "archived",
-      legacy: false,
       listed: true,
       identity_label: "Roll Number",
       access_code: null,
@@ -3850,7 +3564,6 @@ function seedDemoContests(): ContestSummary[] {
       slug: "demo-drive-r2",
       name: "Tech Round 2 (purged)",
       status: "archived",
-      legacy: false,
       listed: true,
       identity_label: "Roll Number",
       access_code: null,
@@ -3894,39 +3607,8 @@ function writeDemoContests(contests: ContestSummary[]) {
   window.localStorage.setItem(demoContestsKey, JSON.stringify(contests));
 }
 
-// Mirrors backend legacy synthesis: the demo settings doc surfaces as a
-// read-only legacy:true contest (slug from contest_url, like demo sessions).
-function demoLegacyContest(): ContestSummary | null {
-  const settings = getDemoSettings();
-  if (!settings) return null;
-  const slug = contestSlugFromUrl(settings.contest_url || "") || "legacy";
-  return {
-    slug,
-    name: slug,
-    status: "open",
-    legacy: true,
-    listed: true,
-    identity_label: "Candidate ID",
-    access_code: null,
-    invigilator_key: null,
-    start_at: settings.start_at || null,
-    end_at: settings.end_at || null,
-    problem_id: settings.problem_id || "",
-    rooms: settings.rooms ?? [],
-    room_gate_enabled: settings.room_gate_enabled === true,
-    template_slug: null,
-    created_at: null,
-    updated_at: settings.updated_at || null
-  };
-}
-
 function demoContestsList(): ContestSummary[] {
-  const real = readDemoContests();
-  const legacy = demoLegacyContest();
-  if (legacy && !real.some((contest) => contest.slug === legacy.slug)) {
-    return [...real, legacy];
-  }
-  return real;
+  return readDemoContests();
 }
 
 function findDemoContest(slug: string): ContestSummary {
@@ -3982,7 +3664,6 @@ export async function createContestApi(password: string, body: ContestCreateRequ
       slug,
       name,
       status: "draft",
-      legacy: false,
       listed: true,
       identity_label: body.identity_label ?? template?.defaults.identity_label ?? "Candidate ID",
       access_code: randomDemoCode(6),
@@ -4173,33 +3854,15 @@ export async function resolveAccessCodeApi(code: string): Promise<{ slug: string
   });
 }
 
-// S-D: per-contest pre-session config. UNLIKE the legacy fetchExamConfig this
-// THROWS on failure — the candidate app must distinguish "unknown/closed
-// contest" (-> access-code landing) from a transient fetch error.
+// S-D: per-contest pre-session config. THROWS on failure — the candidate app
+// must distinguish "unknown/closed contest" (-> access-code landing) from a
+// transient fetch error.
 export async function fetchContestExamConfig(slug: string): Promise<ContestExamConfig> {
   if (demoMode) {
     await wait(120);
     const contest = demoContestsList().find((item) => item.slug === slug);
     if (!contest) throw demoApiError(400, "unknown_contest");
     if (contest.status !== "open") throw demoApiError(403, "contest_not_open");
-    if (contest.legacy) {
-      const roster = getDemoRoster();
-      return {
-        contest_slug: contest.slug,
-        contest_name: contest.name,
-        identity_label: contest.identity_label,
-        identity_mode: "legacy_username",
-        roster_required: Boolean(roster),
-        unique_id_label: roster?.unique_id_column ?? "",
-        rooms: getDemoSettings()?.rooms ?? [],
-        room_gate_enabled: contest.room_gate_enabled,
-        enforcement: demoEnforcement(),
-        camera_recording: demoCameraRecording(),
-        start_at: contest.start_at,
-        end_at: contest.end_at,
-        server_now: new Date().toISOString()
-      };
-    }
     return {
       contest_slug: contest.slug,
       contest_name: contest.name,
@@ -4217,17 +3880,6 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
     };
   }
   return request<ContestExamConfig>(`/api/exam-config?contest=${encodeURIComponent(slug)}`, { method: "GET" });
-}
-
-// S-D candidate routing: does the LEGACY settings-driven exam exist? Decides
-// form-vs-landing for the NO-?contest= candidate URL. THROWS on failure — the
-// router fails OPEN to the legacy flow (candidateRouting.routeForNoParam).
-export async function fetchCandidateRoute(): Promise<{ legacy_configured: boolean }> {
-  if (demoMode) {
-    await wait(80);
-    return { legacy_configured: Boolean(getDemoSettings()) };
-  }
-  return request<{ legacy_configured: boolean }>("/api/candidate-route", { method: "GET" });
 }
 
 // ---- S-D / FIX-B2 (#58): templates — the create-from-template picker AND the
@@ -4516,7 +4168,7 @@ function demoInvigilatorContest(contest?: string): ContestSummary | null {
 function assertDemoInvigilator(password: string, contest?: ContestSummary | null) {
   if (invigilatorPassword && password === invigilatorPassword) return;
   if (adminPassword && password === adminPassword) return;
-  if (contest && !contest.legacy && contest.invigilator_key && password === contest.invigilator_key) return;
+  if (contest && contest.invigilator_key && password === contest.invigilator_key) return;
   throw new Error("Invalid invigilator password.");
 }
 
@@ -4552,13 +4204,13 @@ function writeDemoRoomGates(store: DemoRoomGateStore) {
 // that for NON-legacy contests; the legacy portal keeps the historical bare
 // roomKey so existing demo state survives.
 function demoGateKey(contest: ContestSummary | null, roomKey: string): string {
-  return contest && !contest.legacy ? `${contest.slug}:${roomKey}` : roomKey;
+  return contest ? `${contest.slug}:${roomKey}` : roomKey;
 }
 
 // Is the room start gate enabled for this portal view? Contest mode reads the
 // CONTEST doc (S-I snapshot field); legacy reads the demo settings.
 function demoGateEnabled(contest: ContestSummary | null): boolean {
-  if (contest && !contest.legacy) return contest.room_gate_enabled === true;
+  if (contest) return contest.room_gate_enabled === true;
   return getDemoSettings()?.room_gate_enabled === true;
 }
 
@@ -4567,7 +4219,7 @@ export async function fetchInvigilatorOverview(password: string, contest?: strin
     await wait(120);
     const pinned = demoInvigilatorContest(contest);
     assertDemoInvigilator(password, pinned);
-    if (pinned && !pinned.legacy) {
+    if (pinned) {
       // Backend parity: the CONFIGURED contest rooms union the rooms its
       // sessions actually carry (demo person sessions live in localStorage).
       const sessionRooms = readDemoSessions()
@@ -4604,7 +4256,7 @@ export async function fetchInvigilatorRoom(password: string, room: string, conte
     assertDemoInvigilator(password, pinned);
     const roomKey = roomKeyForLabel(room);
     const roomLabel = roomKey === "_" ? "" : room;
-    const personContest = pinned && !pinned.legacy ? pinned : null;
+    const personContest = pinned ? pinned : null;
     const gate = readDemoRoomGates()[demoGateKey(personContest, roomKey)] || null;
     // S-D scoping: a pinned NON-legacy contest sees ITS OWN sessions — the
     // person sessions this browser's demo candidate flow created — never the
@@ -4726,7 +4378,7 @@ export async function releaseRoomCode(
     await wait(150);
     const pinned = demoInvigilatorContest(contest);
     assertDemoInvigilator(password, pinned);
-    const personContest = pinned && !pinned.legacy ? pinned : null;
+    const personContest = pinned ? pinned : null;
     if (!demoGateEnabled(personContest)) throw new Error("room_gate_disabled");
     const store = readDemoRoomGates();
     const roomKey = roomKeyForLabel(room);
@@ -4768,7 +4420,7 @@ export async function openRoom(password: string, room: string, invigilatorName: 
     await wait(150);
     const pinned = demoInvigilatorContest(contest);
     assertDemoInvigilator(password, pinned);
-    const personContest = pinned && !pinned.legacy ? pinned : null;
+    const personContest = pinned ? pinned : null;
     if (!demoGateEnabled(personContest)) throw new Error("room_gate_disabled");
     const store = readDemoRoomGates();
     const roomKey = roomKeyForLabel(room);
@@ -4814,7 +4466,7 @@ export async function releaseUnlockCode(
     await wait(150);
     const pinned = demoInvigilatorContest(contest);
     assertDemoInvigilator(password, pinned);
-    const personContest = pinned && !pinned.legacy ? pinned : null;
+    const personContest = pinned ? pinned : null;
     const store = readDemoRoomGates();
     const roomKey = roomKeyForLabel(room);
     const storeKey = demoGateKey(personContest, roomKey);
@@ -4866,7 +4518,7 @@ export async function invigilatorUnlock(
     const pinned = demoInvigilatorContest(contest);
     assertDemoInvigilator(password, pinned);
     const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
-    if (pinned && !pinned.legacy) {
+    if (pinned) {
       // Person sessions live in the localStorage demo store — release the
       // newest locked one for this row's stored key (display id fallback).
       const locked = readDemoSessions()
@@ -4915,7 +4567,7 @@ export async function invigilatorExempt(
     const pinned = demoInvigilatorContest(contest);
     assertDemoInvigilator(password, pinned);
     const roomLabel = roomKeyForLabel(room) === "_" ? "" : room;
-    if (pinned && !pinned.legacy) {
+    if (pinned) {
       const live = readDemoSessions()
         .filter((s) => s.contest_slug === pinned.slug && String(s.room || "") === roomLabel)
         .filter((s) => s.status !== "ended" && (
@@ -4954,7 +4606,7 @@ export async function pollRoomGate(sessionId: string, code?: string): Promise<Ro
     // S-D: a person-contest session reads the gate flag from ITS contest doc
     // and its gate from the per-contest store (legacy keeps today's path).
     const sessionContest = demoContestsList().find(
-      (item) => item.slug === session.contest_slug && !item.legacy
+      (item) => item.slug === session.contest_slug
     ) ?? null;
     if (!demoGateEnabled(sessionContest)) return { gate_enabled: false, exam_started: true };
     if (session.exam_started_at) {
@@ -5136,10 +4788,9 @@ function demoProblemEntries(source: { problems?: Array<{ problem_id: string; poi
 
 // Candidate view of a demo contest's problems (backend contestProblemsPublic
 // parity) — published only, never hiddenTests, points = EFFECTIVE points
-// (contest entry override applied), plus `order`. A legacy session (no
-// contest / legacy contest) reads the demo settings problem_id.
+// (contest entry override applied), plus `order`.
 function demoContestProblems(contest: ContestSummary | null): PublicProblem[] {
-  const source = contest && !contest.legacy ? contest : { problem_id: getDemoSettings()?.problem_id || "" };
+  const source = contest ?? { problems: [] };
   const problems: PublicProblem[] = [];
   for (const entry of demoProblemEntries(source)) {
     const p = findDemoProblem(entry.problem_id);
@@ -5224,10 +4875,6 @@ export async function deleteProblem(password: string, id: string): Promise<void>
     await wait(120);
     assertDemoAdmin(password);
     writeDemoProblems(readDemoProblems().filter((p) => p.id !== id));
-    const settings = getDemoSettings();
-    if (settings && settings.problem_id === id) {
-      window.localStorage.setItem(demoSettingsKey, JSON.stringify({ ...settings, problem_id: "" }));
-    }
     return;
   }
   await request<{ ok: boolean }>("/api/admin/problem-delete", {

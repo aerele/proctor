@@ -1,6 +1,6 @@
 // S-D: pure logic for the Contests tab + the global contest selector.
 // Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md
-//   §2.7  — URLs are DERIVED (contest_url is dead): candidate /?contest={slug},
+//   §2.7  — URLs are DERIVED from the slug: candidate /?contest={slug},
 //           invigilator /invigilator?contest={slug}&key={invigilator_key}
 //   §5 A1 — selector scopes every tab; URL-param per-tab so two browser tabs
 //           can run two parallel drives
@@ -37,21 +37,19 @@ export function contestWindowLabel(startAt: string | null, endAt: string | null)
   return `(no start) → ${fmt(endAt as string)}`;
 }
 
-/** Ordered problems count — legacy synth rows count their single problem_id. */
+/** Ordered problems count. */
 export function contestProblemsCount(contest: ContestSummary): number {
-  if (Array.isArray(contest.problems)) return contest.problems.length;
-  return contest.problem_id ? 1 : 0;
+  return Array.isArray(contest.problems) ? contest.problems.length : 0;
 }
 
-// Open first (live ops), then draft (being built), then archived; the legacy
-// row sorts after real contests within its status group; newest first inside
+// Open first (live ops), then draft (being built), then archived;
+// newest first inside
 // a group (mirrors the backend list order), slug as the final tiebreak.
 const STATUS_ORDER: Record<ContestStatus, number> = { open: 0, draft: 1, archived: 2 };
 
 export function sortContestsForList(contests: ContestSummary[]): ContestSummary[] {
   return [...contests].sort((a, b) =>
     (STATUS_ORDER[a.status] ?? 3) - (STATUS_ORDER[b.status] ?? 3)
-    || Number(a.legacy) - Number(b.legacy)
     || String(b.created_at || "").localeCompare(String(a.created_at || ""))
     || a.slug.localeCompare(b.slug)
   );

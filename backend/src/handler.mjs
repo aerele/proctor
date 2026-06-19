@@ -17,7 +17,7 @@ import { makeAdminPeopleRoutes } from "./routes/adminPeople.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
-import { adoptContestIntoPersonModel, applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
+import { applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
@@ -101,9 +101,9 @@ const CLAIM_TTL_MS = 10 * 60 * 1000;
 const REVIEW_ROSTER_LIMIT = 5000;
 const REVIEWS_QUERY_LIMIT = 20000;
 const PROBLEMS_QUERY_LIMIT = 500;
-// S2 roster (compulsory roster login). One ACTIVE roster, global (like the
-// "active" settings doc). Meta lives in SETTINGS_COLLECTION under a distinct
-// doc id (mirrors ALERT_SETTINGS_ID); entries live in ROSTER_COLLECTION, one
+// S2 roster (compulsory roster login). One ACTIVE roster, global. Meta lives in
+// SETTINGS_COLLECTION under a distinct doc id (mirrors ALERT_SETTINGS_ID);
+// entries live in ROSTER_COLLECTION, one
 // doc per student keyed by the sanitized normalized unique-ID for O(1) login
 // lookups. Re-upload is a VERSIONED REPLACE: entries carry roster_version and
 // lookups ignore any entry whose version is not the meta's current one, so no
@@ -176,10 +176,8 @@ const EXPORT_DATASET_LIMIT = 50000;
 const PEOPLE_DIRECTORY_LIMIT = 500;
 // Max rows per sessions-list response page (the drill-down/status-join list).
 const SESSIONS_LIST_PAGE_LIMIT = 500;
-const SETTINGS_ID = "active";
 // Settings doc id for the per-type proctor alert configuration (enabled +
-// severity). Lives in the same SETTINGS_COLLECTION but under a distinct doc id
-// so it never collides with the schedule/contest "active" settings doc.
+// severity). Lives in SETTINGS_COLLECTION under a distinct doc id.
 const ALERT_SETTINGS_ID = "alert_settings";
 // A session whose status is still active but whose last liveness signal
 // (heartbeat or beacon) is older than this many milliseconds is treated as a
@@ -212,24 +210,21 @@ configureClients({
 configureProblemStore({ getFirestore, collection: PROBLEMS_COLLECTION });
 
 // S-B (SHIPS DARK): contests collection + scoping chokepoints. Same getter
-// pattern; the settings collection/id let contests.mjs synthesize the
-// READ-ONLY legacy contest from the "active" doc (F9 §6). No production
-// candidate/session path reads contests yet — only the admin CRUD below.
+// pattern. No production candidate/session path reads contests yet — only the
+// admin CRUD below.
 configureContestStore({
   getFirestore,
   collection: CONTESTS_COLLECTION,
-  settingsCollection: SETTINGS_COLLECTION,
-  settingsId: SETTINGS_ID,
   // Wave-4 fix: createContest probes these for ORPHANED data carrying a
-  // candidate slug (historic legacy contest_slug values from earlier exam
-  // runs) and walks to the next suffix instead of adopting the slug.
+  // candidate slug (historic contest_slug values from earlier exam runs) and
+  // walks to the next suffix instead of adopting the slug.
   dataCollections: [SESSION_COLLECTION, SUBMISSIONS_COLLECTION, ALERTS_COLLECTION]
 });
 
 // S-C: the identity core (proctor_colleges / proctor_persons /
 // proctor_enrollments + the per-contest roster pipeline). Same getter pattern.
-// Only identity_mode:"person" contests ever route into it — the legacy global
-// roster path below stays bit-for-bit.
+// Only identity_mode:"person" contests ever route into it — the global roster
+// path below (no-contest / non-person scope) stays bit-for-bit.
 configureIdentityStore({
   getFirestore,
   collections: {
@@ -263,13 +258,11 @@ const auth = makeAuth({
 const { requireAdmin, requireInvigilator, requireInvigilatorFor, requireApiKey, requireSweepAuth, adminActor } = auth;
 const sessionStore = makeSessionStore({
   getFirestore,
-  sessionCollection: SESSION_COLLECTION,
-  settingsCollection: SETTINGS_COLLECTION,
-  settingsId: SETTINGS_ID
+  sessionCollection: SESSION_COLLECTION
 });
 const {
-  sessionRef, settingsRef, getSession, getSessionOrNull, getSettings,
-  requireWritableSession, contestSlugFromUrl, buildStoragePrefix, sessionPrefix, candidateOf
+  sessionRef, getSession, getSessionOrNull,
+  requireWritableSession, buildStoragePrefix, sessionPrefix, candidateOf
 } = sessionStore;
 
 // Factory seam (decomp B1, A2): the invigilator route domain. ctx closes over
@@ -284,10 +277,8 @@ const {
 const invigilatorRoutes = makeInvigilatorRoutes({
   getFirestore,
   requireInvigilatorFor,
-  getSettings,
   sessionRef,
   candidateOf,
-  contestSlugFromUrl,
   sessionCollection: SESSION_COLLECTION,
   alertsCollection: ALERTS_COLLECTION,
   roomGatesCollection: ROOM_GATES_COLLECTION,
@@ -391,10 +382,9 @@ const {
 // closes over THIS instance's live-client getter, the auth guard from makeAuth,
 // the http transport helpers, the env-captured collection names + caps, the
 // problem-domain store/validation fns (isValidProblemId/validateProblemInput/
-// getBankProblem), the pure contest-reference finder (+ the template lister it
-// reads through), and the legacy-settings store fns (the §1.4.3 silent-clear
-// path). The returned route handlers are destructured into the SAME names the
-// dispatch table uses, so the dispatch lines stay byte-identical
+// getBankProblem), and the pure contest-reference finder (+ the template lister
+// it reads through). The returned route handlers are destructured into the SAME
+// names the dispatch table uses, so the dispatch lines stay byte-identical
 // (canaryIsolation). The problem-bank helpers it owns (problemRef /
 // problemReferenceUniverse) come back too — currently used only by these routes.
 const adminProblemsRoutes = makeAdminProblemsRoutes({
@@ -411,9 +401,7 @@ const adminProblemsRoutes = makeAdminProblemsRoutes({
   validateProblemInput,
   getBankProblem,
   findProblemReferences,
-  listTemplates,
-  getSettings,
-  settingsRef
+  listTemplates
 });
 const {
   adminListProblems, adminGetProblem, adminSaveProblem, adminDeleteProblem
@@ -444,7 +432,7 @@ const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes
 
 // Factory seam (decomp B6): the admin live-counts dashboard route domain. ctx
 // closes over THIS instance's live-client getter, the auth guard from makeAuth,
-// the contest-scope resolver + scopedQuery chokepoint, the settings reader, the
+// the contest-scope resolver + scopedQuery chokepoint, the
 // env-captured session collection name / query cap / disconnected-staleness
 // threshold, the ALL_CONTESTS identity sentinel (passed BY REFERENCE so
 // adminStats's `scope === ALL_CONTESTS` identity check holds), and the SHARED
@@ -461,7 +449,6 @@ const adminStatsRoutes = makeAdminStatsRoutes({
   requireAdmin,
   contestScopeOf,
   scopedQuery,
-  getSettings,
   normalizeRoomFilter,
   distinctRooms,
   isStaleSession,
@@ -553,7 +540,6 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/exec/submit") return send(res, 200, await execSubmit(req));
     if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
     if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig(req));
-    if (req.method === "GET" && path === "/api/candidate-route") return send(res, 200, await publicCandidateRoute());
     if (req.method === "POST" && path === "/api/access-code") return send(res, 200, await publicAccessCode(req));
     if (req.method === "POST" && path === "/api/roster/lookup") return send(res, 200, await rosterLookup(req));
     if (req.method === "GET" && path === "/api/admin/roster") return send(res, 200, await adminGetRoster(req));
@@ -566,8 +552,6 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/room-gate") return send(res, 200, await sessionRoomGate(req));
     if (req.method === "POST" && path === "/api/session/enforcement-violation") return send(res, 200, await sessionEnforcementViolation(req));
     if (req.method === "POST" && path === "/api/session/unlock-gate") return send(res, 200, await sessionUnlockGate(req));
-    if (req.method === "GET" && path === "/api/admin/settings") return send(res, 200, await adminGetSettings(req));
-    if (req.method === "POST" && path === "/api/admin/settings") return send(res, 200, await adminSaveSettings(req));
     if (req.method === "GET" && path === "/api/admin/contests") return send(res, 200, await adminListContests(req));
     if (req.method === "POST" && path === "/api/admin/contests") return send(res, 200, await adminCreateContest(req));
     if (req.method === "POST" && path === "/api/admin/contest-update") return send(res, 200, await adminUpdateContest(req));
@@ -602,13 +586,11 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/contest-evaluate-status") return send(res, 200, await adminContestEvaluateStatus(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection") return send(res, 200, await adminContestSelection(req));
     if (req.method === "POST" && path === "/api/admin/contest-selection-done") return send(res, 200, await adminContestSelectionDone(req));
-    if (req.method === "POST" && path === "/api/admin/contest-adopt") return send(res, 200, await adminContestAdopt(req));
     if (req.method === "POST" && path === "/api/admin/contest-export") return send(res, 200, await adminContestExport(req));
     if (req.method === "POST" && path === "/api/admin/contest-purge") return send(res, 200, await adminContestPurge(req));
     if (req.method === "POST" && path === "/api/admin/retention-sweep") return send(res, 200, await adminRetentionSweep(req));
     if (req.method === "GET" && path === "/api/admin/people") return send(res, 200, await adminPeople(req));
     if (req.method === "GET" && path === "/api/admin/person") return send(res, 200, await adminPerson(req));
-    if (req.method === "POST" && path === "/api/admin/exam-time") return send(res, 200, await adminExamTime(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
     if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
@@ -662,168 +644,13 @@ export const api = async (req, res) => {
 };
 
 async function startSession(req) {
-  let body = parseBody(req);
-  // S-C: a start that names a REAL person-mode contest takes the person-layer
-  // path (username_norm = person_id, server-side college resolution). Anything
-  // else — no contest param, or the synthesized legacy contest — keeps today's
-  // path below BIT-FOR-BIT (the S-C canary). The candidate-facing routing that
-  // sends `contest` lands at S-D; until then only direct callers reach this.
+  const body = parseBody(req);
+  // Every start now REQUIRES a resolvable person contest (the candidate app
+  // always pins ?contest=). resolvePersonContestForStart 400s an absent param
+  // (unknown_contest), 400s an unknown slug, and 403s a not-open contest;
+  // startPersonSession owns the window gate + identity resolution.
   const personContest = await resolvePersonContestForStart(body);
-  if (personContest) return startPersonSession(req, body, personContest);
-
-  // Phase 2 (0.1): the entry passcode is gone. Start is gated only by the
-  // contest time window + complete details. `proctor_passcode` is no longer
-  // required (a client may still send it harmlessly; it is ignored).
-  //
-  // S-E (F8.2): the candidate identifier is no longer named "hackerrank_username"
-  // as a REQUIRED input. The modern client sends `candidate_id`; older callers
-  // still send `hackerrank_username`. We accept EITHER and synthesize the FROZEN
-  // `hackerrank_username` field (vision §234: legacy read-only, never renamed —
-  // it is the session key embedded in doc ids and GCS paths) from candidate_id
-  // when only the modern field is present. This keeps legacy back-compat reads
-  // intact while dropping HackerRank as user-facing required terminology.
-  if ((body.hackerrank_username === undefined || body.hackerrank_username === null || body.hackerrank_username === "")
-    && body.candidate_id !== undefined && body.candidate_id !== null && body.candidate_id !== "") {
-    body = { ...body, hackerrank_username: body.candidate_id };
-  }
-  requireFields(body, ["hackerrank_username", "name", "roll_number"]);
-  if (body.consent_accepted !== true) {
-    return badRequest("Consent is required");
-  }
-  const settings = await validateProctorGate();
-
-  // S2 roster gate: when a roster is configured, starting REQUIRES a roster
-  // match, and mapped identity fields are overridden server-side from the
-  // matched entry — client-typed values are ignored for those fields, so a
-  // candidate can never start under an identity that is not on the roster.
-  // (Runs before the session_id replay check too: a replayed start must still
-  // carry a valid roster id; the client keeps it in form state.)
-  const rosterMeta = await getRosterMeta();
-  let rosterIdentity = null;
-  let emailIsRosterMapped = false;
-  if (rosterMeta) {
-    if (!body.roster_unique_id) throw httpError(403, "roster_id_required");
-    const entry = await findRosterEntry(rosterMeta, String(body.roster_unique_id));
-    if (!entry) throw httpError(403, "not_on_roster");
-    const mapping = rosterMeta.column_mapping || {};
-    emailIsRosterMapped = Boolean(mapping.email);
-    const fromRoster = (field) => (mapping[field] ? String(entry.fields?.[mapping[field]] || "") : "");
-    // Spec §2.5: a MAPPED field is authoritative even when the student's cell
-    // is blank — the client-typed value is IGNORED (empty string stored), never
-    // silently substituted. Unmapped fields keep the typed value.
-    const mappedOrTyped = (field) => (mapping[field] ? fromRoster(field) : String(body[field] ?? ""));
-    rosterIdentity = {
-      unique_id: entry.unique_id,
-      name: mappedOrTyped("name"),
-      email: mappedOrTyped("email"),
-      roll_number: mappedOrTyped("roll_number"),
-      // DELIBERATE EXCEPTION (on the morning-review list): hackerrank_username
-      // keeps the typed fallback even when mapped-but-blank, because it is the
-      // session key — storing "" would strand the candidate mid-exam with a
-      // session no proctor tooling can match to a contest user.
-      hackerrank_username: fromRoster("hackerrank_username") || String(body.hackerrank_username ?? "")
-    };
-  }
-
-  // Wave-6 review (M2): the TYPED email is only validated when it is what gets
-  // stored. On the roster path with a MAPPED email column the typed value is
-  // discarded and replaced by the roster cell (spec §2.5 above), so gating its
-  // format would 400 a non-official/replayed client over a field about to be
-  // ignored — mirroring the client, which gates the typed email only in legacy/
-  // person_open, never person_roster. Require + format-check the typed email
-  // ONLY when it is the effective email (no roster, or email column unmapped).
-  if (!emailIsRosterMapped) {
-    requireFields(body, ["email"]);
-    requireValidEmail(body);
-  }
-
-  // With a roster match the rosterIdentity value is used AS-IS (it may
-  // legitimately be "" for a mapped-but-blank cell); otherwise the typed value.
-  const identityOf = (field) => String((rosterIdentity ? rosterIdentity[field] : body[field]) ?? "").trim();
-
-  const now = new Date().toISOString();
-  const username = identityOf("hackerrank_username");
-  const usernameNorm = normalizeUsername(username);
-  const contestSlug = contestSlugFromUrl(settings.contest_url);
-  const clientIp = getClientIp(req);
-
-  // Resume / single-session reconciliation (Epic 2 + 0.3). A session token the
-  // browser already holds wins: if the SAME session_id is replayed we return it
-  // verbatim (idempotent resume, no re-collection of details). If a DIFFERENT
-  // start arrives for a username_norm+contest_slug that already has an active
-  // (or locked/pending) session, the new one is created as pending_approval so
-  // two live sessions never run at once.
-  const existingActive = await findLiveSessionFor(usernameNorm, contestSlug);
-
-  if (body.session_id) {
-    const replay = await getSessionOrNull(body.session_id);
-    if (replay && replay.username_norm === usernameNorm && replay.contest_slug === (contestSlug || "")) {
-      // Idempotent resume of a session this browser already owns.
-      return startResponse(replay, settings);
-    }
-  }
-
-  const sessionId = randomUUID();
-  const room = body.room !== undefined && body.room !== null ? sanitizeRoom(body.room) : "";
-
-  // H1 (TOCTOU fix): decide active-vs-pending ATOMICALLY by acquiring the
-  // live-slot lock rather than trusting the `existingActive` pre-read (which is
-  // racy: two concurrent starts can both read "no active session" and both go
-  // active). acquireLiveSlot re-reads live sessions INSIDE the lock decision, so
-  // exactly one concurrent start wins the slot. existingActive is still used as
-  // a best-effort hint for the conflict pointer, but the authoritative
-  // blocked_by id comes from the lock owner.
-  const slot = await acquireLiveSlot(usernameNorm, contestSlug, sessionId);
-  const status = slot.acquired ? "active" : "pending_approval";
-  const blockedBy = slot.acquired
-    ? null
-    : (slot.ownerSessionId || (existingActive && existingActive.session_id) || null);
-
-  const item = {
-    session_id: sessionId,
-    hackerrank_username: username,
-    username_norm: usernameNorm,
-    name: identityOf("name"),
-    roll_number: identityOf("roll_number"),
-    email: identityOf("email"),
-    roster_unique_id: rosterIdentity ? rosterIdentity.unique_id : "",
-    roster_verified: Boolean(rosterIdentity),
-    room,
-    contest_slug: contestSlug || "",
-    // storage_prefix is the single source of truth for every per-session GCS
-    // key. Persisting it here means per-chunk sites build keys with ZERO extra
-    // Firestore reads (they already fetch the session doc).
-    storage_prefix: buildStoragePrefix(contestSlug, usernameNorm, sessionId),
-    start_ip: clientIp,
-    current_ip: clientIp,
-    ip_change_count: 0,
-    consent_accepted: true,
-    status,
-    blocked_by_session_id: blockedBy,
-    created_at: now,
-    updated_at: now,
-    event_count: 0,
-    clipboard_event_count: 0,
-    focus_event_count: 0,
-    upload_error_count: 0,
-    heartbeat_count: 0,
-    chunk_count: 0,
-    // F10.1: the separate low-res camera stream's chunk counter (chunk_count
-    // stays screen-only — the admin duration math depends on that).
-    camera_chunk_count: 0,
-    // F5.5: per-session enforcement exemptions — empty by default; set via the
-    // admin session-action "exempt" or the invigilator exempt endpoint.
-    enforcement_exemptions: {}
-  };
-
-  await sessionRef(sessionId).create(item);
-  await putJsonl(`${item.storage_prefix}events/session.jsonl`, [{
-    type: "session_started",
-    timestamp: now,
-    detail: { user_agent: req.get?.("user-agent") || req.headers?.["user-agent"] || "", start_ip: clientIp }
-  }]);
-
-  return startResponse(item, settings);
+  return startPersonSession(req, body, personContest);
 }
 
 // ---- candidateOf — THE dual-read identity adapter (F9 §1.2) ----------------
@@ -846,21 +673,18 @@ async function startSession(req) {
 //   contest_slug) — live locks, alert ids, GCS paths — works unchanged; the
 //   norm simply gains its college prefix.
 
-// The person-mode contest for a start body, or null → legacy path. A present-
-// but-bogus contest is a HARD error (F9 §2.3.1: mandatory resolution kills the
-// shared-empty-slug bleed hazard); the synthesized legacy contest falls through
-// to the legacy path so today's exams are untouched.
+// The person contest a start MUST name. An absent param is unknown_contest
+// (the candidate app always pins ?contest=); a present-but-bogus slug is the
+// same 400, and a not-open contest is 403 (F9 §2.3.1: mandatory resolution
+// kills the shared-empty-slug bleed hazard).
 async function resolvePersonContestForStart(body) {
-  if (body.contest === undefined || body.contest === null || String(body.contest).trim() === "") {
-    return null;
-  }
-  const contest = await resolveContest(String(body.contest).trim()); // 400 unknown_contest / 403 contest_not_open
-  if (contest.legacy || contest.identity_mode !== "person") return null;
+  const contest = await resolveContest(String(body?.contest ?? "").trim()); // 400 unknown_contest / 403 contest_not_open
+  if (contest.identity_mode !== "person") throw httpError(400, "unknown_contest");
   return contest;
 }
 
-// Mirrors validateProctorGate, reading the CONTEST window (S5 semantics moved
-// per-contest for person contests; the legacy settings window never gates them).
+// Gate on the CONTEST window (S5 semantics moved per-contest for person
+// contests).
 function validateContestWindow(contest) {
   if (!contest?.start_at || !contest?.end_at) {
     throw httpError(403, "Proctoring is not configured yet.");
@@ -878,7 +702,7 @@ function validateContestWindow(contest) {
 // Resolve the typed unique id against the contest roster: 0 matches → 403,
 // 1 → that person, 2+ colleges → body.college picks or 409 college_choices
 // (the candidate-side picker payload). Mapped profile fields are server-
-// overridden from the roster exactly like the legacy path's rosterIdentity.
+// overridden from the roster.
 async function resolvePersonRosterIdentity(meta, body) {
   const typed = String(body.roster_unique_id ?? body.candidate_id ?? body.hackerrank_username ?? "").trim();
   if (!typed) throw httpError(403, "roster_id_required");
@@ -985,14 +809,13 @@ async function startPersonSession(req, body, contest) {
   const now = new Date().toISOString();
   const clientIp = getClientIp(req);
   const contestSlug = contest.slug;
-  const settings = await getSettings();
 
-  // Same replay/lock mechanics as the legacy path (H1 unchanged, F9 D6).
+  // H1 replay/lock mechanics (F9 D6).
   const existingActive = await findLiveSessionFor(identity.username_norm, contestSlug);
   if (body.session_id) {
     const replay = await getSessionOrNull(body.session_id);
     if (replay && replay.username_norm === identity.username_norm && replay.contest_slug === contestSlug) {
-      return startResponse(replay, settings || {}, contest);
+      return startResponse(replay, contest);
     }
   }
 
@@ -1050,19 +873,19 @@ async function startPersonSession(req, body, contest) {
     detail: { user_agent: req.get?.("user-agent") || req.headers?.["user-agent"] || "", start_ip: clientIp }
   }]);
 
-  return startResponse(item, settings || {}, contest);
+  return startResponse(item, contest);
 }
 
-// The person-mode contest a stored session belongs to, or null → the response
-// stays settings-driven (legacy sessions keep today's payload bit-for-bit).
-// Only person-path docs (they carry candidate_id) ever resolve a contest here.
+// The person-mode contest a stored session belongs to, or null when it resolves
+// to no current person contest (e.g. an old/orphaned session doc). Only
+// person-path docs (they carry candidate_id) ever resolve a contest here.
 // NOT the same as contestForSession (S-I §3.2) below, which resolves ANY real
 // contest doc for exec membership + the problems[] payload.
 async function personContestForSession(session) {
   if (!session?.contest_slug || session.candidate_id === undefined) return null;
   try {
     const contest = await resolveContest(session.contest_slug, { requireOpen: false });
-    return contest.legacy || contest.identity_mode !== "person" ? null : contest;
+    return contest.identity_mode !== "person" ? null : contest;
   } catch {
     return null;
   }
@@ -1098,26 +921,22 @@ async function resumeSession(req) {
         && identityNorm(String(session.candidate_id)) === identityNorm(value)); // person leg
     if (!matches) throw httpError(404, "Session not found");
   }
-  const settings = await getSettings();
   const contest = await personContestForSession(session);
-  return startResponse(session, settings || {}, contest);
+  return startResponse(session, contest);
 }
 
 // Shared start/resume payload so the browser always gets the same shape whether
 // it just started, replayed a token, or resumed after reload. S4: async because
 // it resolves the assigned problem's candidate-facing view from the bank.
-// S-C: pass the session's PERSON-MODE contest to source the window/gate fields
-// from the contest doc instead of the legacy settings doc (contest = null keeps
-// every legacy payload bit-for-bit; the added candidate_id/identity_label keys
-// are read-side additions the S-A frontend already accepts).
-// S-I §3.4: serves the ORDERED problems[] (real contest doc when the session
-// belongs to one — person-mode or not — else the legacy settings shim), the
-// per-problem submissions summary (resume restores chips/totals) and the
-// submit budget. `problem` stays as a one-release compatibility alias =
-// problems[0] minus `order` (bit-for-bit with the pre-S-I shape for cached
-// bundles).
-async function startResponse(session, settings, contest = null) {
-  const problemSource = contest || await contestForSession(session) || settings;
+// S-C: the session's PERSON-MODE contest sources the window/gate fields from
+// the contest doc. contest = null (an orphaned/old session doc that no longer
+// resolves to a current person contest) degrades to the normalized DEFAULTS.
+// S-I §3.4: serves the ORDERED problems[] (the real contest doc the session
+// belongs to), the per-problem submissions summary (resume restores chips/
+// totals) and the submit budget. `problem` stays as a one-release
+// compatibility alias = problems[0] minus `order`.
+async function startResponse(session, contest = null) {
+  const problemSource = contest || await contestForSession(session);
   const problems = await contestProblemsPublic(problemSource);
   let problemAlias = null;
   if (problems.length) {
@@ -1136,18 +955,15 @@ async function startResponse(session, settings, contest = null) {
     storage_prefix: session.storage_prefix || buildStoragePrefix(session.contest_slug, session.username_norm, session.session_id),
     blocked_by_session_id: session.blocked_by_session_id || null,
     start_ip: session.start_ip || session.current_ip || "",
-    // contest_url is DEAD for person contests (vision §2.7: URLs are derived).
-    contest_url: contest ? "" : (settings?.contest_url || ""),
     // S3: tells the candidate client whether to hold at the room-code screen.
-    room_gate_enabled: contest ? Boolean(contest.room_gate_enabled) : Boolean(settings?.room_gate_enabled),
+    room_gate_enabled: Boolean(contest?.room_gate_enabled),
     // F5.3/F5.5: enforcement knobs + this session's exemptions + why a locked
     // session is locked (the candidate unlock-code UI keys off the reason).
-    // Wave-4 fix: person contests serve their OWN snapshot enforcement.
-    enforcement: enforcementConfigFor(contest, settings),
+    // Person contests serve their OWN snapshot enforcement.
+    enforcement: enforcementConfigFor(contest),
     enforcement_exemptions: sanitizeExemptions(session.enforcement_exemptions),
     locked_reason: session.locked_reason || null,
-    // S-I: person/real contests serve their OWN problems[] (the legacy
-    // settings problem_id never leaks into them — problemSource above);
+    // S-I: the contest serves its OWN problems[] (problemSource above);
     // `problem` is the one-release alias, problems[] the real payload.
     problem: problemAlias,
     problems,
@@ -1169,18 +985,17 @@ async function startResponse(session, settings, contest = null) {
     created_at: session.created_at || "",
     // F10.1: the camera-recording knobs ride the same upload_config object the
     // screen constraints use, so the recorder reads ONE authoritative config.
-    // Wave-4 fix: person contests serve their OWN snapshot camera config.
-    upload_config: { ...uploadConfig, camera: cameraRecordingConfigFor(contest, settings) },
+    // Person contests serve their OWN snapshot camera config.
+    upload_config: { ...uploadConfig, camera: cameraRecordingConfigFor(contest) },
     // OMR P1 (design §5.2): the start/resume response is the ONLY candidate
     // carrier for the screen-marker flag, and the key rides ONLY when enabled —
-    // flag off (the default) keeps this payload byte-identical to today and
-    // the canary-pinned no-param /api/exam-config is never touched.
-    ...(screenMarkersConfigFor(contest, settings).enabled ? { screen_markers: { enabled: true } } : {}),
+    // flag off (the default) keeps this payload byte-identical to today.
+    ...(screenMarkersConfigFor(contest).enabled ? { screen_markers: { enabled: true } } : {}),
     heartbeat_interval_seconds: 15,
     // S5: authoritative exam end time + the server clock at response time, so
     // the client shows a skew-corrected countdown from the very first response.
     // Person contests read their OWN window (S5 semantics moved per-contest).
-    end_at: contest ? (contest.end_at || "") : (settings?.end_at || ""),
+    end_at: contest?.end_at || "",
     server_now: new Date().toISOString()
   };
 }
@@ -1374,23 +1189,6 @@ async function takeOverLiveSlot(session) {
   } catch (error) {
     console.warn(`Failed to take over live slot for ${session.session_id}: ${error?.message || error}`);
   }
-}
-
-async function validateProctorGate() {
-  const settings = await getSettings();
-  if (!settings?.start_at || !settings?.end_at) {
-    throw httpError(403, "Proctoring is not configured yet.");
-  }
-
-  const now = Date.now();
-  const startAt = Date.parse(settings.start_at);
-  const endAt = Date.parse(settings.end_at);
-  if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || startAt >= endAt) {
-    throw httpError(403, "Proctoring schedule is invalid.");
-  }
-  if (now < startAt) throw httpError(403, "Proctoring has not started yet.");
-  if (now > endAt) throw httpError(403, "Proctoring has ended.");
-  return settings;
 }
 
 // D2 — post-admin-end grace. An admin end (end-now / per-session end / the
@@ -1646,9 +1444,8 @@ function checkExecSubmitLimit(sessionId, problemId) {
 // ---- S-I §3.2: contest membership for exec ----------------------------------
 // Scope comes from the SESSION (no client `contest` param). A session bound to
 // a REAL contest doc may exec ONLY that contest's problems[], scored with the
-// entry's effective points. Every legacy shape — contest_slug "", the
-// synthesized legacy contest, or a slug with no doc — takes today's path
-// bit-for-bit: bank read only, bank/seed points (the legacy canary).
+// entry's effective points. Every other shape — contest_slug "" or a slug with
+// no doc — takes the global path: bank read only, bank/seed points.
 async function contestForSession(session) {
   const slug = String(session?.contest_slug || "");
   if (!slug) return null;
@@ -1996,14 +1793,12 @@ async function recordHeartbeat(req) {
   // non-active session, but an active heartbeat returns the live status too).
   // S5: ALSO surface the current exam end time + server clock. The heartbeat is
   // the student's only live channel (15 s interval), so an admin's end-time
-  // change reaches every student within one interval — no reload. Costs one
-  // extra settings read per heartbeat (the same doc the start gate reads).
-  // Wave-4 fix: person-contest sessions source end_at AND enforcement from
-  // THEIR contest doc (S-I snapshot fields), matching startResponse — the
-  // global settings doc stays authoritative for legacy sessions only.
-  const settings = await getSettings();
+  // change reaches every student within one interval — no reload.
+  // Person-contest sessions source end_at AND enforcement from THEIR contest
+  // doc (S-I snapshot fields), matching startResponse; an orphaned session doc
+  // (no current person contest) degrades to the normalized defaults.
   const contest = await personContestForSession(session);
-  const enforcement = enforcementConfigFor(contest, settings);
+  const enforcement = enforcementConfigFor(contest);
 
   // F5.3 wave-2 fix: the heartbeat closes the server-side fullscreen countdown
   // (events set fullscreen_out_since; the heartbeat's `fullscreen` field is
@@ -2017,7 +1812,7 @@ async function recordHeartbeat(req) {
     current_ip: currentIp,
     ip_changed: ipChanged,
     newly_changed: newlyChanged,
-    end_at: contest ? (contest.end_at || "") : (settings?.end_at || ""),
+    end_at: contest?.end_at || "",
     // F5.3/F5.5: the heartbeat is the live channel for enforcement config AND
     // per-session exemptions, so an admin/invigilator exemption (or a settings
     // change) reaches the candidate within one interval — no reload.
@@ -2147,100 +1942,6 @@ async function endSession(req) {
   return { ok: true, manifest_key: manifestKey };
 }
 
-async function adminGetSettings(req) {
-  requireAdmin(req);
-  return publicSettings(await getSettings());
-}
-
-async function adminSaveSettings(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["start_at", "end_at"]);
-
-  const startAt = new Date(body.start_at);
-  const endAt = new Date(body.end_at);
-  if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime()) || startAt.getTime() >= endAt.getTime()) {
-    return badRequest("Start time must be before end time.");
-  }
-
-  const existing = await getSettings();
-  const contestUrl = String(body.contest_url || "").trim();
-  if (contestUrl && !isHttpUrl(contestUrl)) return badRequest("Contest URL must start with http:// or https://.");
-
-  // S4: optional active-problem assignment ("" clears it). A non-empty id must
-  // be servable to candidates RIGHT NOW (published bank doc or built-in seed),
-  // so start/resume never advertise a dead problem id.
-  const problemId = String(body.problem_id || "").trim();
-  if (problemId && !(await getProblem(problemId))) {
-    return badRequest("problem_id must reference a published problem");
-  }
-
-  // Phase 2 (0.1): passcodes are removed. They are no longer REQUIRED to save
-  // settings, and start/end are gated only by the time window. We still persist
-  // any passcode/end_code an older admin UI happens to send so the stored doc is
-  // backward-compatible, but nothing reads the hashes anymore.
-  const now = new Date().toISOString();
-  const passcode = String(body.passcode || "");
-  const endCode = String(body.end_code || "");
-  if (passcode && passcode.length < 4) return badRequest("Passcode must be at least 4 characters.");
-  if (endCode && endCode.length < 4) return badRequest("End code must be at least 4 characters.");
-
-  // D1: once POST /api/admin/exam-time has adjusted the end time (stamped via
-  // end_at_updated_at), the S5 endpoint OWNS end_at for the current exam
-  // window. A Settings-form save posts back whatever end_at the form LOADED —
-  // possibly minutes stale — so honoring it here would silently revert a live
-  // extend/shorten/end-now. Rule: same start_at (same exam) + stamp present →
-  // keep the stored end_at and the stamp, ignore body.end_at. A CHANGED
-  // start_at is a new schedule: body.end_at applies and the stamp resets so
-  // the next exam isn't shackled to the old exam's live adjustments.
-  const sameWindowStart = Boolean(existing?.start_at) && Date.parse(existing.start_at) === startAt.getTime();
-  const examTimeOwnsEnd = sameWindowStart && Boolean(existing?.end_at_updated_at);
-
-  const item = {
-    start_at: startAt.toISOString(),
-    end_at: examTimeOwnsEnd ? existing.end_at : endAt.toISOString(),
-    ...(examTimeOwnsEnd ? { end_at_updated_at: existing.end_at_updated_at } : {}),
-    contest_url: contestUrl,
-    contest_slug: contestSlugFromUrl(contestUrl),
-    problem_id: problemId,
-    // S3: opt-in room start gate (invigilator OTP / start-now). Default false.
-    room_gate_enabled: body.room_gate_enabled === true,
-    // F5.3: fullscreen enforcement knobs — NaN-guarded to their defaults so a
-    // bad payload can never persist a value that strands candidates. Same rule
-    // as rooms: an older admin UI that doesn't SEND a field preserves the
-    // stored value rather than resetting it.
-    fullscreen_reentry_seconds: intSettingOr(
-      body.fullscreen_reentry_seconds !== undefined ? body.fullscreen_reentry_seconds : existing?.fullscreen_reentry_seconds,
-      FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
-    fullscreen_exit_limit: intSettingOr(
-      body.fullscreen_exit_limit !== undefined ? body.fullscreen_exit_limit : existing?.fullscreen_exit_limit,
-      FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
-    enforcement_mode: resolveEnforcementMode(
-      body.enforcement_mode !== undefined ? body.enforcement_mode : existing?.enforcement_mode),
-    // F10.1: camera-recording knobs — same rules as the enforcement fields:
-    // invalid values fall back to the defaults (enabled / 10 fps / 640 w,
-    // never 0), and an older admin UI that doesn't SEND the field preserves
-    // the stored value rather than resetting it.
-    camera_recording: normalizeCameraRecording(
-      body.camera_recording !== undefined ? body.camera_recording : existing?.camera_recording),
-    // OMR P1: screen-marker flag — default OFF; an older admin UI that doesn't
-    // SEND the field preserves the stored value (same rule as camera_recording).
-    screen_markers: normalizeScreenMarkers(
-      body.screen_markers !== undefined ? body.screen_markers : existing?.screen_markers),
-    passcode_hash: passcode ? hashPasscode(passcode) : (existing?.passcode_hash || ""),
-    passcode_preview: passcode ? maskPasscode(passcode) : (existing?.passcode_preview || ""),
-    end_code_hash: endCode ? hashPasscode(endCode) : (existing?.end_code_hash || ""),
-    end_code_preview: endCode ? maskPasscode(endCode) : (existing?.end_code_preview || ""),
-    // S2: room labels for the student room dropdown. An older admin UI that
-    // doesn't send rooms preserves the stored list.
-    rooms: normalizeRooms(Array.isArray(body.rooms) ? body.rooms : existing?.rooms),
-    updated_at: now
-  };
-
-  await settingsRef().set(item);
-  return publicSettings(item);
-}
-
 // ---- S4: problem bank (admin authoring) ------------------------------------
 // The four admin problem-bank route bodies (adminListProblems / adminGetProblem
 // / adminSaveProblem / adminDeleteProblem) + their owned helpers (problemRef /
@@ -2257,11 +1958,9 @@ async function adminSaveSettings(req) {
 // (decomp B2); destructured at module scope above so the dispatch lines stay
 // byte-identical (canaryIsolation). Thin glue over src/templates.mjs as before.
 
-// ---- S-B: contests (F9 §2 / F10 §2.7) — SHIPS DARK ---------------------------
+// ---- S-B: contests (F9 §2 / F10 §2.7) ----------------------------------------
 // Thin admin glue over src/contests.mjs (validation + slug/access-code minting
-// + legacy synthesis live there). The synthesized legacy contest appears in
-// the LIST only — the write endpoints 404 on it by construction. No candidate
-// path is routed through any of this yet.
+// live there).
 
 async function adminListContests(req) {
   requireAdmin(req);
@@ -2507,8 +2206,8 @@ async function adminSaveRoster(req) {
   // S-C: an upload that names a contest goes down the PERSON-layer pipeline
   // (compulsory college column, canonicalization gate, dup hard-reject, person
   // upsert, enrollment minting — identity.mjs). Only real identity_mode:
-  // "person" contests qualify; the synthesized legacy contest (and any absent
-  // contest param) keeps today's global-roster path below BIT-FOR-BIT.
+  // "person" contests qualify; any other scope (absent contest param, or a
+  // non-person contest) keeps the global-roster path below BIT-FOR-BIT.
   const personContest = await resolvePersonContestParam(body.contest);
   if (personContest) {
     return saveContestRoster(personContest, body, {
@@ -2607,15 +2306,15 @@ async function adminSaveRoster(req) {
 }
 
 // Resolve an OPTIONAL contest param to a real person-mode contest doc, or
-// null when the param is absent (legacy path). A param that names anything
-// other than a real person contest is a hard 400 — uploads must never silently
-// fall back to the global roster when the admin asked for a contest.
+// null when the param is absent (the global roster path). A param that names
+// anything other than a real person contest is a hard 400 — uploads must never
+// silently fall back to the global roster when the admin asked for a contest.
 async function resolvePersonContestParam(contestParam) {
   if (contestParam === undefined || contestParam === null || String(contestParam).trim() === "") {
     return null;
   }
   const contest = await resolveContest(String(contestParam).trim(), { requireOpen: false });
-  if (contest.legacy || contest.identity_mode !== "person") {
+  if (contest.identity_mode !== "person") {
     throw httpError(400, "per_contest_roster_requires_person_contest");
   }
   return contest;
@@ -2639,73 +2338,41 @@ async function adminGetRoster(req) {
   };
 }
 
-// GET /api/exam-config — PUBLIC (the student form renders before any session
-// exists). Returns only non-sensitive config: whether the roster gate is on,
-// what to call the unique-ID field, and the room labels. Fail-open client-side
-// is safe because /api/session/start re-enforces the roster gate regardless.
+// GET /api/exam-config?contest=<slug> — PUBLIC (the student form renders before
+// any session exists). ?contest= is MANDATORY: an absent param is a hard 400
+// unknown_contest (the candidate app always pins it). Returns only
+// non-sensitive config: whether the roster gate is on, what to call the
+// unique-ID field, and the room labels. Fail-open client-side is safe because
+// /api/session/start re-enforces the roster gate regardless.
 async function publicExamConfig(req) {
-  // S-D: ?contest= switches this pre-session endpoint to the CONTEST-owned
-  // config (vision C1/C4). Without the param, today's settings-driven payload
-  // stays bit-for-bit — the legacy deployment keeps working unchanged.
   const contestParam = String(req?.query?.contest ?? "").trim();
-  if (contestParam) return contestExamConfig(contestParam);
-  const [settings, meta] = await Promise.all([getSettings(), getRosterMeta()]);
-  return {
-    roster_required: Boolean(meta),
-    unique_id_label: meta?.unique_id_column || "",
-    rooms: normalizeRooms(settings?.rooms),
-    // F5.3: the candidate runtime needs the enforcement knobs before a session
-    // exists (the heartbeat keeps them fresh afterwards).
-    enforcement: enforcementConfig(settings),
-    // F10.1: the consent disclosure + camera capture labels render BEFORE a
-    // session exists, so the candidate must know pre-session whether the
-    // camera is recorded or live-monitored only.
-    camera_recording: cameraRecordingConfig(settings)
-  };
+  if (!contestParam) throw httpError(400, "unknown_contest");
+  return contestExamConfig(contestParam);
 }
 
 // S-D: per-contest exam-config — 400 unknown_contest / 403 contest_not_open
 // (the candidate app turns either into the access-code landing page). Person
-// contests serve their OWN snapshot fields; the synthesized legacy contest
-// serves the settings-driven values under the same contest-shaped envelope.
+// contests serve their OWN snapshot fields.
 async function contestExamConfig(slug) {
   const contest = await resolveContest(slug, { requireOpen: true });
-  const envelope = {
+  const meta = await getContestRosterMeta(contest);
+  return {
     contest_slug: contest.slug,
     contest_name: contest.name || contest.slug,
     identity_label: contest.identity_label || "Candidate ID",
-    // The pinned candidate app forks its identity UX on this: "person" =
-    // server-resolved id (college picker on 409), "legacy_username" = today's
-    // roster-lookup confirm flow. The two branches below are shape-identical
-    // otherwise, so the payload must say which one it is.
-    identity_mode: contest.identity_mode || (contest.legacy ? "legacy_username" : "person"),
+    // The pinned candidate app forks its identity UX on this — always "person".
+    identity_mode: contest.identity_mode || "person",
     start_at: contest.start_at || null,
     end_at: contest.end_at || null,
-    server_now: new Date().toISOString()
-  };
-  if (contest.legacy) {
-    const [settings, meta] = await Promise.all([getSettings(), getRosterMeta()]);
-    return {
-      ...envelope,
-      roster_required: Boolean(meta),
-      unique_id_label: meta?.unique_id_column || "",
-      rooms: normalizeRooms(settings?.rooms),
-      room_gate_enabled: Boolean(settings?.room_gate_enabled),
-      enforcement: enforcementConfig(settings),
-      camera_recording: cameraRecordingConfig(settings)
-    };
-  }
-  const meta = await getContestRosterMeta(contest);
-  return {
-    ...envelope,
+    server_now: new Date().toISOString(),
     roster_required: Boolean(meta),
     // The label-driven identity prompt (F9 §1.5): person contests label the
     // unique-id field from the CONTEST doc, never a roster column name.
-    unique_id_label: envelope.identity_label,
+    unique_id_label: contest.identity_label || "Candidate ID",
     rooms: normalizeRooms(contest.rooms),
     room_gate_enabled: Boolean(contest.room_gate_enabled),
-    enforcement: enforcementConfigFor(contest, null),
-    camera_recording: cameraRecordingConfigFor(contest, null)
+    enforcement: enforcementConfigFor(contest),
+    camera_recording: cameraRecordingConfigFor(contest)
   };
 }
 
@@ -2757,18 +2424,6 @@ async function publicAccessCode(req) {
   const resolved = await resolveAccessCode(body?.code);
   refundAttempt(); // valid code — only failed attempts consume the budget
   return { ok: true, ...resolved };
-}
-
-// GET /api/candidate-route — PUBLIC, one boolean: does the LEGACY settings-
-// driven exam still exist? The no-?contest= candidate URL keeps serving today's
-// form while it does (bit-for-bit deployment guarantee) and shows the
-// access-code landing page once it doesn't. This lives on its OWN endpoint
-// because the no-param /api/exam-config payload is a locked contract (its key
-// set is asserted bit-for-bit) and must not grow routing fields. Reveals
-// nothing sensitive: only whether a settings doc exists at all.
-async function publicCandidateRoute() {
-  const settings = await getSettings();
-  return { legacy_configured: Boolean(settings) };
 }
 
 // The ACTIVE-version roster entry for a unique id, or null. Entries from a
@@ -2900,19 +2555,17 @@ async function rosterLookup(req) {
 
 // S-C: route an OPTIONAL admin/invigilator contest filter through the
 // scopedQuery chokepoint (F9 §2.3.2). Absent/"" → ALL_CONTESTS (no filter —
-// today's behavior, explicit sentinel); a known contest → its resolved doc
-// (the synthesized legacy contest TRANSLATES to the `contest_slug == ""`
-// filter, F9 §6 — selecting the legacy entry now actually matches legacy
-// sessions); an unknown slug filters literally (today's raw-where semantics:
-// an empty result set, never an error — admin GET signatures stay unchanged,
-// F9 D10).
+// explicit sentinel); a known contest → its resolved doc; an unknown slug
+// filters literally (raw-where semantics: an empty result set, never an error —
+// admin GET signatures stay unchanged, F9 D10 — and it keeps any
+// orphaned/historic data browsable by its literal slug).
 async function contestScopeOf(slugRaw) {
   const slug = slugRaw === undefined || slugRaw === null ? "" : String(slugRaw).trim();
   if (!slug) return ALL_CONTESTS;
   try {
     return await resolveContest(slug, { requireOpen: false });
   } catch {
-    return { slug, legacy: false, legacy_empty_slug: false };
+    return { slug };
   }
 }
 
@@ -3253,80 +2906,8 @@ async function adminSessionEvents(req) {
 // (normalizeRoomFilter / distinctRooms / isStaleSession) stay RESIDENT here —
 // other handler code reuses them — and are passed in via ctx by reference.
 
-// ---- S5: dynamic exam time + end-now (admin) -------------------------------
-//
-// POST /api/admin/exam-time — live control over the exam END time. Deliberately
-// NOT part of adminSaveSettings: a merge-write touches ONLY the end-time fields,
-// so settings keys other features own (rooms, gate flags, contest_url) are never
-// clobbered, and the endpoint stays a single, small, testable concern.
-//
-// Body carries EXACTLY ONE of:
-//   { end_at: "<ISO>" }     → set an absolute new end time
-//   { extend_minutes: N }   → shift the CURRENT end by N minutes (negative shortens)
-//   { end_now: true }       → end_at := now AND force-end every non-ended session
-//                             in the current contest scope. Their next heartbeat
-//                             409s session_ended → the recorder self-stops (B1).
-//
-// Students pick a new end time up via the heartbeat response (≤15 s) — no
-// reload. A plain end_at/extend change NEVER force-ends sessions: recording
-// keeps running so candidates end their own test (manifest upload intact);
-// end_now is the explicit hard stop.
-async function adminExamTime(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-
-  const provided = ["end_at", "extend_minutes", "end_now"].filter(
-    (key) => body[key] !== undefined && body[key] !== null && body[key] !== ""
-  );
-  if (provided.length !== 1) {
-    return badRequest("Provide exactly one of end_at, extend_minutes, end_now");
-  }
-  const field = provided[0];
-
-  const settings = await getSettings();
-  if (!settings?.start_at || !settings?.end_at) {
-    return badRequest("Proctoring schedule is not configured yet.");
-  }
-  const startMs = Date.parse(settings.start_at);
-  const currentEndMs = Date.parse(settings.end_at);
-  const now = new Date().toISOString();
-
-  let newEndMs;
-  if (field === "end_now") {
-    if (body.end_now !== true) return badRequest("end_now must be true");
-    newEndMs = Date.parse(now);
-  } else if (field === "end_at") {
-    newEndMs = Date.parse(String(body.end_at));
-    if (!Number.isFinite(newEndMs)) return badRequest("end_at must be a valid ISO 8601 date");
-  } else {
-    const delta = Number(body.extend_minutes);
-    if (!Number.isFinite(delta) || delta === 0) return badRequest("extend_minutes must be a non-zero number");
-    if (!Number.isFinite(currentEndMs)) return badRequest("Stored end time is invalid; set an absolute end_at instead.");
-    newEndMs = currentEndMs + delta * 60_000;
-  }
-
-  // Window sanity: the end must stay after the start (also rejects an end-now
-  // pressed before the exam ever started).
-  if (!Number.isFinite(startMs) || newEndMs <= startMs) {
-    return badRequest("End time must be after the start time.");
-  }
-  const newEndAt = new Date(newEndMs).toISOString();
-
-  // merge:true → ONLY the end-time fields change; everything else on the
-  // settings doc survives (parallel features add their own keys to this doc).
-  await settingsRef().set({ end_at: newEndAt, end_at_updated_at: now, updated_at: now }, { merge: true });
-
-  let endedCount = 0;
-  if (field === "end_now") {
-    const contestSlug = settings.contest_slug || contestSlugFromUrl(settings.contest_url);
-    endedCount = await endAllLiveSessions(contestSlug, now);
-  }
-
-  return { ok: true, start_at: settings.start_at, end_at: newEndAt, server_now: now, ended_count: endedCount };
-}
-
-// S5: end every non-ended session in the given contest scope ("" matches
-// legacy/no-contest sessions). Mirrors applySessionAction("end") — status:ended
+// S5: end every non-ended session in the given contest scope. Mirrors
+// applySessionAction("end") — status:ended
 // + ended_at + live-slot release — with a distinct ended_reason for the audit
 // trail, applied with bounded concurrency so an 800-session end-now never fans
 // out unbounded. Returns the number of sessions ended.
@@ -3521,14 +3102,14 @@ async function adminAttendance(req) {
   };
 }
 
-// The real person-mode contest behind an optional admin filter value, or null →
-// the caller keeps its legacy behavior. NEVER throws: admin GET signatures stay
-// unchanged (F9 D10), so an unknown/legacy slug filters exactly as today.
+// The real person-mode contest behind an optional admin filter value, or null
+// when absent/unknown. NEVER throws: admin GET signatures stay unchanged
+// (F9 D10), so an unknown slug filters exactly as today.
 async function personContestForFilter(contestSlug) {
   if (contestSlug === undefined || contestSlug === null || String(contestSlug).trim() === "") return null;
   try {
     const contest = await resolveContest(String(contestSlug).trim(), { requireOpen: false });
-    return contest.legacy || contest.identity_mode !== "person" ? null : contest;
+    return contest.identity_mode !== "person" ? null : contest;
   } catch {
     return null;
   }
@@ -3875,29 +3456,6 @@ async function adminContestSelectionDone(req) {
     });
   }
   return stampSelectionDone(contest, snapshotByPerson, adminActor(req, body));
-}
-
-// POST /api/admin/contest-adopt — legacy "Adopt into person model" (vision
-// §2.15). Re-upload this contest's roster WITH the college column; the identity
-// module mints persons/colleges/enrollments and stamps person_id onto the
-// contest's existing sessions/submissions (username_norm + all keys FROZEN).
-// The college-confirmation preview rides straight back to the admin UI. The
-// target may be a legacy/F9-era contest, so we resolve it WITHOUT the
-// person-mode filter (resolveContest, not personContestForFilter).
-async function adminContestAdopt(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const slug = body.contest ?? body.contest_slug;
-  if (slug === undefined || slug === null || String(slug).trim() === "") {
-    return badRequest("contest is required");
-  }
-  let contest;
-  try {
-    contest = await resolveContest(String(slug).trim(), { requireOpen: false });
-  } catch {
-    return badRequest("unknown contest");
-  }
-  return adoptContestIntoPersonModel(contest, body, adminActor(req, body));
 }
 
 // ---- Wave7-G data lifecycle (S-G/S-H): export → triple-gated purge → sweep ----
@@ -4619,18 +4177,18 @@ function reviewClaimRef(usernameNorm, contestSlug = "") {
     .doc(contestSlug ? `${usernameNorm}::${contestSlug}` : usernameNorm);
 }
 
-// Resolve the optional review-scope contest param: absent → "" (the legacy
-// slugless set); the synthesized legacy contest → "" too (its review data IS
-// the legacy set); a real contest → its slug; unknown → 400 (typo safety).
+// Resolve the optional review-scope contest param: absent → "" (the slugless
+// set — docs with no contest_slug field); a real contest → its slug; unknown →
+// 400 (typo safety).
 async function reviewContestSlugOf(param) {
   if (param === undefined || param === null || String(param).trim() === "") return "";
   const contest = await resolveContest(String(param).trim(), { requireOpen: false });
-  return contest.legacy ? "" : contest.slug;
+  return contest.slug;
 }
 
 // A review/claim doc belongs to scope `contestSlug` when its contest_slug field
-// matches ("" matches docs WITHOUT the field — the legacy set). New scoped
-// writes always stamp the field; legacy docs never get rewritten.
+// matches ("" matches docs WITHOUT the field — the slugless set). New scoped
+// writes always stamp the field; old docs never get rewritten.
 function inReviewScope(doc, contestSlug) {
   return String(doc?.contest_slug || "") === contestSlug;
 }
@@ -5513,12 +5071,13 @@ async function adminAlertAction(req) {
 // ---- S3: invigilator portal + room start gate -------------------------------
 //
 // Room-scoped console (NO signed-QR verification — deferred by design). Auth =
-// requireInvigilator. Scope is ALWAYS the active contest from the settings doc;
-// invigilators never pick a contest. Least privilege: these endpoints expose NO
-// emails, NO IP addresses, NO signed media URLs.
+// requireInvigilator. Scope is the contest named by ?contest= (the global
+// password falls back to a no-contest staff view across ALL contests). Least
+// privilege: these endpoints expose NO emails, NO IP addresses, NO signed media
+// URLs.
 
 // invigilatorOverview + the room-gate helpers (gateRoomKey/roomGateRef/
-// getRoomGate/generateRoomOtp/publicRoomGate/requireGateEnabledSettings) +
+// getRoomGate/generateRoomOtp/publicRoomGate/requireGateEnabledFor) +
 // invigilatorReleaseCode/OpenRoom/UnlockCode/Unlock/Exempt moved VERBATIM to
 // the makeInvigilatorRoutes(ctx) factory in routes/invigilator.mjs (decomp B1).
 // The route handlers are destructured at module scope (see the factory call near
@@ -5536,13 +5095,12 @@ async function sessionRoomGate(req) {
   const body = parseBody(req);
   requireFields(body, ["session_id"]);
   const session = requireWritableSession(await getSession(String(body.session_id)));
-  // Wave-4 fix: the gate FLAG follows the session's contest (person contests
-  // own room_gate_enabled as an S-I snapshot field); the gate DOC below was
-  // already per-(contest_slug, room). Legacy sessions keep the settings flag.
+  // The gate FLAG follows the session's contest (person contests own
+  // room_gate_enabled as an S-I snapshot field); the gate DOC below is
+  // per-(contest_slug, room). An orphaned session (no current contest) is
+  // ungated.
   const contest = await personContestForSession(session);
-  const gateEnabled = contest
-    ? Boolean(contest.room_gate_enabled)
-    : Boolean((await getSettings())?.room_gate_enabled);
+  const gateEnabled = Boolean(contest?.room_gate_enabled);
   if (!gateEnabled) {
     return { gate_enabled: false, exam_started: true, exam_started_at: session.exam_started_at || null };
   }
@@ -5608,11 +5166,10 @@ async function sessionEnforcementViolation(req) {
     return { ok: true, locked: false, exempt: true };
   }
 
-  // Wave-4 fix: the consequence follows the SESSION's config source — its
-  // person contest's snapshot enforcement when it has one, else the global
-  // settings doc (legacy parity).
+  // The consequence follows the SESSION's config source — its person contest's
+  // snapshot enforcement, or the normalized defaults for an orphaned session.
   const contest = await personContestForSession(session);
-  const enforcement = enforcementConfigFor(contest, contest ? null : await getSettings());
+  const enforcement = enforcementConfigFor(contest);
   const exitCount = Math.max(0, intOrZero(body.exit_count));
   const alertSettings = await getAlertSettings();
   const { locked } = await applyEnforcementViolation(session, { phase, exitCount, enforcement, alertSettings });
@@ -5705,10 +5262,10 @@ async function reconcileFullscreenEnforcement(session, events, alertSettings) {
   });
   if (!unexpectedExits) return;
 
-  // Wave-4 fix: same config-source rule as the self-report path — the
-  // session's person contest wins over the global settings doc.
+  // Same config-source rule as the self-report path — the session's person
+  // contest, or the normalized defaults for an orphaned session.
   const contest = await personContestForSession(session);
-  const enforcement = enforcementConfigFor(contest, contest ? null : await getSettings());
+  const enforcement = enforcementConfigFor(contest);
   if (newCount > enforcement.fullscreen_exit_limit) {
     await applyEnforcementViolation(session, {
       phase: "exit_limit", exitCount: newCount, enforcement, alertSettings, derived: true
@@ -5805,22 +5362,14 @@ async function sessionUnlockGate(req) {
 // blocked until the session was released (OTP / room open / admin turning the
 // gate off). Deliberately NOT inside requireWritableSession — evidence writes
 // (events, uploads, heartbeats) must keep flowing while the candidate waits.
-async function requireExamStarted(session, settings) {
-  // S3 nit: avoid the extra Firestore settings read on the exec HOT PATH. Once a
-  // session has been released (exam_started_at stamped), the gate can never
-  // reject it regardless of settings — so short-circuit BEFORE any read. The
-  // settings read only happens for a not-yet-started session (the rare waiting
-  // case). A caller that already holds settings may pass them through to skip the
-  // read entirely. Behavior is identical: reject iff gate enabled AND not started.
-  // Wave-4 fix: a person-contest session is gated by ITS contest's
-  // room_gate_enabled (S-I snapshot field), never the global settings doc —
-  // legacy sessions (no person contest) keep today's settings-driven gate.
+async function requireExamStarted(session) {
+  // S3 nit: once a session has been released (exam_started_at stamped) the gate
+  // can never reject it — short-circuit BEFORE any contest read.
+  // A person-contest session is gated by ITS contest's room_gate_enabled (S-I
+  // snapshot field); an orphaned session (no current contest) is never gated.
   if (session.exam_started_at) return;
   const contest = await personContestForSession(session);
-  const gateEnabled = contest
-    ? Boolean(contest.room_gate_enabled)
-    : Boolean((settings !== undefined ? settings : await getSettings())?.room_gate_enabled);
-  if (gateEnabled) {
+  if (Boolean(contest?.room_gate_enabled)) {
     throw httpError(403, "exam_not_started");
   }
 }
@@ -5862,11 +5411,11 @@ function alertRef(alertId) {
   return getFirestore().collection(ALERTS_COLLECTION).doc(String(alertId));
 }
 
-// getSession/getSessionOrNull/getSettings/requireWritableSession/sessionRef/
-// settingsRef + the GCS-prefix builders (contestSlugFromUrl/buildStoragePrefix/
-// sessionPrefix) + candidateOf moved to the makeSessionStore factory in
-// lib/sessionStore.mjs (decomp B0); the instances are destructured at module
-// scope (see the makeSessionStore(storeCtx) call near the top).
+// getSession/getSessionOrNull/requireWritableSession/sessionRef + the
+// GCS-prefix builders (buildStoragePrefix/sessionPrefix) + candidateOf moved to
+// the makeSessionStore factory in lib/sessionStore.mjs (decomp B0); the
+// instances are destructured at module scope (see the makeSessionStore(storeCtx)
+// call near the top).
 
 // sanitizeRoom moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
@@ -5887,115 +5436,23 @@ function alertRef(alertId) {
 
 // safeEqual moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
-// ---- F5.3/F5.5: fullscreen enforcement config + per-session exemptions -----
-//
-// Three admin-tunable settings drive the candidate-side enforcement ladder:
-//   fullscreen_reentry_seconds — L1 countdown to re-enter fullscreen (default 20)
-//   fullscreen_exit_limit      — exits beyond this count escalate to L2 (default 2;
-//                                0 = the first exit escalates immediately)
-//   enforcement_mode           — "block" locks the session on violation;
-//                                "alert_first" only raises the critical alert.
-// All three are NaN-guarded to their defaults so a corrupt settings doc can
-// never strand candidates, and they ride exam-config / start / heartbeat so
-// the client applies changes live.
-const FULLSCREEN_REENTRY_DEFAULT_SECONDS = 20;
-const FULLSCREEN_EXIT_LIMIT_DEFAULT = 2;
-const ENFORCEMENT_MODES = ["block", "alert_first"];
-
-function intSettingOr(raw, fallback, minimum) {
-  const num = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(num) || !Number.isInteger(num) || num < minimum) return fallback;
-  return num;
-}
-
-function resolveEnforcementMode(candidate) {
-  return ENFORCEMENT_MODES.includes(candidate) ? candidate : "block";
-}
-
-function enforcementConfig(settings) {
-  return {
-    fullscreen_reentry_seconds: intSettingOr(settings?.fullscreen_reentry_seconds, FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
-    fullscreen_exit_limit: intSettingOr(settings?.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
-    mode: resolveEnforcementMode(settings?.enforcement_mode),
-    // #71: mirror the person-contest flag (normalizeTemplateEnforcement) so a
-    // LEGACY (global-settings) session also carries the simplified-recovery
-    // toggle through start/resume + heartbeat. Default false; non-boolean →
-    // false — an untouched legacy exam is unchanged.
-    simplified_fullscreen_recovery: settings?.simplified_fullscreen_recovery === true
-  };
-}
-
-// F10.1 — separate low-res CAMERA recording stream. Defaults target the operator's
-// eye-movement bar (catch a candidate repeatedly glancing down at notes/a
-// phone): ~10 fps, and just enough width to read eye direction. Admin-tunable
-// within tight bounds; an invalid/blank value falls back to its DEFAULT
-// (never 0 — the wave-2 blank-saves-0 hazard) so a bad payload can never
-// persist an unusable camera config. Default ENABLED: only an explicit
-// boolean false turns the camera stream off.
-const CAMERA_RECORDING_DEFAULTS = { enabled: true, fps: 10, width: 640 };
-const CAMERA_FPS_MIN = 1;
-const CAMERA_FPS_MAX = 15;
-const CAMERA_WIDTH_MIN = 320;
-const CAMERA_WIDTH_MAX = 1280;
-
-// intSettingOr with an upper bound too: out-of-range → fallback (not clamped),
-// matching the existing "garbage falls back to the default" settings rule.
-function boundedIntOr(raw, fallback, minimum, maximum) {
-  const num = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(num) || !Number.isInteger(num) || num < minimum || num > maximum) return fallback;
-  return num;
-}
-
-function normalizeCameraRecording(raw) {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  return {
-    enabled: typeof source.enabled === "boolean" ? source.enabled : CAMERA_RECORDING_DEFAULTS.enabled,
-    fps: boundedIntOr(source.fps, CAMERA_RECORDING_DEFAULTS.fps, CAMERA_FPS_MIN, CAMERA_FPS_MAX),
-    width: boundedIntOr(source.width, CAMERA_RECORDING_DEFAULTS.width, CAMERA_WIDTH_MIN, CAMERA_WIDTH_MAX)
-  };
-}
-
-function cameraRecordingConfig(settings) {
-  return normalizeCameraRecording(settings?.camera_recording);
-}
-
-// OMR P1 (2026-06-12 design §5.2) — screen-marker fiducials feature flag.
-// Default OFF everywhere: only an explicit boolean true enables, garbage falls
-// back to disabled, and a deployment that never touches the flag serves every
-// candidate response byte-identical to today (the start/resume carrier below
-// emits the key ONLY when enabled; /api/exam-config is never touched). v1 is
-// boolean-only — marker size/contrast/count are frontend code constants
-// (design Open Question 4).
-const SCREEN_MARKERS_DEFAULTS = { enabled: false };
-
-function normalizeScreenMarkers(raw) {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  return {
-    enabled: typeof source.enabled === "boolean" ? source.enabled : SCREEN_MARKERS_DEFAULTS.enabled
-  };
-}
-
-function screenMarkersConfig(settings) {
-  return normalizeScreenMarkers(settings?.screen_markers);
-}
-
-// ---- wave-4 fix: contest-owned enforcement/camera (S-I §1.4 snapshot) -------
+// ---- contest-owned enforcement/camera/screen-markers (S-I §1.4 snapshot) ----
 // A session bound to a person contest serves the CONTEST's snapshot-copied
-// enforcement/camera_recording fields; legacy sessions keep the global
-// settings doc bit-for-bit. `contest` is the resolved person contest (or
-// null). The template normalizers produce the exact same shape (and NaN
-// guards) as the settings normalizers above, so a corrupt contest doc can
-// never strand candidates either.
-function enforcementConfigFor(contest, settings) {
-  return contest ? normalizeTemplateEnforcement(contest.enforcement) : enforcementConfig(settings);
+// enforcement/camera_recording/screen_markers fields. `contest` is the resolved
+// person contest, or null for an orphaned session doc that no longer resolves to
+// a current contest — in which case the template normalizers produce the
+// NORMALIZED DEFAULTS (their NaN guards keep a corrupt contest doc from ever
+// stranding candidates either).
+function enforcementConfigFor(contest) {
+  return normalizeTemplateEnforcement(contest?.enforcement);
 }
 
-function cameraRecordingConfigFor(contest, settings) {
-  return contest ? normalizeTemplateCameraRecording(contest.camera_recording) : cameraRecordingConfig(settings);
+function cameraRecordingConfigFor(contest) {
+  return normalizeTemplateCameraRecording(contest?.camera_recording);
 }
 
-function screenMarkersConfigFor(contest, settings) {
-  return contest ? normalizeTemplateScreenMarkers(contest.screen_markers) : screenMarkersConfig(settings);
+function screenMarkersConfigFor(contest) {
+  return normalizeTemplateScreenMarkers(contest?.screen_markers);
 }
 
 // Per-session enforcement exemptions (F5.5): ONLY the known keys, ONLY real
@@ -6018,41 +5475,6 @@ function sanitizeExemptions(input) {
 function intOrZero(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
-}
-
-function publicSettings(settings) {
-  const enforcement = enforcementConfig(settings);
-  return {
-    fullscreen_reentry_seconds: enforcement.fullscreen_reentry_seconds,
-    fullscreen_exit_limit: enforcement.fullscreen_exit_limit,
-    enforcement_mode: enforcement.mode,
-    // F10.1: always normalized on read, so a legacy doc (no stored block)
-    // reports the defaults (enabled / 10 fps / 640 w).
-    camera_recording: cameraRecordingConfig(settings),
-    // OMR P1: screen-marker flag for the admin toggle (default OFF). Admin
-    // settings surface only — candidate responses carry it solely via the
-    // start/resume conditional key, never exam-config.
-    screen_markers: screenMarkersConfig(settings),
-    start_at: settings?.start_at || "",
-    end_at: settings?.end_at || "",
-    contest_url: settings?.contest_url || "",
-    // contest_slug is derived from contest_url and persisted at save time; we
-    // recompute on read so an older settings doc (no stored slug) still reports
-    // the right value. This is the slug all sure-shot alerts/sessions join on.
-    contest_slug: settings?.contest_slug || contestSlugFromUrl(settings?.contest_url),
-    problem_id: settings?.problem_id || "",
-    room_gate_enabled: Boolean(settings?.room_gate_enabled),
-    // S2: admin-configured room labels (student dropdown; later the invigilator
-    // portal). Sanitized + deduped on read as well as on save.
-    rooms: normalizeRooms(settings?.rooms),
-    // Passcodes are removed (Phase 2, 0.1). These flags remain for backward
-    // compatibility with any older admin UI; the backend no longer enforces them.
-    passcode_set: Boolean(settings?.passcode_hash),
-    passcode_preview: settings?.passcode_preview || "",
-    end_code_set: Boolean(settings?.end_code_hash),
-    end_code_preview: settings?.end_code_preview || "",
-    updated_at: settings?.updated_at || ""
-  };
 }
 
 // isHttpUrl moved to lib/http.mjs; normalizeUsername/sanitizeSegment/

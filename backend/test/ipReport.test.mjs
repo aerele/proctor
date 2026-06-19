@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 process.env.EVIDENCE_BUCKET = "ipreport-bucket";
 process.env.SESSION_COLLECTION = "ipreport_sessions";
 process.env.SETTINGS_COLLECTION = "ipreport_settings";
+process.env.CONTESTS_COLLECTION = "ipreport_contests";
 process.env.ALERTS_COLLECTION = "ipreport_alerts";
 process.env.LIVE_LOCK_COLLECTION = "ipreport_live_locks";
 process.env.ADMIN_PASSWORD = "ipreport-admin-pass";
@@ -327,12 +328,21 @@ test("buildIpReport: ip_changed_sessions counts docs with ip_change_count > 0", 
 // x-forwarded-for value; earlier entries are client-supplied and spoofable.
 // =====================================================================
 
-function seedSettings(firestore) {
-  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+// Seed an OPEN, no-roster person contest directly so /api/session/start (which
+// now REQUIRES a resolvable person contest) accepts a start pinned to it.
+const IPREPORT_CONTEST = "ipreport-contest";
+function seedContest(firestore, slug = IPREPORT_CONTEST) {
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(slug).set({
+    slug,
+    name: slug,
+    status: "open",
+    identity_mode: "person",
+    identity_label: "Candidate ID",
     start_at: new Date(Date.now() - 3600 * 1000).toISOString(),
     end_at: new Date(Date.now() + 3600 * 1000).toISOString(),
-    contest_url: "https://www.hackerrank.com/contests/ipreport-contest",
-    updated_at: new Date().toISOString()
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [],
+    room_gate_enabled: false
   });
 }
 
@@ -340,14 +350,15 @@ test("getClientIp: multi-hop x-forwarded-for → the LAST hop is stored, not the
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
-  seedSettings(firestore);
+  seedContest(firestore);
 
   const res = await call(makeReq({
     method: "POST",
     path: "/api/session/start",
     headers: { "x-forwarded-for": "1.2.3.4, 9.9.9.9" },
     body: {
-      hackerrank_username: "Spoofy",
+      contest: IPREPORT_CONTEST,
+      candidate_id: "Spoofy",
       name: "Spoofy Example",
       roll_number: "R-9",
       email: "spoofy@example.com",

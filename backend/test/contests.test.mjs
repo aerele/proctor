@@ -3,8 +3,7 @@
 //        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md §2/§6
 // Covers: proctor_contests CRUD (create/list/update/status via admin endpoints),
 // slugify + collision -2 suffix, access-code mint + collision retry, server-side
-// validation, legacy-contest synthesis (read-only, legacy:true), resolveContest
-// and the scopedQuery chokepoint. No production candidate path reads any of it.
+// validation, resolveContest and the scopedQuery chokepoint.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -128,15 +127,6 @@ function statusReq(body, headers = ADMIN_HEADERS) {
   return makeReq({ method: "POST", path: "/api/admin/contest-status", headers, body });
 }
 
-async function seedLegacySettings(firestore, settings = {}) {
-  await firestore.collection("ct_settings").doc("active").set({
-    start_at: "2026-06-10T03:30:00.000Z",
-    end_at: "2026-06-10T06:30:00.000Z",
-    updated_at: "2026-06-10T00:00:00.000Z",
-    ...settings
-  });
-}
-
 // ---- slugify (F8/F9 rules: lowercase, trim, spaces→-, strip non [a-z0-9-]) ---
 
 test("slugify: golden table", () => {
@@ -229,8 +219,8 @@ test("create: validation — name required, slug must be non-empty, window order
   assert.equal(badWindow.statusCode, 400);
   const badDate = await call(createReq({ name: "X", start_at: "not-a-date" }));
   assert.equal(badDate.statusCode, 400);
-  // legacy_username exists ONLY on the synthesized legacy contest (vision §7 row S-B).
-  const badMode = await call(createReq({ name: "X", identity_mode: "legacy_username" }));
+  // Every contest is "person" (vision §7 row S-B) — any other mode is rejected.
+  const badMode = await call(createReq({ name: "X", identity_mode: "unique_id" }));
   assert.equal(badMode.statusCode, 400);
   const badListed = await call(createReq({ name: "X", listed: "yes" }));
   assert.equal(badListed.statusCode, 400);
@@ -284,7 +274,6 @@ test("list: returns created contests newest-first; archived hidden unless includ
   const plain = await call(listReq());
   assert.equal(plain.statusCode, 200);
   assert.deepEqual(plain.body.contests.map((c) => c.slug), ["beta"]);
-  assert.equal(plain.body.contests[0].legacy, false);
 
   const all = await call(listReq({ include_archived: "1" }));
   const bySlug = Object.fromEntries(all.body.contests.map((c) => [c.slug, c]));
@@ -292,81 +281,11 @@ test("list: returns created contests newest-first; archived hidden unless includ
   assert.equal(bySlug.beta.status, "draft");
 });
 
-// ---- legacy-contest synthesis (F9 §6, read-only) ------------------------------
-
-test("legacy: no settings doc → no synthesized entry", async () => {
-  __setClientsForTest({ firestore: makeFakeFirestore() });
-  const res = await call(listReq());
-  assert.deepEqual(res.body.contests, []);
-});
-
-test("legacy: synthesized from settings.contest_slug, flagged legacy:true, identity_mode legacy_username", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026", problem_id: "sum-two" });
-  const res = await call(listReq());
-  assert.equal(res.body.contests.length, 1);
-  const legacy = res.body.contests[0];
-  assert.equal(legacy.slug, "kec-aerele-2026");
-  assert.equal(legacy.legacy, true);
-  assert.equal(legacy.legacy_empty_slug, false);
-  assert.equal(legacy.identity_mode, "legacy_username");
-  assert.equal(legacy.status, "open");
-  assert.equal(legacy.access_code, null);
-  assert.equal(legacy.start_at, "2026-06-10T03:30:00.000Z");
-  assert.equal(legacy.end_at, "2026-06-10T06:30:00.000Z");
-  // S-I: the settings' single-problem assignment rides the synthesized doc so
-  // the §1.3 shim reads it like any other contest.
-  assert.equal(legacy.problem_id, "sum-two");
-  assert.equal(legacy.template_slug, null);
-  // Synthesis never writes: the contests collection stays empty.
-  assert.equal((firestore._collections.get("ct_contests") || new Map()).size, 0);
-});
-
-test("legacy: slug falls back to contest_url, then to 'legacy' with legacy_empty_slug", async () => {
-  let firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_url: "https://hr.example/contests/mcet-june" });
-  let res = await call(listReq());
-  assert.equal(res.body.contests[0].slug, "mcet-june");
-  assert.equal(res.body.contests[0].legacy_empty_slug, false);
-
-  firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore); // neither contest_slug nor contest_url
-  res = await call(listReq());
-  assert.equal(res.body.contests[0].slug, "legacy");
-  assert.equal(res.body.contests[0].legacy_empty_slug, true);
-});
-
-test("legacy: a real contest doc with the same slug suppresses the synthesized entry", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026" });
-  // Simulate a future migrated/imported real doc owning the legacy slug.
-  await firestore.collection("ct_contests").doc("kec-aerele-2026").set({
-    slug: "kec-aerele-2026", name: "KEC Aerele 2026", status: "open", listed: true,
-    identity_mode: "person", created_at: "2026-06-09T00:00:00.000Z"
-  });
-  const res = await call(listReq());
-  assert.equal(res.body.contests.length, 1);
-  assert.equal(res.body.contests[0].legacy, false);
-});
-
-test("legacy: create never claims the synthesized legacy slug (suffixes instead)", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026" });
-  const res = await call(createReq({ name: "KEC Aerele 2026" }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.contest.slug, "kec-aerele-2026-2");
-});
-
-test("create: never adopts a HISTORIC legacy slug — orphaned sessions/submissions/alerts push to the next suffix (wave-4 fix)", async () => {
+test("create: never adopts a HISTORIC slug — orphaned sessions/submissions/alerts push to the next suffix (wave-4 fix)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore });
   // A previous exam run left sessions stamped with a slug NO contest doc owns
-  // (old contest_url-derived legacy slugs look exactly like slugify output).
+  // (historic slugs look exactly like slugify output).
   // Adopting it would resolve those sessions onto the NEW contest: resume would
   // serve the new problems[], exec would 400 problem_not_in_contest, and every
   // scopedQuery admin read would mix the two populations.
@@ -420,18 +339,9 @@ test("update: unknown slug → 404; identity_mode/status/access_code are not upd
   __setClientsForTest({ firestore: makeFakeFirestore() });
   await call(createReq({ name: "U" }));
   assert.equal((await call(updateReq({ slug: "nope", name: "X" }))).statusCode, 404);
-  assert.equal((await call(updateReq({ slug: "u", identity_mode: "legacy_username" }))).statusCode, 400);
+  assert.equal((await call(updateReq({ slug: "u", identity_mode: "unique_id" }))).statusCode, 400);
   assert.equal((await call(updateReq({ slug: "u", status: "open" }))).statusCode, 400);
   assert.equal((await call(updateReq({ slug: "u", access_code: "HACKED" }))).statusCode, 400);
-});
-
-test("update/status: the synthesized legacy contest is read-only (404, nothing written)", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026" });
-  assert.equal((await call(updateReq({ slug: "kec-aerele-2026", name: "X" }))).statusCode, 404);
-  assert.equal((await call(statusReq({ slug: "kec-aerele-2026", status: "archived" }))).statusCode, 404);
-  assert.equal((firestore._collections.get("ct_contests") || new Map()).size, 0);
 });
 
 // ---- status / archive ----------------------------------------------------------
@@ -457,7 +367,6 @@ test("resolveContest: open contest resolves by slug; draft is contest_not_open u
   await call(statusReq({ slug: "live-one", status: "open" }));
   const open = await resolveContest("live-one");
   assert.equal(open.status, "open");
-  assert.equal(open.legacy, false);
 });
 
 test("resolveContest: unknown/empty slug → unknown_contest (400)", async () => {
@@ -478,15 +387,6 @@ test("resolveContest: accepts a req-like object — query.contest first, then JS
   assert.equal(viaParsedBody.slug, "req-based");
 });
 
-test("resolveContest: the synthesized legacy contest resolves read-only with legacy:true", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore, { contest_slug: "kec-aerele-2026" });
-  const legacy = await resolveContest("kec-aerele-2026");
-  assert.equal(legacy.legacy, true);
-  assert.equal(legacy.identity_mode, "legacy_username");
-});
-
 // ---- scopedQuery chokepoint (F9 §2.3.2) ----------------------------------------
 
 test("scopedQuery: filters to the contest's slug; ALL_CONTESTS passes through unfiltered", async () => {
@@ -504,18 +404,6 @@ test("scopedQuery: filters to the contest's slug; ALL_CONTESTS passes through un
 
   const everything = await scopedQuery(firestore.collection("ct_sessions"), ALL_CONTESTS).get();
   assert.equal(everything.docs.length, 3);
-});
-
-test("scopedQuery: a legacy_empty_slug contest translates to the contest_slug=='' filter (F9 §6)", async () => {
-  const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore });
-  await seedLegacySettings(firestore); // no slug anywhere → slug "legacy", legacy_empty_slug:true
-  await firestore.collection("ct_sessions").doc("s1").set({ session_id: "s1", contest_slug: "" });
-  await firestore.collection("ct_sessions").doc("s2").set({ session_id: "s2", contest_slug: "a" });
-
-  const legacy = await resolveContest("legacy");
-  const scoped = await scopedQuery(firestore.collection("ct_sessions"), legacy).get();
-  assert.deepEqual(scoped.docs.map((d) => d.data().session_id), ["s1"]);
 });
 
 test("scopedQuery: refuses an unresolved contest (no accidental cross-contest reads)", () => {
