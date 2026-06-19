@@ -12,6 +12,7 @@ import { InvigilatorApp } from "./InvigilatorApp";
 import { ProblemBankSection } from "./admin/ProblemBank";
 import { ContestsPanel } from "./admin/ContestsPanel";
 import { TemplatesPanel } from "./admin/TemplatesPanel";
+import { SystemHealthPanel } from "./admin/SystemHealthPanel";
 import { ResultsPanel } from "./admin/ResultsPanel";
 import { PeoplePanel } from "./admin/PeoplePanel";
 import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
@@ -3214,6 +3215,8 @@ function AdminApp() {
           onDeepLinkConsumed={() => setRecordingDeepLink(null)}
         />
       ) : null}
+
+      {view === "health" ? <SystemHealthPanel password={password} /> : null}
     </Shell>
   );
 }
@@ -5187,6 +5190,7 @@ const GROUP_ICONS: Record<string, React.ReactNode> = {
   evidence: <Film size={15} />,
   authoring: <ClipboardList size={15} />,
   people: <Users size={15} />,
+  health: <Activity size={15} />,
   settings: <Lock size={15} />
 };
 const VIEW_ICONS: Record<AdminView, React.ReactNode> = {
@@ -5202,6 +5206,7 @@ const VIEW_ICONS: Record<AdminView, React.ReactNode> = {
   problems: <ClipboardList size={15} />,
   templates: <LayoutTemplate size={15} />,
   people: <Users size={15} />,
+  health: <Activity size={15} />,
   settings: <Lock size={15} />
 };
 
