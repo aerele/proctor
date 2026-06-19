@@ -74,11 +74,24 @@ export type TypeFacet = {
   count: number;
 };
 
-// The DISTINCT event-type facets present in the log (sorted by descending count,
-// then label) — what the event-type filter offers. Uses the same friendly
-// eventLabel the rows show; the raw `type` is the filter key.
+// Friendly labels for the SUBMISSION-stream type facets (run vs submit) so the
+// event-type filter reads "Run (12)" / "Submit (4)" rather than the raw key.
+const SUBMISSION_TYPE_LABELS: Record<string, string> = { run: "Run", submit: "Submit" };
+
+// The DISTINCT type facets the event-type filter offers. It spans BOTH the
+// proctor EVENT stream (window_blur, clipboard_activity, …) AND the SUBMISSION
+// stream's run/submit discriminator — so the SAME picker lets a reviewer narrow
+// to "just runs" or "just submits" (the P3 ask) without a separate control. The
+// raw `type` is the filter key (event types, or "run"/"submit" for submissions).
 export function eventTypeFacets(entries: TimelineLogEntry[]): TypeFacet[] {
-  return typeFacets(entries, "event", (entry) => entry.label);
+  const eventFacets = typeFacets(entries, "event", (entry) => entry.label);
+  const submissionFacets = typeFacets(
+    entries,
+    "submission",
+    (entry) => SUBMISSION_TYPE_LABELS[entry.type] || entry.type
+  );
+  // Submission facets first (run/submit are the headline P3 filter), then events.
+  return [...submissionFacets, ...eventFacets];
 }
 
 // The DISTINCT alert-type facets present in the log — what the alert-type filter
@@ -280,22 +293,45 @@ export function buildTimelineLog(params: {
   for (const submission of submissions) {
     const offsetSec = offsetSecFor(submission.submitted_at, testStartMs);
     if (offsetSec === null) continue;
-    // "Submit" prefix so the row reads as an explicit action (vs an alert/event),
-    // then the RESULT (Accepted / the failure status), the challenge, and — when
-    // the native submit doc carried them — the explicit pass/fail counts + score:
-    //   "Submit · Accepted · Two Sum · 8/10 tests · 80/100"
-    // The score summary also lands in `detail` (searchable; reads under the row).
-    const score = submissionScoreSummary(submission);
-    const result = submission.valid ? "Accepted" : submission.status || "Failed";
+    // RUN events (execRun → SAMPLE tests, the P3 genuine-effort signal) render
+    // DISTINCTLY from submits — a "Run" prefix and "samples" wording so the row
+    // reads as a sample run, never a scored submission. Both ride the SAME
+    // submission stream (green/red marker lane + "Submissions" kind toggle) and
+    // carry a `type` of "run"/"submit" so the event-type filter can narrow to
+    // just one (kind absent on legacy/poller events ⇒ "submit"). The result text
+    // lands in BOTH the label AND detail so free-text search + the type filter
+    // catch it.
+    const isRun = submission.kind === "run";
     const challenge = submission.challenge_name || submission.challenge_slug || "submission";
+    const lang = submission.lang || "";
+    let label: string;
+    let detail: string;
+    if (isRun) {
+      // "Run · 2/3 samples · wrong_answer · Two Sum" — counts as "samples", the
+      // raw verdict (status), then the challenge. The same summary in `detail`.
+      const passed = submission.passed_count;
+      const total = submission.total;
+      const samples = Number.isFinite(passed) && Number.isFinite(total) ? `${passed}/${total} samples` : "";
+      const result = submission.valid ? "accepted" : submission.status || "wrong_answer";
+      const head = [samples, result, challenge].filter(Boolean).join(" · ");
+      label = `Run · ${head}`;
+      detail = [lang, samples, result].filter(Boolean).join(" · ");
+    } else {
+      // SUBMIT (unchanged): "Submit · Accepted · Two Sum · 8/10 tests · 80/100".
+      const score = submissionScoreSummary(submission);
+      const result = submission.valid ? "Accepted" : submission.status || "Failed";
+      label = `Submit · ${result} · ${challenge}${score ? ` · ${score}` : ""}`;
+      detail = [lang, score].filter(Boolean).join(" · ");
+    }
     entries.push({
       kind: "submission",
-      id: `sub:${submission.submission_id}`,
-      type: submission.status || (submission.valid ? "Accepted" : "Failed"),
+      id: `${isRun ? "run" : "sub"}:${submission.submission_id}`,
+      // The run/submit discriminator IS the filter key for the event-type menu.
+      type: isRun ? "run" : "submit",
       offsetSec,
       timestamp: submission.submitted_at,
-      label: `Submit · ${result} · ${challenge}${score ? ` · ${score}` : ""}`,
-      detail: [submission.lang || "", score].filter(Boolean).join(" · "),
+      label,
+      detail,
       valid: submission.valid,
       duringGap: isDuringGap(offsetSec, gaps)
     });
@@ -306,14 +342,32 @@ export function buildTimelineLog(params: {
   );
 }
 
+// The submission-stream type keys the event-type filter can carry (vs the
+// proctor EVENT types). Used to scope the shared eventTypes set to the right
+// stream so picking an event type never silently hides every run/submit (and
+// vice-versa) — each stream is narrowed only when the SELECTION names a type of
+// that stream.
+const SUBMISSION_TYPES = new Set(["run", "submit"]);
+
 // Apply the log panel's filter state. Order: kind toggles drop whole streams;
-// the severity + alert-type narrow ALERTS only; the event-type narrows EVENTS
-// only; the free-text query then matches across ALL surviving kinds (over label
-// + detail + type). Empty type sets / empty query are no-ops (everything passes).
+// the severity + alert-type narrow ALERTS only; the event-type set narrows the
+// EVENT stream AND the SUBMISSION stream (run/submit) — each only by the keys
+// that belong to it, so a "Run"-only selection hides events that are also
+// "Run"-less without touching the event rows; the free-text query then matches
+// across ALL surviving kinds (over label + detail + type). Empty type sets /
+// empty query are no-ops (everything passes).
 export function filterTimelineLog(entries: TimelineLogEntry[], filters: TimelineLogFilters): TimelineLogEntry[] {
   const query = (filters.query || "").trim().toLowerCase();
   const alertTypes = filters.alertTypes && filters.alertTypes.length ? new Set(filters.alertTypes) : null;
   const eventTypes = filters.eventTypes && filters.eventTypes.length ? new Set(filters.eventTypes) : null;
+  // Split the shared event-type selection into its submission half (run/submit)
+  // and its event half so each stream is narrowed ONLY by its own selected keys.
+  const selectedSubmissionTypes = eventTypes
+    ? new Set([...eventTypes].filter((t) => SUBMISSION_TYPES.has(t)))
+    : null;
+  const selectedEventTypes = eventTypes
+    ? new Set([...eventTypes].filter((t) => !SUBMISSION_TYPES.has(t)))
+    : null;
   return entries.filter((entry) => {
     if (entry.kind === "alert") {
       if (!filters.alerts) return false;
@@ -321,9 +375,13 @@ export function filterTimelineLog(entries: TimelineLogEntry[], filters: Timeline
       if (alertTypes && !alertTypes.has(entry.type)) return false;
     } else if (entry.kind === "event") {
       if (!filters.events) return false;
-      if (eventTypes && !eventTypes.has(entry.type)) return false;
+      // Narrow events only when an EVENT type is selected (a run/submit-only
+      // selection leaves the event stream untouched).
+      if (selectedEventTypes && selectedEventTypes.size && !selectedEventTypes.has(entry.type)) return false;
     } else {
       if (!filters.submissions) return false;
+      // Narrow submissions only when a SUBMISSION type (run/submit) is selected.
+      if (selectedSubmissionTypes && selectedSubmissionTypes.size && !selectedSubmissionTypes.has(entry.type)) return false;
     }
     if (query) {
       const haystack = `${entry.label} ${entry.detail} ${entry.type}`.toLowerCase();

@@ -382,6 +382,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
       .sort((a, b) => a.offsetSec - b.offsetSec);
   }, [submissionEvents, testStartMs]);
 
+  // Submission markers split into RUNS (kind:"run", the P3 sample-run signal)
+  // and SUBMITS — surfaced separately in the summary + legend so a reviewer sees
+  // the genuine-effort run trail apart from the scored submissions.
+  const runCount = useMemo(() => markers.filter((m) => m.event.kind === "run").length, [markers]);
   const validCount = useMemo(() => markers.filter((m) => m.event.valid).length, [markers]);
   const invalidCount = markers.length - validCount;
 
@@ -1537,17 +1541,32 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       const clamped = Math.max(span.start, Math.min(marker.offsetSec, span.end));
                       const left = ((clamped - span.start) / spanDuration) * 100;
                       const valid = marker.event.valid;
-                      const color = valid ? "bg-emerald-500" : "bg-danger";
+                      const isRun = marker.event.kind === "run";
+                      // RUN markers are visually DISTINCT from submits: a thin
+                      // HOLLOW (ring, no fill) sky-blue tick vs the submit's solid
+                      // green/red tick, so the genuine-effort runs read apart from
+                      // the scored submissions at a glance. Both still sit above
+                      // (pass) / below (fail) the track so the lane stays clean.
+                      const color = isRun
+                        ? (valid ? "bg-transparent ring-1 ring-inset ring-sky-500" : "bg-transparent ring-1 ring-inset ring-sky-400/70")
+                        : (valid ? "bg-emerald-500" : "bg-danger");
                       const score = submissionScoreSummary(marker.event);
-                      const label =
-                        `Submit · ${valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}` +
-                        ` · ${marker.event.challenge_name || marker.event.challenge_slug || "submission"}` +
-                        (score ? ` · ${score}` : "") +
-                        (marker.event.lang ? ` · ${marker.event.lang}` : "") +
-                        ` · ${formatClock(marker.offsetSec)}`;
+                      const passed = marker.event.passed_count;
+                      const total = marker.event.total;
+                      const samples = Number.isFinite(passed) && Number.isFinite(total) ? `${passed}/${total} samples` : "";
+                      const label = isRun
+                        ? `Run · ${samples ? `${samples} · ` : ""}${valid ? "accepted" : marker.event.status || "wrong_answer"}` +
+                          ` · ${marker.event.challenge_name || marker.event.challenge_slug || "run"}` +
+                          (marker.event.lang ? ` · ${marker.event.lang}` : "") +
+                          ` · ${formatClock(marker.offsetSec)}`
+                        : `Submit · ${valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}` +
+                          ` · ${marker.event.challenge_name || marker.event.challenge_slug || "submission"}` +
+                          (score ? ` · ${score}` : "") +
+                          (marker.event.lang ? ` · ${marker.event.lang}` : "") +
+                          ` · ${formatClock(marker.offsetSec)}`;
                       return (
                         <button
-                          key={marker.event.submission_id}
+                          key={`${isRun ? "run" : "sub"}:${marker.event.submission_id}`}
                           type="button"
                           title={label}
                           aria-label={label}
@@ -1562,7 +1581,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                           {/* Invisible widened hit-area for easy hover at density. */}
                           <span className="absolute -inset-x-1.5 inset-y-0" />
                           <span
-                            className={`block h-3 w-0.5 ${color} transition-transform group-hover:scale-y-150 group-hover:opacity-100`}
+                            className={`block h-3 w-0.5 rounded-sm ${color} transition-transform group-hover:scale-y-150 group-hover:opacity-100`}
                           />
                         </button>
                       );
@@ -1679,6 +1698,13 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                             <span className="inline-block h-3.5 w-0.5 bg-danger" /> below
                             <span className="font-medium text-ink">✗ {invalidCount} invalid</span>
                           </span>
+                          {runCount ? (
+                            <span className="inline-flex items-center gap-1.5">
+                              <span className="inline-block h-3.5 w-0.5 rounded-sm ring-1 ring-inset ring-sky-500" />
+                              <span className="font-medium text-ink">{runCount} run{runCount > 1 ? "s" : ""}</span>
+                              (hollow)
+                            </span>
+                          ) : null}
                         </>
                       ) : null}
                       {alertMarkers.length ? (
@@ -2106,15 +2132,19 @@ function ActivityLogPanel({
                 }`}
               >
                 {/* Kind dot: alert = severity color, event = subdued, submission
-                    = green/red by validity (matches the timeline markers). */}
+                    = green/red by validity (matches the timeline markers). RUN
+                    entries (type "run") render as a HOLLOW sky ring so the
+                    genuine-effort sample runs read apart from scored submits. */}
                 <span
                   className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
                     entry.kind === "alert"
                       ? SEVERITY_DOT[entry.severity ?? "info"]
                       : entry.kind === "submission"
-                        ? entry.valid
-                          ? "bg-emerald-500"
-                          : "bg-danger"
+                        ? entry.type === "run"
+                          ? "bg-transparent ring-1 ring-inset ring-sky-500"
+                          : entry.valid
+                            ? "bg-emerald-500"
+                            : "bg-danger"
                         : "bg-muted/60"
                   }`}
                 />

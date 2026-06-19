@@ -59,7 +59,7 @@ export function __setEvalClockForTest(fn) {
 const {
   SESSION_COLLECTION, SETTINGS_COLLECTION, ALERTS_COLLECTION, SUBMISSION_EVENTS_COLLECTION,
   LIVE_LOCK_COLLECTION, REVIEW_STATE_COLLECTION, REVIEW_COLLECTION, REVIEW_CLAIMS_COLLECTION,
-  SUBMISSIONS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
+  SUBMISSIONS_COLLECTION, RUN_EVENTS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
   ROOM_GATES_COLLECTION, CONTESTS_COLLECTION, COLLEGES_COLLECTION, PERSONS_COLLECTION,
   ENROLLMENTS_COLLECTION, ADMIN_AUDIT_COLLECTION, TEMPLATES_COLLECTION, EVALUATIONS_COLLECTION,
   EVIDENCE_BUCKET, SIGNER_KEY_FILE, JUDGE0_BASE_URL, JUDGE0_MODE, JUDGE0_API_KEY, JUDGE0_AUTH_TOKEN,
@@ -432,7 +432,10 @@ const submissionEventsRoutes = makeSubmissionEventsRoutes({
   submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION,
   // FALLBACK store for proctor-native contests: the in-app submissions the exam
   // app writes (proctor_submission_events is the HackerRank-poller mirror only).
-  submissionsCollection: SUBMISSIONS_COLLECTION
+  submissionsCollection: SUBMISSIONS_COLLECTION,
+  // RUN events (execRun → SAMPLE tests): merged into the recording-review
+  // timeline as distinct kind:"run" events alongside the submits.
+  runEventsCollection: RUN_EVENTS_COLLECTION
 });
 const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
 
@@ -1599,6 +1602,39 @@ async function execRun(req) {
     throw error; // genuine programming error -> bare 500
   } finally {
     limiter.inFlight = false;
+  }
+  // P3 SIGNAL — persist a RUN event (server-authoritative; a client can't fake
+  // the verdict). Mirrors execSubmit's derivation + denormalized-identity store
+  // EXACTLY, and its resilient posture: a store failure must NEVER fail the run
+  // (the candidate already has their sample results). The run RESPONSE is
+  // unchanged — this is a side-channel write placed BEFORE the return.
+  const passedCount = results.filter((r) => r.passed).length;
+  const verdict = passedCount === results.length
+    ? "accepted"
+    : (results.some((r) => r.status === "judging_timeout") ? "error" : "wrong_answer");
+  // SAMPLE-test per-result detail (no inputs/expected — parallel to submit).
+  const tests = results.map((r, i) => ({ index: i, passed: r.passed, status: r.status, timeSec: r.timeSec }));
+  try {
+    await getFirestore().collection(RUN_EVENTS_COLLECTION).doc(randomUUID()).set({
+      // M7: store the VALIDATED language variable (checked against LANGUAGE_IDS),
+      // never the raw client body.language.
+      session_id: sessionId, problem_id: problem.id, language,
+      // Denormalized identity on every NEW doc (same as SUBMISSIONS_COLLECTION).
+      contest_slug: session.contest_slug || "",
+      username_norm: session.username_norm || "",
+      candidate_id: candidateOf(session).id,
+      person_id: session.person_id ?? null,
+      // The code AT RUN TIME — the P3 progression/debugging-trajectory signal.
+      source_code: source,
+      kind: "run", // discriminator vs submit
+      passed_count: passedCount, total: results.length, verdict,
+      tests, // [{index, passed, status, timeSec}] over the SAMPLE tests
+      created_at: new Date().toISOString()
+    });
+  } catch (error) {
+    // Await-with-catch (not fire-and-forget) so a cold-start teardown doesn't
+    // lose the write, but a store failure is swallowed — the run NEVER fails.
+    console.error(`Failed to store run event for session ${sessionId}: ${error?.message || error}`);
   }
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
