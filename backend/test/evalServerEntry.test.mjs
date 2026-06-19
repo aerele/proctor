@@ -221,3 +221,63 @@ test("evalApi applies CORS headers to its 404 fallthrough (cross-origin caller r
   assert.equal(res.statusCode, 404);
   assert.equal(res.headers["access-control-allow-origin"], "https://proctor-web.example");
 });
+
+// ---- /eval-ui: the EVAL-EXCLUSIVE embeddable placeholder page ----------------
+// Served DIRECTLY by the eval entry (before the allowlist), so the frontend's
+// Evaluation tab can iframe ${evalApiBaseUrl}/eval-ui and the eval team owns the
+// page. No auth (placeholder shows nothing privileged), HTML, iframe-friendly.
+
+test("evalApi serves GET /eval-ui as 200 text/html with the contest slug + 'rendered by the proctor-eval service'", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "GET", path: "/eval-ui", query: { contest: "mcet-june-2026" } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.match(String(res.headers["content-type"]), /text\/html/);
+  assert.match(String(res.headers["content-type"]), /charset=utf-8/);
+  const html = String(res.body);
+  assert.match(html, /rendered by the proctor-eval service/);
+  assert.match(html, /mcet-june-2026/);
+  // Heading + the muted P3 note are present (intentional placeholder, not broken).
+  assert.match(html, /<h1>Evaluation<\/h1>/);
+  assert.match(html, /will render here/);
+});
+
+test("GET /eval-ui without a contest param shows the em-dash placeholder ('—'), not a crash", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "GET", path: "/eval-ui" }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const html = String(res.body);
+  assert.match(html, /rendered by the proctor-eval service/);
+  // The Contest value renders as the em-dash placeholder when unset.
+  assert.match(html, /Contest:[\s\S]*—/);
+});
+
+test("GET /eval-ui HTML-ESCAPES a script-y contest param (no raw <script>, no XSS)", async () => {
+  freshClients();
+  const evil = "<script>alert(1)</script>";
+  const res = await call(makeReq({ method: "GET", path: "/eval-ui", query: { contest: evil } }));
+  assert.equal(res.statusCode, 200);
+  const html = String(res.body);
+  // The raw injected tag must NOT appear; its escaped form must.
+  assert.ok(!html.includes("<script>alert(1)</script>"), "raw <script> leaked into the page");
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test("GET /eval-ui does NOT set a frame-blocking header (X-Frame-Options / frame-ancestors) — must be iframe-embeddable", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "GET", path: "/eval-ui", query: { contest: "c" } }));
+  assert.equal(res.statusCode, 200);
+  // No X-Frame-Options at all (DENY/SAMEORIGIN would break the proctor-web embed).
+  assert.equal(res.headers["x-frame-options"], undefined);
+  // No CSP frame-ancestors lock-out either.
+  const csp = res.headers["content-security-policy"];
+  if (csp) assert.ok(!/frame-ancestors/i.test(String(csp)), "CSP frame-ancestors would block embedding");
+});
+
+// /eval-ui is EVAL-EXCLUSIVE: the wrong method on it falls through to the normal
+// allowlist 404 (it is NOT one of the 3 eval API routes).
+test("evalApi 404s a non-GET on /eval-ui (POST /eval-ui is not a route)", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "POST", path: "/eval-ui" }));
+  assert.equal(res.statusCode, 404, JSON.stringify(res.body));
+  assert.equal(res.body.error, "Not found");
+});

@@ -37,10 +37,113 @@ export function __setClientsForTest({ firestore: fakeFirestore, storage: fakeSto
   else if (fakeStorage) signingStorage = fakeStorage;
 }
 
+// ---- Write-isolation guard (proctor-eval) ---------------------------------
+// When EVAL_WRITE_ALLOWLIST is configured (proctor-eval only), every Firestore
+// WRITE to a collection NOT in the allowlist throws. This makes a runaway or
+// compromised eval deploy incapable of mutating the test-taking data — it can
+// only write its OWN collection(s). UNSET (proctor-api) → `_evalWriteAllowlist`
+// stays null and getFirestore() returns the RAW client with ZERO wrapping, so
+// proctor-api behavior + overhead are completely unchanged. READS are always
+// allowed (the guard only intercepts mutations).
+let _evalWriteAllowlist = null; // Set<string> | null
+let _guardedFirestore = null; // memoized proxy; invalidated on client/allowlist change
+let _guardedBase = null; // the firestore instance the memoized proxy wraps
+
+// The write methods we must block on a non-allowlisted DocumentReference /
+// CollectionReference. (DocumentReference: set/update/delete/create; the
+// CollectionReference also exposes add().)
+const DOC_WRITE_METHODS = new Set(["set", "update", "delete", "create"]);
+
+function denyWrite(collectionName) {
+  throw new Error(
+    `eval write-isolation: ${collectionName} not in EVAL_WRITE_ALLOWLIST`
+  );
+}
+
+// Wrap a DocumentReference so its write methods throw (collection not allowed),
+// while reads (get) and sub-navigation (collection) pass through. A subcollection
+// is re-guarded under its OWN name via guardCollection.
+function guardDoc(docRef, collectionName) {
+  return new Proxy(docRef, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && DOC_WRITE_METHODS.has(prop)) {
+        return () => denyWrite(collectionName);
+      }
+      // A subcollection off this doc is guarded under the SUBcollection's name.
+      if (prop === "collection") {
+        return (subName) => guardCollection(target.collection(subName), subName);
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
+// Wrap a CollectionReference so add() throws and .doc() returns a guarded doc,
+// while query builders (where/orderBy/limit) and reads (get) pass through. Only
+// called for collections NOT in the allowlist — allowlisted collections return
+// the raw ref untouched (zero overhead inside the allowed write surface).
+function guardCollection(colRef, collectionName) {
+  return new Proxy(colRef, {
+    get(target, prop, receiver) {
+      if (prop === "add") {
+        return () => denyWrite(collectionName);
+      }
+      if (prop === "doc") {
+        return (id) => guardDoc(target.doc(id), collectionName);
+      }
+      const value = Reflect.get(target, prop, receiver);
+      // where()/orderBy()/limit() return a Query (no write surface), so they
+      // need no further wrapping; bind and pass through. get() reads — allowed.
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
+// Build the guarded Firestore proxy: collection(name) returns the RAW ref for an
+// allowlisted name, or a write-guarded ref otherwise. batch()/runTransaction()/
+// bulkWriter() are blocked wholesale — the eval path uses none of them today, so
+// blocking them keeps the guard airtight (a future eval write via a batch can't
+// silently bypass the per-collection check). collectionGroup() returns a Query
+// (reads only). Everything else passes through.
+function buildGuardedFirestore(base, allowlist) {
+  return new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop === "collection") {
+        return (name) =>
+          allowlist.has(name) ? target.collection(name) : guardCollection(target.collection(name), name);
+      }
+      if (prop === "batch" || prop === "bulkWriter") {
+        return () => {
+          throw new Error(
+            `eval write-isolation: ${prop}() is not permitted under EVAL_WRITE_ALLOWLIST`
+          );
+        };
+      }
+      if (prop === "runTransaction") {
+        return () => {
+          throw new Error(
+            "eval write-isolation: runTransaction() is not permitted under EVAL_WRITE_ALLOWLIST"
+          );
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
 // Getters (not the instances) so __setClientsForTest swaps propagate to every
 // reader — the same getter-injection contract configure*Store already relies on.
 export function getFirestore() {
-  return firestore;
+  // Fast path: no allowlist (proctor-api) → the RAW client, no proxy, no overhead.
+  if (!_evalWriteAllowlist) return firestore;
+  // Memoize the proxy; rebuild if the underlying client was swapped (test seam).
+  if (!_guardedFirestore || _guardedBase !== firestore) {
+    _guardedFirestore = buildGuardedFirestore(firestore, _evalWriteAllowlist);
+    _guardedBase = firestore;
+  }
+  return _guardedFirestore;
 }
 export function getStorage() {
   return storage;
@@ -51,7 +154,7 @@ export function getStorage() {
 let _evidenceBucket;
 let _urlExpirySeconds = 900;
 let _judge0Config = {};
-export function configureClients({ evidenceBucket, urlExpirySeconds, judge0Config, signerKeyFile } = {}) {
+export function configureClients({ evidenceBucket, urlExpirySeconds, judge0Config, signerKeyFile, evalWriteAllowlist } = {}) {
   if (evidenceBucket !== undefined) _evidenceBucket = evidenceBucket;
   if (urlExpirySeconds !== undefined) _urlExpirySeconds = urlExpirySeconds;
   if (judge0Config !== undefined) _judge0Config = judge0Config;
@@ -59,6 +162,19 @@ export function configureClients({ evidenceBucket, urlExpirySeconds, judge0Confi
   // builds a dedicated client that signs v4 URLs locally with the key. The main
   // `storage` client stays on metadata ADC for all token-bearing work.
   if (signerKeyFile) signingStorage = new Storage({ keyFilename: signerKeyFile });
+  // Write-isolation allowlist (comma-separated collection names). Empty/unset →
+  // null (no guard, proctor-api unchanged). Parsed here (handler.mjs is the env
+  // reader and passes the raw string in, so clients.mjs stays env-free).
+  if (evalWriteAllowlist !== undefined) {
+    const names = String(evalWriteAllowlist || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    _evalWriteAllowlist = names.length ? new Set(names) : null;
+    // Invalidate any memoized guarded proxy so the new allowlist takes effect.
+    _guardedFirestore = null;
+    _guardedBase = null;
+  }
 }
 
 // Single adapter, built from injected config on first use. Tests inject a stub
