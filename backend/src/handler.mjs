@@ -14,6 +14,7 @@ import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
 import { makeSubmissionEventsRoutes } from "./routes/submissionEvents.mjs";
 import { makeAdminStatsRoutes } from "./routes/adminStats.mjs";
 import { makeAdminPeopleRoutes } from "./routes/adminPeople.mjs";
+import { makeHealthCheckRoutes } from "./routes/healthCheck.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
 import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
@@ -499,6 +500,52 @@ const adminPeopleRoutes = makeAdminPeopleRoutes({
 });
 const { adminPeople, adminPerson } = adminPeopleRoutes;
 
+// Factory seam: the admin pre-flight health-check route domain. ctx closes over
+// THIS instance's live-client getters (bucket/signingBucket/putJsonl/judge0 +
+// the Firestore getter), the auth guard, the http transport helpers, the
+// session-start reuse (so the canary genuinely exercises the candidate-auth
+// path), the contest/session/teardown domain fns (resolveContest / listContests
+// / scopedQuery / releaseLiveSlot / deleteEvidencePrefix / deleteDocsByIds —
+// ALL by reference so the SAME implementations are shared, never forked), the
+// sessionPrefix builder, and the env-captured collection names / bucket / origin
+// / Judge0 connection params + the LANGUAGE_IDS map BY VALUE. The returned
+// handler is destructured into the SAME name the dispatch table uses, so the
+// dispatch line stays byte-identical (canaryIsolation). It is auth-first
+// (routesAuthLint) and a NON-contest-scoped meta endpoint — it stands up its OWN
+// ephemeral __healthcheck-* canary and tears it down ALWAYS, so it is EXEMPT in
+// canaryIsolation (it is POST, and reads no real contest's data).
+const healthCheckRoutes = makeHealthCheckRoutes({
+  getFirestore,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  startSession,
+  sessionPrefix,
+  resolveContest,
+  listContests,
+  scopedQuery,
+  releaseLiveSlot,
+  deleteEvidencePrefix,
+  deleteDocsByIds,
+  bucket,
+  signingBucket,
+  putJsonl,
+  judge0,
+  contestsCollection: CONTESTS_COLLECTION,
+  sessionCollection: SESSION_COLLECTION,
+  submissionsCollection: SUBMISSIONS_COLLECTION,
+  liveLockCollection: LIVE_LOCK_COLLECTION,
+  evidenceBucket: EVIDENCE_BUCKET,
+  urlExpirySeconds: URL_EXPIRY_SECONDS,
+  publicAppOrigin: PUBLIC_APP_ORIGIN,
+  judge0BaseUrl: JUDGE0_BASE_URL,
+  judge0Mode: JUDGE0_MODE,
+  judge0ApiKey: JUDGE0_API_KEY,
+  judge0AuthToken: JUDGE0_AUTH_TOKEN,
+  languageIds: LANGUAGE_IDS
+});
+const { healthCheck } = healthCheckRoutes;
+
 // Lifecycle states for a session doc (Phase 2 — Epic 2 / 0.3):
 //   active          → the one live session for (username_norm, contest_slug)
 //   pending_approval → a second start arrived for an already-active username;
@@ -591,6 +638,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/retention-sweep") return send(res, 200, await adminRetentionSweep(req));
     if (req.method === "GET" && path === "/api/admin/people") return send(res, 200, await adminPeople(req));
     if (req.method === "GET" && path === "/api/admin/person") return send(res, 200, await adminPerson(req));
+    if (req.method === "POST" && path === "/api/admin/health-check") return send(res, 200, await healthCheck(req));
     if (req.method === "POST" && path === "/api/admin/session-action") return send(res, 200, await adminSessionAction(req));
     if (req.method === "POST" && path === "/api/admin/session-details") return send(res, 200, await adminSessionDetails(req));
     if (req.method === "POST" && path === "/api/alerts") return send(res, 200, await ingestAlerts(req));
@@ -1965,7 +2013,13 @@ async function endSession(req) {
 async function adminListContests(req) {
   requireAdmin(req);
   const includeArchived = ["1", "true"].includes(String(req.query?.include_archived ?? "").toLowerCase());
-  return { contests: await listContests({ includeArchived }) };
+  // Hide ephemeral __healthcheck-* canaries from the ADMIN-FACING list (the
+  // Contests panel + scope picker consume this route). The hide is at the
+  // RESPONSE layer ONLY — the shared listContests() still returns them so the
+  // health check's orphanSweep can find + purge leftover canaries. slugify()
+  // strips leading underscores, so no real contest slug can start with "__".
+  const contests = await listContests({ includeArchived });
+  return { contests: contests.filter((c) => !String(c.slug || "").startsWith("__healthcheck-")) };
 }
 
 async function adminCreateContest(req) {

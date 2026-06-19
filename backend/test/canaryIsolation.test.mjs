@@ -74,6 +74,17 @@ const SCOPED_GET_REQUESTS = {
   "/api/invigilator/room": () => makeReq({ method: "GET", path: "/api/invigilator/room", headers: INVIG_HEADERS, query: { contest: A, room: "Lab A" } })
 };
 
+// NOTE on POST /api/admin/health-check (the pre-flight health check): it is
+// deliberately NOT categorized here. The coverage meta-test scans ONLY the GET
+// route table (req.method === "GET"), and health-check is a POST meta/diagnostic
+// endpoint that stands up its OWN ephemeral, fully-namespaced __healthcheck-*
+// canary contest + session, probes against THAT, and tears it down ALWAYS — it
+// reads no real contest's data, so there is no cross-contest payload to isolate.
+// Adding it to EXEMPT_GETS would (correctly) FAIL the meta-test's `stale` check,
+// because it never appears in the GET route table. So it is intentionally left
+// out of both tables; its isolation is structural (per-run namespaced canary +
+// guaranteed teardown), pinned by healthCheck.test.mjs instead.
+//
 // GET endpoints that are NOT contest-scoped — each with the reason it is
 // exempt. A new GET route must land in exactly one of these two tables.
 const EXEMPT_GETS = {
