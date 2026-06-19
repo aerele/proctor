@@ -1,0 +1,24 @@
+# backend/Dockerfile.eval — the proctor-eval Cloud Run image.
+#
+# IDENTICAL to backend/Dockerfile except the functions-framework --target: this
+# build serves the eval-only entry (index.js -> evalApi -> src/eval-server.mjs),
+# which forwards ONLY the three eval routes to the shared `api` dispatcher and
+# 404s everything else. Same source, same deps, same port; the ONLY difference
+# from proctor-api is the entrypoint target — so the eval service can be
+# redeployed (P3 redesign) without touching proctor-api.
+#
+# Built + pushed as:
+#   asia-south1-docker.pkg.dev/aerele-proctor-dev/proctor/eval
+# Receives the SAME env (the 15 vars) + the signer-key secret at deploy time as
+# proctor-api — see _nightrun/eval-service-deploy.md.
+FROM node:22-alpine
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm install --omit=dev
+COPY . .
+
+ENV PORT=8080
+EXPOSE 8080
+
+CMD ["npx", "functions-framework", "--target=evalApi", "--port=8080"]
