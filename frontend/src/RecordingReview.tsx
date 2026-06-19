@@ -29,8 +29,11 @@ import { candidateIdOf } from "./identity";
 import {
   CHUNK_SECONDS,
   buildPlaylist,
+  isManifestEvidence,
   isSourceChunk,
+  startedAtMapFromManifest,
   type RecordingSource,
+  type StartedAtByKey,
   type TimelineChunk
 } from "./recordingPlaylist";
 import {
@@ -233,6 +236,13 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // low-res camera stream. The toggle renders only when camera chunks exist;
   // both share the same test-relative timeline + overlays.
   const [source, setSource] = useState<RecordingSource>("screen");
+  // Recording-time anchor: storage_key → started_at (ISO) from the active
+  // session's manifest.json. buildPlaylist places each chunk at its TRUE
+  // recording-window start when present, so a Tier-1-buffered chunk that
+  // uploaded minutes late (late last_modified) no longer manufactures a phantom
+  // gap. Empty for legacy sessions / when manifest.json is absent or malformed
+  // (the placement then falls back to last_modified exactly as before).
+  const [startedAtByKey, setStartedAtByKey] = useState<StartedAtByKey>(() => new Map());
   const [playing, setPlaying] = useState(false);
   const [currentTestTime, setCurrentTestTime] = useState(0); // seconds, test-relative
   const [refreshNote, setRefreshNote] = useState("");
@@ -333,8 +343,39 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
 
   const playlist = useMemo(() => {
     if (!activeSession) return [];
-    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs, activeSource);
-  }, [activeSession, testStartMs, activeSource]);
+    return buildPlaylist(activeSession.evidence ?? [], activeSession.created_at, testStartMs, activeSource, startedAtByKey);
+  }, [activeSession, testStartMs, activeSource, startedAtByKey]);
+
+  // Recording-time anchor fetch: the active session's manifest.json (listed in
+  // the signed evidence at {prefix}/manifest.json) maps each chunk's storage_key
+  // → its true recording-window started_at. We fetch + parse it whenever the
+  // active session changes and feed the map into buildPlaylist. Degrades to an
+  // empty map on ANY failure (no manifest object, fetch/parse error, malformed
+  // body) so playback always falls back to the last_modified placement.
+  const manifestKey = useMemo(
+    () => (activeSession?.evidence ?? []).find(isManifestEvidence)?.download_url ?? "",
+    [activeSession]
+  );
+  useEffect(() => {
+    if (!manifestKey) {
+      setStartedAtByKey(new Map());
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(manifestKey);
+        if (!response.ok) throw new Error(`manifest ${response.status}`);
+        const parsed: unknown = await response.json();
+        if (!cancelled) setStartedAtByKey(startedAtMapFromManifest(parsed));
+      } catch {
+        if (!cancelled) setStartedAtByKey(new Map());
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [manifestKey]);
 
   // Timeline span: from the first chunk's start to the last chunk's end. Clamped
   // so a single-chunk or all-gap session still yields a usable bar.
@@ -733,14 +774,14 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
       setSessions(fresh);
       setRefreshNote("Recording links refreshed.");
       const refreshed = fresh.find((s) => String(s.session_id) === selectedSessionId) ?? fresh[0];
-      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs, activeSource);
+      const list = buildPlaylist(refreshed?.evidence ?? [], refreshed?.created_at, testStartMs, activeSource, startedAtByKey);
       return list[currentPos]?.url ?? null;
     } catch {
       return null;
     } finally {
       refreshingRef.current = false;
     }
-  }, [activeSession, password, selectedSessionId, currentPos, testStartMs, activeSource]);
+  }, [activeSession, password, selectedSessionId, currentPos, testStartMs, activeSource, startedAtByKey]);
 
   // ---- Load the current chunk into the <video> and (optionally) play. -----
   // We set src imperatively (not via JSX) so we can also drive seek + play/pause

@@ -9,7 +9,9 @@ import {
   buildPlaylist,
   chunkIndexFromKey,
   hasCameraChunks,
-  isSourceChunk
+  isManifestEvidence,
+  isSourceChunk,
+  startedAtMapFromManifest
 } from "./recordingPlaylist";
 import type { SessionEvidence } from "./types";
 
@@ -139,6 +141,226 @@ describe("buildPlaylist", () => {
     expect(playlist.map((c) => c.index)).toEqual([3, 4, 1, 2]);
     const offsets = playlist.map((c) => c.offsetSec);
     expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
+  });
+});
+
+// --- Recording-time anchor (manifest started_at) ---------------------------
+// The Tier-1 chunk buffer uploads an offline-recorded chunk minutes after it
+// was recorded, so its GCS last_modified is late and the OLD (last_modified −
+// CHUNK_SECONDS) math placed it late → a phantom gap + a timeline clock jump.
+// The recorder manifest records each chunk's TRUE recording-window started_at
+// keyed by storage_key (== the GCS object key), which buildPlaylist now uses as
+// the primary anchor (started_at is the window START → NO CHUNK_SECONDS subtract).
+describe("startedAtMapFromManifest", () => {
+  it("maps storage_key → started_at from a well-formed manifest body", () => {
+    const map = startedAtMapFromManifest({
+      session_id: "s1",
+      ended_at: "2026-06-05T09:10:00.000Z",
+      manifest: [
+        { kind: "screen", index: 1, storage_key: `${PREFIX}screen/chunk-00001.webm`, started_at: "2026-06-05T09:00:00.000Z" },
+        { kind: "screen", index: 2, storage_key: `${PREFIX}screen/chunk-00002.webm`, started_at: "2026-06-05T09:00:30.000Z" }
+      ]
+    });
+    expect(map.size).toBe(2);
+    expect(map.get(`${PREFIX}screen/chunk-00001.webm`)).toBe("2026-06-05T09:00:00.000Z");
+  });
+
+  it("(f) tolerates malformed / partial input without throwing", () => {
+    expect(startedAtMapFromManifest(null).size).toBe(0);
+    expect(startedAtMapFromManifest(undefined).size).toBe(0);
+    expect(startedAtMapFromManifest("not json").size).toBe(0);
+    expect(startedAtMapFromManifest({}).size).toBe(0);
+    expect(startedAtMapFromManifest({ manifest: "nope" }).size).toBe(0);
+    // PARTIAL: only entries with a usable storage_key + parseable started_at survive.
+    const partial = startedAtMapFromManifest({
+      manifest: [
+        { storage_key: `${PREFIX}screen/chunk-00001.webm`, started_at: "2026-06-05T09:00:00.000Z" },
+        { storage_key: `${PREFIX}screen/chunk-00002.webm` }, // no started_at
+        { started_at: "2026-06-05T09:01:00.000Z" }, // no storage_key
+        { storage_key: `${PREFIX}screen/chunk-00003.webm`, started_at: "not-a-date" },
+        null,
+        42
+      ]
+    });
+    expect(partial.size).toBe(1);
+    expect(partial.has(`${PREFIX}screen/chunk-00001.webm`)).toBe(true);
+  });
+});
+
+describe("isManifestEvidence", () => {
+  it("matches the session manifest.json object only", () => {
+    expect(isManifestEvidence(file(`${PREFIX}manifest.json`))).toBe(true);
+    expect(isManifestEvidence(file(`${PREFIX}screen/chunk-00001.webm`))).toBe(false);
+    expect(isManifestEvidence(file(`${PREFIX}events/events-1.jsonl`))).toBe(false);
+  });
+});
+
+describe("buildPlaylist — recording-time anchor (manifest started_at)", () => {
+  const testStartMs = Date.parse("2026-06-05T09:00:00.000Z");
+
+  // (a) BUFFERED chunk: started_at is continuous but last_modified is +60s late
+  // (the buffer drained it long after recording). Placement uses started_at, so
+  // there is NO phantom gap — the chunk lands contiguously.
+  it("(a) places a buffered chunk at started_at, not its late last_modified — no phantom gap", () => {
+    const evidence = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      // Recorded 09:00:30→09:01:00, but the buffer uploaded it at 09:02:00 (+60s late).
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:02:00.000Z")
+    ];
+    const startedAt = new Map([
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
+      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:00:30.000Z"]
+    ]);
+    const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    expect(playlist.map((c) => c.offsetSec)).toEqual([0, 30]);
+    // Contiguous: chunk-2 starts exactly when chunk-1 ends — no gap.
+    expect(playlist[1].offsetSec - playlist[0].endSec).toBe(0);
+  });
+
+  // (b) REAL gap: the recording actually stopped — started_at jumps by far more
+  // than CHUNK_SECONDS. The gap STILL renders from the corrected offsets.
+  it("(b) preserves a real recording gap when started_at jumps past one window", () => {
+    const evidence = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:05:30.000Z")
+    ];
+    const startedAt = new Map([
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
+      // Recording stopped ~5 min; resumed at 09:05:00.
+      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:05:00.000Z"]
+    ]);
+    const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    expect(playlist.map((c) => c.offsetSec)).toEqual([0, 300]);
+    // A real 270s blank between chunk-1's end (30) and chunk-2's start (300).
+    expect(playlist[1].offsetSec - playlist[0].endSec).toBe(270);
+  });
+
+  // (c) MISSING started_at (legacy session / no manifest): falls back to the
+  // EXACT last_modified (− CHUNK_SECONDS) placement of today.
+  it("(c) falls back to last_modified (−CHUNK_SECONDS) when started_at is absent", () => {
+    const evidence = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.000Z")
+    ];
+    const withMap = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", new Map());
+    const noMap = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen");
+    expect(withMap.map((c) => c.offsetSec)).toEqual([0, 30]);
+    expect(withMap.map((c) => c.offsetSec)).toEqual(noMap.map((c) => c.offsetSec));
+  });
+
+  // (d) NON-buffered session: started_at ≈ last_modified − 30s (the window close
+  // approximates upload time). Placement is within ~1s of today's behavior.
+  it("(d) non-buffered placement is unchanged (within ~1s) vs last_modified", () => {
+    const evidence = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.500Z")
+    ];
+    const startedAt = new Map([
+      // started_at ≈ last_modified − 30s (direct upload, no buffering delay).
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
+      [`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:00:30.300Z"]
+    ]);
+    const anchored = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    const legacy = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen");
+    anchored.forEach((c, i) => {
+      expect(Math.abs(c.offsetSec - legacy[i].offsetSec)).toBeLessThanOrEqual(1);
+    });
+  });
+
+  // (e) Activity-log markers use real event timestamps on the SAME test-relative
+  // base ((eventMs − testStartMs)/1000). With chunks now placed at started_at
+  // (also test-relative), an event recorded mid-chunk lands inside that chunk's
+  // span — the two are aligned. (RecordingReview computes both; this pins the math.)
+  it("(e) an event at a chunk's real time lands inside that chunk's placed span", () => {
+    const evidence = [file(`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:11:00.000Z")];
+    const startedAt = new Map([
+      // Buffered: recorded at 09:01:00 but uploaded 10 min late.
+      [`${PREFIX}screen/chunk-00003.webm`, "2026-06-05T09:01:00.000Z"]
+    ]);
+    const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    // An event fired at 09:01:15 (mid-window) → marker offset 75s.
+    const markerOffset = (Date.parse("2026-06-05T09:01:15.000Z") - testStartMs) / 1000;
+    expect(markerOffset).toBe(75);
+    expect(markerOffset).toBeGreaterThanOrEqual(playlist[0].offsetSec);
+    expect(markerOffset).toBeLessThan(playlist[0].endSec);
+    // Had we used the late last_modified, the chunk would be placed at offset 630
+    // (10.5 min in) and the real event would fall OUTSIDE it — the old desync.
+    expect(playlist[0].offsetSec).toBe(60);
+  });
+
+  // (f) Partial manifest: only some chunks have started_at → per-chunk fallback,
+  // no crash. The covered chunk uses started_at; the rest use last_modified.
+  it("(f) mixes started_at and last_modified per chunk for a partial manifest", () => {
+    const evidence = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:02:00.000Z"), // late upload
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.000Z") // direct upload
+    ];
+    // Only chunk-1 is in the manifest map.
+    const startedAt = new Map([[`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"]]);
+    const playlist = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    const byKey = Object.fromEntries(playlist.map((c) => [c.key, c.offsetSec]));
+    // chunk-1: started_at anchor → 0 (NOT the +120s its late last_modified implies).
+    expect(byKey[`${PREFIX}screen/chunk-00001.webm`]).toBe(0);
+    // chunk-2: no started_at → last_modified − CHUNK_SECONDS → 30.
+    expect(byKey[`${PREFIX}screen/chunk-00002.webm`]).toBe(30);
+  });
+
+  it("camera + screen still share offsets when both carry started_at", () => {
+    const evidence = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:09:00.000Z"),
+      file(`${PREFIX}camera/chunk-00001.webm`, "2026-06-05T09:09:00.000Z")
+    ];
+    const startedAt = new Map([
+      [`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"],
+      [`${PREFIX}camera/chunk-00001.webm`, "2026-06-05T09:00:00.000Z"]
+    ]);
+    const screen = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", startedAt);
+    const camera = buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "camera", startedAt);
+    expect(screen[0].offsetSec).toBe(0);
+    expect(camera[0].offsetSec).toBe(screen[0].offsetSec);
+  });
+});
+
+// The exact composition RecordingReview performs: locate the manifest.json
+// evidence object, parse its (fetched) JSON body into the started_at map, and
+// feed that map to buildPlaylist. Tested here as pure data so the join is
+// covered without a DOM test environment (the suite is node-only).
+describe("RecordingReview manifest join (composition)", () => {
+  const testStartMs = Date.parse("2026-06-05T09:00:00.000Z");
+
+  function joinAndBuild(evidence: SessionEvidence[], manifestBody: unknown) {
+    const manifestEvidence = evidence.find(isManifestEvidence);
+    expect(manifestEvidence).toBeDefined(); // manifest.json is listed in evidence
+    const map = startedAtMapFromManifest(manifestBody);
+    return buildPlaylist(evidence, "2026-06-05T09:00:00.000Z", testStartMs, "screen", map);
+  }
+
+  it("anchors a buffered session on manifest started_at, killing the phantom gap", () => {
+    const evidence: SessionEvidence[] = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:03:00.000Z"), // +120s late upload
+      file(`${PREFIX}manifest.json`)
+    ];
+    const manifestBody = {
+      session_id: "s1",
+      ended_at: "2026-06-05T09:02:00.000Z",
+      manifest: [
+        { kind: "screen", index: 1, storage_key: `${PREFIX}screen/chunk-00001.webm`, started_at: "2026-06-05T09:00:00.000Z" },
+        { kind: "screen", index: 2, storage_key: `${PREFIX}screen/chunk-00002.webm`, started_at: "2026-06-05T09:00:30.000Z" }
+      ]
+    };
+    const playlist = joinAndBuild(evidence, manifestBody);
+    expect(playlist.map((c) => c.offsetSec)).toEqual([0, 30]); // contiguous, no gap
+  });
+
+  it("degrades to last_modified when the manifest body is malformed", () => {
+    const evidence: SessionEvidence[] = [
+      file(`${PREFIX}screen/chunk-00001.webm`, "2026-06-05T09:00:30.000Z"),
+      file(`${PREFIX}screen/chunk-00002.webm`, "2026-06-05T09:01:00.000Z"),
+      file(`${PREFIX}manifest.json`)
+    ];
+    const playlist = joinAndBuild(evidence, { garbage: true });
+    expect(playlist.map((c) => c.offsetSec)).toEqual([0, 30]); // last_modified fallback
   });
 });
 
