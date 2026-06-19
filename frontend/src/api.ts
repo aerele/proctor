@@ -89,6 +89,13 @@ import { roomKeyForLabel } from "./invigilator/gateLogic";
 import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
+// Eval-service base: the admin candidate-evaluation calls (contest-evaluate /
+// contest-evaluations / contest-evaluate-status, driven by the batch loop) go to
+// the SEPARATE proctor-eval Cloud Run service when VITE_EVAL_API_URL is set, so
+// the eval can be redeployed (P3 redesign) without touching proctor-api. UNSET =
+// fall back to apiBaseUrl, i.e. the exact current same-origin behavior — every
+// other route always uses apiBaseUrl, so this change is backward-compatible.
+export const evalApiBaseUrl = import.meta.env.VITE_EVAL_API_URL?.replace(/\/$/, "") ?? apiBaseUrl;
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 export const isDemoMode = demoMode;
 const demoSettingsKey = "aerele-proctor-demo-settings";
@@ -118,12 +125,15 @@ export async function sha256Hex(input: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function request<T>(path: string, init: RequestInit): Promise<T> {
-  if (!apiBaseUrl && !demoMode) {
+// `base` defaults to apiBaseUrl so every existing caller is unchanged; the eval
+// API functions pass evalApiBaseUrl so their calls hit proctor-eval when
+// VITE_EVAL_API_URL is set (and apiBaseUrl — same origin — when it is not).
+async function request<T>(path: string, init: RequestInit, base: string = apiBaseUrl): Promise<T> {
+  if (!base && !demoMode) {
     throw new Error("VITE_API_BASE_URL is not configured.");
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(`${base}${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
@@ -601,6 +611,11 @@ export async function heartbeat(params: {
    *  enforcement countdown (true clears a stale open exit; false starts the
    *  clock when the exit event itself was lost). */
   fullscreen: boolean;
+  /** Tier-1 chunk buffer: live pending-upload depth + bytes for this session,
+   *  persisted on the session doc (post-exam telemetry; no admin UI yet). 0 in
+   *  fallback mode. Optional — older clients omit them (backend defaults 0). */
+  buffer_pending_chunks?: number;
+  buffer_pending_bytes?: number;
 }): Promise<HeartbeatResponse> {
   if (demoMode) {
     // B8: mirror the backend H3 write-guard so the lock-stop UX is testable in
@@ -1057,17 +1072,24 @@ function demoCaptureStateFor(session: { session_id: string; status: string }): C
 export async function fetchSubmissionEvents(
   password: string,
   username: string,
-  contestSlug?: string
+  contestSlug?: string,
+  // FIX-B1 parity: the session's EXACT stored key. When known (picker rows +
+  // the Sessions deep link carry it), the backend resolves the markers by it
+  // directly instead of RE-normalizing the display candidate_id — which for
+  // PERSON-mode sessions (username_norm = "{college}~{uid}") would never match.
+  usernameNorm?: string
 ): Promise<SubmissionEvent[] | null> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    return demoSubmissionEventsFor(normalizeUsername(username), contestSlug);
+    // Demo prefers the exact stored key when given (mirrors production lookup).
+    return demoSubmissionEventsFor(normalizeUsername(usernameNorm || username), contestSlug);
   }
 
   const query = new URLSearchParams();
   query.set("username", username);
   if (contestSlug) query.set("contest_slug", contestSlug);
+  if (usernameNorm) query.set("username_norm", usernameNorm);
   try {
     const response = await request<SubmissionEventsResponse>(
       `/api/admin/submission-events?${query.toString()}`,
@@ -1651,7 +1673,7 @@ export async function adminContestEvaluate(
       ...(body.cursor != null ? { cursor: body.cursor } : {}),
       ...(body.force ? { force: true } : {})
     })
-  });
+  }, evalApiBaseUrl);
 }
 
 export async function adminContestEvaluations(
@@ -1667,7 +1689,7 @@ export async function adminContestEvaluations(
   return request<ContestEvaluationsResponse>(`/api/admin/contest-evaluations${query}`, {
     method: "GET",
     headers: { "x-admin-password": password }
-  });
+  }, evalApiBaseUrl);
 }
 
 // GET /api/admin/contest-evaluate-status?contest=<slug> — the current run
@@ -1686,7 +1708,7 @@ export async function adminContestEvaluateStatus(
   return request<ContestEvaluateStatusResponse>(`/api/admin/contest-evaluate-status${query}`, {
     method: "GET",
     headers: { "x-admin-password": password }
-  });
+  }, evalApiBaseUrl);
 }
 
 // ---- Data lifecycle: export / triple-gated purge / retention sweep (Wave7-H) -

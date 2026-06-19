@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
 import { bucket, signingBucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
@@ -59,7 +59,7 @@ export function __setEvalClockForTest(fn) {
 const {
   SESSION_COLLECTION, SETTINGS_COLLECTION, ALERTS_COLLECTION, SUBMISSION_EVENTS_COLLECTION,
   LIVE_LOCK_COLLECTION, REVIEW_STATE_COLLECTION, REVIEW_COLLECTION, REVIEW_CLAIMS_COLLECTION,
-  SUBMISSIONS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
+  SUBMISSIONS_COLLECTION, RUN_EVENTS_COLLECTION, PROBLEMS_COLLECTION, EDITOR_EVENTS_COLLECTION, ROSTER_COLLECTION,
   ROOM_GATES_COLLECTION, CONTESTS_COLLECTION, COLLEGES_COLLECTION, PERSONS_COLLECTION,
   ENROLLMENTS_COLLECTION, ADMIN_AUDIT_COLLECTION, TEMPLATES_COLLECTION, EVALUATIONS_COLLECTION,
   EVIDENCE_BUCKET, SIGNER_KEY_FILE, JUDGE0_BASE_URL, JUDGE0_MODE, JUDGE0_API_KEY, JUDGE0_AUTH_TOKEN,
@@ -67,7 +67,7 @@ const {
   RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
-  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
+  PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
   EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS
 } = loadConfig();
 
@@ -427,7 +427,15 @@ const submissionEventsRoutes = makeSubmissionEventsRoutes({
   badRequest,
   httpError,
   normalizeUsername,
-  submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION
+  // The contest_slug-filter chokepoint, for the native-submission fallback scope.
+  scopedQuery,
+  submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION,
+  // FALLBACK store for proctor-native contests: the in-app submissions the exam
+  // app writes (proctor_submission_events is the HackerRank-poller mirror only).
+  submissionsCollection: SUBMISSIONS_COLLECTION,
+  // RUN events (execRun → SAMPLE tests): merged into the recording-review
+  // timeline as distinct kind:"run" events alongside the submits.
+  runEventsCollection: RUN_EVENTS_COLLECTION
 });
 const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
 
@@ -538,6 +546,17 @@ const healthCheckRoutes = makeHealthCheckRoutes({
   evidenceBucket: EVIDENCE_BUCKET,
   urlExpirySeconds: URL_EXPIRY_SECONDS,
   publicAppOrigin: PUBLIC_APP_ORIGIN,
+  publicAppUrl: PUBLIC_APP_URL,
+  // Pre-compute sha256(password) for the bundle_hashes pre-flight probe so the
+  // probe can assert the served frontend bundle carries the expected gate hashes
+  // WITHOUT ever seeing the raw passwords (label-only from here down). Any unset
+  // password is skipped so the probe degrades to a clean "skip", not a false red.
+  expectedBundleHashes: [
+    { label: "admin", password: ADMIN_PASSWORD },
+    { label: "invigilator", password: INVIGILATOR_PASSWORD }
+  ]
+    .filter((e) => typeof e.password === "string" && e.password.length > 0)
+    .map((e) => ({ label: e.label, hash: createHash("sha256").update(e.password, "utf8").digest("hex") })),
   judge0BaseUrl: JUDGE0_BASE_URL,
   judge0Mode: JUDGE0_MODE,
   judge0ApiKey: JUDGE0_API_KEY,
@@ -690,6 +709,14 @@ export const api = async (req, res) => {
     return send(res, 500, { error: "Internal server error" });
   }
 };
+
+// The CORS origin this handler instance was configured with (PUBLIC_APP_ORIGIN,
+// captured at module load like every other env value). Re-exported ADDITIVELY so
+// the proctor-eval entry (src/eval-server.mjs) can apply the SAME CORS header to
+// its own short-circuit 404s without reading process.env itself (keeping the
+// env-lint allowlist at handler.mjs + config.mjs). This export does not alter the
+// `api` dispatcher in any way — proctor-api's behavior is unchanged.
+export const corsOrigin = PUBLIC_APP_ORIGIN;
 
 async function startSession(req) {
   const body = parseBody(req);
@@ -1584,6 +1611,39 @@ async function execRun(req) {
   } finally {
     limiter.inFlight = false;
   }
+  // P3 SIGNAL — persist a RUN event (server-authoritative; a client can't fake
+  // the verdict). Mirrors execSubmit's derivation + denormalized-identity store
+  // EXACTLY, and its resilient posture: a store failure must NEVER fail the run
+  // (the candidate already has their sample results). The run RESPONSE is
+  // unchanged — this is a side-channel write placed BEFORE the return.
+  const passedCount = results.filter((r) => r.passed).length;
+  const verdict = passedCount === results.length
+    ? "accepted"
+    : (results.some((r) => r.status === "judging_timeout") ? "error" : "wrong_answer");
+  // SAMPLE-test per-result detail (no inputs/expected — parallel to submit).
+  const tests = results.map((r, i) => ({ index: i, passed: r.passed, status: r.status, timeSec: r.timeSec }));
+  try {
+    await getFirestore().collection(RUN_EVENTS_COLLECTION).doc(randomUUID()).set({
+      // M7: store the VALIDATED language variable (checked against LANGUAGE_IDS),
+      // never the raw client body.language.
+      session_id: sessionId, problem_id: problem.id, language,
+      // Denormalized identity on every NEW doc (same as SUBMISSIONS_COLLECTION).
+      contest_slug: session.contest_slug || "",
+      username_norm: session.username_norm || "",
+      candidate_id: candidateOf(session).id,
+      person_id: session.person_id ?? null,
+      // The code AT RUN TIME — the P3 progression/debugging-trajectory signal.
+      source_code: source,
+      kind: "run", // discriminator vs submit
+      passed_count: passedCount, total: results.length, verdict,
+      tests, // [{index, passed, status, timeSec}] over the SAMPLE tests
+      created_at: new Date().toISOString()
+    });
+  } catch (error) {
+    // Await-with-catch (not fire-and-forget) so a cold-start teardown doesn't
+    // lose the write, but a store failure is swallowed — the run NEVER fails.
+    console.error(`Failed to store run event for session ${sessionId}: ${error?.message || error}`);
+  }
   // echo sample input/expected for display (samples are NOT secret)
   return { results: results.map((r, i) => ({ ...r, input: problem.sampleTests[i].input, expected: problem.sampleTests[i].expected })) };
 }
@@ -1782,6 +1842,11 @@ async function recordHeartbeat(req) {
     current_ip: currentIp,
     last_ip_change_at: newlyChanged ? now : session.last_ip_change_at || null,
     upload_queue_depth: Number(body.upload_queue_depth || 0),
+    // Tier-1 chunk buffer: pending-upload depth + bytes persisted for post-exam
+    // telemetry (no admin UI yet; Tier-2 renders the per-candidate indicator).
+    // Defensive Number() — absent on older clients reads as 0.
+    buffer_pending_chunks: Number(body.buffer_pending_chunks || 0),
+    buffer_pending_bytes: Number(body.buffer_pending_bytes || 0),
     network_online: Boolean(body.network_online),
     last_seen_at: now,
     heartbeat_count: FieldValue.increment(1),
@@ -3528,6 +3593,12 @@ async function adminContestSelectionDone(req) {
 const PURGE_DATASETS = [
   { key: "alerts", collection: () => ALERTS_COLLECTION },
   { key: "submission_events", collection: () => SUBMISSION_EVENTS_COLLECTION },
+  // run_events: execRun writes candidate source_code + denormalized identity
+  // (contest_slug/username_norm/candidate_id/person_id) on every run, so it is
+  // PII that MUST be erased on purge and included in an export. Each doc carries
+  // contest_slug, so the scopedQuery/readContestDataset/deleteDocsByIds spine
+  // selects exactly this contest's run docs — same as submission_events.
+  { key: "run_events", collection: () => RUN_EVENTS_COLLECTION },
   { key: "live_locks", collection: () => LIVE_LOCK_COLLECTION },
   { key: "room_gates", collection: () => ROOM_GATES_COLLECTION }
 ];

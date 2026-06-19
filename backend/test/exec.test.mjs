@@ -1019,3 +1019,118 @@ test("exec submit: Firestore store fails after a successful engine run -> 200 wi
   assert.equal(capped.statusCode, 429);
   __setJudge0AdapterForTest(null);
 });
+
+// ---- RUN events (P3 signal): execRun persists a proctor_run_events doc -------
+// The run-events collection name is unset in this file's env, so it defaults.
+const RUN_EVENTS_COLLECTION = "proctor_run_events";
+
+test("POST /api/exec/run persists a proctor_run_events doc with the denormalized fields + verdict + sample tests; response shape UNCHANGED", async () => {
+  advanceClock(3600_000); // step past any prior run cooldown
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("re-1").set({
+    session_id: "re-1", status: "active", username_norm: "bob",
+    contest_slug: "contest-x", person_id: "coll~bob", candidate_id: "BOB"
+  });
+  // One sample passes, the other fails → verdict wrong_answer, passed_count 1/2.
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map((it, i) => ({ status: i === 0 ? "accepted" : "wrong_answer", passed: i === 0,
+      stdout: "", stderr: "", compileOutput: "", timeSec: 0.02, memoryKb: 100 })) });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "re-1", problem_id: "sum-two", language: "python", source_code: "print(1)" } }));
+  assert.equal(res.statusCode, 200);
+  // RESPONSE SHAPE IS BYTE-IDENTICAL to today: ONLY { results: [...] }, each row
+  // the raw judge0 result PLUS the echoed sample input/expected — nothing else.
+  assert.deepEqual(Object.keys(res.body), ["results"]);
+  assert.equal(res.body.results.length, 2);
+  assert.equal(res.body.results[0].input, "2 3\n");      // sample input echoed
+  assert.equal(res.body.results[0].expected !== undefined, true);
+  assert.equal(res.body.results[0].passed, true);
+  assert.equal(res.body.results[1].passed, false);
+  // The run event landed in proctor_run_events (observable on the fake store).
+  const runs = firestore._collections.get(RUN_EVENTS_COLLECTION);
+  assert.equal(runs.size, 1);
+  // Doc id is a randomUUID (NOT a session_id-composed string).
+  const storedId = [...runs.keys()][0];
+  assert.match(storedId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  const stored = [...runs.values()][0];
+  assert.equal(stored.session_id, "re-1");
+  assert.equal(stored.problem_id, "sum-two");
+  assert.equal(stored.language, "python");
+  assert.equal(stored.kind, "run");
+  assert.equal(stored.verdict, "wrong_answer");
+  assert.equal(stored.passed_count, 1);
+  assert.equal(stored.total, 2);
+  assert.equal(stored.source_code, "print(1)"); // the code AT RUN TIME (P3 signal)
+  // Denormalized identity exactly like the submissions store.
+  assert.equal(stored.contest_slug, "contest-x");
+  assert.equal(stored.username_norm, "bob");
+  assert.equal(stored.candidate_id, "BOB");
+  assert.equal(stored.person_id, "coll~bob");
+  assert.ok(stored.created_at);
+  // Per-SAMPLE detail, no inputs/expected (parallel to the submit store).
+  assert.ok(Array.isArray(stored.tests));
+  assert.equal(stored.tests.length, 2);
+  assert.equal(stored.tests[0].passed, true);
+  assert.equal(stored.tests[0].status, "accepted");
+  assert.equal(stored.tests[0].index, 0);
+  assert.equal(stored.tests[0].input, undefined);
+  assert.equal(stored.tests[0].expected, undefined);
+  __setJudge0AdapterForTest(null);
+});
+
+test("POST /api/exec/run verdict: all sample pass -> accepted; a judging_timeout -> error", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("re-v").set({ session_id: "re-v", status: "active", username_norm: "v" });
+  const run = () => { advanceClock(3600_000); return call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "re-v", problem_id: "sum-two", language: "python", source_code: "x" } })); };
+
+  // All sample tests pass → accepted.
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "", stderr: "", compileOutput: "", timeSec: 0, memoryKb: 1 })) });
+  await run();
+  // A judging_timeout among the results → error (infra fault, never wrong_answer).
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map((_, i) => ({ status: i === 0 ? "judging_timeout" : "accepted", passed: i !== 0,
+      stdout: "", stderr: "", compileOutput: "", timeSec: null, memoryKb: null })) });
+  await run();
+  const verdicts = [...firestore._collections.get(RUN_EVENTS_COLLECTION).values()].map((d) => d.verdict);
+  assert.deepEqual(verdicts, ["accepted", "error"]);
+  __setJudge0AdapterForTest(null);
+});
+
+test("POST /api/exec/run: a run-event STORE FAILURE does NOT fail the run — 200 + unchanged { results } shape", async () => {
+  advanceClock(3600_000);
+  const firestore = makeFakeFirestore();
+  // Wrap so set() throws for the RUN-EVENTS collection ONLY — the sessions gate
+  // (other collections) keeps working so the run itself executes normally.
+  const realCollection = firestore.collection.bind(firestore);
+  firestore.collection = (name) => {
+    const col = realCollection(name);
+    if (name !== RUN_EVENTS_COLLECTION) return col;
+    const realDoc = col.doc.bind(col);
+    return {
+      ...col,
+      doc(id) {
+        const d = realDoc(id);
+        return { ...d, async set() { throw new Error("firestore unavailable"); } };
+      }
+    };
+  };
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  firestore.collection(process.env.SESSION_COLLECTION).doc("re-fail").set({ session_id: "re-fail", status: "active", username_norm: "f" });
+  __setJudge0AdapterForTest({ runBatch: async (items) =>
+    items.map(() => ({ status: "accepted", passed: true, stdout: "5", stderr: "", compileOutput: "", timeSec: 0.01, memoryKb: 1 })) });
+  const res = await call(makeReq({ method: "POST", path: "/api/exec/run",
+    body: { session_id: "re-fail", problem_id: "sum-two", language: "python", source_code: "x" } }));
+  // The run SUCCEEDS — the store failure is swallowed (console.error only).
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(Object.keys(res.body), ["results"]);
+  assert.equal(res.body.results.length, 2);
+  assert.equal(res.body.results[0].passed, true);
+  assert.equal(res.body.results[0].input, "2 3\n"); // sample echo intact
+  // Nothing was persisted (the store threw) — but the candidate got their run.
+  assert.equal(firestore._collections.get(RUN_EVENTS_COLLECTION)?.size || 0, 0);
+  __setJudge0AdapterForTest(null);
+});

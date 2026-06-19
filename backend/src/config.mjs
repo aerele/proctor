@@ -22,6 +22,9 @@ export function loadConfig() {
     REVIEW_COLLECTION: process.env.REVIEW_COLLECTION || "proctor_reviews",
     REVIEW_CLAIMS_COLLECTION: process.env.REVIEW_CLAIMS_COLLECTION || "proctor_review_claims",
     SUBMISSIONS_COLLECTION: process.env.SUBMISSIONS_COLLECTION || "proctor_submissions",
+    // RUN events (execRun → Judge0 against SAMPLE tests): the P3 genuine-effort
+    // signal. Mirrors SUBMISSIONS_COLLECTION's denormalized-identity shape.
+    RUN_EVENTS_COLLECTION: process.env.RUN_EVENTS_COLLECTION || "proctor_run_events",
     PROBLEMS_COLLECTION: process.env.PROBLEMS_COLLECTION || "proctor_problems",
     EDITOR_EVENTS_COLLECTION: process.env.EDITOR_EVENTS_COLLECTION || "editor-events", // GCS sub-prefix label
     ROSTER_COLLECTION: process.env.ROSTER_COLLECTION || "proctor_roster",
@@ -75,6 +78,7 @@ export function loadConfig() {
     // never wedges the button. Default 180s.
     EVAL_LEASE_MS: positiveIntOr(process.env.EVAL_LEASE_MS, 180000),
     PUBLIC_APP_ORIGIN: process.env.PUBLIC_APP_ORIGIN || "*",
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || "",
     // S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
     // silently disable the brute-force cap; fall back to the safe default of 20.
     GATE_ATTEMPT_LIMIT: positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20)

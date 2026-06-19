@@ -69,17 +69,19 @@ function makeFakeFirestore() {
       },
       async get() {
         const store = getCollection(name);
-        let docs = [...store.values()];
+        // Carry the doc id alongside the data (real QueryDocumentSnapshot exposes
+        // .id — the native-submission fallback maps submission_id ← doc id).
+        let docs = [...store.entries()].map(([id, data]) => ({ id, data }));
         for (const { field, op, value } of filters) {
           // Mirror the Firestore operators the handler actually uses: scalar
           // equality and the `in` membership test (a small value array).
           if (op === "in") {
-            docs = docs.filter((doc) => Array.isArray(value) && value.includes(doc[field]));
+            docs = docs.filter((doc) => Array.isArray(value) && value.includes(doc.data[field]));
           } else {
-            docs = docs.filter((doc) => doc[field] === value);
+            docs = docs.filter((doc) => doc.data[field] === value);
           }
         }
-        return { docs: docs.map((data) => ({ data: () => data })) };
+        return { docs: docs.map(({ id, data }) => ({ id, data: () => data })) };
       }
     };
   }
@@ -1551,6 +1553,210 @@ test("submission-events: admin read requires the admin password (401 without it)
     query: { username: "Alice" }
   }));
   assert.equal(res.statusCode, 401);
+});
+
+// ---- recording-view FALLBACK: feed the timeline from the proctor's OWN
+// in-app submissions (proctor_submissions) for proctor-NATIVE contests, which
+// never populate the HackerRank-poller proctor_submission_events store. ----
+
+// Seed one native proctor_submissions doc (the shape the exam app writes at
+// submit time — DIFFERENT field names from a SubmissionEvent).
+function seedNativeSubmission(firestore, docId, overrides = {}) {
+  firestore.collection(process.env.SUBMISSIONS_COLLECTION || "proctor_submissions").doc(docId).set({
+    session_id: "sess-1",
+    problem_id: "two-sum",
+    language: "python3",
+    contest_slug: "tridots-contest",
+    username_norm: "23ec203",
+    candidate_id: "23EC203",
+    person_id: null,
+    verdict: "wrong_answer",
+    passed_count: 2,
+    total: 5,
+    score: 40,
+    created_at: "2026-06-05T09:05:00.000Z",
+    ...overrides
+  });
+}
+
+test("submission-events FALLBACK: empty events store → maps native proctor_submissions into the SubmissionEvent shape", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // No proctor_submission_events docs at all (proctor-native contest). Seed two
+  // native submissions — one accepted, one wrong — for this (username_norm, contest).
+  seedNativeSubmission(firestore, "sub-A", { verdict: "accepted", created_at: "2026-06-05T09:10:00.000Z", problem_id: "two-sum", language: "python3", passed_count: 5, total: 5, score: 100, max_points: 100 });
+  seedNativeSubmission(firestore, "sub-B", { verdict: "wrong_answer", created_at: "2026-06-05T09:05:00.000Z", problem_id: "reverse", language: "cpp", passed_count: 2, total: 5, score: 40, max_points: 100 });
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "23EC203", contest_slug: "tridots-contest" }
+  }));
+  assert.equal(read.statusCode, 200);
+  assert.equal(read.body.events.length, 2, "both native submissions surfaced as markers");
+
+  // Sorted ascending by submitted_at (← created_at). sub-B (09:05) before sub-A (09:10).
+  const [first, second] = read.body.events;
+  assert.equal(first.submission_id, "sub-B", "submission_id ← doc id");
+  assert.equal(first.submitted_at, "2026-06-05T09:05:00.000Z", "submitted_at ← created_at");
+  assert.equal(first.valid, false, "valid ← verdict === accepted (wrong_answer → false)");
+  assert.equal(first.status, "wrong_answer", "status ← verdict");
+  assert.equal(first.challenge_slug, "reverse", "challenge_slug ← problem_id");
+  assert.equal(first.lang, "cpp", "lang ← language");
+  assert.equal(first.contest_slug, "tridots-contest");
+  assert.equal(first.hackerrank_username, "23ec203", "hackerrank_username ← username_norm");
+  // SCORES threaded through (numeric, from the native submit doc).
+  assert.equal(first.passed_count, 2, "passed_count ← native doc");
+  assert.equal(first.total, 5, "total ← native doc");
+  assert.equal(first.score, 40, "score ← native doc");
+  assert.equal(first.max_points, 100, "max_points ← native doc");
+
+  assert.equal(second.submission_id, "sub-A");
+  assert.equal(second.valid, true, "accepted → valid true");
+  assert.equal(second.status, "accepted");
+  assert.equal(second.passed_count, 5);
+  assert.equal(second.score, 100);
+});
+
+test("submission-events FALLBACK: non-numeric / missing score fields are omitted (never NaN)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // A native doc whose score fields are missing/garbled — they must NOT surface
+  // as NaN/null; the mapper drops any field that is not a finite number.
+  seedNativeSubmission(firestore, "garbled", {
+    verdict: "accepted",
+    created_at: "2026-06-05T09:05:00.000Z",
+    passed_count: undefined,
+    total: "oops",
+    score: null,
+    max_points: 100
+  });
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "23EC203", contest_slug: "tridots-contest" }
+  }));
+  assert.equal(read.statusCode, 200);
+  const [event] = read.body.events;
+  assert.ok(!("passed_count" in event), "missing passed_count omitted");
+  assert.ok(!("total" in event), "non-numeric total omitted");
+  assert.ok(!("score" in event), "null score omitted");
+  assert.equal(event.max_points, 100, "the one valid numeric field still threads through");
+});
+
+test("submission-events INGEST: poller-supplied score fields thread through when present + numeric", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // Today's poller does not send scores; verify the OPTIONAL passthrough works if
+  // a future poster includes them, and that a non-numeric value is dropped.
+  await call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: INGEST_HEADERS,
+    body: { events: [submissionEvent({ submission_id: 9100, passed_count: 7, total: 9, score: 70, max_points: 90, lang: "java" })] }
+  }));
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "Alice", contest_slug: "mcet-june-2026" }
+  }));
+  assert.equal(read.statusCode, 200);
+  const [event] = read.body.events;
+  assert.equal(event.passed_count, 7);
+  assert.equal(event.total, 9);
+  assert.equal(event.score, 70);
+  assert.equal(event.max_points, 90);
+});
+
+test("submission-events FALLBACK: native query is scoped to (username_norm, contest_slug) — no cross-contest / cross-user bleed", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  seedNativeSubmission(firestore, "mine", { username_norm: "23ec203", contest_slug: "tridots-contest", created_at: "2026-06-05T09:05:00.000Z" });
+  // Same user, DIFFERENT contest — must not appear when scoped to tridots-contest.
+  seedNativeSubmission(firestore, "other-contest", { username_norm: "23ec203", contest_slug: "other-contest" });
+  // DIFFERENT user, same contest — must not appear.
+  seedNativeSubmission(firestore, "other-user", { username_norm: "99xx999", contest_slug: "tridots-contest" });
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "23EC203", contest_slug: "tridots-contest" }
+  }));
+  assert.equal(read.statusCode, 200);
+  assert.equal(read.body.events.length, 1, "only this user's this-contest submission surfaces");
+  assert.equal(read.body.events[0].submission_id, "mine");
+});
+
+test("submission-events FALLBACK: NOT used when the poller events store HAS data (poller path preserved)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // The poller store HAS an event for (alice, mcet-june-2026).
+  await call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: INGEST_HEADERS,
+    body: { events: [submissionEvent({ submission_id: 7001 })] }
+  }));
+  // A native submission ALSO exists for the same key — it must be IGNORED while
+  // the poller store has data (fallback only fires when poller returns nothing).
+  seedNativeSubmission(firestore, "native-decoy", { username_norm: "alice", contest_slug: "mcet-june-2026" });
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "Alice", contest_slug: "mcet-june-2026" }
+  }));
+  assert.equal(read.statusCode, 200);
+  assert.equal(read.body.events.length, 1, "only the poller event, fallback NOT triggered");
+  assert.equal(read.body.events[0].submission_id, "7001", "poller-sourced id, not the native decoy");
+});
+
+test("submission-events FALLBACK: username_norm param bypasses display-id re-normalization (FIX-B1 parity)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // PERSON-mode key: username_norm = "{college}~{uid}", which
+  // normalizeUsername("23EC203") would NEVER reproduce (the ~ is sanitized).
+  const personKey = "kec~23ec203";
+  seedNativeSubmission(firestore, "person-sub", { username_norm: personKey, contest_slug: "tridots-contest", created_at: "2026-06-05T09:07:00.000Z" });
+
+  // Without the param, the display id re-normalizes to "23ec203" and misses.
+  const miss = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "23EC203", contest_slug: "tridots-contest" }
+  }));
+  assert.equal(miss.body.events.length, 0, "re-normalized display id does not match the person key");
+
+  // WITH the exact stored key, it resolves.
+  const hit = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "23EC203", username_norm: personKey, contest_slug: "tridots-contest" }
+  }));
+  assert.equal(hit.statusCode, 200);
+  assert.equal(hit.body.events.length, 1, "exact username_norm resolves the person-mode markers");
+  assert.equal(hit.body.events[0].submission_id, "person-sub");
 });
 
 // =====================================================================

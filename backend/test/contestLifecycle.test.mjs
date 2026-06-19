@@ -24,6 +24,7 @@ process.env.ROSTER_COLLECTION = "cl_roster";
 process.env.ALERTS_COLLECTION = "cl_alerts";
 process.env.SUBMISSIONS_COLLECTION = "cl_submissions";
 process.env.SUBMISSION_EVENTS_COLLECTION = "cl_subevents";
+process.env.RUN_EVENTS_COLLECTION = "cl_run_events";
 process.env.PROBLEMS_COLLECTION = "cl_problems";
 process.env.REVIEW_COLLECTION = "cl_reviews";
 process.env.REVIEW_CLAIMS_COLLECTION = "cl_review_claims";
@@ -165,6 +166,13 @@ function seedContest(firestore, storage, slug, { withEvidence = true } = {}) {
     session_id: `sess-${slug}`, contest_slug: slug, username_norm: PID,
     person_id: PID, problem_id: "p1", score: 80, max_points: 100, created_at: now
   });
+  // run_events: execRun's server-authoritative write — candidate source_code +
+  // denormalized identity (contest_slug). PII that must export + purge.
+  firestore.collection("cl_run_events").doc(`run-${slug}`).set({
+    session_id: `sess-${slug}`, contest_slug: slug, username_norm: PID,
+    candidate_id: "21 CS 001", person_id: PID, problem_id: "p1",
+    source_code: "print('hi')", kind: "run", verdict: "wrong_answer", created_at: now
+  });
   firestore.collection("cl_alerts").doc(`alert-${slug}`).set({
     contest_slug: slug, username_norm: PID, severity: "warning"
   });
@@ -206,6 +214,8 @@ test("export: writes a GCS object under exports/{slug}/, stamps last_export_at +
   assert.equal(res.body.counts.sessions, 1);
   assert.equal(res.body.counts.submissions, 1);
   assert.equal(res.body.counts.enrollments, 1);
+  // run_events (candidate source_code + PII) is in the export bundle.
+  assert.equal(res.body.counts.run_events, 1, "run_events included in export");
 
   // the export object exists in GCS
   const keys = [...storage._saved.keys()];
@@ -276,6 +286,8 @@ test("purge: deletes heavy data, RETAINS enrollment + snapshot, writes tombstone
   // kec-r1 heavy data gone
   assert.equal(firestore._collections.get("cl_sessions").has("sess-kec-r1"), false, "session deleted");
   assert.equal(firestore._collections.get("cl_submissions").has("sub-kec-r1"), false, "submission deleted");
+  assert.equal(firestore._collections.get("cl_run_events").has("run-kec-r1"), false, "run_event (source_code+PII) deleted");
+  assert.equal(firestore._collections.get("cl_run_events").has("run-kec-r2"), true, "sibling run_event intact (scoped to contest_slug)");
   assert.equal(firestore._collections.get("cl_alerts").has("alert-kec-r1"), false, "alert deleted");
   assert.equal(firestore._collections.get("cl_live_locks").size, 1, "only kec-r2's live-lock remains");
   assert.equal(firestore._collections.get("cl_room_gates").size, 1, "only kec-r2's room-gate remains");
