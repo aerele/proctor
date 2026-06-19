@@ -696,6 +696,14 @@ export const api = async (req, res) => {
   }
 };
 
+// The CORS origin this handler instance was configured with (PUBLIC_APP_ORIGIN,
+// captured at module load like every other env value). Re-exported ADDITIVELY so
+// the proctor-eval entry (src/eval-server.mjs) can apply the SAME CORS header to
+// its own short-circuit 404s without reading process.env itself (keeping the
+// env-lint allowlist at handler.mjs + config.mjs). This export does not alter the
+// `api` dispatcher in any way — proctor-api's behavior is unchanged.
+export const corsOrigin = PUBLIC_APP_ORIGIN;
+
 async function startSession(req) {
   const body = parseBody(req);
   // Every start now REQUIRES a resolvable person contest (the candidate app
