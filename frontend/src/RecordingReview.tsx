@@ -41,6 +41,7 @@ import {
   clusterMarkers,
   eventTypeFacets,
   filterTimelineLog,
+  submissionScoreSummary,
   type TimelineLogEntry,
   type TimelineLogFilters,
   type TypeFacet
@@ -1537,9 +1538,11 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       const left = ((clamped - span.start) / spanDuration) * 100;
                       const valid = marker.event.valid;
                       const color = valid ? "bg-emerald-500" : "bg-danger";
+                      const score = submissionScoreSummary(marker.event);
                       const label =
-                        `${valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}` +
+                        `Submit · ${valid ? "✓ Accepted" : `✗ ${marker.event.status || "Failed"}`}` +
                         ` · ${marker.event.challenge_name || marker.event.challenge_slug || "submission"}` +
+                        (score ? ` · ${score}` : "") +
                         (marker.event.lang ? ` · ${marker.event.lang}` : "") +
                         ` · ${formatClock(marker.offsetSec)}`;
                       return (

@@ -1586,8 +1586,8 @@ test("submission-events FALLBACK: empty events store → maps native proctor_sub
 
   // No proctor_submission_events docs at all (proctor-native contest). Seed two
   // native submissions — one accepted, one wrong — for this (username_norm, contest).
-  seedNativeSubmission(firestore, "sub-A", { verdict: "accepted", created_at: "2026-06-05T09:10:00.000Z", problem_id: "two-sum", language: "python3" });
-  seedNativeSubmission(firestore, "sub-B", { verdict: "wrong_answer", created_at: "2026-06-05T09:05:00.000Z", problem_id: "reverse", language: "cpp" });
+  seedNativeSubmission(firestore, "sub-A", { verdict: "accepted", created_at: "2026-06-05T09:10:00.000Z", problem_id: "two-sum", language: "python3", passed_count: 5, total: 5, score: 100, max_points: 100 });
+  seedNativeSubmission(firestore, "sub-B", { verdict: "wrong_answer", created_at: "2026-06-05T09:05:00.000Z", problem_id: "reverse", language: "cpp", passed_count: 2, total: 5, score: 40, max_points: 100 });
 
   const read = await call(makeReq({
     method: "GET",
@@ -1608,10 +1608,75 @@ test("submission-events FALLBACK: empty events store → maps native proctor_sub
   assert.equal(first.lang, "cpp", "lang ← language");
   assert.equal(first.contest_slug, "tridots-contest");
   assert.equal(first.hackerrank_username, "23ec203", "hackerrank_username ← username_norm");
+  // SCORES threaded through (numeric, from the native submit doc).
+  assert.equal(first.passed_count, 2, "passed_count ← native doc");
+  assert.equal(first.total, 5, "total ← native doc");
+  assert.equal(first.score, 40, "score ← native doc");
+  assert.equal(first.max_points, 100, "max_points ← native doc");
 
   assert.equal(second.submission_id, "sub-A");
   assert.equal(second.valid, true, "accepted → valid true");
   assert.equal(second.status, "accepted");
+  assert.equal(second.passed_count, 5);
+  assert.equal(second.score, 100);
+});
+
+test("submission-events FALLBACK: non-numeric / missing score fields are omitted (never NaN)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // A native doc whose score fields are missing/garbled — they must NOT surface
+  // as NaN/null; the mapper drops any field that is not a finite number.
+  seedNativeSubmission(firestore, "garbled", {
+    verdict: "accepted",
+    created_at: "2026-06-05T09:05:00.000Z",
+    passed_count: undefined,
+    total: "oops",
+    score: null,
+    max_points: 100
+  });
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "23EC203", contest_slug: "tridots-contest" }
+  }));
+  assert.equal(read.statusCode, 200);
+  const [event] = read.body.events;
+  assert.ok(!("passed_count" in event), "missing passed_count omitted");
+  assert.ok(!("total" in event), "non-numeric total omitted");
+  assert.ok(!("score" in event), "null score omitted");
+  assert.equal(event.max_points, 100, "the one valid numeric field still threads through");
+});
+
+test("submission-events INGEST: poller-supplied score fields thread through when present + numeric", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+
+  // Today's poller does not send scores; verify the OPTIONAL passthrough works if
+  // a future poster includes them, and that a non-numeric value is dropped.
+  await call(makeReq({
+    method: "POST",
+    path: "/api/submission-events",
+    headers: INGEST_HEADERS,
+    body: { events: [submissionEvent({ submission_id: 9100, passed_count: 7, total: 9, score: 70, max_points: 90, lang: "java" })] }
+  }));
+
+  const read = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS,
+    query: { username: "Alice", contest_slug: "mcet-june-2026" }
+  }));
+  assert.equal(read.statusCode, 200);
+  const [event] = read.body.events;
+  assert.equal(event.passed_count, 7);
+  assert.equal(event.total, 9);
+  assert.equal(event.score, 70);
+  assert.equal(event.max_points, 90);
 });
 
 test("submission-events FALLBACK: native query is scoped to (username_norm, contest_slug) — no cross-contest / cross-user bleed", async () => {

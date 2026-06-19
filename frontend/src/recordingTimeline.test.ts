@@ -18,6 +18,7 @@ import {
   filterTimelineLog,
   isDuringGap,
   offsetSecFor,
+  submissionScoreSummary,
   summarizeEventDetail
 } from "./recordingTimeline";
 
@@ -134,6 +135,26 @@ describe("summarizeEventDetail", () => {
   });
 });
 
+describe("submissionScoreSummary", () => {
+  it("renders both halves when counts + points are present", () => {
+    expect(submissionScoreSummary(submission({ passed_count: 8, total: 10, score: 80, max_points: 100 })))
+      .toBe("8/10 tests · 80/100");
+  });
+  it("renders counts only when points are absent", () => {
+    expect(submissionScoreSummary(submission({ passed_count: 3, total: 5 }))).toBe("3/5 tests");
+  });
+  it("renders points only when counts are absent", () => {
+    expect(submissionScoreSummary(submission({ score: 50, max_points: 100 }))).toBe("50/100");
+  });
+  it("renders a zero-weight problem as 0/0 rather than vanishing", () => {
+    expect(submissionScoreSummary(submission({ passed_count: 0, total: 0, score: 0, max_points: 0 })))
+      .toBe("0/0 tests · 0/0");
+  });
+  it("is empty when no score fields are present (poller-sourced)", () => {
+    expect(submissionScoreSummary(submission({}))).toBe("");
+  });
+});
+
 describe("buildTimelineLog", () => {
   const gaps = [{ fromSec: 240, toSec: 360 }]; // blackout 4–6 min
 
@@ -150,11 +171,11 @@ describe("buildTimelineLog", () => {
     expect(entries[0].label).toBe("Window lost focus");
     expect(entries[1].label).toBe("Tab switched away");
     expect(entries[1].severity).toBe("warning");
-    expect(entries[2].label).toBe("Accepted · Two Sum");
+    expect(entries[2].label).toBe("Submit · Accepted · Two Sum");
     expect(entries[2].valid).toBe(true);
   });
 
-  it("labels failed submissions with their status", () => {
+  it("labels failed submissions with Submit + their status", () => {
     const [entry] = buildTimelineLog({
       alerts: [],
       events: [],
@@ -162,8 +183,46 @@ describe("buildTimelineLog", () => {
       testStartMs: T0,
       gaps: []
     });
-    expect(entry.label).toBe("Wrong Answer · LRU Cache");
+    expect(entry.label).toBe("Submit · Wrong Answer · LRU Cache");
     expect(entry.valid).toBe(false);
+  });
+
+  it("threads explicit pass/fail counts + score into the submission label + detail", () => {
+    const [entry] = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [
+        submission({
+          valid: false,
+          status: "wrong_answer",
+          challenge_name: "Two Sum",
+          lang: "python3",
+          passed_count: 8,
+          total: 10,
+          score: 80,
+          max_points: 100
+        })
+      ],
+      testStartMs: T0,
+      gaps: []
+    });
+    // Label reads: "Submit · <result> · <challenge> · 8/10 tests · 80/100".
+    expect(entry.label).toBe("Submit · wrong_answer · Two Sum · 8/10 tests · 80/100");
+    // Score summary also lands in detail (alongside lang), so it is searchable.
+    expect(entry.detail).toBe("python3 · 8/10 tests · 80/100");
+  });
+
+  it("omits the score chunk for poller-sourced submissions with no counts", () => {
+    const [entry] = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [submission({ status: "Accepted", challenge_name: "Two Sum", lang: "python3" })],
+      testStartMs: T0,
+      gaps: []
+    });
+    // No passed_count/score → no trailing " · …/…" and detail is just the lang.
+    expect(entry.label).toBe("Submit · Accepted · Two Sum");
+    expect(entry.detail).toBe("python3");
   });
 
   it("tags entries that land inside a recording gap as duringGap", () => {
@@ -278,6 +337,21 @@ describe("filterTimelineLog", () => {
     // case-insensitive; empty query is a no-op.
     expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "TWO SUM" })).toHaveLength(1);
     expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "   " })).toHaveLength(4);
+  });
+
+  it("free-text query matches the submission score (counts + points in label/detail)", () => {
+    const scored = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [
+        submission({ submission_id: "s-scored", passed_count: 8, total: 10, score: 80, max_points: 100 })
+      ],
+      testStartMs: T0,
+      gaps: []
+    });
+    expect(filterTimelineLog(scored, { ...DEFAULT_LOG_FILTERS, query: "8/10" }).map((e) => e.id)).toEqual(["sub:s-scored"]);
+    expect(filterTimelineLog(scored, { ...DEFAULT_LOG_FILTERS, query: "80/100" }).map((e) => e.id)).toEqual(["sub:s-scored"]);
+    expect(filterTimelineLog(scored, { ...DEFAULT_LOG_FILTERS, query: "tests" }).map((e) => e.id)).toEqual(["sub:s-scored"]);
   });
 
   it("eventTypes narrows EVENTS only (empty set = all event types)", () => {

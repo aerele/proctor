@@ -397,6 +397,12 @@ export type SubmissionEvent = {
   lang?: string;
   status?: string;
   valid: boolean;
+  /** Per-test counts (native proctor submits only): passed_count of total. */
+  passed_count?: number;
+  total?: number;
+  /** Points scored out of max_points (native proctor submits only). */
+  score?: number;
+  max_points?: number;
   /** ISO 8601 timestamp of the submission's real time. */
   submitted_at: string;
 };
