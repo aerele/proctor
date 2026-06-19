@@ -57,7 +57,7 @@ export function ExamShellChrome({ shell, gate, status, identity, contestName, el
           identity={identity}
           contestName={contestName}
           elapsedSeconds={elapsedSeconds}
-          recording={(status === "recording" || status === "ending") && gate !== "ended"}
+          recording={(status === "recording" || status === "ending" || status === "ending_draining") && gate !== "ended"}
           flagCount={shell.flagCount}
           remainingLabel={remainingLabel}
           timeUp={timeUp}

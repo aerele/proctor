@@ -165,6 +165,12 @@ describe("awayBeaconActive", () => {
     expect(awayBeaconActive("ending")).toBe(false);
     expect(awayBeaconActive("ended")).toBe(false);
   });
+  it("Tier-1: suppresses the away beacon during the end-of-test drain WAIT (ending_draining)", () => {
+    // The drain wait gate can stay up for minutes while a buffered backlog
+    // uploads. It is NOT "recording", so it must NOT fire a spurious tab_hidden/
+    // closing beacon — it behaves exactly like "ending". (Integration check a.)
+    expect(awayBeaconActive("ending_draining")).toBe(false);
+  });
   it("suppresses the away beacon in non-recording states (no spurious alert)", () => {
     expect(awayBeaconActive("idle")).toBe(false);
     expect(awayBeaconActive("starting")).toBe(false);

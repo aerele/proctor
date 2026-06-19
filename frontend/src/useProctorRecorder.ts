@@ -1,9 +1,33 @@
 import { getUploadUrl, heartbeat, sendEvents, uploadBlob } from "./api";
 import type { ApiError } from "./api";
+import {
+  browserChunkBufferDeps,
+  drainBuffer,
+  evictToCapacity,
+  openBuffer,
+  pendingKey,
+  resolveBufferCaps,
+  type ChunkBuffer,
+  type ChunkBufferDeps,
+  type PendingChunk
+} from "./chunkBuffer";
 import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import { writeChunkHwm } from "./chunkContinuity";
 import { advanceUploadChain, runUploadWithRetry } from "./chunkUploadRetry";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
+
+// Tier-1 buffer: the per-session circuit-breaker latch. Starts from the pre-
+// flight self-test; ANY runtime buffer throw flips it to "fallback" FOREVER (no
+// flap-back) and the recorder routes through the UNCHANGED direct-upload floor.
+export type BufferMode = "buffering" | "fallback";
+
+// Live pending-buffer counters surfaced to the host (HealthPanel amber state +
+// the end-of-test wait gate). Zeroed in fallback mode.
+export type BufferStatus = {
+  mode: BufferMode;
+  pendingCount: number;
+  pendingBytes: number;
+};
 
 type RecorderOptions = {
   sessionId: string;
@@ -25,6 +49,16 @@ type RecorderOptions = {
   onEvent: (event: ProctorEvent) => void;
   onUploadChange: (depth: number, uploaded: number) => void;
   onFatalError: (message: string) => void;
+  // Tier-1 buffer: surfaced on every buffer change (write/drain/evict/mode flip)
+  // so the host can render the amber "N uploaded · M pending" HealthPanel state
+  // and drive the end-of-test wait gate. Always called at least once at start().
+  onBufferChange?: (status: BufferStatus) => void;
+  // Tier-1 buffer: injectable IndexedDB deps (browser passes window.indexedDB;
+  // tests pass a fake). Absent → browserChunkBufferDeps() resolves the real one,
+  // or null (→ the session starts in FALLBACK mode, never blocked).
+  bufferDeps?: ChunkBufferDeps | null;
+  // Tier-1 buffer: injectable buffer (tests). Absent → openBuffer(bufferDeps).
+  buffer?: ChunkBuffer | null;
   // B1: the session was locked/ended/paused server-side (heartbeat status or a
   // 403/409 from any write). The recorder has been stopped; the host flips its
   // gate to match. Distinct from onFatalError, which is a local capture failure.
@@ -50,6 +84,19 @@ type RecorderControls = {
    * stop) — the marker_layout event reports the ACTUAL captured dims so the
    * P2 detector never guesses geometry. Read-only; no recorder behavior. */
   getScreenTrackSettings: () => MediaTrackSettings | null;
+  // ---- Tier-1 persistent chunk buffer -------------------------------------
+  /** The circuit-breaker latch: "buffering" while the buffer is healthy,
+   *  "fallback" once any self-test/runtime failure degraded to the floor. */
+  getBufferMode: () => BufferMode;
+  /** Live pending count/bytes for THIS session (0/0 in fallback mode). Re-reads
+   *  IndexedDB; the host polls this to decide the end-of-test wait gate. Never
+   *  throws — a read failure degrades to fallback and returns {0,0}. */
+  getBufferStatus: () => Promise<BufferStatus>;
+  /** Wake the background drainer NOW (End-of-test kick). No-op in fallback. */
+  kickDrain: () => void;
+  /** Delete this session's buffer — ONLY after a confirmed-empty drain +
+   *  successful endSession (App.tsx end sites). Best-effort, never throws. */
+  clearBuffer: () => Promise<void>;
 };
 
 export type MediaCaptureState = {
@@ -70,6 +117,24 @@ export class InvalidShareSurfaceError extends Error {
     super("You must share your ENTIRE SCREEN — you selected a tab/window. Recording has not started.");
     this.name = "InvalidShareSurfaceError";
     this.displaySurface = displaySurface;
+  }
+}
+
+// Tier-1 buffer: thrown by recorder.start() ONLY when upload_config.require_buffer
+// is true AND the pre-flight buffer self-test fails (IndexedDB unavailable,
+// private/incognito, storage blocked, quota). The host must treat this as
+// "recording did NOT start" and show the remediation message. Default
+// require_buffer=false NEVER throws this — a failed self-test silently starts
+// the session in FALLBACK mode (the proven floor records fine).
+export class BufferRequiredError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(
+      "This browser/profile can't save your recording locally as a safeguard. " +
+        "Use Chrome or Edge, exit private/incognito mode, and allow this site to store data — then try again."
+    );
+    this.name = "BufferRequiredError";
+    this.reason = reason;
   }
 }
 
@@ -294,6 +359,74 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
 
   let fatalStatusHandled = false;
 
+  // ---- Tier-1 persistent chunk buffer (strictly additive over the floor) ----
+  //
+  // bufferMode is the circuit-breaker latch. It starts "fallback" and is only
+  // promoted to "buffering" if the pre-flight self-test passes at start(); ANY
+  // runtime buffer throw demotes it back to "fallback" PERMANENTLY. While
+  // "fallback" the recorder uses the EXACT pre-buffer path (enqueueUpload /
+  // enqueueCameraUpload) — today's guaranteed floor, untouched.
+  let bufferMode: BufferMode = "fallback";
+  let buffer: ChunkBuffer | null = null;
+  const caps = resolveBufferCaps(options.config);
+  let drainTimer: number | undefined;
+  let draining = false;
+  let onlineListenerBound = false;
+  // The drainer keeps running AFTER recorder.stop() so the App.tsx end-of-test
+  // wait gate can empty the buffer (it polls getBufferStatus and only then calls
+  // endSession). `drainDisposed` (set by clearBuffer / final teardown), NOT the
+  // segment-loop `stopping` flag, is what halts draining.
+  let drainDisposed = false;
+  // Cached pending counters (kept in sync on every buffer op) so the host's
+  // frequent HealthPanel reads don't hammer IndexedDB; getBufferStatus() does a
+  // fresh authoritative read for the end-gate decision.
+  let pendingCountCache = 0;
+  let pendingBytesCache = 0;
+
+  const emitBufferChange = () => {
+    options.onBufferChange?.({ mode: bufferMode, pendingCount: pendingCountCache, pendingBytes: pendingBytesCache });
+  };
+
+  // Refresh the cached pending counters from IndexedDB. Never throws (a read
+  // failure degrades to fallback). Safe to call frequently.
+  const refreshBufferCounters = async () => {
+    if (bufferMode !== "buffering" || !buffer) {
+      pendingCountCache = 0;
+      pendingBytesCache = 0;
+      emitBufferChange();
+      return;
+    }
+    try {
+      const [count, bytes] = await Promise.all([
+        buffer.count(options.sessionId),
+        buffer.bytes(options.sessionId)
+      ]);
+      pendingCountCache = count;
+      pendingBytesCache = bytes;
+      emitBufferChange();
+    } catch (error) {
+      degradeToFallback("counter_read_failed", error);
+    }
+  };
+
+  // THE CIRCUIT BREAKER. Any buffer op that throws funnels here: audit the
+  // reason, LATCH fallback for the rest of the session (never flip back), zero
+  // the counters, and let the caller fall through to the floor path. Recording
+  // is never interrupted — this only changes which upload path future chunks
+  // take. Idempotent (a second call after the latch is a cheap no-op).
+  const degradeToFallback = (reason: string, error?: unknown) => {
+    if (bufferMode === "fallback") return;
+    bufferMode = "fallback";
+    if (drainTimer) {
+      window.clearTimeout(drainTimer);
+      drainTimer = undefined;
+    }
+    pendingCountCache = 0;
+    pendingBytesCache = 0;
+    emit("buffer_fallback_engaged", { reason, ...(error !== undefined ? { message: String(error) } : {}) });
+    emitBufferChange();
+  };
+
   const emit = (type: string, detail?: Record<string, unknown>) => {
     const event = createEvent(type, detail);
     eventBuffer.push(event);
@@ -444,6 +577,243 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       });
   };
 
+  // ---- Tier-1 buffering enqueue + drainer -----------------------------------
+  //
+  // In "buffering" mode every chunk is written to the durable `pending` store
+  // BEFORE the live upload, deleted ONLY on a confirmed 2xx, and on a non-fatal
+  // live-upload exhaustion is LEFT in `pending` (no drop) for the background
+  // drainer. The live upload still rides the SAME serial per-kind chain as the
+  // floor, so ordering and the one-in-flight-per-kind invariant are unchanged.
+  //
+  // The dispatcher each segment loop calls. Any buffer throw degrades to
+  // fallback and re-routes THIS chunk through the floor — never a drop, never a
+  // recording interruption.
+  const routeChunk = (kind: "screen" | "camera", blob: Blob, index: number) => {
+    if (bufferMode !== "buffering" || !buffer) {
+      if (kind === "screen") enqueueUpload(blob, index);
+      else enqueueCameraUpload(blob, index);
+      return;
+    }
+    const startedAt = new Date().toISOString();
+    const record: PendingChunk = {
+      key: pendingKey(options.sessionId, kind, index),
+      sessionId: options.sessionId,
+      kind,
+      index,
+      blob,
+      bytes: blob.size,
+      contentType: blob.type || "video/webm",
+      startedAt,
+      enqueuedAt: Date.now(),
+      attempts: 0
+    };
+    // Write-before-upload: persist durably FIRST. A write failure here is the
+    // circuit-breaker's job — degrade and fall through to the floor so the
+    // chunk is still attempted via the proven direct path (worst case = today).
+    buffer
+      .put(record)
+      .then(() => {
+        void refreshBufferCounters();
+        enqueueBufferedLiveUpload(kind, record);
+      })
+      .catch((error) => {
+        degradeToFallback(`buffer_put_failed:${kind}`, error);
+        if (kind === "screen") enqueueUpload(blob, index);
+        else enqueueCameraUpload(blob, index);
+      });
+  };
+
+  // The live (fast-path) upload of a freshly-buffered chunk, sequenced on the
+  // existing per-kind serial chain. On 2xx: record manifest, DELETE from
+  // pending, kick the drainer (the path is proven healthy → flush the backlog).
+  // On non-fatal exhaustion: LEAVE it in pending (the drainer owns it). A fatal
+  // status routes through handleFatalStatus exactly like the floor.
+  const enqueueBufferedLiveUpload = (kind: "screen" | "camera", record: PendingChunk) => {
+    queueDepth += 1;
+    updateUploadState();
+    const onSettled = () => {
+      queueDepth = Math.max(0, queueDepth - 1);
+      updateUploadState();
+    };
+    const run = async () => {
+      const { upload, retried } = await uploadChunkWithRetry(kind, record.blob, record.index);
+      manifest.push({
+        kind,
+        index: record.index,
+        storage_key: upload.storage_key,
+        bytes: record.bytes,
+        started_at: record.startedAt,
+        completed_at: new Date().toISOString()
+      });
+      uploadedCount += 1;
+      emit("chunk_uploaded", { kind, index: record.index, bytes: record.bytes, storage_key: upload.storage_key, ...(retried ? { retried } : {}) });
+      // Durability invariant: only delete once provably in GCS.
+      try {
+        await buffer!.delete(record.key);
+        void refreshBufferCounters();
+      } catch (error) {
+        degradeToFallback("buffer_delete_failed", error);
+      }
+      // A healthy live upload proves the path — flush anything the buffer holds.
+      kickDrain();
+    };
+    const onError = (error: unknown) => {
+      const fatal = fatalStatusFromError(error);
+      if (fatal) {
+        // Session no longer writable — surface exactly like the floor.
+        emit("upload_error", { kind, index: record.index, bytes: record.bytes, message: String(error) });
+        handleFatalStatus(fatal);
+        return;
+      }
+      // Non-fatal exhaustion: NOT a drop. The chunk stays in `pending`; the
+      // drainer keeps retrying. Emit chunk_buffered (the "saved, will retry"
+      // semantic that replaces the lossy upload_error on the buffering path).
+      emit("chunk_buffered", { kind, index: record.index, bytes: record.bytes, reason: "live_upload_failed", message: String(error) });
+      void refreshBufferCounters();
+      void enforceCap();
+      scheduleDrain();
+    };
+    if (kind === "screen") {
+      uploadQueue = advanceUploadChain(uploadQueue, {
+        run,
+        onError,
+        isFatal: (error) => fatalStatusFromError(error) !== null,
+        onSettled
+      });
+    } else {
+      // Camera chain keeps its swallow-everything inline form (a fatal status
+      // still self-stops via handleFatalStatus inside onError).
+      cameraUploadQueue = cameraUploadQueue.then(run).catch(onError).finally(onSettled);
+    }
+  };
+
+  // Cap + evict: when the session's buffer is over EITHER cap, evict the OLDEST
+  // pending chunk (sliding window of the most-recent footage) and emit the loud
+  // chunk_buffer_evicted audit. This is the ONLY remaining bounded loss, only
+  // after a long sustained outage. Never throws (degrades to fallback).
+  const enforceCap = async () => {
+    if (bufferMode !== "buffering" || !buffer) return;
+    try {
+      await evictToCapacity(buffer, options.sessionId, caps, (evicted, reason) => {
+        emit("chunk_buffer_evicted", { kind: evicted.kind, index: evicted.index, bytes: evicted.bytes, reason });
+      });
+      await refreshBufferCounters();
+    } catch (error) {
+      degradeToFallback("buffer_evict_failed", error);
+    }
+  };
+
+  // Background drainer: oldest-first, serialized so a drain PUT never races a
+  // live PUT on the same key. MVP re-mints a fresh signed URL via getUploadUrl
+  // for each drain (the backend hwm guard maps it to an unused key — never an
+  // overwrite) and records the RETURNED storage_key in the manifest; playback
+  // orders by the manifest (real time / started_at), NOT the numeric key, so a
+  // re-keyed chunk still plays in the right place (recordingPlaylist.buildPlaylist
+  // sorts by last_modified-anchored offset). Reusing a stored unexpired signed
+  // URL is a deferred optimization, not needed for correctness. A fatal status
+  // (401/403/409) stops draining; non-fatal failures leave the chunk in
+  // `pending` (attempts bumped) for the next wake.
+  const drainOnce = async () => {
+    if (bufferMode !== "buffering" || !buffer || drainDisposed || draining || fatalStatusHandled) return;
+    draining = true;
+    try {
+      // Oldest-first, fatal-stop drain (pure orchestration in chunkBuffer.ts).
+      // drainRecord serializes each PUT behind the live per-kind chain so a drain
+      // never races a live upload on the same key.
+      await drainBuffer(
+        buffer,
+        options.sessionId,
+        (record) => drainRecord(record),
+        () => bufferMode === "buffering" && !fatalStatusHandled && !drainDisposed
+      );
+      await refreshBufferCounters();
+    } catch (error) {
+      degradeToFallback("buffer_drain_failed", error);
+    } finally {
+      draining = false;
+    }
+  };
+
+  // Upload one buffered record (drain path). Returns "ok" (uploaded+deleted),
+  // "retry" (non-fatal failure, left in pending), or "fatal" (stop draining).
+  const drainRecord = async (record: PendingChunk): Promise<"ok" | "retry" | "fatal"> => {
+    const chainKey = record.kind === "screen" ? "screen" : "camera";
+    const doUpload = async (): Promise<"ok" | "retry" | "fatal"> => {
+      try {
+        const fresh = await getUploadUrl({
+          session_id: options.sessionId,
+          kind: chainKey,
+          chunk_index: record.index,
+          content_type: record.contentType || "video/webm"
+        });
+        await uploadBlob(fresh.upload_url, record.blob);
+        manifest.push({
+          kind: record.kind,
+          index: record.index,
+          storage_key: fresh.storage_key,
+          bytes: record.bytes,
+          started_at: record.startedAt,
+          completed_at: new Date().toISOString()
+        });
+        uploadedCount += 1;
+        updateUploadState();
+        emit("chunk_drained", { kind: record.kind, index: record.index, attempts: record.attempts + 1, buffered_ms: Date.now() - record.enqueuedAt });
+        await buffer!.delete(record.key);
+        return "ok";
+      } catch (error) {
+        const fatal = fatalStatusFromError(error);
+        if (fatal) {
+          emit("upload_error", { kind: record.kind, index: record.index, bytes: record.bytes, message: String(error) });
+          handleFatalStatus(fatal);
+          return "fatal";
+        }
+        // Non-fatal: bump attempts + lastError, leave it in pending.
+        try {
+          await buffer!.put({ ...record, attempts: record.attempts + 1, lastError: String(error) });
+        } catch (putError) {
+          degradeToFallback("buffer_reput_failed", putError);
+          return "fatal";
+        }
+        return "retry";
+      }
+    };
+    // Sequence the drain PUT onto the same per-kind serial tail as live uploads
+    // (so a drain PUT never races a live PUT on the same key). doUpload swallows
+    // its own errors and returns the outcome; the chained promise resolves to it.
+    let result: Promise<"ok" | "retry" | "fatal">;
+    if (chainKey === "screen") {
+      result = uploadQueue.then(doUpload, doUpload);
+      uploadQueue = result.then(() => undefined, () => undefined);
+    } else {
+      result = cameraUploadQueue.then(doUpload, doUpload);
+      cameraUploadQueue = result.then(() => undefined, () => undefined);
+    }
+    const outcome = await result;
+    if (outcome === "ok") await refreshBufferCounters();
+    return outcome;
+  };
+
+  const kickDrain = () => {
+    if (bufferMode !== "buffering" || drainDisposed) return;
+    void drainOnce();
+  };
+
+  // ~12s timer backstop ('online' lies on captive-portal/lab-NAT recovery).
+  // Keeps running across recorder.stop() so the end-of-test wait gate drains.
+  const scheduleDrain = () => {
+    if (bufferMode !== "buffering" || drainDisposed) return;
+    if (drainTimer) return;
+    drainTimer = window.setTimeout(() => {
+      drainTimer = undefined;
+      void drainOnce().finally(() => {
+        // Reschedule only while there is still a backlog and we're healthy.
+        if (bufferMode === "buffering" && !drainDisposed && pendingCountCache > 0) scheduleDrain();
+      });
+    }, 12_000);
+  };
+
+  const onOnline = () => kickDrain();
+
   const bindPageEvents = () => {
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("blur", onBlur);
@@ -492,7 +862,12 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         // F5.3 wave-2 fix: corrective fullscreen truth for the server-side
         // enforcement countdown (clears a stale open exit / starts the clock
         // when the exit event itself was lost).
-        fullscreen: Boolean(document.fullscreenElement)
+        fullscreen: Boolean(document.fullscreenElement),
+        // Tier-1: persisted on the session doc next to upload_queue_depth so a
+        // post-exam audit can see how much footage was buffered (no admin UI
+        // tonight; Tier-2 renders the per-candidate indicator). 0 in fallback.
+        buffer_pending_chunks: pendingCountCache,
+        buffer_pending_bytes: pendingBytesCache
       }).then((response) => {
         if (response.start_ip && response.current_ip) {
           options.onIpStatusChange?.({
@@ -534,8 +909,73 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     }, options.heartbeatSeconds * 1000);
   };
 
+  // Tier-1 pre-flight capability gate. Open the buffer + run a write→read→delete
+  // self-test. Pass → bufferMode "buffering" (durability on). Fail → stay
+  // "fallback" (the floor records fine) and emit buffer_fallback_engaged; only
+  // when require_buffer is set does a failure THROW (the host blocks start with
+  // remediation). Never throws otherwise — a candidate is never blocked by a
+  // missing buffer. Resume-across-reload: a healthy buffer that already holds
+  // pending chunks for this session immediately wakes the drainer.
+  const initBuffer = async () => {
+    const requireBuffer = options.config.require_buffer === true;
+    let ok = false;
+    let reason = "unknown";
+    try {
+      const deps = options.bufferDeps !== undefined ? options.bufferDeps : browserChunkBufferDeps();
+      if (options.buffer) {
+        buffer = options.buffer;
+      } else if (deps) {
+        buffer = await openBuffer(deps);
+      } else {
+        buffer = null;
+        reason = "indexeddb_unavailable";
+      }
+      if (buffer) {
+        ok = await buffer.selfTest();
+        if (!ok) reason = "selftest_failed";
+      }
+    } catch (error) {
+      ok = false;
+      reason = "buffer_open_failed";
+      emit("buffer_fallback_engaged", { reason, message: String(error) });
+    }
+    if (ok && buffer) {
+      bufferMode = "buffering";
+      if (!onlineListenerBound) {
+        window.addEventListener("online", onOnline);
+        onlineListenerBound = true;
+      }
+      await refreshBufferCounters();
+      // Resume-across-reload: flush any chunks left from a prior stint/reload.
+      kickDrain();
+      scheduleDrain();
+    } else {
+      bufferMode = "fallback";
+      if (buffer) {
+        // We opened it but the self-test failed — close the handle.
+        try {
+          buffer.close();
+        } catch {
+          /* best-effort */
+        }
+      }
+      buffer = null;
+      if (reason !== "buffer_open_failed") {
+        emit("buffer_fallback_engaged", { reason });
+      }
+      emitBufferChange();
+      if (requireBuffer) {
+        throw new BufferRequiredError(reason);
+      }
+    }
+  };
+
   const controls: RecorderControls = {
     async start() {
+      // Tier-1: run the buffer capability gate FIRST. A require_buffer block
+      // throws here (before any screen-share prompt). A normal failed self-test
+      // silently degrades to fallback and recording proceeds.
+      await initBuffer();
       // F5.1: claim the handed-over streams up front so stop() owns their
       // cleanup even when start() throws part-way (no orphaned camera/screen
       // capture indicators after a failed start).
@@ -646,6 +1086,58 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     },
     getScreenTrackSettings() {
       return screenStream?.getVideoTracks()[0]?.getSettings() ?? null;
+    },
+    getBufferMode() {
+      return bufferMode;
+    },
+    async getBufferStatus() {
+      if (bufferMode !== "buffering" || !buffer) {
+        return { mode: bufferMode, pendingCount: 0, pendingBytes: 0 };
+      }
+      try {
+        const [count, bytes] = await Promise.all([
+          buffer.count(options.sessionId),
+          buffer.bytes(options.sessionId)
+        ]);
+        pendingCountCache = count;
+        pendingBytesCache = bytes;
+        emitBufferChange();
+        return { mode: bufferMode, pendingCount: count, pendingBytes: bytes };
+      } catch (error) {
+        degradeToFallback("buffer_status_read_failed", error);
+        return { mode: "fallback", pendingCount: 0, pendingBytes: 0 };
+      }
+    },
+    kickDrain() {
+      kickDrain();
+    },
+    async clearBuffer() {
+      // Called by App.tsx ONLY after a confirmed-empty drain + successful
+      // endSession. Dispose the drainer, then best-effort delete + close.
+      drainDisposed = true;
+      if (drainTimer) {
+        window.clearTimeout(drainTimer);
+        drainTimer = undefined;
+      }
+      if (onlineListenerBound) {
+        window.removeEventListener("online", onOnline);
+        onlineListenerBound = false;
+      }
+      if (!buffer) return;
+      try {
+        await buffer.clear(options.sessionId);
+      } catch {
+        /* best-effort — a residual record is harmless (cleared next session) */
+      }
+      try {
+        buffer.close();
+      } catch {
+        /* best-effort */
+      }
+      buffer = null;
+      pendingCountCache = 0;
+      pendingBytesCache = 0;
+      emitBufferChange();
     }
   };
 
@@ -735,7 +1227,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         // completion) so even an in-flight chunk's index is never reused by
         // the next stint after a refresh in this tab.
         writeChunkHwm(window.sessionStorage, options.sessionId, "screen", index);
-        enqueueUpload(event.data, index);
+        // Tier-1: buffering mode writes-to-pending first then live-uploads;
+        // fallback mode routes through the UNCHANGED enqueueUpload floor.
+        routeChunk("screen", event.data, index);
       }
     });
     recorder.addEventListener("error", (event) => {
@@ -829,7 +1323,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         const index = ++cameraChunkIndex;
         // F1: same allocation-time hwm persistence as the screen series.
         writeChunkHwm(window.sessionStorage, options.sessionId, "camera", index);
-        enqueueCameraUpload(event.data, index);
+        // Tier-1: buffering writes-to-pending first; fallback uses the
+        // UNCHANGED enqueueCameraUpload floor.
+        routeChunk("camera", event.data, index);
       }
     });
     cameraRecorder.addEventListener("error", (event) => {

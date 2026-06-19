@@ -1798,6 +1798,11 @@ async function recordHeartbeat(req) {
     current_ip: currentIp,
     last_ip_change_at: newlyChanged ? now : session.last_ip_change_at || null,
     upload_queue_depth: Number(body.upload_queue_depth || 0),
+    // Tier-1 chunk buffer: pending-upload depth + bytes persisted for post-exam
+    // telemetry (no admin UI yet; Tier-2 renders the per-candidate indicator).
+    // Defensive Number() — absent on older clients reads as 0.
+    buffer_pending_chunks: Number(body.buffer_pending_chunks || 0),
+    buffer_pending_bytes: Number(body.buffer_pending_bytes || 0),
     network_online: Boolean(body.network_online),
     last_seen_at: now,
     heartbeat_count: FieldValue.increment(1),

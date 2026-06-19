@@ -53,8 +53,9 @@ export function deriveStage({ permissionsReady, fullscreen, gate, status, examRe
   if (!permissionsReady) return 1;
   if (!fullscreen) return 2;
   if (gate === "form") return 3;
-  // A session exists (running / pending_approval / locked).
-  if (status === "recording" || status === "ending") return examReleased ? 4 : 3;
+  // A session exists (running / pending_approval / locked). Tier-1: the end-of-
+  // test drain wait (ending_draining) is the same finishing stage as "ending".
+  if (status === "recording" || status === "ending" || status === "ending_draining") return examReleased ? 4 : 3;
   return 3;
 }
 
@@ -129,7 +130,7 @@ export function stageHint(input: StageInput & { ownEditor: boolean }): string {
   if (gate === "form") return "Read the rules, fill in your details and consent, then start proctoring.";
   if (status === "starting") return "Starting recording — if your browser asks again, share your Entire Screen.";
   if (status === "error") return "Recording has stopped. Use the Retry button on this page to finish ending your test.";
-  if (status === "recording" || status === "ending") return "Recording is active. Waiting for your room's exam code to be released.";
+  if (status === "recording" || status === "ending" || status === "ending_draining") return "Recording is active. Waiting for your room's exam code to be released.";
   return "Your session was restored. Press Resume recording to continue — your screen share is already set up.";
 }
 

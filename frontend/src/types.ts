@@ -112,6 +112,16 @@ export type SessionStartResponse = {
     /** F10.1: separate low-res camera stream knobs (absent on an older
      * backend — the recorder then records NO camera, see shouldRecordCamera). */
     camera?: CameraRecordingConfigPayload;
+    /** Tier-1 chunk buffer: when true a FAILED pre-flight buffer self-test
+     *  BLOCKS test start with a remediation message (admin opt-in for a known-
+     *  good venue). Default false/absent = never block — a failed self-test
+     *  starts the session in FALLBACK mode (the proven direct-upload floor). */
+    require_buffer?: boolean;
+    /** Tier-1 chunk buffer: server-tunable caps (default 200MB / 400 chunks
+     *  when absent/garbage; see resolveBufferCaps). Over-cap evicts OLDEST and
+     *  emits chunk_buffer_evicted (the only remaining bounded loss). */
+    buffer_max_bytes?: number;
+    buffer_max_chunks?: number;
   };
   /** OMR P1: present ONLY when the contest/settings enabled screen markers —
    * absent (flag off or older backend) means the MarkerLayer renders null. */
@@ -170,7 +180,15 @@ export type UploadUrlResponse = {
   expires_in: number;
 };
 
-export type SessionStatus = "idle" | "starting" | "recording" | "ending" | "ended" | "error";
+// Tier-1 buffer: "ending_draining" is the blocking END-OF-TEST WAIT GATE — End
+// was pressed but the persistent chunk buffer (chunkBuffer.ts) still has pending
+// chunks for this session, so close is blocked until the drain empties (then the
+// status moves to "ended"). It behaves like "ending" everywhere EXCEPT that it
+// can persist far longer (a slow drain), so the beforeunload warning + finishing
+// overlay stay up and — critically — awayBeaconActive() must still read false for
+// it (it is NOT "recording", so no spurious end-of-session tab_hidden beacon).
+// In FALLBACK mode the recorder never enters this status (end = today's path).
+export type SessionStatus = "idle" | "starting" | "recording" | "ending" | "ending_draining" | "ended" | "error";
 
 export type UploadManifestItem = {
   kind: string;
