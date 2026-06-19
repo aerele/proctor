@@ -1,6 +1,6 @@
 // backend/test/scopingLint.test.mjs — S-B scoping lint (F9 §2.3.2–2.3.3).
 // THE chokepoint rule: every contest_slug equality filter belongs in
-// scopedQuery (src/contests.mjs). The pre-existing legacy call sites in
+// scopedQuery (src/contests.mjs). The grandfathered raw call sites in
 // handler.mjs are pinned by EXACT per-file count below; a NEW raw
 // `.where("contest_slug", ...)` anywhere in backend/src fails this test until
 // the read goes through scopedQuery — or is deliberately re-pinned here in the
@@ -32,18 +32,17 @@ function collectMjsFiles(dir) {
 // Matches .where("contest_slug"... in any quote style, any whitespace.
 const RAW_FILTER_PATTERN = /\.where\(\s*["'`]contest_slug["'`]/g;
 const CHOKEPOINT_FILE = "contests.mjs";
-// Legacy call sites grandfathered at S-B (pre-contests code paths; they migrate
-// through scopedQuery stage by stage). Counts are exact on purpose: additions
+// Raw call sites grandfathered at S-B. Counts are exact on purpose: additions
 // AND removals both surface here.
 // S-C migrated all 12 admin/invigilator READ sites through scopedQuery
 // (16 → 4). The 4 that stay raw are deliberate:
-//   - findLiveSessionFor      start-path lock check; slug comes from the
-//                             session context, "" IS the legacy scope
-//   - endAllLiveSessions      settings-driven end-now sweep, same "" semantics
-//   - resolveActionTargets    bulk POST body where an EXPLICIT "" filter is a
-//                             meaningful value (legacy scope), unlike the GETs
-//   - adminSessionDetails     same explicit-"" body contract
-const LEGACY_ALLOWLIST = { "handler.mjs": 4 };
+//   - findLiveSessionFor      start-path lock check; the slug comes from the
+//                             session context, defaulting "" only when missing
+//   - endAllLiveSessions      end-now sweep, same per-session slug semantics
+//   - resolveActionTargets    bulk POST body where the slug comes straight from
+//                             the request, not a resolved contest doc
+//   - adminSessionDetails     same request-supplied slug contract
+const RAW_FILTER_ALLOWLIST = { "handler.mjs": 4 };
 
 test("scoping lint: contest_slug filters = pinned legacy sites + exactly one chokepoint", () => {
   const counts = {};
@@ -57,7 +56,7 @@ test("scoping lint: contest_slug filters = pinned legacy sites + exactly one cho
     `src/${CHOKEPOINT_FILE} must contain EXACTLY one contest_slug filter (the scopedQuery chokepoint); found ${chokepointCount}`
   );
   assert.deepEqual(
-    others, LEGACY_ALLOWLIST,
+    others, RAW_FILTER_ALLOWLIST,
     "raw .where(\"contest_slug\"...) call-site counts changed — route new contest-scoped reads through scopedQuery (src/contests.mjs), or re-pin the allowlist in this same diff"
   );
 });

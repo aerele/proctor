@@ -4,7 +4,7 @@
 // App.tsx touchpoints stay minimal: import + tab + render branch.
 import { ClipboardList, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { deleteProblem, fetchContests, fetchProblemDetail, fetchProblems, fetchProctorSettings, saveProblem, saveProctorSettings } from "../api";
+import { deleteProblem, fetchContests, fetchProblemDetail, fetchProblems, saveProblem } from "../api";
 import { draftFromDoc, draftToDoc, emptyProblemDraft, PROBLEM_LANGUAGES, validateProblemDraft, type ProblemDraft } from "../problems/problemDraft";
 import { StatementView } from "../problems/StatementView";
 import { liveContestsReferencingProblem, liveEditConfirmMessage, liveEditGuardFromError, liveEditRetryBody, liveSaveConfirmMessage, shouldConfirmLiveSave } from "./saveGuard";
@@ -15,7 +15,6 @@ export function ProblemBankSection({ password }: { password: string }) {
   // D1: the contests list lets the save gate detect when an edited problem is
   // referenced by an OPEN (running/active) contest and confirm before committing.
   const [contests, setContests] = useState<ContestSummary[]>([]);
-  const [activeProblemId, setActiveProblemId] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -27,16 +26,14 @@ export function ProblemBankSection({ password }: { password: string }) {
     setLoading(true);
     setError("");
     try {
-      const [list, settings, contestList] = await Promise.all([
+      const [list, contestList] = await Promise.all([
         fetchProblems(password),
-        fetchProctorSettings(password).catch(() => null),
         // D1: contests feed the live-save gate. A failed fetch must not block
         // authoring — fall back to an empty list (gate simply won't prompt).
         fetchContests(password).catch(() => [] as ContestSummary[])
       ]);
       setProblems(list);
       setContests(contestList);
-      setActiveProblemId(settings?.problem_id || "");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -117,25 +114,6 @@ export function ProblemBankSection({ password }: { password: string }) {
     }
   };
 
-  // Assign/clear the active contest problem by patching the EXISTING settings
-  // doc (problem_id rides next to contest_url). Requires the schedule gate to
-  // be configured first — surfaced as a plain error message if it is not.
-  const setActive = async (id: string) => {
-    setError("");
-    try {
-      const settings = await fetchProctorSettings(password);
-      if (!settings.start_at || !settings.end_at) {
-        setError("Configure the proctoring schedule (Settings tab) before assigning a problem.");
-        return;
-      }
-      await saveProctorSettings(password, { ...settings, problem_id: id });
-      setActiveProblemId(id);
-      setMessage(id ? `"${id}" is now the active contest problem.` : "Active problem cleared — candidates fall back to the contest link.");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
   return (
     <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
       <div className="mb-5 flex items-center justify-between gap-3">
@@ -144,7 +122,7 @@ export function ProblemBankSection({ password }: { password: string }) {
           <div>
             <h1 className="text-2xl font-semibold">Problem bank</h1>
             <p className="mt-1 text-sm text-muted">
-              Author problems with sample + hidden tests, limits, and scoring. Publish, then set one as the active contest problem — candidates get it inside the proctored workspace.
+              Author problems with sample + hidden tests, limits, and scoring. Publish, then add them to a contest's problems list — candidates get them inside the proctored workspace.
             </p>
           </div>
         </div>
@@ -176,7 +154,7 @@ export function ProblemBankSection({ password }: { password: string }) {
         <div className="space-y-2">
           {loading ? <p className="text-sm text-muted">Loading…</p> : null}
           {!loading && !problems.length ? (
-            <p className="text-sm text-muted">No problems yet. The built-in seed "sum-two" remains available until you author one (assign it by setting the active problem ID to sum-two in Settings).</p>
+            <p className="text-sm text-muted">No problems yet. The built-in seed "sum-two" remains available until you author one (add it to a contest's problems list).</p>
           ) : null}
           {problems.map((p) => (
             <div key={p.id} className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3 text-sm">
@@ -185,7 +163,6 @@ export function ProblemBankSection({ password }: { password: string }) {
                   <span className="font-mono font-semibold">{p.id}</span>
                   <span className="text-muted">{p.title}</span>
                   <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${p.status === "published" ? "bg-accent/10 text-accent" : "bg-ink/10 text-ink"}`}>{p.status}</span>
-                  {p.id === activeProblemId ? <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">Active</span> : null}
                 </div>
                 <div className="mt-1 text-xs text-muted">
                   {p.points} pts · {p.scoring} · {p.languages.join(", ")} · {p.sample_count} sample / {p.hidden_count} hidden
@@ -193,11 +170,6 @@ export function ProblemBankSection({ password }: { password: string }) {
                 </div>
               </div>
               <div className="flex gap-2">
-                {p.id === activeProblemId ? (
-                  <button className="focus-ring rounded-md border border-line px-3 py-1.5 text-xs font-medium" onClick={() => void setActive("")}>Clear active</button>
-                ) : p.status === "published" ? (
-                  <button className="focus-ring rounded-md border border-line px-3 py-1.5 text-xs font-medium" onClick={() => void setActive(p.id)}>Set active</button>
-                ) : null}
                 <button className="focus-ring rounded-md border border-line px-3 py-1.5 text-xs font-medium" onClick={() => void openEdit(p.id)}>Edit</button>
                 <button className="focus-ring inline-flex items-center gap-1 rounded-md border border-danger/40 px-3 py-1.5 text-xs font-medium text-danger" onClick={() => void remove(p.id)}>
                   <Trash2 size={12} /> Delete

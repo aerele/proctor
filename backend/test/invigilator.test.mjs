@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 process.env.EVIDENCE_BUCKET = "invig-bucket";
 process.env.SESSION_COLLECTION = "invig_sessions";
 process.env.SETTINGS_COLLECTION = "invig_settings";
+process.env.CONTESTS_COLLECTION = "invig_contests";
 process.env.ALERTS_COLLECTION = "invig_alerts";
 process.env.ROOM_GATES_COLLECTION = "invig_room_gates";
 process.env.SUBMISSIONS_COLLECTION = "invig_submissions";
@@ -178,28 +179,32 @@ function makeFakeStorage() {
 
 // ---- Seed helpers -----------------------------------------------------------
 
-// Settings doc id is "active" (SETTINGS_ID). Default: a wide-open window for
-// contest kec-2026 with the room gate ENABLED.
+const CONTEST_SLUG = "kec-2026";
+
+// Default: an OPEN no-roster person contest kec-2026 with a wide-open window and
+// the room gate ENABLED. Invigilator endpoints scope to it via ?contest=kec-2026.
 function seedSettings(firestore, overrides = {}) {
-  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(CONTEST_SLUG).set({
+    slug: CONTEST_SLUG, name: CONTEST_SLUG, status: "open", listed: true,
+    identity_mode: "person", identity_label: "Candidate ID",
     start_at: "2026-01-01T00:00:00.000Z",
     end_at: "2099-01-01T00:00:00.000Z",
-    contest_url: "https://www.hackerrank.com/contests/kec-2026",
-    contest_slug: "kec-2026",
-    room_gate_enabled: true,
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [], room_gate_enabled: true,
     ...overrides
   });
 }
 
 // An ACTIVE session in Lab A-1 of kec-2026 with a FRESH heartbeat (so it is
-// never accidentally "disconnected"); override per test.
+// never accidentally "disconnected"); override per test. Carries candidate_id so
+// personContestForSession resolves the contest for session-bound serve paths.
 function seedSession(firestore, id, overrides = {}) {
   firestore.collection(process.env.SESSION_COLLECTION).doc(id).set({
     session_id: id, status: "active",
-    hackerrank_username: "Alice", username_norm: "alice",
+    candidate_id: "alice", hackerrank_username: "Alice", username_norm: "alice",
     name: "Alice A", roll_number: "R1", email: "a@x.y", room: "Lab A-1",
-    contest_slug: "kec-2026",
-    storage_prefix: `contests/kec-2026/sessions/alice/${id}/`,
+    contest_slug: CONTEST_SLUG,
+    storage_prefix: `contests/${CONTEST_SLUG}/sessions/alice/${id}/`,
     created_at: "2026-06-09T09:00:00.000Z",
     last_heartbeat_at: new Date().toISOString(),
     ...overrides
@@ -288,7 +293,7 @@ test("GET /api/invigilator/overview: rooms from the ACTIVE contest's sessions + 
   seedSession(firestore, "s3", { room: "", username_norm: "carl" });          // unassigned
   seedSession(firestore, "s4", { room: "Lab Z-9", contest_slug: "other" });   // other contest — excluded
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/overview",
-    headers: { "x-invigilator-password": "invig-pass" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.contest_slug, "kec-2026");
   assert.equal(res.body.room_gate_enabled, true);
@@ -296,22 +301,14 @@ test("GET /api/invigilator/overview: rooms from the ACTIVE contest's sessions + 
   assert.equal(res.body.has_unassigned, true);
 });
 
-test("room_gate_enabled round-trips through admin settings and appears in the start response", async () => {
+test("room_gate_enabled rides the contest doc and appears in the start response", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
-  const save = await call(makeReq({ method: "POST", path: "/api/admin/settings",
-    headers: { "x-admin-password": "invig-admin-pass" },
-    body: { start_at: "2026-01-01T00:00:00.000Z", end_at: "2099-01-01T00:00:00.000Z",
-            contest_url: "https://www.hackerrank.com/contests/kec-2026", room_gate_enabled: true } }));
-  assert.equal(save.statusCode, 200);
-  assert.equal(save.body.room_gate_enabled, true);
-  const get = await call(makeReq({ method: "GET", path: "/api/admin/settings",
-    headers: { "x-admin-password": "invig-admin-pass" } }));
-  assert.equal(get.body.room_gate_enabled, true);
+  seedSettings(firestore); // contest kec-2026 with room_gate_enabled: true
   // Candidate start response carries the flag → the client knows to show the
   // waiting room.
   const start = await call(makeReq({ method: "POST", path: "/api/session/start",
-    body: { hackerrank_username: "Zoe", name: "Zoe Z", roll_number: "R9", email: "z@x.y",
+    body: { contest: CONTEST_SLUG, candidate_id: "Zoe", name: "Zoe Z", roll_number: "R9", email: "z@x.y",
             room: "Lab A-1", consent_accepted: true } }));
   assert.equal(start.statusCode, 200);
   assert.equal(start.body.room_gate_enabled, true);
@@ -331,7 +328,7 @@ test("POST /api/invigilator/release-code: 6-digit OTP, idempotent re-display, re
   seedSettings(firestore);
   const first = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   assert.equal(first.statusCode, 200);
   assert.equal(first.body.contest_slug, "kec-2026");
   assert.equal(first.body.gate.mode, "otp");
@@ -343,13 +340,13 @@ test("POST /api/invigilator/release-code: 6-digit OTP, idempotent re-display, re
   // idempotent: a portal reload re-displays the SAME code
   const second = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   assert.equal(second.body.gate.otp, first.body.gate.otp);
   // regenerate writes a NEW gate doc (released_by proves the rewrite — the new
   // random code itself could collide one-in-a-million, so don't assert on it)
   const regen = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Asha", regenerate: true } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Asha", regenerate: true } }));
   assert.match(regen.body.gate.otp, /^\d{6}$/);
   assert.equal(regen.body.gate.released_by, "Asha");
 });
@@ -360,10 +357,10 @@ test("POST /api/invigilator/open-room: start-now marks the room OPEN and keeps p
   seedSettings(firestore);
   const released = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   const open = await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Asha" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Asha" } }));
   assert.equal(open.statusCode, 200);
   assert.equal(open.body.gate.mode, "open");
   assert.equal(open.body.gate.opened_by, "Asha");
@@ -377,12 +374,12 @@ test("release-code / open-room: 400 room_gate_disabled when the admin toggle is 
   seedSettings(firestore, { room_gate_enabled: false });
   const release = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   assert.equal(release.statusCode, 400);
   assert.equal(release.body.error, "room_gate_disabled");
   const open = await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   assert.equal(open.statusCode, 400);
 });
 
@@ -392,7 +389,7 @@ test("release-code for the unassigned pseudo-room ('_') stores key '_' with a bl
   seedSettings(firestore);
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "_", invigilator_name: "Priya" } }));
+    body: { contest: CONTEST_SLUG, room: "_", invigilator_name: "Priya" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.gate.room_key, "_");
   assert.equal(res.body.gate.room, "");
@@ -422,7 +419,7 @@ test("room-gate: waiting before any release; invigilator open-room auto-starts a
   assert.equal(waiting.statusCode, 200);
   assert.equal(waiting.body.exam_started, false);
   await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
-    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   const started = await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
   assert.equal(started.body.exam_started, true);
   const doc = firestore._collections.get(process.env.SESSION_COLLECTION).get("s1");
@@ -440,7 +437,7 @@ test("room-gate: correct OTP starts; wrong OTP -> 403 invalid_code and counts th
   seedSettings(firestore);
   seedSession(firestore, "s1");
   const released = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
-    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   const otp = released.body.gate.otp;
   const wrong = await call(makeReq({ method: "POST", path: "/api/session/room-gate",
     body: { session_id: "s1", code: "000000" === otp ? "999999" : "000000" } }));
@@ -460,7 +457,7 @@ test("room-gate: attempt cap -> 429 too_many_attempts (even with the right code)
   seedSettings(firestore);
   seedSession(firestore, "s1", { gate_attempt_count: 20 });
   const released = await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
-    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   const res = await call(makeReq({ method: "POST", path: "/api/session/room-gate",
     body: { session_id: "s1", code: released.body.gate.otp } }));
   assert.equal(res.statusCode, 429);
@@ -486,7 +483,7 @@ test("room-gate: a non-numeric GATE_ATTEMPT_LIMIT still enforces a finite cap (d
   // proving NaN did not collapse the limit to "no cap".
   seedSession(firestore, "s1", { gate_attempt_count: 20 });
   const released = await call3(makeReq({ method: "POST", path: "/api/invigilator/release-code",
-    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   const res = await call3(makeReq({ method: "POST", path: "/api/session/room-gate",
     body: { session_id: "s1", code: released.body.gate.otp } }));
   assert.equal(res.statusCode, 429);
@@ -520,7 +517,7 @@ test("exec run/submit blocked with 403 exam_not_started until released; allowed 
   assert.equal(blockedSubmit.statusCode, 403);
   // release via start-now, then run again
   await call(makeReq({ method: "POST", path: "/api/invigilator/open-room",
-    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   await call(makeReq({ method: "POST", path: "/api/session/room-gate", body: { session_id: "s1" } }));
   const allowed = await call(makeReq({ method: "POST", path: "/api/exec/run",
     body: { session_id: "s1", problem_id: "sum-two", language: "python", source_code: "x" } }));
@@ -557,12 +554,12 @@ test("GET /api/invigilator/room: room-scoped stats + least-privilege rows + gate
   seedSession(firestore, "a4", { username_norm: "dan", name: "Dan D", status: "ended", exam_started_at: fresh });
   seedSession(firestore, "b1", { username_norm: "eve", room: "Lab B-2" });                 // other room — excluded
   await call(makeReq({ method: "POST", path: "/api/invigilator/release-code",
-    headers: { "x-invigilator-password": "invig-pass" }, body: { room: "Lab A-1", invigilator_name: "Priya" } }));
+    headers: { "x-invigilator-password": "invig-pass" }, body: { contest: CONTEST_SLUG, room: "Lab A-1", invigilator_name: "Priya" } }));
   seedAlert(firestore, "al1");
   seedAlert(firestore, "al2", { id: "al2", archived: true });                              // archived — excluded
   seedAlert(firestore, "al3", { id: "al3", room: "Lab B-2" });                             // other room — excluded
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.room, "Lab A-1");
   assert.deepEqual(res.body.stats,
@@ -608,7 +605,7 @@ test("GET /api/invigilator/room: rows + alerts carry NO session_id; ip_changed a
     video_key: undefined
   });
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
 
   // No session row leaks the session_id bearer token.
@@ -694,7 +691,7 @@ test("GET /api/invigilator/room: alert feed filters by show_to_invigilator serve
   // Wave6: DEFAULT ALL OFF — nothing shared with the invigilator until the admin
   // opts a type in. Before any opt-in the feed is empty.
   const empty = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(empty.statusCode, 200);
   assert.deepEqual(empty.body.alerts.map((a) => a.id), []);
   // Admin opts recording_stopped IN.
@@ -702,7 +699,7 @@ test("GET /api/invigilator/room: alert feed filters by show_to_invigilator serve
     headers: { "x-admin-password": "invig-admin-pass" },
     body: { proctor: { recording_stopped: { enabled: true, severity: "critical", show_to_invigilator: true } } } }));
   const first = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.deepEqual(first.body.alerts.map((a) => a.id), ["crit1"]);
   // Admin flips the visibility: tab_hidden ON, recording_stopped OFF.
   const save = await call(makeReq({ method: "POST", path: "/api/admin/alert-settings",
@@ -713,7 +710,7 @@ test("GET /api/invigilator/room: alert feed filters by show_to_invigilator serve
     } } }));
   assert.equal(save.statusCode, 200);
   const second = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.deepEqual(second.body.alerts.map((a) => a.id), ["warn1"]);
   // The admin alert console is NOT affected by invigilator visibility.
   const admin = await call(makeReq({ method: "GET", path: "/api/admin/alerts",
@@ -729,7 +726,7 @@ test("GET /api/invigilator/room: alerts_shared reflects whether any type is shar
   // Default ALL OFF → nothing is shared → alerts_shared false (empty feed reads
   // as intentional, not broken).
   const before = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(before.statusCode, 200);
   assert.equal(before.body.alerts_shared, false);
   // Admin opts ONE type in → alerts_shared flips true.
@@ -737,7 +734,7 @@ test("GET /api/invigilator/room: alerts_shared reflects whether any type is shar
     headers: { "x-admin-password": "invig-admin-pass" },
     body: { proctor: { tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: true } } } }));
   const after = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(after.body.alerts_shared, true);
 });
 
@@ -753,7 +750,7 @@ test("GET /api/invigilator/room: catalog-unknown alert types are NEVER shared (n
   seedAlert(firestore, "leg2", { id: "leg2", type: "some_future_type", severity: "warning",
     title: "Future thing" });
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.alerts.map((a) => a.id), []);
 });
@@ -772,7 +769,7 @@ test("GET /api/invigilator/room: session rows carry roster_unique_id; alert proj
   seedSession(firestore, "a2", { username_norm: "bob", hackerrank_username: "Bob", name: "Bob B" }); // no roster id
   seedAlert(firestore, "al1");
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.sessions.find((r) => r.name === "Alice A").roster_unique_id, "22CS042");
   assert.equal(res.body.sessions.find((r) => r.name === "Bob B").roster_unique_id, "");
@@ -821,13 +818,13 @@ test("POST /api/invigilator/unlock: exact username_norm releases a person-mode e
   // person-mode doc — pinned so the identity-threading regression stays loud.
   const displayOnly = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", username: "TEC002" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "TEC002" } }));
   assert.equal(displayOnly.statusCode, 404);
   assert.equal(displayOnly.body.error, "no_locked_session_in_room");
   // The row payload carries the EXACT stored key → the lock releases.
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", username: "TEC002", username_norm: PERSON_ID } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "TEC002", username_norm: PERSON_ID } }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.equal(res.body.status, "active");
   const doc = firestore._collections.get(process.env.SESSION_COLLECTION).get("p1");
@@ -844,7 +841,7 @@ test("POST /api/invigilator/exempt: exact username_norm reaches a person-mode li
   seedPersonSession(firestore, "p2");
   const res = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", username: "TEC002", username_norm: PERSON_ID,
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "TEC002", username_norm: PERSON_ID,
             exemptions: { fullscreen: true } } }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.deepEqual(res.body.enforcement_exemptions, { fullscreen: true });
@@ -862,13 +859,13 @@ test("invigilator unlock/exempt: legacy sessions keep working by display usernam
   seedSession(firestore, "l1", { status: "locked", locked_reason: "fullscreen_enforcement" });
   const unlock = await call(makeReq({ method: "POST", path: "/api/invigilator/unlock",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", username: "Alice" } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "Alice" } }));
   assert.equal(unlock.statusCode, 200, JSON.stringify(unlock.body));
   assert.equal(firestore._collections.get(process.env.SESSION_COLLECTION).get("l1").status, "active");
   // A BLANK username_norm must not shadow the legacy fallback.
   const exempt = await call(makeReq({ method: "POST", path: "/api/invigilator/exempt",
     headers: { "x-invigilator-password": "invig-pass" },
-    body: { room: "Lab A-1", username: "Alice", username_norm: "", exemptions: { switch_away: true } } }));
+    body: { contest: CONTEST_SLUG, room: "Lab A-1", username: "Alice", username_norm: "", exemptions: { switch_away: true } } }));
   assert.equal(exempt.statusCode, 200, JSON.stringify(exempt.body));
   assert.deepEqual(exempt.body.enforcement_exemptions, { switch_away: true });
 });
@@ -880,7 +877,7 @@ test("GET /api/invigilator/room: rows carry the exact stored username_norm for B
   seedSession(firestore, "a1");
   seedPersonSession(firestore, "p3");
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "Lab A-1" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.sessions.find((r) => r.name === "Alice A").username_norm, "alice");
   const person = res.body.sessions.find((r) => r.name === "Bharath K");
@@ -899,7 +896,7 @@ test("GET /api/invigilator/room: room=_ selects blank-room sessions; room param 
   seedSession(firestore, "u1", { room: "", name: "Unassigned U", username_norm: "uuu", hackerrank_username: "U" });
   seedSession(firestore, "a1");
   const res = await call(makeReq({ method: "GET", path: "/api/invigilator/room",
-    query: { room: "_" }, headers: { "x-invigilator-password": "invig-pass" } }));
+    query: { contest: CONTEST_SLUG, room: "_" }, headers: { "x-invigilator-password": "invig-pass" } }));
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.room_key, "_");
   // Rows identify by name/roll/username, not session_id (M13 removes it).

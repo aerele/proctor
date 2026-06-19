@@ -25,12 +25,11 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_RETENTION_DAYS = 4;
 
 /** The lifecycle-relevant subset of a contest the section reads. A superset of
- *  ContestSummary's lifecycle stamps (all optional on the wire; legacy synth and
- *  pre-lifecycle contests omit them). */
+ *  ContestSummary's lifecycle stamps (all optional on the wire; pre-lifecycle
+ *  contests omit them). */
 export type LifecycleContest = {
   slug: string;
   status: ContestStatus;
-  legacy?: boolean;
   start_at?: string | null;
   end_at?: string | null;
   last_export_at?: string | null;

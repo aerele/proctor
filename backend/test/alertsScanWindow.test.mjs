@@ -179,7 +179,7 @@ test("invigilatorRoom: alert feed survives an all-archived first scan window", a
   // No contest configured — the unfiltered scan branch, same as adminAlerts'.
   firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
     start_at: "2026-01-01T00:00:00.000Z", end_at: "2099-01-01T00:00:00.000Z",
-    contest_url: "", contest_slug: "", room_gate_enabled: false
+    room_gate_enabled: false
   });
   // Wave6: nothing is shared with invigilators by default — opt recording_stopped
   // IN so the live alert reaches the feed and this test exercises the SCAN-WINDOW

@@ -15,6 +15,7 @@ process.env.ALERTS_COLLECTION = "phase2_alerts";
 process.env.SUBMISSION_EVENTS_COLLECTION = "phase2_submission_events";
 process.env.SESSION_COLLECTION = "phase2_sessions";
 process.env.SETTINGS_COLLECTION = "phase2_settings";
+process.env.CONTESTS_COLLECTION = "phase2_contests";
 process.env.REVIEW_STATE_COLLECTION = "phase2_review_state";
 process.env.REVIEW_COLLECTION = "phase2_reviews";
 process.env.REVIEW_CLAIMS_COLLECTION = "phase2_review_claims";
@@ -211,26 +212,40 @@ async function call(req) {
 
 const ADMIN_HEADERS = { "x-admin-password": TEST_ADMIN_PASSWORD };
 
-// Seed a settings doc with a wide-open time window and a contest_url.
-function seedSettings(firestore, { contestUrl = "https://www.hackerrank.com/contests/coding-contest-mcet-june-2026-slot-2" } = {}) {
-  const store = firestore.collection(process.env.SETTINGS_COLLECTION);
-  store.doc("active").set({
+const CONTEST_SLUG = "coding-contest-mcet-june-2026-slot-2";
+
+// Seed an OPEN no-roster person contest with a wide-open window. start() pins
+// ?contest= to it; the no-roster person path keys username_norm = identityNorm
+// (candidate_id) and stamps storage_prefix under contests/<slug>/.
+function seedSettings(firestore, { slug = CONTEST_SLUG } = {}) {
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(slug).set({
+    slug, name: slug, status: "open", listed: true,
+    identity_mode: "person", identity_label: "Candidate ID",
     start_at: new Date(Date.now() - 3600 * 1000).toISOString(),
     end_at: new Date(Date.now() + 3600 * 1000).toISOString(),
-    contest_url: contestUrl,
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [], room_gate_enabled: false,
     updated_at: new Date().toISOString()
   });
 }
 
+// The candidate identity rides on candidate_id (the person-path resolves
+// candidate_id ?? hackerrank_username). When a caller passes the legacy
+// `hackerrank_username` key, that IS the id they mean — so DON'T also send the
+// default candidate_id "Alice" (it would win the ?? and collapse distinct users
+// onto one person). Callers pass exactly one of candidate_id / hackerrank_username.
 function detailsBody(overrides = {}) {
-  return {
-    hackerrank_username: "Alice",
+  const base = {
+    contest: CONTEST_SLUG,
     name: "Alice Example",
     roll_number: "R-1",
     email: "alice@example.com",
-    consent_accepted: true,
-    ...overrides
+    consent_accepted: true
   };
+  if (!("hackerrank_username" in overrides) && !("candidate_id" in overrides)) {
+    base.candidate_id = "Alice";
+  }
+  return { ...base, ...overrides };
 }
 
 async function start(firestore, storage, overrides = {}) {
@@ -242,7 +257,7 @@ async function start(firestore, storage, overrides = {}) {
 // 2.1 — GCS contest-foldering / slug helper
 // =====================================================================
 
-test("slug: valid contest_url → prefixed contest layout (full segment kept)", async () => {
+test("slug: pinned contest → prefixed contest layout under the contest slug", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   seedSettings(firestore);
@@ -276,10 +291,8 @@ test("start: a well-formed candidate email → 200 (gate is permissive, not RFC-
   assert.equal(res.statusCode, 200);
 });
 
-// S-E (F8.2): the legacy start no longer hard-requires the field named
-// "hackerrank_username". The modern client sends `candidate_id`; the server
-// synthesizes the FROZEN hackerrank_username session key from it so legacy reads
-// (doc ids, GCS paths, dual-read DTOs) keep working unchanged.
+// S-E (F8.2): the modern client sends `candidate_id`; the response surfaces it
+// as the frozen hackerrank_username key so dual-read DTOs keep working.
 test("start: candidate_id alone (no hackerrank_username) → 200, frozen key synthesized", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
@@ -328,41 +341,6 @@ test("start: hackerrank_username still accepted verbatim (back-compat caller)", 
   });
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.hackerrank_username, "Legacy_User");
-});
-
-test("slug: empty contest_url → LEGACY layout, no contests// double slash", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  seedSettings(firestore, { contestUrl: "" });
-  const res = await start(firestore, storage);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.contest_slug, "");
-  assert.ok(res.body.storage_prefix.startsWith("sessions/alice/"), res.body.storage_prefix);
-  assert.ok(!res.body.storage_prefix.includes("contests//"), "must not produce contests// double slash");
-  assert.ok(!res.body.storage_prefix.includes("contests/"), "legacy layout has no contests/ prefix");
-});
-
-test("slug: invalid contest_url → legacy fallback", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  seedSettings(firestore, { contestUrl: "not a url" });
-  const res = await start(firestore, storage);
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.contest_slug, "");
-  assert.ok(res.body.storage_prefix.startsWith("sessions/alice/"));
-});
-
-test("slug: weird characters in the last segment are sanitized", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  // Trailing slash + special chars in the last path segment. The URL fragment
-  // (#...) is correctly excluded by new URL().pathname, so only path chars count.
-  seedSettings(firestore, { contestUrl: "https://x.test/contests/we!rd@slug-2026/" });
-  const res = await start(firestore, storage);
-  assert.equal(res.statusCode, 200);
-  // sanitizeSegment maps every non [a-zA-Z0-9._-] char to "_" (dash is kept).
-  assert.equal(res.body.contest_slug, "we_rd_slug-2026");
-  assert.ok(res.body.storage_prefix.startsWith("contests/we_rd_slug-2026/sessions/alice/"));
 });
 
 test("slug: admin-evidence read prefix == upload prefix (same key layout)", async () => {
@@ -415,11 +393,13 @@ test("passcode no longer required to start (no proctor_passcode supplied)", asyn
 test("start is still gated by the time window (before start_at → 403)", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
-  firestore.collection(process.env.SETTINGS_COLLECTION).doc("active").set({
+  firestore.collection(process.env.CONTESTS_COLLECTION).doc(CONTEST_SLUG).set({
+    slug: CONTEST_SLUG, name: CONTEST_SLUG, status: "open", listed: true,
+    identity_mode: "person", identity_label: "Candidate ID",
     start_at: new Date(Date.now() + 3600 * 1000).toISOString(),
     end_at: new Date(Date.now() + 7200 * 1000).toISOString(),
-    contest_url: "https://x.test/contests/c1",
-    updated_at: new Date().toISOString()
+    problems: [{ problem_id: "sum-two", points: null, order: 0 }],
+    rooms: [], room_gate_enabled: false
   });
   const res = await start(firestore, storage);
   assert.equal(res.statusCode, 403);
@@ -887,7 +867,7 @@ test("session-details: projects details straight from the session doc, ZERO GCS 
   assert.equal(res.body.details.length, 1);
   const d = res.body.details[0];
   assert.equal(d.username, "Alice", "echoes the input username");
-  assert.equal(d.hackerrank_username, "Alice");
+  assert.equal(d.candidate_id, "Alice", "person identity surfaced via candidateOf");
   assert.equal(d.name, "Alice Example");
   assert.equal(d.email, "alice@example.com", "email projected (recording-sessions omits this)");
   assert.equal(d.roll_number, "R-1", "roll_number projected (recording-sessions omits this)");
@@ -1066,7 +1046,7 @@ test("recording-sessions: lists only sessions with chunks, newest-first, lightwe
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.sessions.length, 1, "only the session with chunks is listed");
   const session = res.body.sessions[0];
-  assert.equal(session.hackerrank_username, "alice");
+  assert.equal(session.candidate_id, "alice");
   assert.equal(session.chunk_count, 2);
   // Lightweight contract: no GCS listing, no signed URLs.
   assert.equal(Object.prototype.hasOwnProperty.call(session, "evidence"), false, "no evidence array");
@@ -1191,7 +1171,7 @@ test("sessions-list: contest_slug and room scope the result", async () => {
   const lab3 = await sessionsList({ contest_slug: contestSlug, room: "Lab-3" });
   assert.equal(lab3.body.sessions.length, 1, "only the Lab-3 session");
   assert.equal(lab3.body.sessions[0].room, "Lab-3");
-  assert.equal(lab3.body.sessions[0].hackerrank_username, "alice");
+  assert.equal(lab3.body.sessions[0].candidate_id, "alice");
 });
 
 test("sessions-list: requires admin password", async () => {
@@ -1299,7 +1279,7 @@ test("session-detail: returns the least-privilege projection for one session", a
   assert.equal(res.statusCode, 200);
   const detail = res.body.session;
   assert.equal(detail.session_id, started.body.session_id);
-  assert.equal(detail.hackerrank_username, "alice");
+  assert.equal(detail.candidate_id, "alice");
   assert.equal(detail.name, "Alice Example");
   assert.equal(detail.roll_number, "R-1");
   assert.equal(detail.status, "active");
