@@ -337,6 +337,68 @@ test("evaluate: mixed-keying fixture → 2 scorecard docs + meta + done", async 
   assert.ok(an.coverage.editor_events_n > 0, "anon scorecard saw editor events");
 });
 
+// A fake storage whose getFiles() ALWAYS throws (simulates a transient/persistent
+// GCS list failure). Object downloads are never reached. Used to prove a read
+// failure is treated as a GAP (gcs_read_failed → inconclusive), not silent
+// absence — and that it never becomes a cheating flag.
+function makeThrowingStorage() {
+  return {
+    bucket() {
+      return {
+        file() { return { async download() { throw new Error("should not download"); } }; },
+        async getFiles() { throw new Error("simulated transient GCS list failure"); }
+      };
+    }
+  };
+}
+
+test("READ FAILURE (Fix C): GCS list throws → gcs_read_failed gap + inconclusive tier + evidence_read_errors, NOT a cheating flag", async () => {
+  const objects = new Map();
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeThrowingStorage() });
+  seedProblem(firestore, "p1", "Answer");
+  const contest = await createContest("Read Fail 2026", [{ problem_id: "p1" }]);
+  await openContest(contest.slug);
+  const slug = contest.slug;
+
+  // One candidate who fully solved a problem — pre-fix the missing-evidence run
+  // would emit zero_effort_solve and tier "flag". The evidence read FAILS here.
+  const prefix = `contests/${slug}/sessions/anon/s1/`;
+  firestore.collection("ev_sessions").doc("s1").set({
+    session_id: "s1", contest_slug: slug, username_norm: "anon", person_id: null,
+    candidate_id: "anon", name: "Anon", room: "Lab A", status: "ended", storage_prefix: prefix,
+    fullscreen_exit_count: 0, ip_change_count: 0, created_at: "2026-06-10T03:59:00.000Z"
+  });
+  firestore.collection("ev_submissions").doc("sub1").set({
+    _id: "sub1", session_id: "s1", contest_slug: slug, username_norm: "anon", person_id: null,
+    candidate_id: "anon", problem_id: "p1", language: "python", verdict: "accepted",
+    passed_count: 10, total: 10, score: 100, max_points: 100,
+    source_code: "def solve():\n    return 42\n".repeat(20), created_at: "2026-06-10T04:00:30.000Z"
+  });
+
+  const res = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.done, true, JSON.stringify(res.body));
+  // The run surfaces the read failure as a visible counter, not silence.
+  assert.ok(res.body.evidence_read_errors >= 1, `expected evidence_read_errors; got ${JSON.stringify(res.body)}`);
+
+  const evalCol = firestore._collections.get("ev_evaluations");
+  const sc = evalCol.get(`${slug}::anon`);
+  assert.ok(sc, "scorecard written");
+  // Read failure recorded as a GAP distinct from real absence.
+  assert.ok(sc.coverage.gaps.includes("gcs_read_failed"), `coverage gaps=${JSON.stringify(sc.coverage.gaps)}`);
+  assert.equal(sc.coverage.confidence, "low");
+  // The candidate is INCONCLUSIVE, never flagged off the unread evidence.
+  assert.equal(sc.tiers.integrity, "inconclusive", `one_line=${sc.tiers.one_line}`);
+  assert.ok(!sc.flags.find((f) => f.code === "zero_effort_solve"), "no zero_effort flag on a read failure");
+  assert.match(sc.tiers.one_line, /read failed/);
+
+  // The __job doc also records the read-error tally for outage visibility.
+  const job = evalCol.get(`__job::${slug}`);
+  assert.ok(job, "job doc written");
+  assert.ok(job.evidence_read_errors >= 1, `job evidence_read_errors=${JSON.stringify(job.evidence_read_errors)}`);
+});
+
 // ---- cursor batching -------------------------------------------------------
 
 test("evaluate: cursor batching (limit:1 → cursor → resume → done)", async () => {

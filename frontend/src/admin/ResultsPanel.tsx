@@ -41,12 +41,16 @@ const TALENT_TONE: Record<RowEvaluation["talent_tier"], string> = {
   moderate: "border-ink/20 bg-ink/5 text-ink",
   weak: "border-line bg-white text-muted"
 };
-const INTEGRITY_LABEL: Record<RowEvaluation["integrity_tier"], string> = { clean: "Clean", watch: "Watch", flag: "Flag", confirmed: "Confirmed" };
+// "No data" (missing-data, 2026-06-19): a neutral grey chip — NOT the accent
+// "clean" green (we did not clear the candidate) and NOT the danger scale (we did
+// not flag them). It reads "we could not judge — review manually."
+const INTEGRITY_LABEL: Record<RowEvaluation["integrity_tier"], string> = { clean: "Clean", watch: "Watch", flag: "Flag", confirmed: "Confirmed", inconclusive: "No data" };
 const INTEGRITY_TONE: Record<RowEvaluation["integrity_tier"], string> = {
   clean: "border-accent/40 bg-accent/10 text-accent",
   watch: "border-warning/40 bg-warning/10 text-warning",
   flag: "border-danger/40 bg-danger/10 text-danger",
-  confirmed: "border-danger/60 bg-danger/20 text-danger"
+  confirmed: "border-danger/60 bg-danger/20 text-danger",
+  inconclusive: "border-ink/20 bg-ink/5 text-muted"
 };
 // Severity tone for the evidence-drawer flag list (mirrors the integrity column chips).
 const FLAG_SEVERITY_TONE: Record<ContestScorecard["flags"][number]["severity"], string> = {
@@ -55,7 +59,7 @@ const FLAG_SEVERITY_TONE: Record<ContestScorecard["flags"][number]["severity"], 
   info: "border-line bg-white text-muted"
 };
 const TALENT_FILTERS: EvalTalentFilter[] = ["all", "strong", "moderate", "weak"];
-const INTEGRITY_FILTERS: EvalIntegrityFilter[] = ["all", "clean", "watch", "flag", "confirmed"];
+const INTEGRITY_FILTERS: EvalIntegrityFilter[] = ["all", "clean", "watch", "flag", "confirmed", "inconclusive"];
 
 // The Talent column cell: tier badge + the sortable composite number ("—" when
 // the row has no scorecard, incl. unmatched rows the evaluator never scored).

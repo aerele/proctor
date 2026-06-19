@@ -166,17 +166,20 @@ describe("evaluation threading + tier filters", () => {
     row({ person_id: "moderate-watch", evaluation: evaluation({ talent_tier: "moderate", integrity_tier: "watch" }) }),
     row({ person_id: "weak-flag", evaluation: evaluation({ talent_tier: "weak", integrity_tier: "flag" }) }),
     row({ person_id: "confirmed", evaluation: evaluation({ talent_tier: "weak", integrity_tier: "confirmed" }) }),
+    // Missing-data (2026-06-19): a no-evidence candidate is "inconclusive" — a
+    // distinct tier the reviewer can filter to, separate from clean/flagged.
+    row({ person_id: "no-data", evaluation: evaluation({ talent_tier: "moderate", integrity_tier: "inconclusive" }) }),
     row({ person_id: "unevaluated", evaluation: null })
   ];
 
   it("threads the evaluation onto rows (null preserved)", () => {
     expect(evalRows[0].evaluation?.talent_tier).toBe("strong");
-    expect(evalRows[4].evaluation).toBeNull();
+    expect(evalRows[5].evaluation).toBeNull();
   });
 
   it("evalTalent 'all' (or absent) is a no-op", () => {
-    expect(filterResultRows(evalRows, {}).length).toBe(5);
-    expect(filterResultRows(evalRows, { evalTalent: "all" }).length).toBe(5);
+    expect(filterResultRows(evalRows, {}).length).toBe(6);
+    expect(filterResultRows(evalRows, { evalTalent: "all" }).length).toBe(6);
   });
 
   it("evalTalent filters to the matching tier and drops unevaluated rows", () => {
@@ -187,6 +190,13 @@ describe("evaluation threading + tier filters", () => {
   it("evalIntegrity filters to the matching tier and drops unevaluated rows", () => {
     expect(filterResultRows(evalRows, { evalIntegrity: "confirmed" }).map((r) => r.person_id)).toEqual(["confirmed"]);
     expect(filterResultRows(evalRows, { evalIntegrity: "clean" }).map((r) => r.person_id)).toEqual(["strong-clean"]);
+  });
+
+  it("evalIntegrity 'inconclusive' isolates the no-data candidates (never mixed with clean/flagged)", () => {
+    expect(filterResultRows(evalRows, { evalIntegrity: "inconclusive" }).map((r) => r.person_id)).toEqual(["no-data"]);
+    // and an inconclusive row is NOT returned by the clean or flag filters.
+    expect(filterResultRows(evalRows, { evalIntegrity: "clean" }).map((r) => r.person_id)).not.toContain("no-data");
+    expect(filterResultRows(evalRows, { evalIntegrity: "flag" }).map((r) => r.person_id)).not.toContain("no-data");
   });
 
   it("tier filters compose with each other and with existing filters (AND)", () => {
