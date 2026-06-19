@@ -341,7 +341,7 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   // rejections are NOT retried — they reject immediately into the existing
   // catch path (upload_error + handleFatalStatus), unchanged. Retries run
   // INSIDE this chunk's slot of the serial per-kind chain, so at most one retry
-  // sequence is in flight per kind and exhaustion (~7s of backoff) falls
+  // sequence is in flight per kind and exhaustion (~67s of backoff) falls
   // through to the exact same honest-gap path as a single failure today.
   const uploadChunkWithRetry = async (kind: "screen" | "camera", blob: Blob, index: number) => {
     let retried = 0;

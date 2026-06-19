@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
 import { bucket, signingBucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
@@ -67,7 +67,7 @@ const {
   RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
-  PUBLIC_APP_ORIGIN, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
+  PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
   EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS
 } = loadConfig();
 
@@ -543,6 +543,17 @@ const healthCheckRoutes = makeHealthCheckRoutes({
   evidenceBucket: EVIDENCE_BUCKET,
   urlExpirySeconds: URL_EXPIRY_SECONDS,
   publicAppOrigin: PUBLIC_APP_ORIGIN,
+  publicAppUrl: PUBLIC_APP_URL,
+  // Pre-compute sha256(password) for the bundle_hashes pre-flight probe so the
+  // probe can assert the served frontend bundle carries the expected gate hashes
+  // WITHOUT ever seeing the raw passwords (label-only from here down). Any unset
+  // password is skipped so the probe degrades to a clean "skip", not a false red.
+  expectedBundleHashes: [
+    { label: "admin", password: ADMIN_PASSWORD },
+    { label: "invigilator", password: INVIGILATOR_PASSWORD }
+  ]
+    .filter((e) => typeof e.password === "string" && e.password.length > 0)
+    .map((e) => ({ label: e.label, hash: createHash("sha256").update(e.password, "utf8").digest("hex") })),
   judge0BaseUrl: JUDGE0_BASE_URL,
   judge0Mode: JUDGE0_MODE,
   judge0ApiKey: JUDGE0_API_KEY,

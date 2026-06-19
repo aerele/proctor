@@ -13,6 +13,7 @@
 //   - auth: missing/incorrect x-admin-password -> 401.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 process.env.EVIDENCE_BUCKET = "hc-bucket";
 process.env.SESSION_COLLECTION = "hc_sessions";
@@ -30,6 +31,13 @@ process.env.JUDGE0_API_KEY = "hc-judge0-key";
 
 const handler = await import("../src/handler.mjs?healthcheck");
 const { api, __setClientsForTest, __setJudge0AdapterForTest } = handler;
+
+// The served bundle carries the HASH VALUES (sha256 of each gate password), not
+// the env-var names — so the fake bundle below embeds these and the probe
+// asserts their presence (mirrors the live frontend deploy hash-gate).
+const sha256Hex = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+const ADMIN_HASH = sha256Hex("hc-admin-pass");
+const INVIG_HASH = sha256Hex("hc-invig-pass");
 
 // ---- req/res mocks (copied from the sibling handler tests) ------------------
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -166,8 +174,12 @@ function makeFakeFetch({ bundleOk = true, saved = new Map() } = {}) {
       return ok(200, '<html><head><script src="/assets/index-abc123.js"></script></head></html>');
     }
     if (/\.js$/.test(u)) {
+      // The Vite build inlines the HASH VALUES (sha256 of the gate passwords),
+      // NOT the env-var names — so the bundle_hashes probe asserts those values
+      // are present. ADMIN_HASH/INVIG_HASH are sha256("hc-admin-pass") /
+      // sha256("hc-invig-pass") (the test's ADMIN_PASSWORD/INVIGILATOR_PASSWORD).
       const body = bundleOk
-        ? 'const a="VITE_ADMIN_PASSWORD_HASH";const b="VITE_INVIGILATOR_PASSWORD_HASH";'
+        ? `const a="${ADMIN_HASH}";const b="${INVIG_HASH}";`
         : 'const a="nope";';
       return ok(200, body);
     }
@@ -247,9 +259,15 @@ test("health-check: LIGHT mode returns the contract shape, all checks present, N
   // signed PUT now lands the object in the shared Storage map, so the
   // list-after-PUT + read-back actually succeed, not just shape-check).
   const byId = new Map(b.checks.map((c) => [c.id, c]));
-  for (const id of ["infra_gcs_rw", "chunk_upload_signed", "recordings_read"]) {
+  for (const id of ["infra_gcs_rw", "chunk_upload_signed", "recordings_read", "bundle_hashes"]) {
     assert.equal(byId.get(id).status, "green", `${id} should be GREEN in a healthy LIGHT run: ${byId.get(id).detail}`);
   }
+  // bundle_hashes proves the served bundle carries the expected hash VALUES,
+  // and must NOT leak any raw password or hash value in its detail string.
+  const bundleDetail = byId.get("bundle_hashes").detail;
+  assert.ok(!bundleDetail.includes("hc-admin-pass") && !bundleDetail.includes("hc-invig-pass")
+    && !bundleDetail.includes(ADMIN_HASH) && !bundleDetail.includes(INVIG_HASH),
+    `bundle_hashes detail leaked a secret: ${bundleDetail}`);
   // A fully-healthy LIGHT run is GREEN overall.
   assert.equal(b.overall, "green", `healthy LIGHT run should be GREEN; reds: ${b.checks.filter((c) => c.status === "red").map((c) => `${c.id}=${c.detail}`).join(", ")}`);
 
@@ -370,6 +388,13 @@ test("health-check: bundle missing the hash gate -> bundle_hashes red, overall r
   assert.equal(res.statusCode, 200);
   const bundle = res.body.checks.find((c) => c.id === "bundle_hashes");
   assert.equal(bundle.status, "red");
-  assert.match(bundle.detail, /VITE_(ADMIN|INVIGILATOR)_PASSWORD_HASH/);
+  // Error names the missing LABELS (admin/invigilator) — never a hash/password.
+  assert.match(bundle.detail, /missing expected password hash/);
+  assert.match(bundle.detail, /admin|invigilator/);
+  // And it must NEVER leak a raw password or a hash value.
+  assert.ok(!bundle.detail.includes("hc-admin-pass") && !bundle.detail.includes("hc-invig-pass"),
+    "bundle_hashes detail leaked a raw password");
+  assert.ok(!bundle.detail.includes(ADMIN_HASH) && !bundle.detail.includes(INVIG_HASH),
+    "bundle_hashes detail leaked a hash value");
   assert.equal(res.body.overall, "red");
 });

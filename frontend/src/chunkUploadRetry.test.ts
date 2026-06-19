@@ -1,6 +1,6 @@
 // RT-1 (e2e-live retest rev 00008, 2026-06-12) — bounded retry for recording-
 // chunk uploads. Pure logic: TRANSIENT failures (network rejection / 5xx /
-// 429) get up to 2 more attempts with a fresh signed URL for the SAME index
+// 429) get up to 5 more attempts with a fresh signed URL for the SAME index
 // and bytes; by-design 4xx rejections (401/403 lock-window, 409 ended) and
 // exhaustion fall through to the existing honest-gap path unchanged.
 import { describe, expect, it } from "vitest";
@@ -124,7 +124,11 @@ describe("runUploadWithRetry", () => {
   it("exhaustion -> gives up cleanly with the LAST error after the full schedule", async () => {
     const { sleep, delays } = recordingSleep();
     const retries: UploadRetryInfo[] = [];
-    const errors = [networkError(), putError(503), networkError()];
+    // One transient error per attempt: 1 initial + (schedule length) retries.
+    const attempts = UPLOAD_RETRY_BACKOFF_MS.length + 1;
+    const errors = Array.from({ length: attempts }, (_, i) =>
+      i % 2 === 0 ? networkError() : putError(503)
+    );
     let calls = 0;
 
     await expect(
@@ -134,11 +138,13 @@ describe("runUploadWithRetry", () => {
         },
         { sleep, onRetry: (info) => retries.push(info) }
       )
-    ).rejects.toBe(errors[2]);
+    ).rejects.toBe(errors[attempts - 1]);
 
-    expect(calls).toBe(3); // 1 attempt + 2 retries, then stop
+    expect(calls).toBe(attempts); // 1 attempt + (schedule length) retries, then stop
     expect(delays).toEqual([...UPLOAD_RETRY_BACKOFF_MS]);
-    expect(retries.map((r) => r.attempt)).toEqual([1, 2]);
+    expect(retries.map((r) => r.attempt)).toEqual(
+      UPLOAD_RETRY_BACKOFF_MS.map((_, i) => i + 1)
+    );
   });
 
   it("re-uses the SAME chunk index and bytes, with a FRESH url per attempt (recorder shape)", async () => {
@@ -189,8 +195,8 @@ describe("runUploadWithRetry", () => {
     expect(result.storage_key).toBe("screen/chunk-00007.webm");
   });
 
-  it("uses the real backoff schedule by default (2 retries max)", () => {
-    expect(UPLOAD_RETRY_BACKOFF_MS).toEqual([2000, 5000]);
+  it("uses the real backoff schedule by default (5 retries max)", () => {
+    expect(UPLOAD_RETRY_BACKOFF_MS).toEqual([2000, 5000, 10000, 20000, 30000]);
   });
 });
 

@@ -75,6 +75,7 @@ export function loadConfig() {
     // never wedges the button. Default 180s.
     EVAL_LEASE_MS: positiveIntOr(process.env.EVAL_LEASE_MS, 180000),
     PUBLIC_APP_ORIGIN: process.env.PUBLIC_APP_ORIGIN || "*",
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || "",
     // S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
     // silently disable the brute-force cap; fall back to the safe default of 20.
     GATE_ATTEMPT_LIMIT: positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20)
