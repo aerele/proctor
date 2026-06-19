@@ -222,44 +222,57 @@ test("evalApi applies CORS headers to its 404 fallthrough (cross-origin caller r
   assert.equal(res.headers["access-control-allow-origin"], "https://proctor-web.example");
 });
 
-// ---- /eval-ui: the EVAL-EXCLUSIVE embeddable placeholder page ----------------
+// ---- /eval-ui: the EVAL-EXCLUSIVE embeddable recommendation page -------------
 // Served DIRECTLY by the eval entry (before the allowlist), so the frontend's
 // Evaluation tab can iframe ${evalApiBaseUrl}/eval-ui and the eval team owns the
-// page. No auth (placeholder shows nothing privileged), HTML, iframe-friendly.
+// page. The page is a STATIC shell (no server-side data interpolation): it reads
+// ?contest itself and self-authenticates (asks for the admin password, replays
+// it as x-admin-password on its own same-origin fetch), so the three /eval-ui
+// routes expose only static HTML/JS and need no auth.
 
-test("evalApi serves GET /eval-ui as 200 text/html with the contest slug + 'rendered by the proctor-eval service'", async () => {
+test("evalApi serves GET /eval-ui as 200 text/html — the static app shell, iframe-embeddable", async () => {
   freshClients();
   const res = await call(makeReq({ method: "GET", path: "/eval-ui", query: { contest: "mcet-june-2026" } }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   assert.match(String(res.headers["content-type"]), /text\/html/);
   assert.match(String(res.headers["content-type"]), /charset=utf-8/);
   const html = String(res.body);
-  assert.match(html, /rendered by the proctor-eval service/);
-  assert.match(html, /mcet-june-2026/);
-  // Heading + the muted P3 note are present (intentional placeholder, not broken).
-  assert.match(html, /<h1>Evaluation<\/h1>/);
-  assert.match(html, /will render here/);
+  assert.match(html, /<title>Evaluation<\/title>/);
+  // The shell loads the client app module; all data is fetched + rendered client-side.
+  assert.match(html, /<script type="module" src="\/eval-ui\/app\.js">/);
+  assert.match(html, /id="root"/);
 });
 
-test("GET /eval-ui without a contest param shows the em-dash placeholder ('—'), not a crash", async () => {
-  freshClients();
-  const res = await call(makeReq({ method: "GET", path: "/eval-ui" }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  const html = String(res.body);
-  assert.match(html, /rendered by the proctor-eval service/);
-  // The Contest value renders as the em-dash placeholder when unset.
-  assert.match(html, /Contest:[\s\S]*—/);
-});
-
-test("GET /eval-ui HTML-ESCAPES a script-y contest param (no raw <script>, no XSS)", async () => {
+test("GET /eval-ui does NOT reflect the contest param into the document (no server-side XSS surface)", async () => {
   freshClients();
   const evil = "<script>alert(1)</script>";
   const res = await call(makeReq({ method: "GET", path: "/eval-ui", query: { contest: evil } }));
   assert.equal(res.statusCode, 200);
   const html = String(res.body);
-  // The raw injected tag must NOT appear; its escaped form must.
-  assert.ok(!html.includes("<script>alert(1)</script>"), "raw <script> leaked into the page");
-  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  // The shell is identical regardless of the query — the slug never touches the
+  // server-rendered HTML (the client reads it from location), so there is nothing
+  // to escape and no injection vector here.
+  assert.ok(!html.includes("alert(1)"), "contest param leaked into the server-rendered page");
+});
+
+test("GET /eval-ui/app.js serves the browser client as text/javascript", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "GET", path: "/eval-ui/app.js" }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.match(String(res.headers["content-type"]), /javascript/);
+  const js = String(res.body);
+  // It imports the shared pure recommendation module and self-authenticates.
+  assert.match(js, /\/eval-ui\/recommend\.js/);
+  assert.match(js, /x-admin-password/);
+});
+
+test("GET /eval-ui/recommend.js serves the SAME pure module the node tests pin", async () => {
+  freshClients();
+  const res = await call(makeReq({ method: "GET", path: "/eval-ui/recommend.js" }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.match(String(res.headers["content-type"]), /javascript/);
+  const js = String(res.body);
+  assert.match(js, /export function computeRecommendationReport/);
 });
 
 test("GET /eval-ui does NOT set a frame-blocking header (X-Frame-Options / frame-ancestors) — must be iframe-embeddable", async () => {
