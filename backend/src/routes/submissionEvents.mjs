@@ -109,6 +109,16 @@ export function makeSubmissionEventsRoutes(ctx) {
     if (event.challenge_name) item.challenge_name = String(event.challenge_name);
     if (event.lang) item.lang = String(event.lang);
     if (event.status) item.status = String(event.status);
+    // OPTIONAL score fields — uniform with the native-submission mapping so the
+    // recording-review timeline renders the same result+score shape from either
+    // source. Today's poller fleet does not send them; threaded through only when
+    // present + numeric so the poller path is unchanged when they are absent.
+    for (const field of ["passed_count", "total", "score", "max_points"]) {
+      const n = Number(event[field]);
+      if (event[field] !== undefined && event[field] !== null && event[field] !== "" && Number.isFinite(n)) {
+        item[field] = n;
+      }
+    }
     return item;
   }
 
@@ -182,6 +192,12 @@ export function makeSubmissionEventsRoutes(ctx) {
   //   status             ← verdict
   //   hackerrank_username ← username_norm (the timeline only displays it; the
   //                         markers are already scoped by the query)
+  // SCORES (handler.mjs execSubmit writes these on every native submit doc):
+  //   passed_count / total ← per-test counts (e.g. "8/10 tests")
+  //   score / max_points   ← points scored / out of (e.g. "80/100")
+  // Threaded through ONLY when present + numeric so the recording-review timeline
+  // can render an explicit result+score; absent/non-numeric → field omitted (the
+  // poller-sourced HackerRank events have no counts, and the renderer degrades).
   // Drops docs with no usable created_at (the timeline plots on submitted_at and
   // would otherwise NaN them out anyway).
   function nativeSubmissionToEvent(docId, data) {
@@ -198,6 +214,15 @@ export function makeSubmissionEventsRoutes(ctx) {
     if (data?.problem_id) event.challenge_slug = String(data.problem_id);
     if (data?.language) event.lang = String(data.language);
     if (verdict !== undefined && verdict !== null && verdict !== "") event.status = String(verdict);
+    // Score fields: thread only the ones that are PRESENT and coerce to a finite
+    // number, so a missing/null/garbled field never lands as NaN (and never as a
+    // spurious 0 — Number(null) === 0, so null/""/undefined are rejected FIRST).
+    for (const field of ["passed_count", "total", "score", "max_points"]) {
+      const raw = data?.[field];
+      if (raw === undefined || raw === null || raw === "") continue;
+      const n = Number(raw);
+      if (Number.isFinite(n)) event[field] = n;
+    }
     return event;
   }
 

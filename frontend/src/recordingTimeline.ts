@@ -191,6 +191,27 @@ export function summarizeEventDetail(detail?: Record<string, string | number | b
     .join(" · ");
 }
 
+// Explicit RESULT + SCORE summary for a submission, built from the (optional,
+// native-proctor-only) score fields. Renders the two facts a reviewer wants at
+// a glance: how many hidden tests passed, and the points scored:
+//   "8/10 tests · 80/100"   (both present)
+//   "8/10 tests"            (counts only)
+//   "80/100"                (points only)
+//   ""                      (neither — poller-sourced HackerRank events)
+// Each half appears only when its numbers are finite (an unscored / counts-only
+// submission never shows a bare "/" or NaN). max_points 0 still renders so a
+// zero-weight problem reads "0/0" rather than vanishing.
+export function submissionScoreSummary(submission: SubmissionEvent): string {
+  const parts: string[] = [];
+  const passed = submission.passed_count;
+  const total = submission.total;
+  if (Number.isFinite(passed) && Number.isFinite(total)) parts.push(`${passed}/${total} tests`);
+  const score = submission.score;
+  const maxPoints = submission.max_points;
+  if (Number.isFinite(score) && Number.isFinite(maxPoints)) parts.push(`${score}/${maxPoints}`);
+  return parts.join(" · ");
+}
+
 // The candidate's alerts out of a contest-scoped alert list: match on
 // username_norm (both sides are backend-normalized), falling back to a
 // lowercase username compare for records missing the norm field.
@@ -259,16 +280,22 @@ export function buildTimelineLog(params: {
   for (const submission of submissions) {
     const offsetSec = offsetSecFor(submission.submitted_at, testStartMs);
     if (offsetSec === null) continue;
+    // "Submit" prefix so the row reads as an explicit action (vs an alert/event),
+    // then the RESULT (Accepted / the failure status), the challenge, and — when
+    // the native submit doc carried them — the explicit pass/fail counts + score:
+    //   "Submit · Accepted · Two Sum · 8/10 tests · 80/100"
+    // The score summary also lands in `detail` (searchable; reads under the row).
+    const score = submissionScoreSummary(submission);
+    const result = submission.valid ? "Accepted" : submission.status || "Failed";
+    const challenge = submission.challenge_name || submission.challenge_slug || "submission";
     entries.push({
       kind: "submission",
       id: `sub:${submission.submission_id}`,
       type: submission.status || (submission.valid ? "Accepted" : "Failed"),
       offsetSec,
       timestamp: submission.submitted_at,
-      label: `${submission.valid ? "Accepted" : submission.status || "Failed"} · ${
-        submission.challenge_name || submission.challenge_slug || "submission"
-      }`,
-      detail: submission.lang || "",
+      label: `Submit · ${result} · ${challenge}${score ? ` · ${score}` : ""}`,
+      detail: [submission.lang || "", score].filter(Boolean).join(" · "),
       valid: submission.valid,
       duringGap: isDuringGap(offsetSec, gaps)
     });
