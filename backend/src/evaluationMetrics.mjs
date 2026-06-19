@@ -271,6 +271,10 @@ export function buildScorecard(input) {
     hardness = () => "easy",
     maxTotal = 0,
     clipboardEntries = [],
+    // evidenceReadFailed: the GCS evidence read for this candidate persistently
+    // failed (a read GAP, distinct from real absence). Threaded into coverage so
+    // confidence drops and the tier becomes inconclusive, never a violation.
+    evidenceReadFailed = false,
   } = input;
 
   const identity_key = identityKeyOf(identity);
@@ -289,6 +293,22 @@ export function buildScorecard(input) {
 
   // ---- replay ----
   const replay = replaySession(editorEvents, { stubs: allStubs, extraSelfTexts });
+
+  // AVAILABILITY GATES (missing-data, 2026-06-19). A detector that needs a signal
+  // must verify the signal is PRESENT; absent ⇒ inconclusive, never a flag. These
+  // are hoisted here so the per-problem loop (zero-effort) and the later tamper
+  // detector share one definition.
+  // editorCoveragePresent: any editor events at all? (mirrors the tamper gate.)
+  const editorCoveragePresent = replay.events_n > 0;
+  // problemsWithEvents: problems that actually have editor events (per-problem
+  // zero-coverage exclusion, mirroring the tamper logic).
+  const problemsWithEvents = new Set(Object.keys(replay.problems));
+  // pasteInferenceAvailable: did the session emit ANY paste/selection telemetry?
+  // When false, the "large unpaired insert ⇒ pasted" inference was suppressed in
+  // the replay (so pasted_chars/foreign-unpaired are clean), and the paste-ratio
+  // flag below is suppressed too — absence of paste markers is inconclusive on the
+  // paste axis, never a high-paste-ratio violation.
+  const pasteInferenceAvailable = replay.paste_inference_available === true;
 
   // ---- away episodes + correlations + cadence ----
   const episodes = awayEpisodes(shellEvents);
@@ -425,7 +445,15 @@ export function buildScorecard(input) {
 
     // genuine_arc
     const typedMajority = typed >= pasted;
+    // AVAILABILITY GATE (missing-data, 2026-06-19): zero-effort needs editor
+    // events to be MEANINGFUL — with no events, active_ms=0 and typed=0 for every
+    // problem, so this would fire on every accepted non-easy solve purely because
+    // the telemetry was absent/unread. Gate on editor coverage being present
+    // (whole-session) AND this specific problem having events, exactly mirroring
+    // the tamper detector's gate. No editor coverage ⇒ inconclusive, never a flag.
     const zeroEffort =
+      editorCoveragePresent &&
+      problemsWithEvents.has(pid) &&
       solvedFull &&
       tier !== "easy" &&
       active_ms < THRESHOLDS.ZERO_EFFORT_ACTIVE_MS &&
@@ -509,7 +537,13 @@ export function buildScorecard(input) {
   const overallScoringPasteRatio = scoringPasted / Math.max(1, scoringTyped + scoringPasted);
   const paste_ratio = totalPasted / Math.max(1, totalTyped + totalPasted);
 
-  if (overallScoringPasteRatio > THRESHOLDS.PASTE_RATIO_FLAG) {
+  // AVAILABILITY GATE (missing-data, 2026-06-19): the paste-ratio flag is only
+  // meaningful when the session emitted paste/selection telemetry. With no
+  // markers, the replay already suppressed the "large unpaired insert ⇒ pasted"
+  // inference (so this ratio should be ~0), but we ALSO gate the flag here so a
+  // session that never captured paste signals can never produce a high-paste
+  // critical flag — that axis is inconclusive, never a violation.
+  if (pasteInferenceAvailable && overallScoringPasteRatio > THRESHOLDS.PASTE_RATIO_FLAG) {
     flags.push({
       code: "high_paste_ratio",
       severity: "critical",
@@ -570,9 +604,8 @@ export function buildScorecard(input) {
   // ---- D16b replay-vs-submission mismatch ----
   const replay_mismatches = [];
   let telemetry_tampered = false;
-  const editorCoveragePresent = replay.events_n > 0;
-  // Problems that actually have editor events (for the zero-coverage exclusion).
-  const problemsWithEvents = new Set(Object.keys(replay.problems));
+  // editorCoveragePresent + problemsWithEvents are hoisted above (shared with the
+  // zero-effort gate); the per-problem zero-coverage exclusion uses them below.
   for (const s of submissions) {
     const pid = s.problem_id;
     const src = s.source_code || "";
@@ -686,6 +719,7 @@ export function buildScorecard(input) {
     submissions,
     sessions,
     replay,
+    evidenceReadFailed,
   });
   // Glitch-gated mismatches (see D16b above): replay base was wrong for these
   // problems — record as coverage gaps so confidence drops instead of a flag.
@@ -743,7 +777,7 @@ export function buildScorecard(input) {
     stubsByProblem,
   });
 
-  const derived = deriveTiers({ flags, talent, integrity });
+  const derived = deriveTiers({ flags, talent, integrity, coverage });
 
   return {
     schema_version: 1,
@@ -804,10 +838,27 @@ function computeComposite({ total_score, gamedPartialPoints = 0, maxTotal, per_p
   return Math.round(55 * score_frac + 20 * hardness_frac + 15 * genuine_frac + 10 * reach_frac);
 }
 
-function deriveTiers({ flags, talent, integrity }) {
+function deriveTiers({ flags, talent, integrity, coverage = {} }) {
   const hasCode = (c) => flags.some((f) => f.code === c);
   const criticalFlags = flags.filter((f) => f.severity === "critical");
   const warningFlags = flags.filter((f) => f.severity === "warning");
+
+  // INCONCLUSIVE / NO-DATA tier (missing-data, 2026-06-19). When there is
+  // effectively NO interaction evidence to judge — confidence "low" AND zero
+  // editor AND zero shell events — the eval must NOT accuse the candidate of
+  // cheating off absent data. This includes the case where the evidence read
+  // FAILED (gcs_read_failed gap, Fix C): a read gap is distinct from real
+  // absence and must also land here, never as a violation. Such a candidate is
+  // surfaced as "no data — review manually", neither clean nor flagged.
+  // EXCEPTION: a Firestore-derived conclusive recurring-pair clone (cross-pass)
+  // does not depend on the interaction stream and remains a real confirmation,
+  // so it is NOT downgraded to inconclusive.
+  const editorEventsN = Number.isFinite(coverage.editor_events_n) ? coverage.editor_events_n : null;
+  const shellEventsN = Number.isFinite(coverage.shell_events_n) ? coverage.shell_events_n : null;
+  const gcsReadFailed = Array.isArray(coverage.gaps) && coverage.gaps.includes("gcs_read_failed");
+  const noEvidence =
+    coverage.confidence === "low" &&
+    (gcsReadFailed || (editorEventsN === 0 && shellEventsN === 0));
 
   // integrity tier
   let integrityTier = "clean";
@@ -818,7 +869,13 @@ function deriveTiers({ flags, talent, integrity }) {
   const fullSolnAfterAway = integrity.foreign_pastes.some(
     (fp) => fp.after_away_ms != null && fp.len >= THRESHOLDS.FULL_SOLUTION_PASTE_LEN
   );
-  if (conclusiveRecurring || integrity.telemetry_tampered || fullSolnAfterAway) {
+  if (conclusiveRecurring) {
+    // Code-similarity clone proof is independent of the interaction stream.
+    integrityTier = "confirmed";
+  } else if (noEvidence) {
+    // No interaction evidence (real absence or read failure) ⇒ cannot judge.
+    integrityTier = "inconclusive";
+  } else if (integrity.telemetry_tampered || fullSolnAfterAway) {
     integrityTier = "confirmed";
   } else if (criticalFlags.length > 0) {
     integrityTier = "flag";
@@ -847,7 +904,7 @@ function deriveTiers({ flags, talent, integrity }) {
     composite = Math.min(composite, 20);
   }
 
-  const one_line = buildOneLine({ talentTier, integrityTier, talent, integrity, flags, composite });
+  const one_line = buildOneLine({ talentTier, integrityTier, talent, integrity, flags, composite, gcsReadFailed });
 
   return {
     tiers: { talent: talentTier, integrity: integrityTier, one_line },
@@ -871,11 +928,22 @@ function countGenuine(talent, tier) {
   return n;
 }
 
-function buildOneLine({ talentTier, integrityTier, talent, integrity, flags, composite }) {
+function buildOneLine({ talentTier, integrityTier, talent, integrity, flags, composite, gcsReadFailed = false }) {
   const crit = flags.filter((f) => f.severity === "critical").length;
   const warn = flags.filter((f) => f.severity === "warning").length;
   const parts = [];
   parts.push(`talent=${talentTier}(${composite})`);
+  if (integrityTier === "inconclusive") {
+    // Make the reason explicit so a reviewer sees "no data" vs a clean/flagged
+    // verdict and never reads it as cleared OR as a cheating accusation.
+    parts.push(
+      gcsReadFailed
+        ? "integrity=inconclusive (evidence read failed — no interaction telemetry available)"
+        : "integrity=inconclusive (no editor/shell telemetry read)"
+    );
+    parts.push(`solved=${talent.n_solved_full}/${Object.keys(talent.per_problem).length}`);
+    return parts.join("; ");
+  }
   parts.push(`integrity=${integrityTier}`);
   parts.push(`solved=${talent.n_solved_full}/${Object.keys(talent.per_problem).length}`);
   parts.push(`paste=${Math.round(integrity.paste_ratio * 100)}%`);
@@ -889,12 +957,17 @@ function buildOneLine({ talentTier, integrityTier, talent, integrity, flags, com
 // ---------------------------------------------------------------------------
 // coverage / confidence
 // ---------------------------------------------------------------------------
-function computeCoverage({ editorEvents, shellEvents, submissions, sessions, replay }) {
+function computeCoverage({ editorEvents, shellEvents, submissions, sessions, replay, evidenceReadFailed = false }) {
   const editor_events_n = editorEvents.length;
   const shell_events_n = shellEvents.length;
   const submissions_n = submissions.length;
   const sessions_n = sessions.length;
   const gaps = [];
+  // READ-FAILURE GAP (missing-data, 2026-06-19): a persistent GCS read failure is
+  // a coverage gap, NOT real absence. Record it as a distinct gap so deriveTiers
+  // can mark the candidate inconclusive and a reviewer sees "read failed" rather
+  // than the eval scoring absent evidence as a violation.
+  if (evidenceReadFailed) gaps.push("gcs_read_failed");
   // D16a: >5min silent editor stream while a session is active. Approximate by
   // scanning consecutive editor-event gaps inside the active span.
   let prev = null;
@@ -907,7 +980,7 @@ function computeCoverage({ editorEvents, shellEvents, submissions, sessions, rep
     prev = ts;
   }
   let confidence;
-  if (editor_events_n === 0 || gaps.length > 2) confidence = "low";
+  if (evidenceReadFailed || editor_events_n === 0 || gaps.length > 2) confidence = "low";
   else if (editor_events_n > 0 && gaps.length === 0) confidence = "high";
   else confidence = "medium";
   return { editor_events_n, shell_events_n, submissions_n, sessions_n, gaps, confidence };
@@ -1553,7 +1626,7 @@ export function applyCrossPatches(scorecard, patch) {
   // re-derive tiers + composite + one_line. Need per_problem tier tags for the
   // talent recount; reconstruct from the scorecard.
   tagPerProblemTiers(sc);
-  const derived = deriveTiers({ flags: sc.flags, talent: sc.talent, integrity: sc.integrity });
+  const derived = deriveTiers({ flags: sc.flags, talent: sc.talent, integrity: sc.integrity, coverage: sc.coverage || {} });
   sc.talent.composite = derived.composite;
   sc.tiers = derived.tiers;
   return sc;

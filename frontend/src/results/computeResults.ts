@@ -27,7 +27,9 @@ export type ResultProblemCell = {
 // behaviour-preserving against backends that don't send it.
 export type RowEvaluation = {
   talent_tier: "strong" | "moderate" | "weak";
-  integrity_tier: "clean" | "watch" | "flag" | "confirmed";
+  // "inconclusive" (missing-data, 2026-06-19): no/unread interaction evidence —
+  // the eval cannot judge integrity, so this is neither clean nor a violation.
+  integrity_tier: "clean" | "watch" | "flag" | "confirmed" | "inconclusive";
   composite: number; // 0–100 sortable talent composite
   paste_ratio: number; // 0–1 across scoring problems
   flags_by_severity: { critical: number; warning: number; info: number };
@@ -91,7 +93,7 @@ export function countUnmatched(rows: ResultRow[]): number {
 
 // P1: the talent/integrity-tier filter vocabularies. "all" is the no-op.
 export type EvalTalentFilter = "all" | "strong" | "moderate" | "weak";
-export type EvalIntegrityFilter = "all" | "clean" | "watch" | "flag" | "confirmed";
+export type EvalIntegrityFilter = "all" | "clean" | "watch" | "flag" | "confirmed" | "inconclusive";
 
 export type ResultFilters = {
   search?: string;

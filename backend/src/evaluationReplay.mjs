@@ -307,6 +307,27 @@ export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) 
 
   let eventsN = 0;
 
+  // AVAILABILITY PRE-SCAN (missing-data gate, 2026-06-19): the "large unpaired
+  // insert ⇒ pasted" fallback (provisionalPaste below) is only trustworthy when
+  // the session actually emits paste/selection telemetry to pair against. Some
+  // builds capture ZERO `editor_paste`/`editor_selection` events; with no marker
+  // to pair, legitimate large inserts (stub loads, big genuine edits, autocomplete)
+  // were mis-credited as pasted, inflating paste_ratio toward the critical flag —
+  // an honest cohort looked like mass cheating. When neither paste nor selection
+  // markers exist anywhere in the stream, the paste-inference signal is ABSENT,
+  // not negative: we record that here and stop inferring "pasted" from unpaired
+  // inserts (the metrics layer marks the paste axis inconclusive, never a flag).
+  // When markers ARE present, behavior is unchanged — real detection is intact.
+  let hasPasteEvents = false;
+  let hasSelectionEvents = false;
+  for (const ev of events) {
+    const t = ev && ev.type;
+    if (t === "editor_paste") hasPasteEvents = true;
+    else if (t === "editor_selection") hasSelectionEvents = true;
+    if (hasPasteEvents && hasSelectionEvents) break;
+  }
+  const pasteInferenceAvailable = hasPasteEvents || hasSelectionEvents;
+
   for (const ev of events) {
     eventsN++;
     const tsRaw = Date.parse(ev.timestamp);
@@ -485,8 +506,13 @@ export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) 
           recentStubReload,
           consumed: false,
           finalized: false,
-          // provisional classification (large unpaired insert → paste unless excluded)
+          // provisional classification (large unpaired insert → paste unless excluded).
+          // GATED on paste/selection telemetry being present in the session: with
+          // no markers to pair against, an unpaired large insert is inconclusive,
+          // not pasted (see AVAILABILITY PRE-SCAN above). When markers exist this
+          // is unchanged.
           provisionalPaste:
+            pasteInferenceAvailable &&
             insertedLen >= REPLAY.LARGE_INSERT_PASTE_LEN &&
             !isAutocompleteShaped(text) &&
             !isStubMatch &&
@@ -572,6 +598,13 @@ export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) 
     submit_snapshots: submitSnapshots,
     stub_reloads: stubReloads,
     events_n: eventsN,
+    // Per-session signal-availability manifest (missing-data gate). Lets the
+    // metrics layer tell "no paste detected" (negative) apart from "paste
+    // telemetry was never captured" (inconclusive). When neither flag is set the
+    // paste-ratio / pasted-inference axis is marked inconclusive, never a flag.
+    has_paste_events: hasPasteEvents,
+    has_selection_events: hasSelectionEvents,
+    paste_inference_available: pasteInferenceAvailable,
   };
 }
 

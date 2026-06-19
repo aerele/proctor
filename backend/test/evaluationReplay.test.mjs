@@ -191,13 +191,55 @@ test("paste pairing backward: change arrives just before the paste marker", () =
   assert.ok(rec);
 });
 
-test("unpaired big insert >=40 classified as paste", () => {
+test("unpaired big insert >=40 classified as paste WHEN paste telemetry present", () => {
+  // Real-detection preserved: when the session DOES emit paste/selection markers
+  // (here a non-pairing earlier paste marker), the "large unpaired insert ⇒
+  // pasted" inference still fires exactly as before.
+  const P = "p1";
+  const blob = "abcdefghij\nklmnopqrst\nuvwxyz0123\n4567890abc"; // 43 chars, multiline
+  const events = [
+    paste(P, 100, 7), // a small paste marker far from the big insert (won't pair: len mismatch + window)
+    ins(P, 1000, blob, 1, 1),
+  ];
+  const out = replaySession(events, {});
+  // The 43-char unpaired insert is inferred pasted (7 from the unpaired marker +
+  // 43 from the inferred-paste insert).
+  assert.equal(out.pasted_chars_by_problem[P], 7 + blob.length);
+  assert.equal(out.typed_chars_by_problem[P] || 0, 0);
+  assert.equal(out.paste_inference_available, true);
+});
+
+test("unpaired big insert NOT inferred pasted when NO paste/selection telemetry (availability gate)", () => {
+  // Missing-data gate (2026-06-19): with ZERO paste AND ZERO selection events in
+  // the stream, a large unpaired insert is INCONCLUSIVE on the paste axis, not a
+  // paste. It must not inflate pasted_chars / paste_ratio. The diagnosis: today's
+  // cohort emitted no paste/selection markers, so legitimate large inserts were
+  // mis-credited as pasted, flagging an honest cohort.
   const P = "p1";
   const blob = "abcdefghij\nklmnopqrst\nuvwxyz0123\n4567890abc"; // 43 chars, multiline
   const events = [ins(P, 1000, blob, 1, 1)];
   const out = replaySession(events, {});
+  assert.equal(out.pasted_chars_by_problem[P] || 0, 0);
+  assert.equal(out.typed_chars_by_problem[P], blob.length);
+  assert.equal(out.paste_inference_available, false);
+  assert.equal(out.has_paste_events, false);
+  assert.equal(out.has_selection_events, false);
+});
+
+test("availability flag set by editor_selection alone re-enables paste inference", () => {
+  // A session that emits selection telemetry (but no explicit paste markers)
+  // still has the paste-inference signal available, so a large unpaired insert
+  // is classified as before.
+  const P = "p1";
+  const blob = "abcdefghij\nklmnopqrst\nuvwxyz0123\n4567890abc"; // 43 chars
+  const events = [
+    { type: "editor_selection", timestamp: tsAt(100), problem_id: P, detail: { startLine: 1, startCol: 1, endLine: 1, endCol: 5 } },
+    ins(P, 1000, blob, 1, 1),
+  ];
+  const out = replaySession(events, {});
   assert.equal(out.pasted_chars_by_problem[P], blob.length);
-  assert.equal(out.typed_chars_by_problem[P] || 0, 0);
+  assert.equal(out.has_selection_events, true);
+  assert.equal(out.paste_inference_available, true);
 });
 
 test("autocomplete-shaped insert excluded from paste", () => {

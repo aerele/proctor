@@ -1625,7 +1625,7 @@ export type ContestScorecard = {
   username_norm: string;
   name?: string;
   flags: ScorecardFlag[];
-  tiers: { talent: "strong" | "moderate" | "weak"; integrity: "clean" | "watch" | "flag" | "confirmed"; one_line: string };
+  tiers: { talent: "strong" | "moderate" | "weak"; integrity: "clean" | "watch" | "flag" | "confirmed" | "inconclusive"; one_line: string };
 };
 
 export type ContestEvaluationsResponse = {
