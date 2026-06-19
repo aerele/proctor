@@ -1991,6 +1991,10 @@ function ActivityLogPanel({
   // ---- ITEM 3: playback-synced auto-scroll + highlight --------------------
   const listRef = useRef<HTMLOListElement | null>(null);
   const rowRefs = useRef<Map<string, HTMLLIElement>>(new Map());
+  // #115: explicit reviewer-facing on/off for auto-follow (default ON). When OFF,
+  // the log NEVER auto-scrolls — the reviewer reads/scrolls freely while the
+  // video plays. Separate from `autoFollow` (the transient manual-scroll pause).
+  const [followEnabled, setFollowEnabled] = useState(true);
   // The admin manually scrolled → suspend auto-follow until they idle. A short
   // timer re-arms it so a one-off nudge doesn't permanently kill following.
   const [autoFollow, setAutoFollow] = useState(true);
@@ -2009,22 +2013,33 @@ function ActivityLogPanel({
     return id;
   }, [entries, currentOffsetSec]);
 
-  // Auto-scroll the active row into view (smooth, centered) while playing and
-  // not suspended. We mark followingRef so our own programmatic scroll doesn't
-  // trip the manual-scroll suspend handler.
+  // Auto-scroll the active row into view (centered) while playing and not
+  // suspended. #115: we move ONLY the log container's scrollTop — NOT
+  // element.scrollIntoView(), which scrolls every scrollable ancestor INCLUDING
+  // the window and yanks the whole page (and the video) out of view. Centering
+  // the row inside the bounded <ol> keeps the page (and the player) perfectly
+  // still. We mark followingRef so our own programmatic scroll doesn't trip the
+  // manual-scroll suspend handler.
   useEffect(() => {
-    if (!playing || !autoFollow || !activeId) return;
+    if (!followEnabled || !playing || !autoFollow || !activeId) return;
     const row = rowRefs.current.get(activeId);
     const list = listRef.current;
     if (!row || !list) return;
+    // Center the active row within the container's viewport. offsetTop is
+    // relative to the offsetParent; the <li>'s offsetParent is the <ol>
+    // (positioned scroll container), so offsetTop is already container-relative.
+    const target = row.offsetTop - (list.clientHeight - row.clientHeight) / 2;
+    const maxScroll = list.scrollHeight - list.clientHeight;
+    const next = Math.max(0, Math.min(target, maxScroll));
+    if (Math.abs(next - list.scrollTop) < 1) return; // already there — no churn
     followingRef.current = true;
-    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    list.scrollTo({ top: next, behavior: "smooth" });
     // Release the guard after the smooth scroll settles.
     const t = window.setTimeout(() => {
       followingRef.current = false;
     }, 400);
     return () => window.clearTimeout(t);
-  }, [activeId, playing, autoFollow]);
+  }, [activeId, playing, autoFollow, followEnabled]);
 
   // Manual scroll suspends auto-follow; after a short idle we re-arm it so the
   // log resumes following the playhead (don't fight the user, but don't strand
@@ -2083,6 +2098,22 @@ function ActivityLogPanel({
             <option value="warning">Warning</option>
             <option value="info">Info</option>
           </select>
+          {/* #115: Follow on/off — when ON the log auto-scrolls (within its own
+              container only) to the entry at the playhead; when OFF the reviewer
+              scrolls freely while the video plays. Default ON. */}
+          <button
+            type="button"
+            onClick={() => setFollowEnabled((v) => !v)}
+            aria-pressed={followEnabled}
+            title={followEnabled ? "Auto-follow is on — the log tracks the playhead" : "Auto-follow is off — scroll the log freely"}
+            className={`focus-ring inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs font-medium ${
+              followEnabled
+                ? "border-accent/40 bg-accent/10 text-accent"
+                : "border-line bg-white text-muted hover:border-ink/40 hover:text-ink"
+            }`}
+          >
+            <Eye size={12} /> Follow {followEnabled ? "on" : "off"}
+          </button>
         </div>
       </div>
 
@@ -2140,8 +2171,9 @@ function ActivityLogPanel({
       ) : null}
 
       {/* Auto-follow status: shows when following is paused (manual scroll) so the
-          admin knows it will resume — and offers an instant resume. */}
-      {playing && !autoFollow ? (
+          admin knows it will resume — and offers an instant resume. Hidden when
+          the reviewer has turned Follow off entirely (#115). */}
+      {followEnabled && playing && !autoFollow ? (
         <button
           type="button"
           onClick={() => setAutoFollow(true)}
@@ -2152,7 +2184,7 @@ function ActivityLogPanel({
       ) : null}
 
       {entries.length ? (
-        <ol ref={listRef} onScroll={onListScroll} className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
+        <ol ref={listRef} onScroll={onListScroll} className="relative mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
           {entries.map((entry) => {
             const isActive = entry.id === activeId;
             return (

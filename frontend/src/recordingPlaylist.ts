@@ -77,10 +77,13 @@ export function startedAtMapFromManifest(parsed: unknown): StartedAtByKey {
 }
 
 // A Map from a chunk's GCS object key (== the recorder manifest's storage_key)
-// to its TRUE recording-window START (the manifest `started_at` ISO). This is
-// the authoritative anchor for timeline placement — see buildPlaylist. Built by
-// RecordingReview from the session's manifest.json; empty/absent for legacy
-// sessions (which then fall back to last_modified, exactly as before).
+// to its recording-window CLOSE (the manifest `started_at` ISO — the recorder
+// stamps it at the dataavailable/stop event). buildPlaylist maps it back to the
+// window START via − CHUNK_SECONDS; it is the authoritative anchor for timeline
+// placement because it carries the true RECORDING time (not the late upload
+// time) — see buildPlaylist. Built by RecordingReview from the session's
+// manifest.json; empty/absent for legacy sessions (which then fall back to
+// last_modified, exactly as before).
 export type StartedAtByKey = Map<string, string>;
 
 // Build the playlist for one session + source against a chosen test-start time.
@@ -88,13 +91,18 @@ export type StartedAtByKey = Map<string, string>;
 // PLACEMENT ANCHOR (in priority order, per chunk):
 //   1. RECORDING TIME (primary): when the chunk's manifest `started_at` is known
 //      (startedAtByKey, keyed by the GCS object key) the chunk is placed at its
-//      TRUE recording-window start — offsetSec = (started_at − testStart). This
-//      is correct even when the object's last_modified (its GCS UPLOAD time) is
-//      minutes late: the Tier-1 chunk buffer uploads an offline-recorded chunk
-//      long after it was recorded, so last_modified would otherwise place the
-//      chunk late and manufacture a PHANTOM gap (and desync the activity-log
-//      markers, which use real event timestamps). started_at is the window
-//      START, so we do NOT subtract CHUNK_SECONDS here.
+//      recording-window START — offsetSec = (started_at − CHUNK_SECONDS − testStart).
+//      The recorder stamps `started_at` at the chunk window CLOSE (it captures
+//      `new Date().toISOString()` in the single dataavailable/stop event that
+//      fires ~CHUNK_SECONDS after recording.start(), see useProctorRecorder.ts),
+//      so it maps to the window START via − CHUNK_SECONDS — identical IN FORM to
+//      the last_modified path below. The ONLY difference is the SOURCE:
+//      recording-close time (started_at) vs upload time (last_modified). That is
+//      exactly what fixes Tier-1-buffered chunks: the buffer uploads an offline-
+//      recorded chunk minutes late, so last_modified would place it late and
+//      manufacture a PHANTOM gap (and desync the activity-log markers, which use
+//      real event timestamps); started_at carries the true recording-close time
+//      regardless of when the upload landed.
 //   2. UPLOAD TIME (fallback 1): no started_at but last_modified present — the
 //      object is finalized when its 30s window CLOSES, so its START offset is
 //      (last_modified − CHUNK_SECONDS). Today's behavior, unchanged. Correct for
@@ -124,8 +132,10 @@ export function buildPlaylist(
     const modifiedMs = entry.file.last_modified ? Date.parse(entry.file.last_modified) : NaN;
     let offsetSec: number;
     if (Number.isFinite(startedAtMs) && Number.isFinite(testStartMs)) {
-      // PRIMARY: recording-window START. No CHUNK_SECONDS subtraction.
-      offsetSec = (startedAtMs - testStartMs) / 1000;
+      // PRIMARY: started_at is the chunk window CLOSE (the recorder stamps it at
+      // the dataavailable/stop event), so map it to the window START via
+      // − CHUNK_SECONDS — same form as the last_modified path, different source.
+      offsetSec = (startedAtMs - CHUNK_SECONDS * 1000 - testStartMs) / 1000;
     } else if (Number.isFinite(modifiedMs) && Number.isFinite(testStartMs)) {
       // FALLBACK 1: upload time approximates the window CLOSE.
       offsetSec = (modifiedMs - CHUNK_SECONDS * 1000 - testStartMs) / 1000;
