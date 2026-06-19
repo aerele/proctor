@@ -18,10 +18,11 @@ export type AdminView =
   | "recordings"
   | "problems"
   | "settings"
-  | "ips";
+  | "ips"
+  | "health";
 
 export type AdminNavGroup = {
-  key: "live" | "contest" | "evidence" | "authoring" | "people" | "settings";
+  key: "live" | "contest" | "evidence" | "authoring" | "people" | "settings" | "health";
   label: string;
   views: ReadonlyArray<{ view: AdminView; label: string }>;
 };
@@ -32,6 +33,7 @@ export type AdminNavGroup = {
 //   Evidence  — post-hoc human review of candidates and recordings
 //   Authoring — the cross-contest libraries (problem bank, templates)
 //   People    — the cross-round person directory (single view)
+//   Health    — the pre-flight readiness probe the admin runs before a round
 //   Settings  — the legacy global gate (single view)
 export const ADMIN_NAV_GROUPS: ReadonlyArray<AdminNavGroup> = [
   {
@@ -70,6 +72,7 @@ export const ADMIN_NAV_GROUPS: ReadonlyArray<AdminNavGroup> = [
     ]
   },
   { key: "people", label: "People", views: [{ view: "people", label: "People" }] },
+  { key: "health", label: "System Health", views: [{ view: "health", label: "Pre-flight" }] },
   { key: "settings", label: "Settings", views: [{ view: "settings", label: "Settings" }] }
 ];
 
