@@ -13,6 +13,7 @@ export type AdminView =
   | "sessions"
   | "attendance"
   | "results"
+  | "evaluation"
   | "people"
   | "review"
   | "recordings"
@@ -52,7 +53,10 @@ export const ADMIN_NAV_GROUPS: ReadonlyArray<AdminNavGroup> = [
     views: [
       { view: "contests", label: "Contests" },
       { view: "attendance", label: "Attendance" },
-      { view: "results", label: "Results" }
+      { view: "results", label: "Results" },
+      // Evaluation is rendered ENTIRELY by the proctor-eval service (embedded in
+      // an iframe by EvaluationPanel) — sibling to Results in the Contest group.
+      { view: "evaluation", label: "Evaluation" }
     ]
   },
   {

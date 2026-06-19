@@ -79,6 +79,15 @@ export function loadConfig() {
     EVAL_LEASE_MS: positiveIntOr(process.env.EVAL_LEASE_MS, 180000),
     PUBLIC_APP_ORIGIN: process.env.PUBLIC_APP_ORIGIN || "*",
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || "",
+    // Write-isolation for the proctor-eval service. When set (comma-separated
+    // collection names), the Firestore client guard rejects any WRITE to a
+    // collection NOT in this list — so a runaway/compromised eval deploy can
+    // only ever mutate its OWN collection(s), never the test-taking data. UNSET
+    // (proctor-api) = no guard at all, behavior completely unchanged. Reads are
+    // always allowed. The expected value for proctor-eval is the EVALUATIONS
+    // collection name (default "proctor_evaluations"), the only collection the
+    // eval routes write to.
+    EVAL_WRITE_ALLOWLIST: process.env.EVAL_WRITE_ALLOWLIST || "",
     // S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
     // silently disable the brute-force cap; fall back to the safe default of 20.
     GATE_ATTEMPT_LIMIT: positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20)

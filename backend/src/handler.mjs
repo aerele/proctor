@@ -68,7 +68,7 @@ const {
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
   PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
-  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS
+  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS, EVAL_WRITE_ALLOWLIST
 } = loadConfig();
 
 // ---- Non-env code constants (kept local to the handler) ---------------------
@@ -203,7 +203,11 @@ configureClients({
   judge0Config: {
     baseUrl: JUDGE0_BASE_URL, mode: JUDGE0_MODE,
     apiKey: JUDGE0_API_KEY, authToken: JUDGE0_AUTH_TOKEN
-  }
+  },
+  // Write-isolation allowlist (proctor-eval only). UNSET on proctor-api → no
+  // guard, behavior unchanged. clients.mjs stays env-free: handler.mjs (the
+  // env reader) hands the resolved value in here.
+  evalWriteAllowlist: EVAL_WRITE_ALLOWLIST
 });
 
 // S4: wire the problem bank to THIS module's Firestore handle. A getter (not

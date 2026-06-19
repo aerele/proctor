@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
+import { Activity, AlertTriangle, Archive, ArchiveRestore, Award, Bell, BrainCircuit, Camera, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, ClipboardList, Clock, Cookie, Copy, Download, ExternalLink, Eye, Film, KeyRound, LayoutTemplate, ListChecks, ListFilter, Lock, MailWarning, Mic, MonitorUp, Network, RefreshCw, Search, ShieldCheck, Square, UploadCloud, UserCheck, Users, Video, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { adjustContestExamTime, adminPassword, adminPasswordHash, alertAction, clearRoster, endSession, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchAttendance, fetchContests, fetchContestExamConfig, fetchIpReport, fetchReviewRoster, fetchRosterStatus, fetchSessionCardDetail, fetchSessionDetails, fetchSessionsList, fetchSubmissionEvents, parseRosterInput, pollRoomGate, recordingDataAvailable, resolveAccessCodeApi, resumeSession, rosterLookup, saveAlertSettings, saveReviewRoster, sendEvents, sendSessionBeacon, sessionAction, sha256Hex, startSession, unlockEnforcementGate, uploadReviewFile, uploadRoster, validateEndSession } from "./api";
 import { RecordingReview } from "./RecordingReview";
@@ -15,6 +15,7 @@ import { ContestsPanel } from "./admin/ContestsPanel";
 import { TemplatesPanel } from "./admin/TemplatesPanel";
 import { SystemHealthPanel } from "./admin/SystemHealthPanel";
 import { ResultsPanel } from "./admin/ResultsPanel";
+import { EvaluationPanel } from "./admin/EvaluationPanel";
 import { PeoplePanel } from "./admin/PeoplePanel";
 import { defaultContestSelection, searchWithContestParam } from "./admin/contestAdmin";
 import { ADMIN_NAV_GROUPS, groupOfView, type AdminView } from "./admin/adminNav";
@@ -3253,6 +3254,12 @@ function AdminApp() {
         <ResultsPanel password={password} contestSlug={alertFilters.contest_slug ?? ""} />
       ) : null}
 
+      {/* Evaluation is rendered ENTIRELY by proctor-eval and embedded in an
+          iframe — the SPA fetches nothing for this view. */}
+      {view === "evaluation" ? (
+        <EvaluationPanel contestSlug={alertFilters.contest_slug ?? ""} />
+      ) : null}
+
       {/* People tab is CROSS-ROUND by design — it ignores the contest selector. */}
       {view === "people" ? (
         <PeoplePanel password={password} />
@@ -5369,6 +5376,7 @@ const VIEW_ICONS: Record<AdminView, React.ReactNode> = {
   contests: <ListChecks size={15} />,
   attendance: <UserCheck size={15} />,
   results: <Award size={15} />,
+  evaluation: <BrainCircuit size={15} />,
   review: <Search size={15} />,
   recordings: <Film size={15} />,
   problems: <ClipboardList size={15} />,
