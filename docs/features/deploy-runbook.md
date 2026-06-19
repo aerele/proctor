@@ -75,7 +75,9 @@ The deploy scripts read their config from the process environment, so in practic
 | `REGION` | Yes (defaults `asia-south1`) | One region for Cloud Run, Firestore, buckets, images. | all scripts |
 | `REPOSITORY` | Yes | Artifact Registry Docker repo (created if missing). Example `proctor`; **scripts default to `aerele-proctor`** if unset. | all scripts |
 | `ADMIN_PASSWORD` | **Yes** | Admin unlock for `/admin`. Backend gets the plaintext; frontend gets only its sha256 hash (see §4). | backend, frontend |
-| `INVIGILATOR_PASSWORD` | Read by backend config | Password auth for the invigilator portal. **Not set by any deploy script (gap — see §4 / §8).** | backend (`config.mjs`) |
+| `INVIGILATOR_PASSWORD` | **Yes** (full-mode gate) | Password auth for the invigilator portal. Set by the **full** backend deploy and baked as a frontend hash by `frontend/deploy-gcp.sh`. | backend, frontend |
+| `JUDGE0_API_KEY` | **Yes** (full-mode gate) | RapidAPI key for live Run/Submit. Set by the **full** backend deploy (with `JUDGE0_MODE`/`JUDGE0_BASE_URL`/`JUDGE0_RAPIDAPI_HOST` defaults). Not in `.env.deploy.example`; dev stack keeps it in gitignored `monitoring/.data/judge0.env`. | backend |
+| `SIGNER_KEY_FILE` | Set by full deploy | Path to the mounted signer SA key (`/secrets/signer-key.json`) for **local** v4 URL signing. Backed by Secret Manager secret `proctor-signer-key`. See [Signer key](#signer-key-local-recording-signing). | backend |
 | `ALERTS_INGEST_API_KEY` | **Yes** | Shared secret for `POST /api/alerts` (`x-api-key`). Closed-by-default: unset ⇒ every ingest rejected. | backend |
 | `RETENTION_SWEEP_API_KEY` | Required for the daily sweep job | `x-api-key` for `POST /api/admin/retention-sweep`. Closed-by-default: unset ⇒ key-auth rejected (admin password still triggers a manual sweep). | backend |
 | `ALERTS_COLLECTION` | Optional | Firestore collection for alerts; defaults `proctor_alerts`. | backend |
@@ -90,7 +92,7 @@ The deploy scripts read their config from the process environment, so in practic
 | `WORKER_TOKEN` | Worker only | Protects the worker `/merge` endpoint. | video worker |
 | `MAX_USERNAMES_PER_REQUEST` | Optional | Local helper cap for the merge script; default 25. | merge helper |
 
-**Judge0 (Run/Submit) keys.** The backend's `config.mjs` reads `JUDGE0_BASE_URL` (default `https://judge0-ce.p.rapidapi.com`), `JUDGE0_MODE` (default `rapidapi`), `JUDGE0_API_KEY` (the RapidAPI key), and `JUDGE0_AUTH_TOKEN`. These are **not** present in `.env.deploy.example` and **not** set by `backend/deploy-gcp.sh` (gap — see §3 / §8). The dev stack supplies them out of band (the project keeps the RapidAPI key in a gitignored `monitoring/.data/judge0.env`, per the resume anchor — *(unverified at the deploy-script level; the script does not pass these env vars)*).
+**Judge0 (Run/Submit) keys.** The backend's `config.mjs` reads `JUDGE0_BASE_URL` (default `https://judge0-ce.p.rapidapi.com`), `JUDGE0_MODE` (default `rapidapi`), `JUDGE0_RAPIDAPI_HOST`, `JUDGE0_API_KEY` (the RapidAPI key), and `JUDGE0_AUTH_TOKEN`. The **full** backend deploy now sets `JUDGE0_MODE`/`JUDGE0_BASE_URL`/`JUDGE0_RAPIDAPI_HOST` (defaulted) and `JUDGE0_API_KEY` (required — pre-flight gate); `JUDGE0_AUTH_TOKEN` passes through only when set. These are **not** in `.env.deploy.example`; the dev stack keeps the RapidAPI key in a gitignored `monitoring/.data/judge0.env` (per the resume anchor).
 
 > Naming note: the example uses `BACKEND_SERVICE_NAME` / `FRONTEND_SERVICE_NAME` / `VIDEO_WORKER_SERVICE_NAME`, but each `deploy-gcp.sh` actually reads `SERVICE_NAME`. Either export `SERVICE_NAME` per script, or rely on each script's built-in default (`proctor-api` / `proctor-web` / `proctor-video-worker`).
 
@@ -107,9 +109,9 @@ source .env.deploy.local
 bash backend/deploy-gcp.sh
 ```
 
-The script is `set -euo pipefail` and hard-fails early if `PROJECT_ID`, `ADMIN_PASSWORD`, or `ALERTS_INGEST_API_KEY` are unset. In order, it:
+The script is `set -euo pipefail`, **sources `.env.deploy.local`** if present, and is governed by **`DEPLOY_MODE`** (default `full`; see [Deploy modes](#deploy-modes) below). In `full` mode it **hard-fails before any build** if any exam-critical secret is unset (`ADMIN_PASSWORD`, `INVIGILATOR_PASSWORD`, `ALERTS_INGEST_API_KEY`, `RETENTION_SWEEP_API_KEY`, `JUDGE0_API_KEY`, `EVIDENCE_BUCKET`). In order, it:
 
-1. **Sets project** and **enables APIs** (`run`, `cloudbuild`, `artifactregistry`, `firestore`, `storage`, `iamcredentials`).
+1. **Sets project** and **enables APIs** (`run`, `cloudbuild`, `artifactregistry`, `firestore`, `storage`, `iamcredentials`, `secretmanager`).
 2. **Creates Firestore** `(default)` database in `$REGION` if absent.
 3. **Submits a composite index** on `proctor_sessions(username_norm ASC, contest_slug ASC)` — `--async --quiet`, wrapped `|| echo` so "already exists / building / any error" never blocks the deploy. (Also declared in `backend/firestore.indexes.json`.)
 4. **Creates the evidence bucket** (`gs://$EVIDENCE_BUCKET`, uniform bucket-level access) if missing.
@@ -117,7 +119,30 @@ The script is `set -euo pipefail` and hard-fails early if `PROJECT_ID`, `ADMIN_P
 6. **Applies lifecycle** from [`backend/gcs-lifecycle.json`](../../backend/gcs-lifecycle.json) — the Wave-7 3-day / 11-day split (see §5).
 7. **Creates the Artifact Registry repo** if missing.
 8. **Grants runtime IAM** to the Cloud Run runtime SA (`<projnum>-compute@…`): `roles/datastore.user` on the project, `roles/storage.objectAdmin` on the evidence bucket, and `roles/iam.serviceAccountTokenCreator` on itself (needed to mint V4 signed URLs for evidence upload/download).
-9. **Builds** the image with Cloud Build and **deploys** to Cloud Run.
+9. **(full mode) Verifies the signer secret** `proctor-signer-key` exists and grants the runtime SA `roles/secretmanager.secretAccessor` on it (see [Signer key](#signer-key-local-recording-signing)).
+10. **Builds** the image with Cloud Build and **deploys** to Cloud Run. In `full` mode the deploy carries the **complete** `--set-env-vars` **and** `--set-secrets=/secrets/signer-key.json=proctor-signer-key:latest`; in `image-only` mode it carries neither (preserving the live config).
+
+### Deploy modes
+
+| `DEPLOY_MODE` | When | Behavior |
+| --- | --- | --- |
+| `full` (default) | From-scratch / config-authoritative (new/rotated secret, locked CORS, tuned `EXEC_*`). | Pre-flight gate → build → set the **complete** env map + mount the signer key, atomically. |
+| `image-only` | Routine code redeploy; service already holds the full env + signer mount. | Build + deploy the image only; **preserve** existing env + secret mounts. |
+
+```bash
+SERVICE_NAME=proctor-api bash backend/deploy-gcp.sh                  # full (default)
+DEPLOY_MODE=image-only SERVICE_NAME=proctor-api bash backend/deploy-gcp.sh   # code only
+```
+
+> **Why:** `--set-env-vars` REPLACES the whole env map and `--set-secrets` REPLACES all secret mounts. The mode split is the fix for the 2026-06-19 incident, where an older partial-env script silently dropped the signer key + Judge0/invigilator/sweep secrets on a re-run. Full reproduces everything; image-only touches nothing but the image.
+
+### Signer key (local recording-signing)
+
+Recording-signing must sign GCS v4 URLs **locally** off a mounted SA key, not via the remote IAM `signBlob` token endpoint (which degrades under exam load — the 2026-06-19 outage). Wiring (verified `backend/src/lib/clients.mjs`): Secret Manager secret **`proctor-signer-key`** → mounted at **`/secrets/signer-key.json`** → `SIGNER_KEY_FILE=/secrets/signer-key.json` tells the backend to build a dedicated signing client off the key. If `SIGNER_KEY_FILE` is unset, signing falls back to the main metadata-ADC client (the flaky remote-signBlob path). `full` sets the mount; `image-only` preserves it. The secret itself is created once, out of band (never committed) — see [`docs/DEPLOY.md` §2c](../DEPLOY.md).
+
+### Staged zero-downtime deploy + pre-flight
+
+The **standard** production cut is staged: build → deploy a **no-traffic tagged revision** (`--no-traffic --tag <≥3-char tag>`) → verify on the tag URL with the **admin pre-flight health-check** (`POST /api/admin/health-check`, light mode) + a smoke (exam-config 200, admin login, frontend bundle-hash presence) → cut traffic with `gcloud run services update-traffic <svc> --to-revisions=<rev>=100` → keep the prior revision at 0% for **instant rollback** (flip `update-traffic` back). The full commands + the `gcloud builds submit` VPC-SC exit-1 / deploy-the-digest gotcha live in [`docs/DEPLOY.md`](../DEPLOY.md) (§Staged zero-downtime deploy, §Controlled build, §Admin pre-flight health check).
 
 ### Cloud Run deploy parameters (backend)
 
@@ -131,22 +156,11 @@ The script is `set -euo pipefail` and hard-fails early if `PROJECT_ID`, `ADMIN_P
 | `--concurrency` | `100` | |
 | `--timeout` | **`120s`** | `/api/exec/*` requests block while the Judge0 adapter polls (up to ~90s); a 30s timeout killed them mid-poll. |
 
-### Env the backend script sets
+### Env the backend script sets (full mode — the COMPLETE map)
 
-`--set-env-vars` passes: `EVIDENCE_BUCKET`, `ADMIN_PASSWORD`, `ALERTS_INGEST_API_KEY`, `ALERTS_COLLECTION`, `PUBLIC_APP_ORIGIN`, `SESSION_COLLECTION`, `SETTINGS_COLLECTION=proctor_settings`, `URL_EXPIRY_SECONDS=900`.
+In `full` mode `--set-env-vars` passes the entire live env map: `EVIDENCE_BUCKET`, `ADMIN_PASSWORD`, `INVIGILATOR_PASSWORD`, `ALERTS_INGEST_API_KEY`, `ALERTS_COLLECTION`, `RETENTION_SWEEP_API_KEY`, `PUBLIC_APP_ORIGIN`, `SESSION_COLLECTION`, `SETTINGS_COLLECTION`, `URL_EXPIRY_SECONDS`, `JUDGE0_MODE`, `JUDGE0_BASE_URL`, `JUDGE0_RAPIDAPI_HOST`, `JUDGE0_API_KEY`, `SIGNER_KEY_FILE`. Optional tunables (`EXEC_*`, `EVALUATE_*`, `EVAL_LEASE_MS`, `JUDGE0_AUTH_TOKEN`) are added **only when set** (so a full deploy never resets a tuned limit to a default). It uses gcloud's `^@^` custom-delimiter form, so a secret value containing a comma can't corrupt the parse. The deploy also mounts the signer key via `--set-secrets`.
 
-### Env gaps the backend script does **not** set (flagged)
-
-These are read by `backend/src/config.mjs` but never passed by the deploy script. Set them yourself (e.g. with `gcloud run services update <service> --update-env-vars=…` or by extending the script) before the corresponding feature is exercised:
-
-| Missing env | Effect if left unset | Feature affected |
-| --- | --- | --- |
-| `INVIGILATOR_PASSWORD` | Invigilator portal password auth has no configured secret. | Invigilator portal login *(unverified end-state behavior; config defaults to `undefined`)*. |
-| `RETENTION_SWEEP_API_KEY` | Key-auth path to the sweep stays closed (manual admin-password sweep still works). | Daily retention sweep (§6). |
-| `JUDGE0_API_KEY` / `JUDGE0_AUTH_TOKEN` | No RapidAPI credential ⇒ Run/Submit cannot reach Judge0. | Candidate Run/Submit. |
-| `EXEC_*` tuning | Falls back to code defaults (see §7). | Exec rate limits / concurrency. |
-
-> The resume anchor confirms the live dev stack was deployed with `RETENTION_SWEEP_API_KEY` added by hand after this script ran. Treat that as the standing pattern: the script gives you a working core; the retention-sweep key, invigilator password, and Judge0 credentials are operator-applied add-ons.
+> **No more hand-applied env.** Earlier this script set only ~8 vars and the invigilator/Judge0/sweep keys had to be `--update-env-vars`'d by hand — that gap caused the 2026-06-19 incident. Now: set every secret in `.env.deploy.local`, run the script in `full` mode, and the resulting revision is the complete, correct config. `image-only` mode preserves it for routine code redeploys. (`INVIGILATOR_PASSWORD`, `RETENTION_SWEEP_API_KEY`, `JUDGE0_API_KEY` are still **closed-by-default in the code** if you somehow deploy without them — the full-mode pre-flight gate prevents that by aborting before build.)
 
 The script ends by printing the **Backend URL** — copy it into `API_URL` before the frontend deploy.
 
@@ -208,7 +222,7 @@ The script bakes **both** `VITE_ADMIN_PASSWORD_HASH` and `VITE_INVIGILATOR_PASSW
 
 Wave-7 introduced the data-retention safety story. Three deploy-time pieces:
 
-**1. `RETENTION_SWEEP_API_KEY`.** A new closed-by-default secret (`openssl rand -base64 32`). It is the `x-api-key` the Cloud Scheduler job sends to `POST /api/admin/retention-sweep`. The route (`adminRetentionSweep` in `handler.mjs`, authed via `requireSweepAuth`) accepts **either** this key **or** the admin password (manual "run now"). As noted in §3, the backend deploy script does not set it — apply it by hand.
+**1. `RETENTION_SWEEP_API_KEY`.** A closed-by-default secret (`openssl rand -base64 32`). It is the `x-api-key` the Cloud Scheduler job sends to `POST /api/admin/retention-sweep`. The route (`adminRetentionSweep` in `handler.mjs`, authed via `requireSweepAuth`) accepts **either** this key **or** the admin password (manual "run now"). The **full** backend deploy now sets it (the pre-flight gate even requires it) — just put it in `.env.deploy.local`.
 
 **2. The `gcs-lifecycle.json` 3-day / 11-day split.** [`backend/gcs-lifecycle.json`](../../backend/gcs-lifecycle.json) has two prefix-scoped Delete rules:
 
@@ -278,9 +292,11 @@ For a real ~700-candidate exam the project's capacity work settled on roughly `E
 
 ## 8. Real-exam standing rules
 
+- **Stage every cut + pre-flight before you flip traffic.** Deploy as a no-traffic tagged revision, run the admin pre-flight health-check (`POST /api/admin/health-check`, light) + smoke on the tag URL, then `update-traffic` to it — keeping the prior revision at 0% for instant rollback. Run pre-flight **again** right before the exam opens. See [`docs/DEPLOY.md`](../DEPLOY.md) (§Staged zero-downtime deploy, §Admin pre-flight health check).
 - **`min-instances = 1` for a real exam.** Both backend and frontend scripts default `--min-instances 0` (fine for testing — scale-to-zero). For an exam, set the backend to `1` so the first candidate doesn't eat a cold start. Apply with `gcloud run services update "$BACKEND_SERVICE_NAME" --region "$REGION" --min-instances=1`.
-- **Lock CORS.** First deploy can keep `PUBLIC_APP_ORIGIN=*`. After the frontend URL exists, set `PUBLIC_APP_ORIGIN` to the exact frontend Cloud Run URL and redeploy the backend for a tighter production posture (per `.env.deploy.example`).
-- **Apply the operator-set env by hand.** Because the scripts don't set them: `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD` (backend service), `JUDGE0_API_KEY`/`JUDGE0_AUTH_TOKEN`, and any `EXEC_*` overrides. (The frontend's `VITE_INVIGILATOR_PASSWORD_HASH` is now baked + verified by `frontend/deploy-gcp.sh` — just set `INVIGILATOR_PASSWORD` for the frontend build too.)
+- **Lock CORS.** First deploy can keep `PUBLIC_APP_ORIGIN=*`. After the frontend URL exists, set `PUBLIC_APP_ORIGIN` to the exact frontend Cloud Run URL in `.env.deploy.local` and re-run the backend in `full` mode (or one-key `--update-env-vars` it) for a tighter production posture (per `.env.deploy.example`).
+- **Set every secret in `.env.deploy.local`; the full deploy does the rest.** `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD`, `JUDGE0_API_KEY`, the signer-key mount, and any `EXEC_*` overrides are all set by a `full` backend deploy (the pre-flight gate aborts before build if a required one is missing) — no hand-applied `--update-env-vars` step. The frontend's `VITE_INVIGILATOR_PASSWORD_HASH` is baked + verified by `frontend/deploy-gcp.sh` — just set `INVIGILATOR_PASSWORD`.
+- **Create the signer-key secret once (out of band).** Recording-signing needs `proctor-signer-key` in Secret Manager (mounted at `/secrets/signer-key.json`). Create it once, never committed — see [Signer key](#signer-key-local-recording-signing). The full-mode deploy aborts if it's missing.
 - **Create the Cloud Scheduler sweep job** (§5) — not automated by any script.
 - **NO git push — standing rule.** Deploy from local commits only; deploying does **not** require a push. Per the resume anchor §4, the repo must not be pushed until the operator runs the history PII scrub. Treat "deploy ≠ push" as absolute.
 
@@ -303,20 +319,23 @@ For a real ~700-candidate exam the project's capacity work settled on roughly `E
 
 ```bash
 # 0. (setup agent) bootstrap project + SA key + handoff env   → §1
-# 1. fill secrets
+# 0b. (once) create the signer-key secret out of band:
+#     gcloud secrets create proctor-signer-key --replication-policy=automatic
+#     gcloud secrets versions add proctor-signer-key --data-file=<signer-sa-key.json>
+# 1. fill ALL secrets (ADMIN/INVIGILATOR pw, ingest+sweep keys, JUDGE0_API_KEY, buckets, EXEC_* tuning)
 cp .env.deploy.example .env.deploy.local && $EDITOR .env.deploy.local
 source .env.deploy.local
-# 2. backend → prints Backend URL
-bash backend/deploy-gcp.sh
-# 3. put that URL into API_URL, then frontend
+# 2. backend, full mode → sets the COMPLETE env + mounts the signer key; prints Backend URL
+bash backend/deploy-gcp.sh          # DEPLOY_MODE=full (default); image-only for routine code redeploys
+# 3. put that URL into API_URL, then frontend (bakes + verifies password hashes)
 $EDITOR .env.deploy.local   # set API_URL=...
 source .env.deploy.local
 bash frontend/deploy-gcp.sh
 # 4. (optional) video worker
 bash video-worker/deploy-gcp.sh
-# 5. operator-apply (backend): RETENTION_SWEEP_API_KEY, INVIGILATOR_PASSWORD, JUDGE0 keys,
-#    EXEC_* tuning, min-instances=1, locked CORS, scheduler job
-#    (frontend invigilator hash is baked + verified by frontend/deploy-gcp.sh)
+# 5. pre-flight + go-live: run POST /api/admin/health-check (light) → green;
+#    for prod, stage as --no-traffic --tag, verify on the tag URL, then update-traffic;
+#    set min-instances=1, lock CORS, create the scheduler sweep job (§5).
 # NEVER git push.
 ```
 
