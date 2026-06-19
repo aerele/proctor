@@ -2,7 +2,7 @@
 // 2026-06-12): bounded retry for recording-chunk uploads. In the retest 9 of
 // 57 chunk uploads died on transient net::ERR_CONNECTION_CLOSED (~4.5 min of
 // honest video loss); on college-hall Wi-Fi transient drops WILL happen, so a
-// TRANSIENT failure gets up to 2 more attempts (short backoff) before the
+// TRANSIENT failure gets up to 5 more attempts (widening backoff) before the
 // existing honest-gap path (upload_error event + timeline marker) takes over.
 //
 // Contract (recorder side, useProctorRecorder.ts):
@@ -16,14 +16,14 @@
 //     they must keep flowing to handleFatalStatus immediately, unchanged.
 //   - Retries run INSIDE the chunk's slot of the existing serial per-kind
 //     upload chain, so they are naturally queued (max one retry sequence in
-//     flight per kind) and exhaustion is bounded to ~7s of backoff.
+//     flight per kind) and exhaustion is bounded to ~67s of backoff.
 //
 // No React, no network — pure decision logic + an injectable-sleep runner so
 // vitest covers it without timers or a DOM.
 
-/** Backoff schedule: retry #1 after ~2s, retry #2 after ~5s. Length = max
- * number of RETRIES (attempts = length + 1). */
-export const UPLOAD_RETRY_BACKOFF_MS: readonly number[] = [2000, 5000];
+/** Backoff schedule (2s,5s,10s,20s,30s → ~67s total). Length = max number of
+ * RETRIES (attempts = length + 1). */
+export const UPLOAD_RETRY_BACKOFF_MS: readonly number[] = [2000, 5000, 10000, 20000, 30000];
 
 /** Extract the HTTP status of a failed upload step, if one exists.
  *  - getUploadUrl rejections are ApiError (api.ts request()) carrying .status.
