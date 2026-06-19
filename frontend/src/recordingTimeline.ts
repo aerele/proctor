@@ -44,6 +44,14 @@ export type TimelineLogFilters = {
   submissions: boolean;
   /** Narrows ALERTS only; "" = every severity. */
   severity: "" | AlertSeverity;
+  /** Free-text search over label + detail + type (case-insensitive). "" = off. */
+  query: string;
+  /** Exact EVENT-type filter: when non-empty, only events whose raw `type` is in
+   * this set survive. Empty set = no event-type narrowing (all event types). */
+  eventTypes: string[];
+  /** Exact ALERT-type filter: when non-empty, only alerts whose raw `type` is in
+   * this set survive. Empty set = no alert-type narrowing (all alert types). */
+  alertTypes: string[];
 };
 
 // Sensible defaults: everything visible (the operator: usability is the bar).
@@ -51,8 +59,48 @@ export const DEFAULT_LOG_FILTERS: TimelineLogFilters = {
   alerts: true,
   events: true,
   submissions: true,
-  severity: ""
+  severity: "",
+  query: "",
+  eventTypes: [],
+  alertTypes: []
 };
+
+// One selectable type option for the event-type / alert-type filter pickers: the
+// raw `type` to filter on, a friendly label to show, and how many log entries of
+// that type are present (so a "Window lost focus (12)" reads at a glance).
+export type TypeFacet = {
+  type: string;
+  label: string;
+  count: number;
+};
+
+// The DISTINCT event-type facets present in the log (sorted by descending count,
+// then label) — what the event-type filter offers. Uses the same friendly
+// eventLabel the rows show; the raw `type` is the filter key.
+export function eventTypeFacets(entries: TimelineLogEntry[]): TypeFacet[] {
+  return typeFacets(entries, "event", (entry) => entry.label);
+}
+
+// The DISTINCT alert-type facets present in the log — what the alert-type filter
+// offers. Alerts carry a human title in `label`; the raw `type` is the key.
+export function alertTypeFacets(entries: TimelineLogEntry[]): TypeFacet[] {
+  return typeFacets(entries, "alert", (entry) => entry.label || entry.type);
+}
+
+function typeFacets(
+  entries: TimelineLogEntry[],
+  kind: TimelineLogKind,
+  labelOf: (entry: TimelineLogEntry) => string
+): TypeFacet[] {
+  const byType = new Map<string, TypeFacet>();
+  for (const entry of entries) {
+    if (entry.kind !== kind) continue;
+    const existing = byType.get(entry.type);
+    if (existing) existing.count += 1;
+    else byType.set(entry.type, { type: entry.type, label: labelOf(entry) || entry.type, count: 1 });
+  }
+  return [...byType.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
 
 // Machinery noise that would drown the log without telling the reviewer
 // anything (one chunk_uploaded per 30s of recording = the recording itself,
@@ -231,16 +279,30 @@ export function buildTimelineLog(params: {
   );
 }
 
-// Apply the log panel's filter state: kind toggles drop whole streams; the
-// severity narrows ALERTS only (events/submissions are unaffected by it).
+// Apply the log panel's filter state. Order: kind toggles drop whole streams;
+// the severity + alert-type narrow ALERTS only; the event-type narrows EVENTS
+// only; the free-text query then matches across ALL surviving kinds (over label
+// + detail + type). Empty type sets / empty query are no-ops (everything passes).
 export function filterTimelineLog(entries: TimelineLogEntry[], filters: TimelineLogFilters): TimelineLogEntry[] {
+  const query = (filters.query || "").trim().toLowerCase();
+  const alertTypes = filters.alertTypes && filters.alertTypes.length ? new Set(filters.alertTypes) : null;
+  const eventTypes = filters.eventTypes && filters.eventTypes.length ? new Set(filters.eventTypes) : null;
   return entries.filter((entry) => {
     if (entry.kind === "alert") {
       if (!filters.alerts) return false;
-      return !filters.severity || entry.severity === filters.severity;
+      if (filters.severity && entry.severity !== filters.severity) return false;
+      if (alertTypes && !alertTypes.has(entry.type)) return false;
+    } else if (entry.kind === "event") {
+      if (!filters.events) return false;
+      if (eventTypes && !eventTypes.has(entry.type)) return false;
+    } else {
+      if (!filters.submissions) return false;
     }
-    if (entry.kind === "event") return filters.events;
-    return filters.submissions;
+    if (query) {
+      const haystack = `${entry.label} ${entry.detail} ${entry.type}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
   });
 }
 

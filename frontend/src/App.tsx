@@ -3028,7 +3028,10 @@ function AdminApp() {
   }
 
   return (
-    <Shell>
+    // Recordings + Results are data-dense (the recording player/timeline and the
+    // ranked results table) — render them full-width (max-w-screen-2xl, header
+    // kept) instead of the default max-w-6xl. Every other admin view stays narrow.
+    <Shell variant={view === "recordings" || view === "results" ? "wide" : "page"}>
       {/* W3: grouped admin nav. Top row: SECTIONS (left) + the global contest
           scope (top-right — it scopes EVERY screen, so it sits ABOVE them all;
           A1/S-D: the selection persists in this tab's URL ?contest= param).
@@ -5784,15 +5787,22 @@ function AlertField({ label, value, mono = false }: { label: string; value: stri
 // padTop matches the fixed shell header (W2): true = slim strip, "alert" =
 // the taller anomaly banner. The "exam" variant (W1) widens the container and
 // drops the page header — the strip already carries the branding/identity, so
-// nothing distracts from the workspace.
-function Shell({ children, padTop = false, variant = "page" }: { children: React.ReactNode; padTop?: boolean | "alert"; variant?: "page" | "exam" }) {
+// nothing distracts from the workspace. The "wide" variant (admin recordings /
+// results) widens the container the SAME way the exam workspace does but KEEPS
+// the page header — those data-dense screens (the recording player + the ranked
+// results table) waste the side gutters at max-w-6xl.
+function Shell({ children, padTop = false, variant = "page" }: { children: React.ReactNode; padTop?: boolean | "alert"; variant?: "page" | "exam" | "wide" }) {
   const pad = padTop === "alert" ? "pt-40" : padTop ? "pt-14" : "";
+  // The width cap: exam/wide get the roomy max-w-screen-2xl (calmer than full
+  // bleed on ultrawide monitors, but ~2.5× the side room of max-w-6xl); exam
+  // ALSO reserves bottom clearance for the fixed CameraDock.
+  const containerWidth = variant === "exam" ? "max-w-screen-2xl pb-48" : variant === "wide" ? "max-w-screen-2xl" : "max-w-6xl";
   return (
     <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${pad}`}>
       {/* UX-H2: the exam variant reserves bottom clearance (pb-48) so the
           fixed bottom-right CameraDock never covers end-of-page content
           (run results / verdict) once the candidate scrolls to the bottom. */}
-      <div className={`mx-auto ${variant === "exam" ? "max-w-screen-2xl pb-48" : "max-w-6xl"}`}>
+      <div className={`mx-auto ${containerWidth}`}>
         {variant === "exam" ? null : (
           <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
             <div className="flex items-center gap-3">

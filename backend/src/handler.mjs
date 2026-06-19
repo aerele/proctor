@@ -427,7 +427,12 @@ const submissionEventsRoutes = makeSubmissionEventsRoutes({
   badRequest,
   httpError,
   normalizeUsername,
-  submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION
+  // The contest_slug-filter chokepoint, for the native-submission fallback scope.
+  scopedQuery,
+  submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION,
+  // FALLBACK store for proctor-native contests: the in-app submissions the exam
+  // app writes (proctor_submission_events is the HackerRank-poller mirror only).
+  submissionsCollection: SUBMISSIONS_COLLECTION
 });
 const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
 

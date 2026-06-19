@@ -8,11 +8,13 @@ import type { Alert, SessionEventItem, SubmissionEvent } from "./types";
 import {
   DEFAULT_LOG_FILTERS,
   EVENT_TYPE_MAX,
+  alertTypeFacets,
   alertsForCandidate,
   buildTimelineLog,
   clampEventType,
   clusterMarkers,
   eventLabel,
+  eventTypeFacets,
   filterTimelineLog,
   isDuringGap,
   offsetSecFor,
@@ -261,6 +263,79 @@ describe("filterTimelineLog", () => {
   it("severity narrows alerts only (events/submissions unaffected)", () => {
     const critOnly = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, severity: "critical" });
     expect(critOnly.map((e) => e.id)).toEqual(["alert:a-crit", entries[2].id, entries[3].id]);
+  });
+
+  it("free-text query matches across label + detail + type, all kinds", () => {
+    // "two sum" is in the submission label only.
+    const sub = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "two sum" });
+    expect(sub.map((e) => e.kind)).toEqual(["submission"]);
+    // "tab" is in the two alert labels ("Tab switched away").
+    const tab = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "tab" });
+    expect(tab.map((e) => e.kind)).toEqual(["alert", "alert"]);
+    // matches the raw event type too.
+    const byType = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "window_blur" });
+    expect(byType.map((e) => e.kind)).toEqual(["event"]);
+    // case-insensitive; empty query is a no-op.
+    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "TWO SUM" })).toHaveLength(1);
+    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "   " })).toHaveLength(4);
+  });
+
+  it("eventTypes narrows EVENTS only (empty set = all event types)", () => {
+    const onlyBlur = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, eventTypes: ["window_blur"] });
+    // the lone event survives; alerts + submission untouched.
+    expect(onlyBlur.map((e) => e.kind)).toEqual(["alert", "alert", "event", "submission"]);
+    const noneMatch = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, eventTypes: ["clipboard_activity"] });
+    expect(noneMatch.some((e) => e.kind === "event")).toBe(false);
+    // alerts/submissions still present (event-type filter never touches them).
+    expect(noneMatch.map((e) => e.kind)).toEqual(["alert", "alert", "submission"]);
+  });
+
+  it("alertTypes narrows ALERTS only (empty set = all alert types)", () => {
+    const onlyTabAway = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, alertTypes: ["tab_away"] });
+    expect(onlyTabAway.map((e) => e.kind)).toEqual(["alert", "alert", "event", "submission"]);
+    const noMatch = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, alertTypes: ["some_other_alert"] });
+    expect(noMatch.some((e) => e.kind === "alert")).toBe(false);
+    expect(noMatch.map((e) => e.kind)).toEqual(["event", "submission"]);
+  });
+});
+
+describe("type facets", () => {
+  const entries = buildTimelineLog({
+    alerts: [
+      alert({ id: "a1", type: "tab_away", title: "Tab switched away", timestamp: "2026-06-05T09:01:00.000Z" }),
+      alert({ id: "a2", type: "tab_away", title: "Tab switched away", timestamp: "2026-06-05T09:02:00.000Z" }),
+      alert({ id: "a3", type: "paste_detected", title: "Paste detected", timestamp: "2026-06-05T09:03:00.000Z" })
+    ],
+    events: [
+      event({ type: "window_blur", timestamp: "2026-06-05T09:04:00.000Z" }),
+      event({ type: "window_blur", timestamp: "2026-06-05T09:05:00.000Z" }),
+      event({ type: "clipboard_activity", timestamp: "2026-06-05T09:06:00.000Z" })
+    ],
+    submissions: [submission({ submitted_at: "2026-06-05T09:07:00.000Z" })],
+    testStartMs: T0,
+    gaps: []
+  });
+
+  it("eventTypeFacets lists DISTINCT event types with friendly labels + counts, sorted by count desc", () => {
+    const facets = eventTypeFacets(entries);
+    expect(facets).toEqual([
+      { type: "window_blur", label: "Window lost focus", count: 2 },
+      { type: "clipboard_activity", label: "Clipboard activity", count: 1 }
+    ]);
+  });
+
+  it("alertTypeFacets lists DISTINCT alert types with their titles + counts", () => {
+    const facets = alertTypeFacets(entries);
+    expect(facets).toEqual([
+      { type: "tab_away", label: "Tab switched away", count: 2 },
+      { type: "paste_detected", label: "Paste detected", count: 1 }
+    ]);
+  });
+
+  it("facets are empty when no entries of that kind exist", () => {
+    const onlySub = buildTimelineLog({ alerts: [], events: [], submissions: [submission({})], testStartMs: T0, gaps: [] });
+    expect(eventTypeFacets(onlySub)).toEqual([]);
+    expect(alertTypeFacets(onlySub)).toEqual([]);
   });
 });
 

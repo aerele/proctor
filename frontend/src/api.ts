@@ -1057,17 +1057,24 @@ function demoCaptureStateFor(session: { session_id: string; status: string }): C
 export async function fetchSubmissionEvents(
   password: string,
   username: string,
-  contestSlug?: string
+  contestSlug?: string,
+  // FIX-B1 parity: the session's EXACT stored key. When known (picker rows +
+  // the Sessions deep link carry it), the backend resolves the markers by it
+  // directly instead of RE-normalizing the display candidate_id — which for
+  // PERSON-mode sessions (username_norm = "{college}~{uid}") would never match.
+  usernameNorm?: string
 ): Promise<SubmissionEvent[] | null> {
   if (demoMode) {
     await wait(100);
     assertDemoAdmin(password);
-    return demoSubmissionEventsFor(normalizeUsername(username), contestSlug);
+    // Demo prefers the exact stored key when given (mirrors production lookup).
+    return demoSubmissionEventsFor(normalizeUsername(usernameNorm || username), contestSlug);
   }
 
   const query = new URLSearchParams();
   query.set("username", username);
   if (contestSlug) query.set("contest_slug", contestSlug);
+  if (usernameNorm) query.set("username_norm", usernameNorm);
   try {
     const response = await request<SubmissionEventsResponse>(
       `/api/admin/submission-events?${query.toString()}`,

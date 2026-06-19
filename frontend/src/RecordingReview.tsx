@@ -35,12 +35,15 @@ import {
 } from "./recordingPlaylist";
 import {
   DEFAULT_LOG_FILTERS,
+  alertTypeFacets,
   alertsForCandidate,
   buildTimelineLog,
   clusterMarkers,
+  eventTypeFacets,
   filterTimelineLog,
   type TimelineLogEntry,
-  type TimelineLogFilters
+  type TimelineLogFilters,
+  type TypeFacet
 } from "./recordingTimeline";
 import type { AdminSessionDetail, Alert, AlertSeverity, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SubmissionEvent } from "./types";
 
@@ -451,6 +454,11 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
     }),
     [logEntries]
   );
+  // The DISTINCT event-type / alert-type facets actually present in this log,
+  // for the searchable type-filter pickers (item 2). Computed off the FULL log
+  // (unfiltered) so the selectable universe is stable as the admin narrows.
+  const eventFacets = useMemo(() => eventTypeFacets(logEntries), [logEntries]);
+  const alertFacets = useMemo(() => alertTypeFacets(logEntries), [logEntries]);
 
   // ---- Load a chosen user's sessions (with signed evidence). --------------
   // `silentIfEmpty` (review mode) suppresses the "No sessions found" banner so
@@ -505,8 +513,13 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
         // Also fetch the student's SUBMISSION-TIME MARKERS. Scope to the chosen
         // session's contest so the markers line up with that test; a 404 (or
         // null) just means no markers — never blocks the recording view.
+        // FIX-B1 parity: resolve by the EXACT stored key (the loaded session's
+        // username_norm, else the lookup norm) so PERSON-mode markers don't miss
+        // — the same fix the sessions lookup above already uses.
+        const markerNorm =
+          (typeof target?.username_norm === "string" && target.username_norm) || norm || undefined;
         try {
-          const events = await fetchSubmissionEvents(password, trimmed, target?.contest_slug || undefined);
+          const events = await fetchSubmissionEvents(password, trimmed, target?.contest_slug || undefined, markerNorm);
           setSubmissionEvents(events ?? []);
         } catch {
           setSubmissionEvents([]);
@@ -1702,8 +1715,12 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   counts={logCounts}
                   filters={logFilters}
                   onFilters={setLogFilters}
+                  eventFacets={eventFacets}
+                  alertFacets={alertFacets}
                   eventsTruncated={sessionEventsTruncated}
                   eventsShown={sessionEvents.length}
+                  currentOffsetSec={currentTestTime}
+                  playing={playing}
                   onJump={(offsetSec) =>
                     seekToTestTime(Math.max(span.start, Math.min(offsetSec, span.end)), wantPlaying())
                   }
@@ -1745,30 +1762,218 @@ function LogFilterChip({ active, label, onClick }: { active: boolean; label: str
   );
 }
 
+// ITEM 2 — a searchable, multi-select TYPE-FILTER dropdown. Presents the DISTINCT
+// type facets (event-type or alert-type) actually present in the log, each with a
+// live count; the admin can search the list and toggle any subset. Empty
+// selection = "All" (no narrowing). Closes on outside click / Escape.
+function TypeFilterMenu({
+  label,
+  facets,
+  selected,
+  onChange,
+  disabled
+}: {
+  label: string;
+  facets: TypeFacet[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+
+  // Close on outside-click / Escape so the menu never traps focus.
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return facets;
+    return facets.filter((facet) => `${facet.label} ${facet.type}`.toLowerCase().includes(q));
+  }, [facets, query]);
+
+  const toggle = (type: string) => {
+    const next = new Set(selectedSet);
+    if (next.has(type)) next.delete(type);
+    else next.add(type);
+    onChange([...next]);
+  };
+
+  const summary = selected.length === 0 ? "All" : `${selected.length} selected`;
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled || facets.length === 0}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={facets.length === 0 ? `No ${label.toLowerCase()} present` : `Filter by ${label.toLowerCase()}`}
+        className={`focus-ring inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs font-medium disabled:opacity-50 ${
+          selected.length ? "border-ink bg-ink/5 text-ink" : "border-line bg-white text-muted hover:border-ink/40"
+        }`}
+      >
+        {label}: {summary}
+        <ChevronDown size={12} />
+      </button>
+      {open ? (
+        <div className="absolute right-0 z-40 mt-1 w-64 rounded-md border border-line bg-white p-2 shadow-lg">
+          <div className="relative">
+            <Search size={12} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted" />
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`Search ${label.toLowerCase()}…`}
+              className="focus-ring h-8 w-full rounded-md border border-line bg-white pl-7 pr-2 text-xs text-ink"
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between px-1 text-[11px] text-muted">
+            <span>{facets.length} type{facets.length === 1 ? "" : "s"}</span>
+            {selected.length ? (
+              <button type="button" onClick={() => onChange([])} className="focus-ring rounded text-accent hover:underline">
+                Clear ({selected.length})
+              </button>
+            ) : null}
+          </div>
+          <ul className="mt-1 max-h-56 space-y-0.5 overflow-auto">
+            {filtered.length ? (
+              filtered.map((facet) => (
+                <li key={facet.type}>
+                  <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-ink/5">
+                    <input
+                      type="checkbox"
+                      checked={selectedSet.has(facet.type)}
+                      onChange={() => toggle(facet.type)}
+                      className="shrink-0"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-ink" title={facet.type}>{facet.label}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-muted">{facet.count}</span>
+                  </label>
+                </li>
+              ))
+            ) : (
+              <li className="px-1.5 py-2 text-xs text-muted">No matching types.</li>
+            )}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // F6.7 — the ACTIVITY LOG card: the merged alert/event/submission entries as a
 // time-ordered, click-to-jump list. Each row carries the test-relative clock,
 // the absolute wall time, a one-line label + detail, the alert severity where
 // applicable, and a "during blackout" tag when the moment has no footage.
+// ITEM 2: a search box + event-type / alert-type filters (over the DISTINCT
+// types present) narrow ~800-entry logs. ITEM 3: as the recording plays, the
+// log auto-scrolls to + highlights the entry at the current playback time
+// (subtitle-style), pausing when the admin scrolls and resuming sensibly.
 function ActivityLogPanel({
   entries,
   counts,
   filters,
   onFilters,
+  eventFacets,
+  alertFacets,
   eventsTruncated,
   eventsShown,
+  currentOffsetSec,
+  playing,
   onJump
 }: {
   entries: TimelineLogEntry[];
   counts: { alerts: number; events: number; submissions: number };
   filters: TimelineLogFilters;
   onFilters: (next: TimelineLogFilters) => void;
+  /** DISTINCT type facets present in the (full) log — the filter universe. */
+  eventFacets: TypeFacet[];
+  alertFacets: TypeFacet[];
   /** F6 review: the backend capped the event stream — say so (with the count
    * actually shown) instead of presenting a partial log as the full story. */
   eventsTruncated: boolean;
   eventsShown: number;
+  /** ITEM 3: live playback position (test-relative seconds) for auto-scroll. */
+  currentOffsetSec: number;
+  /** Auto-follow is only active while the recording is playing. */
+  playing: boolean;
   onJump: (offsetSec: number) => void;
 }) {
   const total = counts.alerts + counts.events + counts.submissions;
+
+  // ---- ITEM 3: playback-synced auto-scroll + highlight --------------------
+  const listRef = useRef<HTMLOListElement | null>(null);
+  const rowRefs = useRef<Map<string, HTMLLIElement>>(new Map());
+  // The admin manually scrolled → suspend auto-follow until they idle. A short
+  // timer re-arms it so a one-off nudge doesn't permanently kill following.
+  const [autoFollow, setAutoFollow] = useState(true);
+  const followingRef = useRef(false); // true while WE are the ones scrolling
+  const reArmTimer = useRef<number | null>(null);
+
+  // The entry the playhead currently sits on: the LAST entry whose offset is
+  // ≤ the playback time (subtitle semantics — the most recent thing to happen).
+  // Recomputed from the visible (filtered) list so the highlight tracks what's shown.
+  const activeId = useMemo(() => {
+    let id: string | null = null;
+    for (const entry of entries) {
+      if (entry.offsetSec <= currentOffsetSec + 0.001) id = entry.id;
+      else break; // entries are time-sorted ascending
+    }
+    return id;
+  }, [entries, currentOffsetSec]);
+
+  // Auto-scroll the active row into view (smooth, centered) while playing and
+  // not suspended. We mark followingRef so our own programmatic scroll doesn't
+  // trip the manual-scroll suspend handler.
+  useEffect(() => {
+    if (!playing || !autoFollow || !activeId) return;
+    const row = rowRefs.current.get(activeId);
+    const list = listRef.current;
+    if (!row || !list) return;
+    followingRef.current = true;
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    // Release the guard after the smooth scroll settles.
+    const t = window.setTimeout(() => {
+      followingRef.current = false;
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [activeId, playing, autoFollow]);
+
+  // Manual scroll suspends auto-follow; after a short idle we re-arm it so the
+  // log resumes following the playhead (don't fight the user, but don't strand
+  // them off-track forever either).
+  const onListScroll = useCallback(() => {
+    if (followingRef.current) return; // our own scroll, ignore
+    setAutoFollow(false);
+    if (reArmTimer.current) window.clearTimeout(reArmTimer.current);
+    reArmTimer.current = window.setTimeout(() => setAutoFollow(true), 4000);
+  }, []);
+
+  useEffect(() => () => {
+    if (reArmTimer.current) window.clearTimeout(reArmTimer.current);
+  }, []);
+
+  const hasTypeFilters = filters.eventTypes.length > 0 || filters.alertTypes.length > 0;
+  const filtersActive = Boolean(filters.query.trim()) || hasTypeFilters || filters.severity ||
+    !filters.alerts || !filters.events || !filters.submissions;
+
   return (
     <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1811,21 +2016,91 @@ function ActivityLogPanel({
         </div>
       </div>
 
+      {/* ITEM 2 — search box + exact event-type / alert-type filters. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[12rem] flex-1">
+          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            value={filters.query}
+            onChange={(event) => onFilters({ ...filters, query: event.target.value })}
+            placeholder="Search the log (label, detail, type)…"
+            className="focus-ring h-8 w-full rounded-md border border-line bg-white pl-8 pr-8 text-sm text-ink"
+            aria-label="Search activity log"
+          />
+          {filters.query ? (
+            <button
+              type="button"
+              onClick={() => onFilters({ ...filters, query: "" })}
+              aria-label="Clear search"
+              className="focus-ring absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-ink"
+            >
+              <X size={13} />
+            </button>
+          ) : null}
+        </div>
+        <TypeFilterMenu
+          label="Event type"
+          facets={eventFacets}
+          selected={filters.eventTypes}
+          onChange={(next) => onFilters({ ...filters, eventTypes: next })}
+          disabled={!filters.events}
+        />
+        <TypeFilterMenu
+          label="Alert type"
+          facets={alertFacets}
+          selected={filters.alertTypes}
+          onChange={(next) => onFilters({ ...filters, alertTypes: next })}
+          disabled={!filters.alerts}
+        />
+        {filtersActive ? (
+          <button
+            type="button"
+            onClick={() => onFilters(DEFAULT_LOG_FILTERS)}
+            className="focus-ring inline-flex h-7 items-center gap-1 rounded-md border border-line bg-white px-2 text-xs font-medium text-muted hover:border-ink/40 hover:text-ink"
+          >
+            <X size={12} /> Clear filters
+          </button>
+        ) : null}
+      </div>
+
       {eventsTruncated ? (
         <p className="mt-2 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
           <AlertTriangle size={13} /> Showing the first {eventsShown} events — the event log was truncated server-side.
         </p>
       ) : null}
 
+      {/* Auto-follow status: shows when following is paused (manual scroll) so the
+          admin knows it will resume — and offers an instant resume. */}
+      {playing && !autoFollow ? (
+        <button
+          type="button"
+          onClick={() => setAutoFollow(true)}
+          className="focus-ring mt-2 inline-flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1 text-xs font-medium text-accent hover:border-accent/50"
+        >
+          <Play size={12} /> Auto-follow paused — resume following playback
+        </button>
+      ) : null}
+
       {entries.length ? (
-        <ol className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
-          {entries.map((entry) => (
-            <li key={entry.id}>
+        <ol ref={listRef} onScroll={onListScroll} className="mt-3 max-h-80 divide-y divide-line/60 overflow-auto">
+          {entries.map((entry) => {
+            const isActive = entry.id === activeId;
+            return (
+            <li
+              key={entry.id}
+              ref={(el) => {
+                if (el) rowRefs.current.set(entry.id, el);
+                else rowRefs.current.delete(entry.id);
+              }}
+            >
               <button
                 type="button"
                 onClick={() => onJump(entry.offsetSec)}
                 title={`Jump the recording to ${formatClock(entry.offsetSec)}`}
-                className="focus-ring flex w-full items-start gap-3 rounded px-1.5 py-2 text-left hover:bg-ink/5"
+                aria-current={isActive ? "true" : undefined}
+                className={`focus-ring flex w-full items-start gap-3 rounded px-1.5 py-2 text-left transition-colors ${
+                  isActive ? "bg-accent/15 ring-1 ring-inset ring-accent/40" : "hover:bg-ink/5"
+                }`}
               >
                 {/* Kind dot: alert = severity color, event = subdued, submission
                     = green/red by validity (matches the timeline markers). */}
@@ -1840,7 +2115,7 @@ function ActivityLogPanel({
                         : "bg-muted/60"
                   }`}
                 />
-                <span className="w-16 shrink-0 pt-0.5 font-mono text-xs font-medium text-ink">
+                <span className={`w-16 shrink-0 pt-0.5 font-mono text-xs font-medium ${isActive ? "text-accent" : "text-ink"}`}>
                   {formatClock(entry.offsetSec)}
                 </span>
                 <span className="min-w-0 flex-1">
@@ -1864,7 +2139,8 @@ function ActivityLogPanel({
                 </span>
               </button>
             </li>
-          ))}
+            );
+          })}
         </ol>
       ) : (
         <p className="mt-3 rounded-md border border-line bg-white/60 px-3 py-2 text-xs text-muted">
