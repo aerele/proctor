@@ -61,6 +61,8 @@ export function makeHealthCheckRoutes(ctx) {
     evidenceBucket,
     urlExpirySeconds,
     publicAppOrigin,
+    publicAppUrl,
+    expectedBundleHashes = [],
     judge0BaseUrl,
     judge0Mode,
     judge0ApiKey,
@@ -369,36 +371,46 @@ export function makeHealthCheckRoutes(ctx) {
       return { detail: "signed write URL minted, object PUT + verified + deleted" };
     }));
 
-    // bundle_hashes: fetch the served proctor-web app and assert BOTH password
-    // hash substrings are present (the deploy hash-gate protects exactly these).
+    // bundle_hashes: fetch the served proctor-web app and assert the gate hash
+    // VALUES — sha256(admin password) / sha256(invigilator password), computed
+    // in handler.mjs and injected as expectedBundleHashes (label + hash only,
+    // never the raw passwords) — are baked into the served bundle. The env-var
+    // NAMES (VITE_*_PASSWORD_HASH) do NOT survive the Vite build, so this is a
+    // real frontend↔backend coherence check, not a name-substring scan.
     checks.push(await runProbe("bundle_hashes", "Served bundle carries password-hash gate", async () => {
-      if (!publicAppOrigin || publicAppOrigin === "*") {
-        return { status: "skip", detail: "PUBLIC_APP_ORIGIN not set to a concrete origin" };
+      const appUrl = publicAppUrl || (publicAppOrigin && publicAppOrigin !== "*" ? publicAppOrigin : "");
+      if (!appUrl) {
+        return { status: "skip", detail: "PUBLIC_APP_URL not set to a concrete origin" };
       }
-      const origin = String(publicAppOrigin).replace(/\/+$/, "");
+      if (!expectedBundleHashes.length) {
+        return { status: "skip", detail: "admin/invigilator passwords not configured" };
+      }
+      const origin = String(appUrl).replace(/\/+$/, "");
       const indexRes = await fetchImpl(`${origin}/`, { method: "GET" });
       if (!indexRes.ok) throw new Error(`GET ${origin}/ failed: HTTP ${indexRes.status}`);
       const indexHtml = await indexRes.text();
       // Locate the built JS asset(s) referenced by the index HTML.
       const scriptKeys = [...indexHtml.matchAll(/src="([^"]+\.js)"/g)].map((m) => m[1]);
-      const want = ["VITE_ADMIN_PASSWORD_HASH", "VITE_INVIGILATOR_PASSWORD_HASH"];
-      const found = new Set();
+      // Track which LABELS are still missing (never the hash/password itself).
+      const missing = new Set(expectedBundleHashes.map((e) => e.label));
+      const seen = (text) => {
+        for (const e of expectedBundleHashes) if (text.includes(e.hash)) missing.delete(e.label);
+      };
       // The hashes are inlined into the JS at build time; scan each referenced JS.
+      seen(indexHtml);
       for (const rawSrc of scriptKeys) {
+        if (!missing.size) break;
         const jsUrl = /^https?:\/\//.test(rawSrc)
           ? rawSrc
           : `${origin}/${String(rawSrc).replace(/^\/+/, "")}`;
         const jsRes = await fetchImpl(jsUrl, { method: "GET" });
         if (!jsRes.ok) continue;
-        const js = await jsRes.text();
-        for (const token of want) if (js.includes(token)) found.add(token);
-        if (found.size === want.length) break;
+        seen(await jsRes.text());
       }
-      // Fall back to scanning the index HTML itself (some builds inline the env).
-      for (const token of want) if (indexHtml.includes(token)) found.add(token);
-      const missing = want.filter((token) => !found.has(token));
-      if (missing.length) throw new Error(`served bundle missing: ${missing.join(", ")}`);
-      return { detail: "both VITE_ADMIN_PASSWORD_HASH and VITE_INVIGILATOR_PASSWORD_HASH present" };
+      if (missing.size) {
+        throw new Error("served bundle missing expected password hash(es): " + [...missing].join(", "));
+      }
+      return { detail: "served bundle carries expected admin+invigilator password hashes" };
     }));
 
     // auth_session_start: admin auth already confirmed; assert the canary
