@@ -87,7 +87,11 @@ fi
 ADMIN_PASSWORD_HASH="$(printf '%s' "$ADMIN_PASSWORD" | sha256sum | awk '{print $1}')"
 INVIGILATOR_PASSWORD_HASH="$(printf '%s' "$INVIGILATOR_PASSWORD" | sha256sum | awk '{print $1}')"
 
+# VITE_EVAL_API_URL routes ONLY the admin eval calls (contest-evaluate*) to the
+# separate proctor-eval service when set; UNSET = empty = the frontend falls back
+# to the same-origin proctor-api eval routes (backward-compatible). Optional.
 VITE_API_BASE_URL="$API_URL" \
+  VITE_EVAL_API_URL="${VITE_EVAL_API_URL:-}" \
   VITE_ADMIN_PASSWORD_HASH="$ADMIN_PASSWORD_HASH" \
   VITE_INVIGILATOR_PASSWORD_HASH="$INVIGILATOR_PASSWORD_HASH" \
   npm --workspace frontend run build
@@ -99,6 +103,15 @@ verify_dist_has_hashes "$DIST_DIR" "$ADMIN_PASSWORD_HASH" "$INVIGILATOR_PASSWORD
 echo "OK: both password hashes verified in $DIST_DIR — proceeding to deploy."
 
 gcloud builds submit frontend --tag "$IMAGE"
+
+# Staged zero-downtime option: set DEPLOY_NO_TRAFFIC=1 to deploy a new revision
+# WITHOUT taking traffic (tagged for verification on its tag URL); cut over later
+# with `gcloud run services update-traffic "$SERVICE_NAME" --to-revisions=<rev>=100`.
+# Unset = normal deploy (new healthy revision serves 100%).
+TRAFFIC_ARGS=()
+if [ -n "${DEPLOY_NO_TRAFFIC:-}" ]; then
+  TRAFFIC_ARGS=(--no-traffic --tag "${DEPLOY_TAG:-stg}")
+fi
 gcloud run deploy "$SERVICE_NAME" \
   --image "$IMAGE" \
   --region "$REGION" \
@@ -108,7 +121,8 @@ gcloud run deploy "$SERVICE_NAME" \
   --cpu 1 \
   --min-instances 0 \
   --max-instances 3 \
-  --concurrency 1000
+  --concurrency 1000 \
+  "${TRAFFIC_ARGS[@]}"
 
 echo "Frontend URL:"
 gcloud run services describe "$SERVICE_NAME" --region="$REGION" --format="value(status.url)"
