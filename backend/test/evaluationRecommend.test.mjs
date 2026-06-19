@@ -16,14 +16,14 @@ import {
 } from "../src/evaluationRecommend.mjs";
 
 // --- fixture helper ---
-function card({ id, name, comp, score, talent, integrity, ed = 1000, subs = 5, conf = "high", flags = [] }) {
+function card({ id, name, comp, score, talent, integrity, ed = 1000, subs = 5, shell = 100, conf = "high", flags = [] }) {
   return {
     identity_key: id,
     candidate_id: id.toUpperCase(),
     name,
     contest_slug: "fixture-contest",
     computed_at: "2026-06-12T12:00:00.000Z",
-    coverage: { editor_events_n: ed, submissions_n: subs, confidence: conf },
+    coverage: { editor_events_n: ed, shell_events_n: shell, submissions_n: subs, confidence: conf },
     talent: { composite: comp, total_score: score, max_total: 88 },
     integrity: {},
     flags,
@@ -144,7 +144,54 @@ test("report: FOR/AGAINST case — clean hire states absence affirmatively, ring
   assert.ok(c1.case.against.some((s) => /Recurring identical code/.test(s)));
   const a2 = rep.hires.find((r) => r.identity_key === "a2"); // strong+watch
   assert.ok(a2.case.against.some((s) => /weak signal/.test(s)));
-  assert.ok(a2.case.against.some((s) => /desk-check, not a block/.test(s)));
+  assert.ok(a2.case.against.some((s) => /desk-check and not a block/.test(s)));
+  // the reassurance must NOT claim false pattern-identity ("exactly this weak pattern")
+  assert.ok(!a2.case.against.some((s) => /exactly this weak pattern/.test(s)));
+});
+
+test("recommendFor: the exclude gate is robust to upstream tier-string drift (casing/whitespace)", () => {
+  const drifted = { tiers: { talent: "Weak", integrity: " Confirmed " }, talent: { composite: 62 } };
+  assert.equal(recommendFor(drifted).bucket, BUCKET.EXCLUDE_INTEGRITY);
+  const driftedHire = { tiers: { talent: " Strong ", integrity: "CLEAN" }, talent: { composite: 60 } };
+  assert.equal(recommendFor(driftedHire).bucket, BUCKET.STRONG_HIRE);
+});
+
+test("report: coverage-aware clean line — thin coverage is NOT stamped a full clearance", () => {
+  const thinClean = card({ id: "tc", name: "Thin Clean", comp: 50, score: 40, talent: "strong", integrity: "clean", ed: 1200, subs: 0, conf: "medium" });
+  const rep = computeRecommendationReport([thinClean], {});
+  const tc = rep.hires.find((r) => r.identity_key === "tc");
+  assert.ok(tc.case.against.some((s) => /not a full clearance/.test(s)), tc.case.against.join(" | "));
+  // a full-coverage high-confidence clean keeps the conclusive wording
+  const fullClean = card({ id: "fc", name: "Full Clean", comp: 60, score: 55, talent: "strong", integrity: "clean", ed: 4000, subs: 8, conf: "high" });
+  const rep2 = computeRecommendationReport([fullClean], {});
+  assert.ok(rep2.hires[0].case.against.some((s) => /clean editor history/.test(s)));
+});
+
+test("report: twin-pairs peer_evidence built from meta for confirmed copiers, empty for hires", () => {
+  const meta = {
+    recurring_pairs: [{ pair: ["c1", "c2"], n_problems: 5, n_hard: 1, problems: ["p1", "p2", "p3", "p4", "p5"] }],
+    clusters: { exact: [{ ch: "p5", hardness: "hard", members: [{ user: "c1", created: 1000 }, { user: "c2", created: 1211 }] }] },
+  };
+  // give c1/c2 a room via cross_inputs
+  const cohort = COHORT.map((c) => (c.identity_key === "c1" || c.identity_key === "c2") ? { ...c, cross_inputs: { room: "Lab A" } } : c);
+  const rep = computeRecommendationReport(cohort, meta);
+  const c1 = rep.excluded.find((r) => r.identity_key === "c1");
+  assert.equal(c1.peer_evidence.length, 1);
+  assert.equal(c1.peer_evidence[0].peer, "c2");
+  assert.equal(c1.peer_evidence[0].n_problems, 5);
+  assert.equal(c1.peer_evidence[0].same_room, true);
+  assert.equal(c1.peer_evidence[0].hard_delta.dt_sec, 211);
+  assert.equal(c1.peer_evidence[0].hard_delta.i_was_first, true); // c1 created earlier
+  // a clean hire has no peer evidence
+  assert.equal(rep.hires.find((r) => r.identity_key === "a1").peer_evidence.length, 0);
+});
+
+test("report: raw-score traps carry bucket so the headline can split by reason", () => {
+  const rep = computeRecommendationReport(COHORT, {});
+  // every trap must expose its bucket (used to split confirmed-copying vs hold vs below-bar)
+  assert.ok(rep.rawScoreTraps.every((t) => typeof t.bucket === "string"));
+  const hold = rep.rawScoreTraps.find((t) => t.bucket === BUCKET.HOLD_REVIEW);
+  if (hold) assert.match(hold.why_not, /not a confirmed violation/);
 });
 
 test("report: shadow-leaderboard rank_delta — confirmed copier with a top raw score shows a big demotion", () => {

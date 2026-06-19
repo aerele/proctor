@@ -180,12 +180,22 @@ export const EVAL_UI_HTML = `<!doctype html>
   .linkbtn { background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; width: auto; }
   .linkbtn:hover { color: var(--ink); border-color: var(--muted); }
 
-  /* method-calibration strip (trust anchor) */
-  .calib { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 11px 15px; background: var(--accent-soft);
-    border: 1px solid var(--accent-line); border-radius: 11px; font-size: 13px; color: #065f46; margin: 0 0 20px; }
-  .calib .ck { font-weight: 700; }
-  .calib .sep { color: var(--accent-line); }
-  .calib .cnote { color: #047857; }
+  /* methodology note — neutral/muted (NOT a green result banner): it describes a
+     prior validation of the ruleset, not this contest's results, so it must not
+     read as a headline number for this contest. */
+  .calib { display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; padding: 9px 13px; background: #f8fafc;
+    border: 1px solid var(--line); border-left: 3px solid #cbd5e1; border-radius: 9px; font-size: 12px; color: var(--muted); margin: 0 0 18px; }
+  .calib .ck { font-weight: 650; color: #475569; }
+
+  /* twin-pairs (the conclusive copying receipt, inside the case-against) */
+  .twin { padding: 8px 10px; margin: 0 0 8px; background: var(--danger-soft); border: 1px solid var(--danger-line); border-radius: 8px; }
+  .twin-head { font-size: 13px; }
+  .twin-head b { color: var(--danger); }
+  .twin-id { color: var(--muted); font-size: 11.5px; margin-left: 6px; font-variant: tabular-nums; }
+  .twin-meta { font-size: 12px; color: #7f1d1d; margin-top: 2px; }
+
+  /* compare-shortlist warnings (unmatched / ambiguous entries) */
+  .cmp-warn { font-size: 12px; color: var(--warn); margin: 4px 0 0; }
 
   /* shadow-leaderboard movement chip */
   .deltachip { font-size: 11px; font-weight: 650; padding: 2px 8px; border-radius: 999px; white-space: nowrap; font-variant: tabular-nums; border: 1px solid transparent; }

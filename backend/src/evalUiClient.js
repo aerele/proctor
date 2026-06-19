@@ -160,6 +160,24 @@ function candidateRow(c, opts) {
   if (c.one_line) forCard.append(el("div", { class: "one-line", text: c.one_line }));
 
   const againstCard = el("div", { class: "casecard against" }, el("h4", { text: "The case against" }));
+  // twin-pairs: the conclusive copying relationship(s) — who / how many problems /
+  // submit-gap on the hard problem / same room. The verifiable receipt.
+  if (c.peer_evidence && c.peer_evidence.length) {
+    for (const pe of c.peer_evidence) {
+      const bits = [pe.n_problems + " shared problem" + (pe.n_problems === 1 ? "" : "s")];
+      if (pe.n_hard) bits.push(pe.n_hard + " hard");
+      if (pe.same_room && pe.room) bits.push("same room (" + pe.room + ")");
+      if (pe.hard_delta) bits.push("hard " + pe.hard_delta.problem + ": " + (pe.hard_delta.i_was_first ? "submitted first" : pe.peer_name + " submitted first") + ", " + pe.hard_delta.dt_sec + "s apart");
+      againstCard.append(el("div", { class: "twin" },
+        el("div", { class: "twin-head" },
+          el("span", { text: "Identical code shared with " }),
+          el("b", { text: pe.peer_name }),
+          pe.peer ? el("span", { class: "twin-id", text: pe.peer }) : null,
+        ),
+        el("div", { class: "twin-meta", text: bits.join(" · ") }),
+      ));
+    }
+  }
   if (c.flags && c.flags.length) {
     for (const f of c.flags) {
       againstCard.append(el("div", { class: "flag" },
@@ -175,10 +193,18 @@ function candidateRow(c, opts) {
       ));
     }
     if (c.bucket === BUCKET.HIRE_DESKCHECK) {
-      againstCard.append(el("div", { class: "reassure", text: "Calibrated as a desk-check, not a block: in the honest control cohort, genuinely-hired candidates showed exactly this weak pattern." }));
+      againstCard.append(el("div", { class: "reassure", text: "Why this is a desk-check and not a block: a single weak signal like this is not, on its own, evidence of copying — confirm it in a short desk-check before an offer." }));
     }
-  } else {
-    againstCard.append(el("div", { class: "nodossier", text: "No adverse signal on any captured stream — clean editor history." }));
+  } else if (!(c.peer_evidence && c.peer_evidence.length)) {
+    // honest absence: only claim a conclusive clean record on full high-confidence
+    // coverage; with thin/absent capture, say "clean on what was recorded".
+    const thin = (c.confidence && c.confidence !== "high") || (c.missing_signals && c.missing_signals.length);
+    const txt = thin
+      ? "No adverse signal in the captured streams, but coverage was limited" +
+        (c.missing_signals && c.missing_signals.length ? " (thin/absent: " + c.missing_signals.join(", ") + ")" : "") +
+        " — clean on what was recorded, not a full clearance."
+      : "No adverse signal on any captured stream — clean editor history.";
+    againstCard.append(el("div", { class: "nodossier", text: txt }));
   }
 
   const dossier = el("div", { class: "dossier" }, el("div", { class: "case2" }, forCard, againstCard));
@@ -219,16 +245,17 @@ function render(report) {
   root.append(header);
   root.append(el("p", { class: "sub", text: c.participants + " candidates evaluated" + (c.phantoms ? " · " + c.phantoms + " enrolled identities had no captured session data (not ranked)" : "") }));
 
-  // method-calibration strip (trust anchor)
+  // methodology note — a PRIOR one-time validation of the ruleset against a
+  // labeled control set, NOT this contest's results. Framed + styled as
+  // methodology (not a green result banner) so the bold numbers above the fold
+  // are only THIS contest's counts (chips, below).
   const cal = report.calibration;
   if (cal) {
     root.append(el("div", { class: "calib" },
-      el("span", { class: "ck", text: "Method calibration:" }),
-      el("span", null, "validated on the " + cal.control_cohort + " — "),
-      el("span", { class: "ck", text: cal.honest_excluded + " honest candidates excluded" }),
-      el("span", { class: "sep", text: "·" }),
-      el("span", { class: "ck", text: cal.ring_caught + "/" + cal.ring_total + " confirmed copying caught" }),
-      el("span", { class: "cnote", text: "— " + cal.note }),
+      el("span", { class: "ck", text: "Methodology:" }),
+      el("span", null,
+        "this ruleset was calibrated once against a labeled control set (" + cal.control_cohort +
+        "), where every org-selected hire was retained and every confirmed copier excluded. " + cal.note),
     ));
   }
 
@@ -242,15 +269,24 @@ function render(report) {
   );
   root.append(chips);
 
-  // headline insight
+  // headline insight — split the "trap" count by WHY (don't brand a below-bar
+  // genuine candidate or an unconfirmed hold as "integrity-failed").
   const nTrap = report.rawScoreTraps.length;
   const nMiss = report.missedByRawScore.length;
+  const nCopy = report.rawScoreTraps.filter((t) => t.bucket === BUCKET.EXCLUDE_INTEGRITY).length;
+  const nHold = report.rawScoreTraps.filter((t) => t.bucket === BUCKET.HOLD_REVIEW).length;
+  const nWeak = nTrap - nCopy - nHold; // below-bar / stub-gaming — genuine work, just weak
   if (nTrap || nMiss) {
+    const breakdown = [];
+    if (nCopy) breakdown.push(nCopy + " confirmed copying");
+    if (nHold) breakdown.push(nHold + " needing integrity review");
+    if (nWeak) breakdown.push(nWeak + " below-bar / stub-gaming");
     root.append(el("div", { class: "insight" },
       el("div", { class: "ico", text: "⚖️" }),
       el("p", null,
         "Hiring by raw leaderboard score would wrongly include ",
-        el("b", { class: "bad", text: nTrap + (nTrap === 1 ? " integrity-failed candidate" : " integrity-failed candidates") }),
+        el("b", { class: "bad", text: nTrap + (nTrap === 1 ? " high scorer" : " high scorers") + " who don't clear the bar" }),
+        breakdown.length ? " (" + breakdown.join(", ") + ")" : "",
         " and miss ",
         el("b", { class: "good", text: nMiss + (nMiss === 1 ? " genuine solver" : " genuine solvers") }),
         ". The ranking below is integrity-adjusted: talent and integrity are scored separately, and confirmed copying excludes a candidate regardless of score.",
@@ -320,20 +356,37 @@ function buildCompare(report) {
   const out = el("div", { class: "cmp-out" });
   const run = () => {
     const raw = ta.value || "";
-    const tokens = raw.split(/[\n,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const tokens = raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
     out.replaceChildren();
     if (!tokens.length) { out.classList.remove("show"); return; }
-    const match = (cand) => tokens.some((t) =>
-      cand.name.toLowerCase().includes(t) ||
-      (cand.candidate_id || "").toLowerCase() === t ||
-      (cand.identity_key || "").toLowerCase() === t);
-    const picked = report.ranked.filter(match);
+    // Match per-token so a typo (matches nobody) or an ambiguous substring
+    // (matches several — e.g. a common surname) is SURFACED, never silently
+    // treated as a clean pass.
+    const matchesFor = (t) => {
+      const tl = t.toLowerCase();
+      return report.ranked.filter((cand) =>
+        (cand.candidate_id || "").toLowerCase() === tl ||
+        (cand.identity_key || "").toLowerCase() === tl ||
+        cand.name.toLowerCase().includes(tl));
+    };
+    const pickedMap = new Map();
+    const unmatched = [];
+    const ambiguous = [];
+    for (const t of tokens) {
+      const m = matchesFor(t);
+      if (!m.length) { unmatched.push(t); continue; }
+      if (m.length > 1) ambiguous.push(t + " (" + m.length + ")");
+      m.forEach((cand) => pickedMap.set(cand.identity_key, cand));
+    }
+    const picked = [...pickedMap.values()];
     const pickedIds = new Set(picked.map((p) => p.identity_key));
     const concerns = picked.filter((p) => !isHireBucket(p.bucket));
     const missedByYou = report.hires.filter((h) => !pickedIds.has(h.identity_key));
 
     out.append(el("p", { class: "h-note", text:
-      picked.length + " of your picks matched · " + concerns.length + " the eval flags · " + missedByYou.length + " recommended candidates not on your list" }));
+      picked.length + " candidate(s) matched · " + concerns.length + " the eval flags · " + missedByYou.length + " recommended candidates not on your list" }));
+    if (unmatched.length) out.append(el("p", { class: "cmp-warn", text: unmatched.length + " of your entries matched nobody (check spelling, or use the ID): " + unmatched.join(", ") }));
+    if (ambiguous.length) out.append(el("p", { class: "cmp-warn", text: "Matched multiple — refine to an ID: " + ambiguous.join(", ") }));
     const twoup = el("div", { class: "twoup" });
     const cCard = el("div", { class: "card bad" }, el("h3", { text: "Your picks the eval would NOT clear" }));
     if (concerns.length) concerns.forEach((p) => cCard.append(el("div", { class: "mini" },

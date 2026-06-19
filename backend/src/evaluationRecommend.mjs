@@ -73,8 +73,13 @@ export function isParticipant(card) {
 // integrity is a desk-check, not a clean hire.
 export function recommendFor(card) {
   const tiers = (card && card.tiers) || {};
-  const talent = tiers.talent || "";
-  const integrity = tiers.integrity || "";
+  // Normalize the tier strings before gating. The exclude gate (integrity ===
+  // "confirmed") is the single most safety-critical line in the layer — a copier
+  // reaching the hire set is the worst failure mode — so make it robust to any
+  // upstream formatting drift (casing / stray whitespace) rather than depending
+  // on an implicit byte-exact cross-module contract with the detector.
+  const talent = String(tiers.talent || "").trim().toLowerCase();
+  const integrity = String(tiers.integrity || "").trim().toLowerCase();
   const composite = Number(card && card.talent && card.talent.composite) || 0;
 
   if (integrity === "confirmed") {
@@ -200,15 +205,34 @@ function buildCase(card, bucket, annotatedFlags) {
   forPts.push(`${score}${maxTotal ? "/" + maxTotal : ""} raw score`);
 
   const against = [];
-  const adverse = (annotatedFlags || []).filter((f) => f.code !== "partial_gamer");
+  const adverse = (annotatedFlags || []).filter((f) => f && f.code && f.code !== "partial_gamer");
   for (const f of adverse) {
     against.push(f.weak ? `${f.label} (weak signal)` : f.label);
   }
-  const gamer = (annotatedFlags || []).find((f) => f.code === "partial_gamer");
+  const gamer = (annotatedFlags || []).find((f) => f && f.code === "partial_gamer");
   if (gamer) against.push(gamer.label);
-  if (!against.length) against.push("No adverse signal on any captured stream — clean editor history.");
+  if (!against.length) {
+    // Honest absence: only claim a conclusive "clean history" when coverage was
+    // actually full + high-confidence. With thin/absent capture, say so — a no-
+    // signal candidate is "clean on what was recorded", NOT fully cleared. (This
+    // is the false-clear guard: the 2026 retyper produces a clean-looking capture,
+    // so an unqualified "clean" is exactly the wrong over-trust.)
+    const conf = (card && card.coverage && card.coverage.confidence) || "";
+    const miss = missingSignals(card);
+    if ((conf && conf !== "high") || miss.length) {
+      against.push(
+        "No adverse signal in the captured streams, but coverage was limited" +
+          (miss.length ? ` (thin/absent: ${miss.join(", ")})` : "") +
+          " — clean on what was recorded, not a full clearance."
+      );
+    } else {
+      against.push("No adverse signal on any captured stream — clean editor history.");
+    }
+  }
   if (bucket === BUCKET.HIRE_DESKCHECK && adverse.length) {
-    against.push("Calibrated as a desk-check, not a block: in the honest control cohort, real hires showed exactly this weak pattern.");
+    against.push(
+      "Why this is a desk-check and not a block: a single weak signal like this is not, on its own, evidence of copying — confirm it in a short desk-check before an offer."
+    );
   }
   return { for: forPts, against };
 }
@@ -222,6 +246,54 @@ function missingSignals(card) {
   if ((c.shell_events_n || 0) === 0) out.push("proctoring/shell events");
   if ((c.submissions_n || 0) === 0) out.push("submissions");
   return out;
+}
+
+// TWIN-PAIRS evidence — the "30-second verifiable" receipt behind an integrity
+// exclusion: WHO this candidate shares identical code with, on HOW MANY problems
+// (and how many hard), the submit-time gap on the hardest shared problem, and
+// same-room corroboration. Built purely from the cross-pass meta
+// (recurring_pairs + clusters.exact) + each side's cross_inputs.room. Empty for
+// candidates not in any conclusive pair (i.e. every genuine hire).
+function peerEvidenceFor(identityKey, meta, byId) {
+  const pairs = ((meta && meta.recurring_pairs) || []).filter(
+    (p) => p && Array.isArray(p.pair) && p.pair.indexOf(identityKey) !== -1
+  );
+  if (!pairs.length) return [];
+  const exact = (meta && meta.clusters && meta.clusters.exact) || [];
+  const roomOf = (id) => (((byId.get(id) || {}).cross_inputs || {}).room) || "";
+  const nameOf = (id) => (byId.get(id) || {}).name || id;
+  const myRoom = roomOf(identityKey);
+  return pairs
+    .map((p) => {
+      const peer = p.pair[0] === identityKey ? p.pair[1] : p.pair[0];
+      // submit-time delta on the hardest shared exact-clone problem
+      let hard = null;
+      for (const cl of exact) {
+        if (cl.hardness !== "hard") continue;
+        const me = (cl.members || []).find((m) => m.user === identityKey);
+        const them = (cl.members || []).find((m) => m.user === peer);
+        if (me && them) {
+          hard = {
+            problem: cl.ch,
+            dt_sec: Math.abs((me.created || 0) - (them.created || 0)),
+            i_was_first: (me.created || 0) <= (them.created || 0),
+          };
+          break;
+        }
+      }
+      const peerRoom = roomOf(peer);
+      return {
+        peer,
+        peer_name: nameOf(peer),
+        n_problems: p.n_problems || (p.problems ? p.problems.length : 0),
+        n_hard: p.n_hard || 0,
+        problems: p.problems || [],
+        same_room: !!(myRoom && peerRoom && myRoom === peerRoom),
+        room: myRoom || peerRoom || "",
+        hard_delta: hard,
+      };
+    })
+    .sort((a, b) => b.n_hard - a.n_hard || b.n_problems - a.n_problems);
 }
 
 // Build the full cohort recommendation report from the raw scorecard list (the
@@ -243,6 +315,9 @@ export function computeRecommendationReport(evaluations, meta) {
   const cards = Array.isArray(evaluations) ? evaluations : [];
   const participants = cards.filter(isParticipant);
   const phantoms = cards.length - participants.length;
+  // peer lookup (names + rooms) for the twin-pairs evidence — built over ALL
+  // cards so a peer is resolvable even if it were filtered elsewhere.
+  const byId = new Map(cards.map((c) => [c && c.identity_key, c]));
 
   const enriched = participants.map((card) => {
     const rec = recommendFor(card);
@@ -266,6 +341,7 @@ export function computeRecommendationReport(evaluations, meta) {
       reason: rec.reason,
       flags,
       case: buildCase(card, rec.bucket, flags),
+      peer_evidence: peerEvidenceFor(card.identity_key, meta, byId),
       // surface the strongest (non-weak) integrity finding first for the dossier header
       top_finding: flags.filter((f) => !f.weak && f.severity === "critical")[0] || null,
       one_line: (card.tiers && card.tiers.one_line) || "",
@@ -318,7 +394,7 @@ export function computeRecommendationReport(evaluations, meta) {
         r.bucket === BUCKET.EXCLUDE_INTEGRITY
           ? "confirmed copying"
           : r.bucket === BUCKET.HOLD_REVIEW
-            ? "integrity hold"
+            ? "needs integrity review (not a confirmed violation)"
             : (r.flags.find((f) => f.code === "partial_gamer") ? "stub-gaming (partial credit, little real solving)" : "talent below bar on genuine work"),
     }));
 
