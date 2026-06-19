@@ -88,6 +88,12 @@ export function makeEvaluation(ctx) {
     evalTimeBudgetMs = 90000,
     evalLeaseMs = 180000,
     nowMs = () => Date.now(),
+    // GCS list-retry knobs (read-error handling, 2026-06-19). A LIST that throws
+    // is retried with exponential backoff; only after gcsListRetries failures is
+    // it surfaced as a read GAP (gcs_read_failed) rather than silent absence.
+    gcsListRetries = 3,
+    gcsRetryBaseMs = 250,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   } = ctx;
 
   const evaluationsCollection = collections.evaluations;
@@ -101,13 +107,38 @@ export function makeEvaluation(ctx) {
   // ---- GCS NDJSON/JSONL gather (adminSessionEvents pattern: list → download →
   // split lines → JSON.parse, skipping malformed lines / unreadable objects). A
   // missing prefix lists empty, never throws.
+  //
+  // READ-ERROR HANDLING (missing-data fix, 2026-06-19): a LIST that THROWS is a
+  // GAP, not "no data". Previously any throw was swallowed (`return []`), so a
+  // transient GCS outage looked identical to a session that genuinely produced no
+  // events — and the eval then scored that absence as zero-effort cheating for a
+  // whole contest. We now retry the list with bounded backoff, and on persistent
+  // failure THROW a tagged error so the caller marks the candidate's evidence as
+  // `gcs_read_failed` (⇒ low confidence ⇒ inconclusive tier) instead of silently
+  // proceeding as if there were no data. (A successful list that returns zero
+  // files is still legitimate "no data" and returns [].)
   async function gatherJsonLines(prefix) {
     let files = [];
-    try {
-      const [listed] = await bucket().getFiles({ prefix, maxResults: 1000 });
-      files = listed || [];
-    } catch {
-      return [];
+    let lastErr = null;
+    let listed = false;
+    for (let attempt = 0; attempt < gcsListRetries; attempt++) {
+      try {
+        const [got] = await bucket().getFiles({ prefix, maxResults: 1000 });
+        files = got || [];
+        listed = true;
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < gcsListRetries - 1) {
+          await sleep(gcsRetryBaseMs * Math.pow(2, attempt));
+        }
+      }
+    }
+    if (!listed) {
+      const err = new Error(`gcs_read_failed: ${prefix}`);
+      err.code = "GCS_READ_FAILED";
+      err.cause = lastErr;
+      throw err;
     }
     const out = [];
     // Bounded concurrency over the listed files (small batches; sequential
@@ -140,20 +171,30 @@ export function makeEvaluation(ctx) {
   }
 
   // All editor / shell / clipboard evidence for one session, sorted by ts.
+  // readFailed=true ⇒ the GCS list persistently threw (even after retries); the
+  // caller treats that as a read GAP (gcs_read_failed), NOT as "no data", so the
+  // candidate is marked inconclusive instead of scored off absent evidence.
   async function gatherSessionEvidence(session) {
     const prefix = String(session.storage_prefix || "");
-    if (!prefix) return { editorEvents: [], shellEvents: [], clipboardEntries: [] };
-    const [editorRaw, shellRaw, clipboardRaw] = await Promise.all([
-      gatherJsonLines(`${prefix}${editorEventsLabel}/`),
-      gatherJsonLines(`${prefix}events/`),
-      gatherJsonLines(`${prefix}review/clipboard.jsonl`),
-    ]);
-    const clipboardEntries = [];
-    for (const rec of clipboardRaw) {
-      const text = typeof rec === "string" ? rec : rec && (rec.text || rec.content || rec.clipboard);
-      if (typeof text === "string" && text) clipboardEntries.push(text);
+    if (!prefix) return { editorEvents: [], shellEvents: [], clipboardEntries: [], readFailed: false };
+    try {
+      const [editorRaw, shellRaw, clipboardRaw] = await Promise.all([
+        gatherJsonLines(`${prefix}${editorEventsLabel}/`),
+        gatherJsonLines(`${prefix}events/`),
+        gatherJsonLines(`${prefix}review/clipboard.jsonl`),
+      ]);
+      const clipboardEntries = [];
+      for (const rec of clipboardRaw) {
+        const text = typeof rec === "string" ? rec : rec && (rec.text || rec.content || rec.clipboard);
+        if (typeof text === "string" && text) clipboardEntries.push(text);
+      }
+      return { editorEvents: editorRaw, shellEvents: shellRaw, clipboardEntries, readFailed: false };
+    } catch (e) {
+      if (e && e.code === "GCS_READ_FAILED") {
+        return { editorEvents: [], shellEvents: [], clipboardEntries: [], readFailed: true };
+      }
+      throw e;
     }
-    return { editorEvents: editorRaw, shellEvents: shellRaw, clipboardEntries };
   }
 
   // ---- per-contest problem context (points / stubs / hardness) --------------
@@ -365,6 +406,10 @@ export function makeEvaluation(ctx) {
     const slice = pending.slice(0, batchLimit);
     let evaluated = 0;
     let skipped = 0;
+    // Count of identities whose evidence read failed this batch — surfaced on the
+    // __job doc so a contest-wide GCS outage is VISIBLE rather than invisible
+    // (read-error handling, 2026-06-19).
+    let evidenceReadErrors = 0;
     let lastKey = cursorKey;
     let budgetBroke = false;
     // A. per-batch wall-clock budget: break early (return cursor, done:false) once
@@ -401,12 +446,15 @@ export function makeEvaluation(ctx) {
       const editorEvents = [];
       const shellEvents = [];
       const clipboardEntries = [];
+      let evidenceReadFailed = false;
       for (const session of idSessions) {
         const ev = await gatherSessionEvidence(session);
         editorEvents.push(...ev.editorEvents);
         shellEvents.push(...ev.shellEvents);
         clipboardEntries.push(...ev.clipboardEntries);
+        if (ev.readFailed) evidenceReadFailed = true;
       }
+      if (evidenceReadFailed) evidenceReadErrors += 1;
       editorEvents.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
       shellEvents.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
 
@@ -435,6 +483,7 @@ export function makeEvaluation(ctx) {
         hardness,
         maxTotal,
         clipboardEntries,
+        evidenceReadFailed,
       });
       // Denorm contest_slug so scopedQuery list returns it.
       scorecard.contest_slug = slug;
@@ -453,7 +502,15 @@ export function makeEvaluation(ctx) {
       ? total
       : universe.filter((u) => lastKey != null && u.key <= lastKey).length;
 
-    const result = { evaluated, skipped, done, run_id: runId, processed, total };
+    // Accumulate read-error count across batches: a FRESH start (no cursor)
+    // resets to this batch's count; a resume adds to the prior count so a
+    // contest-wide GCS outage shows the full tally on the __job doc.
+    const priorReadErrors = cursorKey != null && existingJob && Number.isFinite(existingJob.evidence_read_errors)
+      ? existingJob.evidence_read_errors
+      : 0;
+    const totalReadErrors = priorReadErrors + evidenceReadErrors;
+
+    const result = { evaluated, skipped, done, run_id: runId, processed, total, evidence_read_errors: totalReadErrors };
     if (!done) {
       result.cursor = lastKey;
     } else {
@@ -467,6 +524,7 @@ export function makeEvaluation(ctx) {
       status: done ? "done" : "running",
       total, processed, cursor: done ? "" : (lastKey || ""), run_id: runId,
       started_at: startedAtIso,
+      evidence_read_errors: totalReadErrors,
       updated_at: new Date(nowMs()).toISOString(), updated_at_ms: nowMs(),
     });
 
