@@ -453,7 +453,7 @@ export function makeEvaluation(ctx) {
       ? total
       : universe.filter((u) => lastKey != null && u.key <= lastKey).length;
 
-    const result = { evaluated, skipped, done, run_id: runId };
+    const result = { evaluated, skipped, done, run_id: runId, processed, total };
     if (!done) {
       result.cursor = lastKey;
     } else {
