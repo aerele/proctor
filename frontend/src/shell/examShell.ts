@@ -172,6 +172,22 @@ export function elapsedTimerActive(input: { status: SessionStatus; gate: ShellGa
   return input.status === "recording" && input.gate !== "ended";
 }
 
+// Whether an "away" liveness beacon (visibilitychange→hidden / pagehide→closing)
+// should be sent for the current status. The backend raises the tab_hidden
+// proctor alert SOLELY from this beacon, so it must fire only while the exam is
+// GENUINELY live — i.e. status === "recording". Once the candidate presses End
+// the status moves to "ending" → "ended" (or "error"), and the recorder
+// teardown, fullscreen exit, and the candidate switching away to close the tab
+// each flip visibilityState to hidden. None of those are a mid-exam tab switch;
+// gating them here is what stops the end-of-session tab_hidden FALSE POSITIVE.
+// A "visible" return-to-foreground beacon is liveness-only (never raises an
+// alert) and is sent unconditionally by the caller — this predicate governs the
+// away signals only. Mid-exam detection is unchanged: while recording, every
+// hide/close still beacons exactly as before.
+export function awayBeaconActive(status: SessionStatus): boolean {
+  return status === "recording";
+}
+
 // ---- Spec §6: anomaly classification ---------------------------------------
 
 export type AnomalyVerdict =

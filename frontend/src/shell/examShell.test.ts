@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   deriveStage, stageHint, topBarVisible, fullscreenGateVisible, permissionsGateVisible,
-  shellHeaderMode, elapsedTimerActive, STAGE_META,
+  shellHeaderMode, elapsedTimerActive, awayBeaconActive, STAGE_META,
   formatWallClock, formatExamElapsed, formatRoomLabel,
   anomalyFromEvent, topBarReducer, initialTopBarState,
   serializeShellState, deserializeShellState, shellStateStorageKey,
@@ -151,6 +151,24 @@ describe("elapsedTimerActive", () => {
     expect(elapsedTimerActive({ status: "idle", gate: "running" })).toBe(false);
     expect(elapsedTimerActive({ status: "starting", gate: "running" })).toBe(false);
     expect(elapsedTimerActive({ status: "error", gate: "running" })).toBe(false);
+  });
+});
+
+describe("awayBeaconActive", () => {
+  it("sends the away beacon only while genuinely recording", () => {
+    expect(awayBeaconActive("recording")).toBe(true);
+  });
+  it("suppresses the away beacon once the session is ENDING — the tab_hidden false-positive window", () => {
+    // Pressing End sets status "ending" and then "ended"; the recorder teardown,
+    // fullscreen exit, and the candidate closing the tab all flip the page to
+    // hidden. None of those may raise tab_hidden — this gate is the fix.
+    expect(awayBeaconActive("ending")).toBe(false);
+    expect(awayBeaconActive("ended")).toBe(false);
+  });
+  it("suppresses the away beacon in non-recording states (no spurious alert)", () => {
+    expect(awayBeaconActive("idle")).toBe(false);
+    expect(awayBeaconActive("starting")).toBe(false);
+    expect(awayBeaconActive("error")).toBe(false);
   });
 });
 
