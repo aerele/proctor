@@ -50,7 +50,11 @@ export function makeSubmissionEventsRoutes(ctx) {
     // populated by the exam app on each candidate submit. Used to feed the
     // recording-review timeline for proctor-NATIVE contests, which never populate
     // the HackerRank-poller proctor_submission_events store.
-    submissionsCollection
+    submissionsCollection,
+    // RUN events (proctor_run_events): execRun writes one per sample-test run.
+    // Surfaced as distinct kind:"run" events merged time-ordered with submits.
+    // Absent on an older ctx → run events simply don't surface (graceful).
+    runEventsCollection
   } = ctx;
 
   // Cap the native-submission fallback scan (a contest has up to ~50 submissions
@@ -208,6 +212,9 @@ export function makeSubmissionEventsRoutes(ctx) {
       submission_id: String(docId),
       hackerrank_username: String(data?.username_norm || data?.candidate_id || ""),
       valid: verdict === "accepted",
+      // Discriminator vs the run events merged into the same stream. Set
+      // explicitly so the recording view can style submits distinctly from runs.
+      kind: "submit",
       submitted_at: new Date(String(createdAt)).toISOString()
     };
     if (data?.contest_slug) event.contest_slug = String(data.contest_slug);
@@ -251,6 +258,65 @@ export function makeSubmissionEventsRoutes(ctx) {
     return mergeSubmissionEvents([], mapped);
   }
 
+  // Map ONE proctor_run_events doc (execRun writes it) into the SubmissionEvent
+  // shape so a run rides the SAME recording-review timeline as submits — sorted
+  // by submitted_at, free-text searchable, type-filterable. The discriminator is
+  // kind:"run" (vs submit), and `valid` mirrors the submit convention
+  // (verdict === "accepted") so a run that passed every SAMPLE reads GREEN.
+  //   submission_id      ← doc id
+  //   submitted_at       ← created_at  (the SAME time field submits sort on)
+  //   challenge_slug     ← problem_id
+  //   lang               ← language
+  //   status             ← verdict
+  //   passed_count/total ← per-SAMPLE counts (e.g. "2/3 samples")
+  // Drops docs with no usable created_at (the timeline would NaN them out).
+  function nativeRunToEvent(docId, data) {
+    const createdAt = data?.created_at;
+    if (!createdAt || Number.isNaN(Date.parse(String(createdAt)))) return null;
+    const verdict = data?.verdict;
+    const event = {
+      submission_id: String(docId),
+      hackerrank_username: String(data?.username_norm || data?.candidate_id || ""),
+      valid: verdict === "accepted",
+      kind: "run",
+      submitted_at: new Date(String(createdAt)).toISOString()
+    };
+    if (data?.contest_slug) event.contest_slug = String(data.contest_slug);
+    if (data?.problem_id) event.challenge_slug = String(data.problem_id);
+    if (data?.language) event.lang = String(data.language);
+    if (verdict !== undefined && verdict !== null && verdict !== "") event.status = String(verdict);
+    // Sample-test counts (no score/max_points — runs are unscored). Threaded
+    // through only when PRESENT + finite (null/""/undefined rejected first, so
+    // Number(null) === 0 never lands as a spurious 0).
+    for (const field of ["passed_count", "total"]) {
+      const raw = data?.[field];
+      if (raw === undefined || raw === null || raw === "") continue;
+      const n = Number(raw);
+      if (Number.isFinite(n)) event[field] = n;
+    }
+    return event;
+  }
+
+  // Read this candidate's RUN events (proctor_run_events) for the recording-
+  // review timeline. Scoped by username_norm (+ contest_slug via THE scopedQuery
+  // chokepoint, exactly like nativeSubmissionEventsFor). A missing
+  // runEventsCollection (older ctx) or any read failure → []. Returns the mapped
+  // events sorted by submitted_at.
+  async function nativeRunEventsFor(usernameNorm, contestSlug) {
+    if (!runEventsCollection) return [];
+    let query = getFirestore()
+      .collection(runEventsCollection)
+      .where("username_norm", "==", usernameNorm);
+    if (contestSlug !== undefined && contestSlug !== null && contestSlug !== "") {
+      query = scopedQuery(query, { slug: String(contestSlug) });
+    }
+    const snapshot = await query.limit(SUBMISSION_EVENTS_FALLBACK_LIMIT).get();
+    const mapped = snapshot.docs
+      .map((doc) => nativeRunToEvent(doc.id, doc.data()))
+      .filter((event) => event !== null);
+    return mergeSubmissionEvents([], mapped);
+  }
+
   // GET /api/admin/submission-events?username=<u>&contest_slug=<optional>&username_norm=<optional>
   // — admin read for the recording-review timeline. When contest_slug is omitted,
   // merges events across every contest doc for that user. Always returns the
@@ -287,14 +353,22 @@ export function makeSubmissionEventsRoutes(ctx) {
       docs = snapshot.docs.map((doc) => doc.data());
     }
 
-    const merged = mergeSubmissionEvents([], docs.flatMap((doc) => doc?.events || []));
-    // Preserve the poller-sourced path when it HAS data; only when it returns
-    // NOTHING for this (username_norm, contest_slug) do we fall back to the
-    // proctor's own in-app submissions (the data that actually exists for
-    // proctor-native, non-HackerRank contests).
-    if (merged.length) return { events: merged };
-    const fallback = await nativeSubmissionEventsFor(usernameNorm, contestSlug);
-    return { events: fallback };
+    const pollerSourced = mergeSubmissionEvents([], docs.flatMap((doc) => doc?.events || []));
+    // The SUBMIT stream: preserve the poller-sourced path when it HAS data; only
+    // when it returns NOTHING for this (username_norm, contest_slug) do we fall
+    // back to the proctor's own in-app submissions (the data that actually
+    // exists for proctor-native, non-HackerRank contests). Poller-sourced events
+    // carry no `kind` — stamp "submit" so the recording view styles them as
+    // submits (the native fallback already tags them via nativeSubmissionToEvent).
+    const submitEvents = pollerSourced.length
+      ? pollerSourced.map((event) => (event.kind ? event : { ...event, kind: "submit" }))
+      : await nativeSubmissionEventsFor(usernameNorm, contestSlug);
+    // RUN events ride the SAME timeline as a distinct kind:"run" stream — always
+    // fetched (independent of the submit source) and merged time-ordered with the
+    // submits. mergeSubmissionEvents de-dupes by submission_id (run docs use their
+    // own randomUUIDs, so no collision) and re-sorts the whole list by submitted_at.
+    const runEvents = await nativeRunEventsFor(usernameNorm, contestSlug);
+    return { events: mergeSubmissionEvents(submitEvents, runEvents) };
   }
 
   return {
@@ -311,6 +385,9 @@ export function makeSubmissionEventsRoutes(ctx) {
     mergeSubmissionEvents,
     // native-submission fallback helpers (exported for the mapper/fallback tests)
     nativeSubmissionToEvent,
-    nativeSubmissionEventsFor
+    nativeSubmissionEventsFor,
+    // run-event surfacing helpers (exported for the mapper/merge tests)
+    nativeRunToEvent,
+    nativeRunEventsFor
   };
 }

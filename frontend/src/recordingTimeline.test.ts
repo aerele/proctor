@@ -225,6 +225,61 @@ describe("buildTimelineLog", () => {
     expect(entry.detail).toBe("python3");
   });
 
+  it("renders RUN events DISTINCTLY from submits: 'Run · n/m samples · verdict · challenge', type 'run', result in label AND detail", () => {
+    const [entry] = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [
+        submission({
+          submission_id: "run-1",
+          kind: "run",
+          valid: false,
+          status: "wrong_answer",
+          challenge_name: "Two Sum",
+          lang: "python3",
+          passed_count: 2,
+          total: 3
+        })
+      ],
+      testStartMs: T0,
+      gaps: []
+    });
+    // Distinct "Run" prefix + "samples" wording (never "Submit"/"tests").
+    expect(entry.label).toBe("Run · 2/3 samples · wrong_answer · Two Sum");
+    // The result text is ALSO in detail (searchable), with the language.
+    expect(entry.detail).toBe("python3 · 2/3 samples · wrong_answer");
+    // The discriminator type is "run" (the event-type filter key) and the row is
+    // a submission-stream entry (green/red lane), id prefixed "run:".
+    expect(entry.kind).toBe("submission");
+    expect(entry.type).toBe("run");
+    expect(entry.id).toBe("run:run-1");
+    expect(entry.valid).toBe(false);
+  });
+
+  it("an all-samples-pass run reads accepted + valid (GREEN)", () => {
+    const [entry] = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [submission({ kind: "run", valid: true, passed_count: 3, total: 3, challenge_name: "Two Sum" })],
+      testStartMs: T0,
+      gaps: []
+    });
+    expect(entry.label).toBe("Run · 3/3 samples · accepted · Two Sum");
+    expect(entry.valid).toBe(true);
+  });
+
+  it("a submission with kind absent is treated as a SUBMIT (legacy/poller events)", () => {
+    const [entry] = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [submission({ status: "Accepted", challenge_name: "Two Sum" })],
+      testStartMs: T0,
+      gaps: []
+    });
+    expect(entry.type).toBe("submit");
+    expect(entry.label.startsWith("Submit · ")).toBe(true);
+  });
+
   it("tags entries that land inside a recording gap as duringGap", () => {
     const entries = buildTimelineLog({
       alerts: [],
@@ -371,6 +426,49 @@ describe("filterTimelineLog", () => {
     expect(noMatch.some((e) => e.kind === "alert")).toBe(false);
     expect(noMatch.map((e) => e.kind)).toEqual(["event", "submission"]);
   });
+
+  describe("run events flow through search + the event-type filter", () => {
+    // A mixed stream: one proctor event, two runs, one submit.
+    const mixed = buildTimelineLog({
+      alerts: [],
+      events: [event({ type: "window_blur", timestamp: "2026-06-05T09:00:30.000Z" })],
+      submissions: [
+        submission({ submission_id: "r1", kind: "run", valid: false, status: "wrong_answer", passed_count: 1, total: 3, submitted_at: "2026-06-05T09:01:00.000Z" }),
+        submission({ submission_id: "r2", kind: "run", valid: true, passed_count: 3, total: 3, submitted_at: "2026-06-05T09:02:00.000Z" }),
+        submission({ submission_id: "s1", kind: "submit", valid: true, status: "Accepted", submitted_at: "2026-06-05T09:03:00.000Z" })
+      ],
+      testStartMs: T0,
+      gaps: []
+    });
+
+    it("a run event is FREE-TEXT searchable by its result text ('samples', 'Run', the verdict)", () => {
+      expect(filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, query: "samples" }).map((e) => e.id)).toEqual(["run:r1", "run:r2"]);
+      expect(filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, query: "run" }).map((e) => e.id)).toEqual(["run:r1", "run:r2"]);
+      // The raw verdict in the label/detail is searchable too.
+      expect(filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, query: "wrong_answer" }).map((e) => e.id)).toEqual(["run:r1"]);
+    });
+
+    it("event-type filter 'run' includes ONLY runs (events + submits dropped from the submission/event narrow)", () => {
+      const onlyRuns = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, eventTypes: ["run"] });
+      // The "run" key narrows the submission stream to runs AND leaves the event
+      // stream untouched (selecting a submission type doesn't hide proctor events)
+      // — but the submit submission is excluded.
+      expect(onlyRuns.map((e) => e.id)).toEqual(["event:0:window_blur@2026-06-05T09:00:30.000Z", "run:r1", "run:r2"]);
+      expect(onlyRuns.some((e) => e.id === "sub:s1")).toBe(false);
+    });
+
+    it("event-type filter 'submit' includes ONLY submits among the submission stream (runs excluded)", () => {
+      const onlySubmits = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, eventTypes: ["submit"] });
+      expect(onlySubmits.filter((e) => e.kind === "submission").map((e) => e.id)).toEqual(["sub:s1"]);
+      expect(onlySubmits.some((e) => e.type === "run")).toBe(false);
+    });
+
+    it("toggling OFF the submissions kind drops both runs and submits", () => {
+      const noSubs = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, submissions: false });
+      expect(noSubs.some((e) => e.kind === "submission")).toBe(false);
+      expect(noSubs.map((e) => e.kind)).toEqual(["event"]);
+    });
+  });
 });
 
 describe("type facets", () => {
@@ -392,9 +490,31 @@ describe("type facets", () => {
 
   it("eventTypeFacets lists DISTINCT event types with friendly labels + counts, sorted by count desc", () => {
     const facets = eventTypeFacets(entries);
+    // Submission-stream facets (run/submit) come FIRST so the run/submit narrow
+    // is the headline option, then the event-type facets sorted by count desc.
     expect(facets).toEqual([
+      { type: "submit", label: "Submit", count: 1 },
       { type: "window_blur", label: "Window lost focus", count: 2 },
       { type: "clipboard_activity", label: "Clipboard activity", count: 1 }
+    ]);
+  });
+
+  it("eventTypeFacets spans BOTH run and submit submission entries (the P3 runs-vs-submits filter)", () => {
+    const mixed = buildTimelineLog({
+      alerts: [],
+      events: [event({ type: "window_blur", timestamp: "2026-06-05T09:04:00.000Z" })],
+      submissions: [
+        submission({ submission_id: "r1", kind: "run", submitted_at: "2026-06-05T09:01:00.000Z" }),
+        submission({ submission_id: "r2", kind: "run", submitted_at: "2026-06-05T09:02:00.000Z" }),
+        submission({ submission_id: "s1", kind: "submit", submitted_at: "2026-06-05T09:03:00.000Z" })
+      ],
+      testStartMs: T0,
+      gaps: []
+    });
+    expect(eventTypeFacets(mixed)).toEqual([
+      { type: "run", label: "Run", count: 2 },
+      { type: "submit", label: "Submit", count: 1 },
+      { type: "window_blur", label: "Window lost focus", count: 1 }
     ]);
   });
 
@@ -407,9 +527,15 @@ describe("type facets", () => {
   });
 
   it("facets are empty when no entries of that kind exist", () => {
+    // A lone submit still yields its submission facet (the event-type menu now
+    // spans run/submit); only the EVENT-proper + alert facets are empty here.
     const onlySub = buildTimelineLog({ alerts: [], events: [], submissions: [submission({})], testStartMs: T0, gaps: [] });
-    expect(eventTypeFacets(onlySub)).toEqual([]);
+    expect(eventTypeFacets(onlySub)).toEqual([{ type: "submit", label: "Submit", count: 1 }]);
     expect(alertTypeFacets(onlySub)).toEqual([]);
+    // Truly empty when there are no entries at all.
+    const empty = buildTimelineLog({ alerts: [], events: [], submissions: [], testStartMs: T0, gaps: [] });
+    expect(eventTypeFacets(empty)).toEqual([]);
+    expect(alertTypeFacets(empty)).toEqual([]);
   });
 });
 

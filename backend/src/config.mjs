@@ -22,6 +22,9 @@ export function loadConfig() {
     REVIEW_COLLECTION: process.env.REVIEW_COLLECTION || "proctor_reviews",
     REVIEW_CLAIMS_COLLECTION: process.env.REVIEW_CLAIMS_COLLECTION || "proctor_review_claims",
     SUBMISSIONS_COLLECTION: process.env.SUBMISSIONS_COLLECTION || "proctor_submissions",
+    // RUN events (execRun → Judge0 against SAMPLE tests): the P3 genuine-effort
+    // signal. Mirrors SUBMISSIONS_COLLECTION's denormalized-identity shape.
+    RUN_EVENTS_COLLECTION: process.env.RUN_EVENTS_COLLECTION || "proctor_run_events",
     PROBLEMS_COLLECTION: process.env.PROBLEMS_COLLECTION || "proctor_problems",
     EDITOR_EVENTS_COLLECTION: process.env.EDITOR_EVENTS_COLLECTION || "editor-events", // GCS sub-prefix label
     ROSTER_COLLECTION: process.env.ROSTER_COLLECTION || "proctor_roster",

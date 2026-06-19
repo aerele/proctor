@@ -409,6 +409,11 @@ export type SubmissionEvent = {
   hackerrank_username: string;
   /** S-A accept-both (see SessionStartResponse.candidate_id). */
   candidate_id?: string;
+  /** Discriminator for the recording-review timeline: "run" = a sample-test RUN
+   * (execRun → proctor_run_events, the P3 genuine-effort signal), "submit" = a
+   * scored submission. ABSENT on poller-sourced HackerRank events and on older
+   * backends → treated as "submit" (the historical-only stream). */
+  kind?: "run" | "submit";
   contest_slug?: string;
   challenge_slug?: string;
   challenge_name?: string;

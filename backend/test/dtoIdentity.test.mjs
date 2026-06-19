@@ -74,18 +74,20 @@ function makeFakeFirestore() {
       limit() { return this; },
       async get() {
         const store = getCollection(name);
-        let docs = [...store.values()];
+        // Carry the doc id through (real Firestore exposes doc.id on query
+        // snapshots — the native-submission/run mappers read it as the event id).
+        let docs = [...store.entries()].map(([id, data]) => ({ id, data }));
         for (const { field, op, value } of filters) {
-          if (op === "in") docs = docs.filter((doc) => Array.isArray(value) && value.includes(doc[field]));
-          else docs = docs.filter((doc) => doc[field] === value);
+          if (op === "in") docs = docs.filter((d) => Array.isArray(value) && value.includes(d.data[field]));
+          else docs = docs.filter((d) => d.data[field] === value);
         }
         if (ordering) {
           docs = docs.sort((a, b) => {
-            const cmp = String(a[ordering.field] ?? "").localeCompare(String(b[ordering.field] ?? ""));
+            const cmp = String(a.data[ordering.field] ?? "").localeCompare(String(b.data[ordering.field] ?? ""));
             return ordering.direction === "desc" ? -cmp : cmp;
           });
         }
-        return { docs: docs.map((data) => ({ data: () => data })) };
+        return { docs: docs.map(({ id, data }) => ({ id, data: () => data })) };
       }
     };
   }
@@ -297,6 +299,59 @@ test("submission-events ingest accepts candidate_id as an alias", async () => {
   const doc = firestore._collections.get("di_submission_events").get("21_cs_001:kec-r1");
   assert.ok(doc, [...firestore._collections.get("di_submission_events").keys()].join(","));
   assert.equal(doc.events[0].hackerrank_username, "21 CS 001");
+});
+
+// ---- RUN events surfaced + merged with submits (recording-review timeline) ----
+
+test("admin submission-events MERGES proctor_run_events with submits, time-ordered, distinct kind", async () => {
+  const { firestore } = freshClients();
+  // Two NATIVE submits (proctor_submissions) — the fallback source when the
+  // poller mirror has nothing for this user.
+  firestore.collection("di_submissions").doc("sub-a").set({
+    session_id: "s", username_norm: "merge-user", problem_id: "two-sum",
+    language: "python", verdict: "accepted", passed_count: 4, total: 4,
+    created_at: "2026-06-10T03:02:00.000Z"
+  });
+  firestore.collection("di_submissions").doc("sub-b").set({
+    session_id: "s", username_norm: "merge-user", problem_id: "two-sum",
+    language: "python", verdict: "wrong_answer", passed_count: 2, total: 4,
+    created_at: "2026-06-10T03:06:00.000Z"
+  });
+  // Two RUN events (proctor_run_events) interleaved in time.
+  firestore.collection("proctor_run_events").doc("run-a").set({
+    session_id: "s", username_norm: "merge-user", problem_id: "two-sum",
+    language: "python", kind: "run", verdict: "wrong_answer", passed_count: 1, total: 3,
+    source_code: "print(1)", created_at: "2026-06-10T03:01:00.000Z"
+  });
+  firestore.collection("proctor_run_events").doc("run-b").set({
+    session_id: "s", username_norm: "merge-user", problem_id: "two-sum",
+    language: "python", kind: "run", verdict: "accepted", passed_count: 3, total: 3,
+    source_code: "print(2)", created_at: "2026-06-10T03:05:00.000Z"
+  });
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/submission-events",
+    headers: ADMIN_HEADERS, query: { username: "merge-user" } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const events = res.body.events;
+  assert.equal(events.length, 4);
+  // ONE time-ordered stream (ascending submitted_at): run, submit, run, submit.
+  assert.deepEqual(events.map((e) => e.submission_id), ["run-a", "sub-a", "run-b", "sub-b"]);
+  assert.deepEqual(events.map((e) => e.kind), ["run", "submit", "run", "submit"]);
+  // Run events carry the P3-surfacing fields (sample counts + verdict + lang).
+  const runA = events[0];
+  assert.equal(runA.kind, "run");
+  assert.equal(runA.passed_count, 1);
+  assert.equal(runA.total, 3);
+  assert.equal(runA.valid, false);
+  assert.equal(runA.status, "wrong_answer");
+  assert.equal(runA.challenge_slug, "two-sum");
+  assert.equal(runA.lang, "python");
+  const runB = events[2];
+  assert.equal(runB.kind, "run");
+  assert.equal(runB.valid, true); // all 3 samples passed → GREEN
+  // Submits keep kind:"submit" (set explicitly on the native mapping).
+  assert.equal(events[1].kind, "submit");
+  assert.equal(events[3].kind, "submit");
 });
 
 // ---- submissions denorm (F9 D7: NEW docs at submit time) ----------------------
