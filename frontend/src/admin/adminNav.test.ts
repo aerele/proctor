@@ -4,7 +4,7 @@ import { ADMIN_NAV_GROUPS, groupOfView, type AdminView } from "./adminNav";
 
 const ALL_VIEWS: AdminView[] = [
   "stats", "contests", "templates", "alerts", "sessions", "attendance",
-  "results", "people", "review", "recordings", "problems", "settings", "ips", "health"
+  "results", "evaluation", "people", "review", "recordings", "problems", "settings", "ips", "health"
 ];
 
 describe("admin nav groups", () => {

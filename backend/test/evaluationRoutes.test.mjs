@@ -41,6 +41,10 @@ process.env.EVAL_LEASE_MS = "180000";
 const handler = await import("../src/handler.mjs?evalroutes");
 const { api, __setClientsForTest, __setEvalClockForTest } = handler;
 const { personIdOf, identityNorm } = await import("../src/identity.mjs");
+// The SAME clients singleton the handler imports (no ?buster → shared instance),
+// so configureClients()/getFirestore() here drive the exact seam the handler
+// uses. Used to prove the eval write-isolation guard PERMITS a real eval batch.
+const { configureClients, getFirestore } = await import("../src/lib/clients.mjs");
 
 const ADMIN_HEADERS = { "x-admin-password": "ev-admin-pass" };
 
@@ -646,4 +650,50 @@ test("evaluate: 409 eval_in_progress when a fresh job doc is running; reclaimabl
   const job = evalCol.get(`__job::${slug}`);
   assert.equal(job.status, "done", JSON.stringify(job));
   assert.notEqual(job.run_id, "crashed-run", "reclaim minted a fresh run_id");
+});
+
+// ---- write-isolation guard: a REAL eval batch still writes under the allowlist ----
+// Proves Part C doesn't break the legitimate eval write path: with
+// EVAL_WRITE_ALLOWLIST = the EVALUATIONS collection ("ev_evaluations" here), the
+// full contest-evaluate batch must succeed and land its scorecards + meta + job
+// doc — every eval write is to that one collection. We also confirm that, with
+// the guard active, a write to a FOREIGN collection (a session doc) throws, and
+// that clearing the allowlist restores unrestricted writes (proctor-api parity).
+test("write-isolation: real eval batch succeeds under EVAL_WRITE_ALLOWLIST=ev_evaluations; foreign write blocked", async () => {
+  // Setup (contest/roster/session/submission writes) happens with the guard OFF
+  // — only after seeding do we arm the allowlist, exactly like the deploy split
+  // (proctor-eval only runs the eval routes, never the setup CRUD).
+  const { slug, personKey, anonNorm, firestore } = await seedMixedFixture();
+  try {
+    configureClients({ evalWriteAllowlist: "ev_evaluations" });
+
+    // The real batch — every write inside goes to ev_evaluations, so the guard
+    // must let it through untouched.
+    const res = await call(makeReq({ method: "POST", path: "/api/admin/contest-evaluate", headers: ADMIN_HEADERS, body: { contest: slug } }));
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(res.body.done, true, JSON.stringify(res.body));
+    assert.equal(res.body.evaluated, 2, JSON.stringify(res.body));
+    assert.equal(res.body.meta_written, true);
+
+    const evalCol = firestore._collections.get("ev_evaluations");
+    assert.ok(evalCol.has(`${slug}::${personKey}`), "person scorecard written under guard");
+    assert.ok(evalCol.has(`${slug}::${anonNorm}`), "anon scorecard written under guard");
+    assert.ok(evalCol.has(`__meta::${slug}`), "meta doc written under guard");
+    assert.ok(evalCol.has(`__job::${slug}`), "job doc written under guard");
+
+    // A FOREIGN write (a session doc) through the guarded client must throw —
+    // proving the isolation actually bites on non-eval collections.
+    assert.throws(
+      () => getFirestore().collection("ev_sessions").doc("sp").set({ status: "locked" }),
+      /eval write-isolation: ev_sessions not in EVAL_WRITE_ALLOWLIST/
+    );
+  } finally {
+    // Restore unrestricted (proctor-api) behavior for the rest of the suite.
+    configureClients({ evalWriteAllowlist: "" });
+  }
+
+  // With the guard cleared, the foreign write that just threw now succeeds.
+  getFirestore().collection("ev_sessions").doc("sp").set({ status: "locked" });
+  const sessions = firestore._collections.get("ev_sessions");
+  assert.equal(sessions.get("sp").status, "locked", "foreign write allowed once allowlist cleared");
 });
