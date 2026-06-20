@@ -64,7 +64,7 @@ export function ProblemBankSection({ password }: { password: string }) {
       setError(invalid);
       return;
     }
-    // D1 (the operator decision): warn-on-save. When the edited problem is referenced
+    // D1 (product-owner decision): warn-on-save. When the edited problem is referenced
     // by an OPEN (running/active) contest, candidates may be sitting it right now
     // — confirm before the edit reaches them. New drafts (blank id) and problems
     // only draft/archived contests reference never prompt.

@@ -16,12 +16,9 @@ editor. A clearly-labelled **optional** secondary component still exists: a Pyth
 alerts pipeline. It is not part of the candidate experience and is not required to
 run an exam.
 
-> **Standard of truth.** Every page here documents only behavior verified against
-> the code/UI in this repo or an existing screenshot. Anything not independently
-> confirmed is marked **(unverified)**. The product owner's rule: *if the docs say
-> it works, it works.* The live build-state single-source-of-truth is
-> [`../night-run/RESUME-ANCHOR.md`](../night-run/RESUME-ANCHOR.md) — read it before a
-> real contest.
+> **Note.** Every page here documents behavior against the code/UI in this repo.
+> Anything not independently confirmed is marked **(unverified)**. For current
+> deployed revisions, run `gcloud run services list`.
 
 This page is the index. New here? Read
 [`features/architecture-overview.md`](features/architecture-overview.md) first for

@@ -1,14 +1,14 @@
-// D1 (the operator decision, Wave6): "warn-on-save" confirm gate — reusable PURE
+// D1 (product-owner decision, Wave6): "warn-on-save" confirm gate — reusable PURE
 // decision logic for "this admin save touches something LIVE; confirm first".
 //
-// IMPORTANT (flagged for the operator): the EXACT trigger the operator agreed to was not
+// IMPORTANT (flagged for the product owner): the EXACT trigger the product owner agreed to was not
 // recoverable from disk. The implemented interpretation is the clearest impactful
 // one: saving an edit to a published problem that is referenced by an OPEN
 // (running/active) contest. An open contest can have candidates sitting it right
 // now, so editing the problem changes the statement/tests/limits they see
 // mid-exam — exactly the foot-gun a confirm dialog should guard. The gate is a
 // pure function so it is trivially reusable for the contest window/settings save
-// too if the operator wants it extended there.
+// too if the product owner wants it extended there.
 //
 // "Live" == contest.status === "open". Draft contests are not yet running and
 // archived contests are over, so a save against problems only those reference is

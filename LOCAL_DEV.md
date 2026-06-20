@@ -1,17 +1,22 @@
-# Aerele Proctor — Local Test-Instance Guide
+# Aerele Proctor — Local Development Guide
 
-A tight edit/test loop for the `proctor` monorepo. Written for the case where **gcloud is NOT installed** and you want to make changes and see them fast. The fast path is **demo mode**, which needs zero backend and zero GCP.
+A tight edit/test loop for the `proctor` monorepo. The fast path is **demo mode**,
+which needs **no backend and no Google Cloud account** — you can run, edit, and
+hot-reload the entire UI with `gcloud` not even installed.
 
-Repo root: `<repo>` (an npm **workspaces** monorepo: `frontend`, `backend`, `video-worker`). **Run all npm commands from the repo root**, not from `frontend/`.
+Repo root: the cloned `proctor` directory (an npm **workspaces** monorepo:
+`frontend`, `backend`, `video-worker`). **Run all npm commands from the repo
+root**, not from `frontend/`.
 
-> This file is local notes (untracked). Delete it any time with `rm LOCAL_DEV.md`.
+> This is the contributor quickstart. The fastest path needs neither a backend
+> nor a Google Cloud account — see §1 below.
 
 ---
 
 ## 1. TL;DR — fastest live, editable instance
 
 ```bash
-cd <repo>
+cd proctor
 npm install                                   # once
 VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev
 ```
@@ -52,7 +57,7 @@ This runs the full UI with fake sessions/uploads/settings (stored in `localStora
 1. **Install Node deps from the repo root** (npm workspaces hoists everything into `proctor/node_modules`; there is no separate `backend/node_modules`):
 
    ```bash
-   cd <repo>
+   cd proctor
    npm install
    ```
 
@@ -90,7 +95,7 @@ Confirmed toolchain on this machine: node `v20.19.0`, npm `10.8.2`, ffmpeg and d
 ### (a) Demo mode — no backend, recommended
 
 ```bash
-cd <repo>
+cd proctor
 VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev
 ```
 
@@ -103,7 +108,7 @@ VITE_DEMO_MODE=true VITE_ADMIN_PASSWORD=dev npm run dev
 Requires that someone has already deployed the backend (you can't deploy from here without gcloud).
 
 ```bash
-cd <repo>
+cd proctor
 # frontend/.env.local must contain VITE_API_BASE_URL=https://...  (and NOT VITE_DEMO_MODE)
 npm run dev
 ```
@@ -118,7 +123,7 @@ npm run dev
 
 ```bash
 # Terminal 1 — backend (boots with zero GCP)
-cd <repo>
+cd proctor
 EVIDENCE_BUCKET=local-proctor-evidence ADMIN_PASSWORD=localadmin PUBLIC_APP_ORIGIN='*' \
   npm start --workspace backend          # functions-framework --target=api, port 8080
 ```
@@ -126,7 +131,7 @@ EVIDENCE_BUCKET=local-proctor-evidence ADMIN_PASSWORD=localadmin PUBLIC_APP_ORIG
 ```bash
 # Terminal 2 — frontend pointed at the local backend
 # frontend/.env.local: VITE_API_BASE_URL=http://localhost:8080  (no VITE_DEMO_MODE)
-cd <repo>
+cd proctor
 npm run dev
 ```
 

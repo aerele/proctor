@@ -23,7 +23,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REGION="${REGION:-asia-south1}"
-PROJECT="${PROJECT:-${PROJECT_ID}}"
+PROJECT="${PROJECT:-your-gcp-project-id}"
 SLUG="${1:-}"
 GCLOUD="${GCLOUD:-$HOME/google-cloud-sdk/bin/gcloud}"
 

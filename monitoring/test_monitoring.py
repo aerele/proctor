@@ -20,6 +20,7 @@ It also smoke-checks that cdp.py imports and exposes the unattended entry points
 (without touching the network).
 """
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -56,7 +57,11 @@ class T:
         print("=" * 70)
 
 
-FIX_BASE = Path("<your-contest-eval-data-dir>/MCET-06-26")
+# Fixture data lives outside the repo (local-only; not shipped). Point
+# CONTEST_EVAL_DATA at your own contest-eval data dir; otherwise the slot-backed
+# checks SKIP (see _slot_available) instead of failing.
+FIX_BASE = Path(os.environ.get("CONTEST_EVAL_DATA",
+                               str(Path(__file__).resolve().parent / ".data" / "fixtures" / "contest")))
 SLOTS = [
     ("386521-slot1", "386521", "coding-contest-mcet-june-2026"),
     ("386562-slot2", "386562", "coding-contest-mcet-june-2026"),

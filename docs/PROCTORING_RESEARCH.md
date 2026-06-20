@@ -1,6 +1,6 @@
 # Proctoring a HackerRank Contest We Cannot Iframe — Authoritative Decision Report
 
-**Date:** 2026-06-05 · **Audience:** the operator (pre-build decision) · **Constraint:** HackerRank contest runs in a tab/window we do not own (XFO: SAMEORIGIN behind Akamai). Our app is a browser-based companion.
+**Date:** 2026-06-05 · **Audience:** product owner (pre-build decision) · **Constraint:** HackerRank contest runs in a tab/window we do not own (XFO: SAMEORIGIN behind Akamai). Our app is a browser-based companion.
 
 This report reconciles 5 research lanes against an adversarial reality-check. Where they conflicted, the reality-check won. Two "shifting ground" claims were independently re-verified today against primary sources (Apple Developer Forums, HUMAN Security) and are folded in.
 

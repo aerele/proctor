@@ -54,7 +54,7 @@ export type TimelineLogFilters = {
   alertTypes: string[];
 };
 
-// Sensible defaults: everything visible (the operator: usability is the bar).
+// Sensible defaults: everything visible (the product owner: usability is the bar).
 export const DEFAULT_LOG_FILTERS: TimelineLogFilters = {
   alerts: true,
   events: true,

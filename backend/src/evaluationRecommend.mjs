@@ -12,20 +12,20 @@
 // The detection engine (evaluationMetrics.mjs) already derives, per candidate,
 // `tiers.talent` (weak|moderate|strong), `tiers.integrity`
 // (clean|watch|flag|confirmed|inconclusive) and a confirmed-capped
-// `talent.composite`. Calibration against the KPR ground truth (the 5
-// internship-selected + the 9-person confirmed copying ring — see
-// _nightrun/P3-calibration-findings.md) proved those tiers ALREADY separate the
-// real hires from the ring correctly. So the recommendation is a PURE TRANSFORM
-// over the stored scorecards — additive, zero risk to the calibrated detector.
+// `talent.composite`. Calibration against a real ground-truth cohort (the
+// candidates an organization actually selected, plus a known confirmed copying
+// ring) proved those tiers ALREADY separate the real hires from the ring
+// correctly. So the recommendation is a PURE TRANSFORM over the stored
+// scorecards — additive, zero risk to the calibrated detector.
 //
 // THE CALIBRATION INVARIANT (why honest candidates ~never get excluded)
 // ---------------------------------------------------------------------
 // Integrity GATES talent; the two are orthogonal and NEVER averaged. Only
 // `confirmed` excludes; `flag` holds for manual review; `watch`/`inconclusive`
-// are desk-check notes, NEVER a hire-blocker. This is forced by the data: 3 of
-// the 5 genuinely-selected interns carry a `watch` note (a single shared medium
-// problem — weak by design). A naive "any flag ⇒ exclude" rule would have
-// rejected 60% of the real hires.
+// are desk-check notes, NEVER a hire-blocker. This is forced by the data: a
+// majority of the genuinely-selected candidates in the calibration cohort carry
+// a `watch` note (a single shared medium problem — weak by design). A naive
+// "any flag => exclude" rule would have rejected most of the real hires.
 
 export const RECOMMEND_VERSION = "1";
 
@@ -223,16 +223,16 @@ function displayName(card) {
 }
 
 // METHOD-CALIBRATION reference (the trust anchor). The recommendation ruleset was
-// calibrated against the KPR round-2 honest control cohort (the genuine
-// distribution) + a known 9-person confirmed copying ring + the 5 candidates the
-// org actually selected for internship — see _nightrun/P3-calibration-findings.md.
-// This is a STATIC statement about the METHOD's validation (it holds for any
-// contest the method is applied to), shown so a reviewer can see WHY the
-// thresholds are trustworthy: honest candidates are ~never excluded. No PII.
+// calibrated against a real ground-truth cohort: a heavily-proctored honest
+// control group (the genuine distribution) + a known confirmed copying ring + the
+// candidates the organization actually selected. This is a STATIC statement about
+// the METHOD's validation (it holds for any contest the method is applied to),
+// shown so a reviewer can see WHY the thresholds are trustworthy: honest
+// candidates are ~never excluded. No candidate PII is stored here.
 export const CALIBRATION = {
-  control_cohort: "KPR round-2 (66-person heavily-proctored honest control)",
-  honest_excluded: 0, // 0 of the 5 org-selected interns excluded; watch ≠ block
-  ring_caught: 9, // 9 of 9 confirmed copying-ring members excluded
+  control_cohort: "heavily-proctored honest control group",
+  honest_excluded: 0, // every genuinely-selected candidate retained; watch ≠ block
+  ring_caught: 9, // every confirmed copying-ring member excluded
   ring_total: 9,
   note:
     "Calibrated so an honest candidate is ~never excluded: only conclusive copying excludes; a single shared medium problem is a desk-check note, never a block.",

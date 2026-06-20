@@ -2,7 +2,7 @@
 
 Aerele Proctor is a **standalone own-editor exam platform**: candidates register, share their screen, and solve coding problems entirely inside our own React + Monaco workspace with Judge0-backed Run/Submit, while admins and invigilators monitor live and review the recorded evidence. A separate, **optional** Python "contest-eval" poller can additionally live-watch an externally-hosted HackerRank contest and feed cheating alerts into the same pipeline.
 
-> **Standard of truth.** Everything below was verified by reading the code in this repo (`backend/src/*.mjs`, `frontend/src/*.tsx|*.ts`) or a screenshot under `night-run/evidence/`. Anything not confirmed is marked **(unverified)**. The product owner's rule: *if the docs say it works, it works.*
+> **Note.** Everything below tracks the code in this repo (`backend/src/*.mjs`, `frontend/src/*.tsx|*.ts`). Anything not confirmed is marked **(unverified)**.
 
 ---
 
@@ -12,7 +12,7 @@ Proctor began life as a "HackerRank companion proctor" where students kept the p
 
 | | Component | Role | Status |
 |---|---|---|---|
-| **Primary** | Own-editor exam platform | Candidates do *everything* in our React + Monaco workspace; Run/Submit run against **Judge0**; evidence (screen video + events) streams to GCS. | Built, deployed to `${PROJECT_ID}` (rev 00008). |
+| **Primary** | Own-editor exam platform | Candidates do *everything* in our React + Monaco workspace; Run/Submit run against **Judge0**; evidence (screen video + events) streams to GCS. | Built and deployable to Cloud Run (see `docs/DEPLOY.md`). |
 | **Secondary / optional** | `monitoring/` contest-eval poller | Live-watches an **externally-hosted** HackerRank contest and emits `source:"contest-eval"` cheating alerts into the **same** alerts pipeline the platform reads. | Still present; a separate, optional component. The "easily-startable adapter" follow-up (F8.5 / task #32) is **pending**. |
 
 The HackerRank-companion lineage survives only as **legacy code paths** kept for backward compatibility — for example `frontend/src/studentCopy.ts` still has an `ownEditor:false` variant ("End the proctoring session only after submitting HackerRank…") that renders only in the legacy external-HR mode. The wire field is still named `hackerrank_username` (frozen for compatibility, per the F9 D1 note in `types.ts`), but the candidate-facing identity input is labelled **"Candidate ID"** (`StudentForm.candidate_id` in `frontend/src/types.ts`).
@@ -102,7 +102,7 @@ Surfaces, each with its backing routes:
 | **Recording review** | Screen + camera chunk playback with an events/alerts/submission timeline; multi-reviewer YES/NO queue. | `GET /api/admin/submission-events`, `session-events`; `review-roster`, `review-next`, `review-verdict`, `review-mine`, `reviews`; component `frontend/src/RecordingReview.tsx` |
 | **Data lifecycle** | Export → triple-gated purge → tombstone; retention sweep. | `POST /api/admin/contest-export`, `contest-purge`, `retention-sweep` |
 
-> **Verified caveat (from `night-run/RESUME-ANCHOR.md` §1b):** the distributed reviewer **queue** (review-roster/claims/verdicts) is still candidate-norm-keyed, so person-mode review-queue serving does not resolve (the recording **player** does). Person-mode submission-timeline markers are also a pending follow-up (tasks #59/#60).
+> **Caveat:** the distributed reviewer **queue** (review-roster/claims/verdicts) is still candidate-norm-keyed, so person-mode review-queue serving does not resolve (the recording **player** does). Person-mode submission-timeline markers are also a pending follow-up.
 
 ---
 
@@ -130,7 +130,7 @@ What an invigilator can do, with backing routes (route bodies live in `backend/s
 
 The backend is a **single Cloud Run HTTP handler**, `backend/src/handler.mjs` (~303 KB). It holds the **dispatch table** (a flat list of `if (method && path === "...") return ...` lines) and **most route bodies**. Dispatch lines start at `handler.mjs` ~321; any unmatched path → `404`. CORS allows `GET,POST,OPTIONS` (`PUBLIC_APP_ORIGIN`, default `*`).
 
-**Decomposition is PARTIAL and PAUSED** (B0/B1, behavior-preserving — confirmed by `RESUME-ANCHOR.md` §0: *"Architecture decomposition PAUSED… resume at B2"*, task #56). What has been split out of the god-file so far, and is wired back via factories/injection at handler module scope:
+**Decomposition is PARTIAL and PAUSED** (B0/B1, behavior-preserving). What has been split out of the god-file so far, and is wired back via factories/injection at handler module scope:
 
 | Module | Owns |
 |---|---|
@@ -194,7 +194,7 @@ All env-derived collection names come from `config.mjs` `loadConfig()`. There ar
 | `GATE_ATTEMPT_LIMIT` | 20 | room-gate brute-force cap (safe-defaulted on bad env) |
 | `URL_EXPIRY_SECONDS` | 900 | signed-URL lifetime |
 
-> Note: `RESUME-ANCHOR.md` §3 records exam-day tuning of `EXEC_SUBMIT_COOLDOWN_SECONDS≈20` and `EXEC_MAX_SUBMISSIONS_PER_SESSION≈200` set at deploy via env, not code.
+> Note: for a real exam, `EXEC_SUBMIT_COOLDOWN_SECONDS≈20` and `EXEC_MAX_SUBMISSIONS_PER_SESSION≈200` are set at deploy via env, not code.
 
 ---
 
@@ -236,7 +236,7 @@ Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all
 
 ## 10. Optional video-worker merge service
 
-`video-worker/src/server.mjs` is an **optional** Cloud Run service that merges a session's screen chunks into one review video and writes `merged_video_key` back onto the session doc. It is **NOT deployed on the dev stack** — `night-run/RESUME-ANCHOR.md` makes no mention of a deployed video-worker, and task #61 ("Alert→recording deep-link: fall back to chunk player (or deploy video-worker)") is **pending**. Consequently, alert deep-links and recording review **play the raw chunks** rather than a merged video on dev.
+`video-worker/src/server.mjs` is an **optional** Cloud Run service that merges a session's screen chunks into one review video and writes `merged_video_key` back onto the session doc. It is **NOT deployed by default** — and the alert→recording deep-link falling back to the chunk player (vs deploying the video-worker) is a **pending** follow-up. Consequently, when the worker is not deployed, alert deep-links and recording review **play the raw chunks** rather than a merged video.
 
 ---
 
@@ -289,6 +289,5 @@ All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes
 - [`../PLATFORM_ALTERNATIVES.md`](../PLATFORM_ALTERNATIVES.md) — platform alternatives evaluated
 - [`../README.md`](../README.md) — the documentation index (start here for the full page map)
 - [`../../README.md`](../../README.md) — repo root README
-- [`../../night-run/RESUME-ANCHOR.md`](../../night-run/RESUME-ANCHOR.md) — single source of truth for build state
 
 > Per-feature deep dives now live alongside this page under `docs/features/` (candidate flow, enforcement ladder, the admin-console surfaces, the invigilator portal, the alert taxonomy, and the optional contest-eval poller). See the documentation index at [`../README.md`](../README.md) for the full map.

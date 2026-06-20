@@ -9,8 +9,8 @@
 //
 // `proctor-eval` SHARES the same Firestore + GCS + signer key + config as
 // proctor-api — separation is at the DEPLOY boundary, not the data boundary. It
-// receives the SAME env (the 15 vars) + the signer-key secret at deploy time
-// (see _nightrun/eval-service-deploy.md).
+// receives the SAME env + the signer-key secret at deploy time (see
+// docs/DEPLOY.md for the eval-service deploy).
 //
 // WRAPPER-OVER-FORK (zero eval-logic duplication)
 // -----------------------------------------------

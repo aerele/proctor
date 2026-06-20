@@ -17,17 +17,15 @@ Components deployed by this runbook:
 
 ## 1. From-scratch isolated GCP project bootstrap
 
-**Source of truth:** [`night-run/GCP-SETUP-INSTRUCTIONS.md`](../../night-run/GCP-SETUP-INSTRUCTIONS.md)
+This first step is run by a **person with full `gcloud` auth** (someone who can create projects and link billing), **not** by the build/deploy agent. Its job is only: project + billing + APIs + deployer service account + key + handoff. It deliberately does **not** create app secrets or run the deploy scripts.
 
-This first step is run by a **setup agent / person with full `gcloud` auth** (someone who can create projects and link billing), **not** by the build/deploy agent. Its job is only: project + billing + APIs + deployer service account + key + handoff. It deliberately does **not** create app secrets or run the deploy scripts.
-
-The hard requirement is **isolation**: a brand-new, budget-capped, deletable project; the deployer SA is a member of **only this project** (GCP IAM is per-project, so it cannot see the operator's other projects/VMs/prod); **no** org/folder-level roles; **no** handover of personal user credentials.
+The hard requirement is **isolation**: a brand-new, budget-capped, deletable project; the deployer SA is a member of **only this project** (GCP IAM is per-project, so it cannot see any other projects/VMs/prod); **no** org/folder-level roles; **no** handover of personal user credentials.
 
 ### What the bootstrap does
 
 | Step | Action |
 | --- | --- |
-| 1. Create project | `gcloud projects create "$PROJECT_ID"` — IDs are globally unique (6-30 chars). Reference value: `${PROJECT_ID}`, region `asia-south1`. |
+| 1. Create project | `gcloud projects create "$PROJECT_ID"` — IDs are globally unique (6-30 chars). Example value: `your-gcp-project-id`, example region `asia-south1`. |
 | 2. Link billing | Links an open billing account. Recommended: a small budget (e.g. ~$20) with 50/90/100% alerts so an overnight run can't run up cost. |
 | 3. Enable APIs | `run`, `cloudbuild`, `artifactregistry`, `firestore`, `storage`, `iamcredentials`, `cloudresourcemanager`. |
 | 4. Deployer SA | `proctor-deployer@…`, granted **`roles/owner` on this project only** (a documented tighter per-role alternative is listed in the brief). |
@@ -40,7 +38,7 @@ The hard requirement is **isolation**: a brand-new, budget-capped, deletable pro
 On the machine that holds the proctor repo, the bootstrap writes a gitignored env file the deploy agent reads:
 
 ```bash
-cd <repo>
+cd proctor
 mkdir -p monitoring/.data
 cat > monitoring/.data/gcp-dev.env <<EOF
 GCP_PROJECT_ID=$PROJECT_ID
@@ -166,7 +164,7 @@ The script ends by printing the **Backend URL** — copy it into `API_URL` befor
 
 ![Deployed proctor live in an exam capture (dev stack)](../assets/deployed-in-exam-capture-verified.png)
 
-*The candidate workspace running against the deployed `${PROJECT_ID}` stack — confirmation that the backend + frontend deploy described here yields a working in-exam experience.*
+*The candidate workspace running against a deployed stack — confirmation that the backend + frontend deploy described here yields a working in-exam experience.*
 
 ---
 
@@ -298,20 +296,18 @@ For a real ~700-candidate exam the project's capacity work settled on roughly `E
 - **Set every secret in `.env.deploy.local`; the full deploy does the rest.** `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD`, `JUDGE0_API_KEY`, the signer-key mount, and any `EXEC_*` overrides are all set by a `full` backend deploy (the pre-flight gate aborts before build if a required one is missing) — no hand-applied `--update-env-vars` step. The frontend's `VITE_INVIGILATOR_PASSWORD_HASH` is baked + verified by `frontend/deploy-gcp.sh` — just set `INVIGILATOR_PASSWORD`.
 - **Create the signer-key secret once (out of band).** Recording-signing needs `proctor-signer-key` in Secret Manager (mounted at `/secrets/signer-key.json`). Create it once, never committed — see [Signer key](#signer-key-local-recording-signing). The full-mode deploy aborts if it's missing.
 - **Create the Cloud Scheduler sweep job** (§5) — not automated by any script.
-- **NO git push — standing rule.** Deploy from local commits only; deploying does **not** require a push. Per the resume anchor §4, the repo must not be pushed until the operator runs the history PII scrub. Treat "deploy ≠ push" as absolute.
+- **Deploy ≠ push.** Deploying does **not** require a `git push` — deploys run from local commits. Run a PII history scrub before pushing the repo anywhere public.
 
-### Live dev-stack reference (`${PROJECT_ID}`)
+### Live stack reference
 
-*(From `night-run/RESUME-ANCHOR.md`, last updated 2026-06-11 — point-in-time; verify current revisions with `gcloud run services list` before relying on these.)*
+*(Revision names and service URLs are point-in-time; verify current revisions with `gcloud run services list` before relying on these.)*
 
 | Item | Value |
 | --- | --- |
-| Project / region | `${PROJECT_ID}` / `asia-south1` |
-| Backend revision | `proctor-api-00006-pjr` |
-| Frontend revision | `proctor-web-00006-d66` |
-| Backend URL | `<cloud-run-url>` (also `…-<cloud-run-url>`) |
-| Frontend URL | `<cloud-run-url>` (also `…-<cloud-run-url>`) |
-| Notes | api `/` returns 404 by design (routes are `/api/*`); `min-instances` left at 0 for testing; Wave-6/7 admin routes (`/api/admin/{people,contest-results,contest-export,retention-sweep}`) return 401 live without auth. |
+| Project / region | `your-gcp-project-id` / `asia-south1` (example region) |
+| Backend service | `proctor-api` (revision names are point-in-time) |
+| Frontend service | `proctor-web` (revision names are point-in-time) |
+| Notes | api `/` returns 404 by design (routes are `/api/*`); `min-instances` left at 0 for testing; Wave-6/7 admin routes (`/api/admin/{people,contest-results,contest-export,retention-sweep}`) return 401 without auth. |
 
 ---
 

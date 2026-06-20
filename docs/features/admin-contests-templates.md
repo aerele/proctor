@@ -231,7 +231,7 @@ Because problem **content** is read live from the bank at serve time, the bank's
 
 On top of the server guards, the Problem Bank UI adds a client-side **warn-on-save** dialog (`saveGuard.ts`, used by `ProblemBank.tsx`): saving a problem that an **open** contest references prompts a confirm naming the affected running contests before the request is sent (`"This change affects N running/active contest(s) (slugs…). Candidates sitting … right now will see the edited problem. Continue?"`). "Live" means `contest.status === "open"`; draft/archived references prompt nothing.
 
-> The exact original trigger the operator agreed to was not recoverable from disk; the shipped interpretation (edit-to-an-open-contest's problem) is documented in `saveGuard.ts` and flagged there for review. *(unverified that this matches the original intent.)*
+> The exact original trigger was not recoverable from disk; the shipped interpretation (edit-to-an-open-contest's problem) is documented in `saveGuard.ts` and flagged there for review. *(unverified that this matches the original intent.)*
 
 ---
 

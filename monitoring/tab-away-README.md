@@ -157,7 +157,7 @@ fires; the **default 12s threshold (sourced from the admin console) is unchanged
 Does not touch the network or the real backend. Keeps existing
 `python3 monitoring/test_monitoring.py` passing.
 
-## HELD for the operator (final accuracy tuning)
+## HELD for the product owner (final accuracy tuning)
 
 The synthetic test proves the **pipeline and contract** are correct, but real-world
 accuracy tuning needs:

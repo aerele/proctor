@@ -20,7 +20,7 @@
 
 export const FULLSCREEN_ACK_PHRASE = "I will not exit full screen after this";
 
-// W10 (the operator, exam morning): the typed ack is judged CASE-INSENSITIVELY (and
+// W10 (product owner, exam morning): the typed ack is judged CASE-INSENSITIVELY (and
 // whitespace-tolerantly) — a nervous candidate typing "i will not exit..."
 // must not fail the countdown over a shift key. Pure so the reducer tests pin it.
 export function matchesAckPhrase(text: string): boolean {

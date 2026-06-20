@@ -2567,7 +2567,7 @@ async function findRosterEntry(meta, uniqueId) {
 
 // ---- M3: roster-lookup enumeration mitigation -------------------------------
 // /api/roster/lookup is PUBLIC and ID-enumerable (s2 design §7 accepted it as a
-// documented limitation). the operator wants it mitigated now: a BEST-EFFORT per-IP
+// documented limitation). The product owner wants it mitigated now: a BEST-EFFORT per-IP
 // fixed-window rate limiter caps how fast one client can walk the id space, so a
 // scraper can no longer harvest the masked confirmation set (name/roll/masked
 // email) at machine speed.
@@ -4723,7 +4723,7 @@ const SURE_SHOT_EVENT_TYPES = {
 // minimum continuous "HackerRank not visible" span the monitoring tab-away
 // detector must observe before raising an alert. This is the source of truth for
 // the detector's --min-gap-seconds.
-// F9.3 (the operator decision, Wave6): show_to_invigilator gates each type's appearance
+// F9.3 (product-owner decision, Wave6): show_to_invigilator gates each type's appearance
 // on the INVIGILATOR room dashboard's alert feed (server-side filter in
 // invigilatorRoom; the admin console always sees everything). The admin OPTS IN
 // per type — DEFAULT ALL OFF: nothing is shared with invigilators until the admin
@@ -4790,7 +4790,7 @@ function alertTypeConfig(settings, type, fallbackSeverity) {
   return { enabled: true, severity: fallbackSeverity };
 }
 
-// F9.3 (the operator decision, Wave6): does this STORED alert appear on the invigilator
+// F9.3 (product-owner decision, Wave6): does this STORED alert appear on the invigilator
 // room dashboard? Catalog types follow their explicit show_to_invigilator config;
 // catalog-UNKNOWN types (legacy invalid_share_surface, future ingest types) are
 // NOT shared — the admin can only opt in types the catalog actually exposes, so

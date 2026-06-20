@@ -235,7 +235,7 @@ The candidate can still self-resolve by completing both steps, or wait for an
 invigilator. Entering `alert_hold` clears the typed box along with the
 reducer's `ackOk` (the 2026-06-12 fix above) — the phrase must be retyped
 fresh in the hold, which is what makes the self-resolve actually reachable.
-No screenshot of `alert_first` mode is available in `night-run/evidence/`
+No screenshot of `alert_first` mode is available
 **(unverified by screenshot)**; the behaviour is verified in code
 (`EnforcementOverlay.tsx` `phase === "alert_hold"` branch and
 `enforcement.ts`).

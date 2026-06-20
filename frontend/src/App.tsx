@@ -2129,7 +2129,7 @@ function EndTestPanel({ assuranceAccepted, hasProblem, onAssuranceChange, onCanc
 // screen-share/camera released (the whole stop() body). role=alertdialog, fixed
 // over EVERYTHING (same treatment as the enforcement takeover). It holds the
 // candidate on the page so they do NOT exit fullscreen / switch away / close the
-// tab during teardown — which (a) is the UX the operator asked for and (b) closes the
+// tab during teardown — which (a) is the UX the product owner asked for and (b) closes the
 // last window where a teardown-induced visibility change could be misread.
 // (The beacon away-signal is already gated off once status leaves "recording",
 // so this overlay is belt-and-braces on top of that root-cause fix.)
@@ -3883,7 +3883,7 @@ function ProctorAlertTypesSection({ settings, loading, message, onReload, onSave
                   {!config.enabled ? <span className="rounded-full border border-line px-2 py-0.5 text-xs text-muted">disabled</span> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
-                  {/* F9.3 (Wave6, the operator): whether this type appears on the
+                  {/* F9.3 (Wave6, product owner): whether this type appears on the
                       INVIGILATOR room dashboard's alert feed (filtered
                       server-side). DEFAULT ALL OFF — the admin opts each type in;
                       nothing is shared with invigilators until ticked here. */}

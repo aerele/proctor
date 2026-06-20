@@ -29,7 +29,7 @@ export const DEFAULT_RETENTION_DAYS = 4;
 // (exportObjectExists) and the sweep clears last_export_at when it deletes the
 // stamped zip — so the gate can never pass on a recovery anchor that is gone.
 // The D12 "≤24h fresh export" freshness window is a SEPARATE, still-deferred
-// strengthening (F9 Q3, awaiting the operator); the existence check is the data-safety
+// strengthening (F9 Q3, awaiting the product owner); the existence check is the data-safety
 // floor that closes the stale-stamp hole in the meantime.
 export const EXPORT_RETENTION_DAYS = 10;
 

@@ -2393,7 +2393,7 @@ export async function fetchAlerts(password: string, filters?: AlertFilters): Pro
 
 // POST /api/admin/alert-action — archive/unarchive a set of alert ids. In demo
 // mode this MUTATES the persisted demo alert store so the console list and stats
-// visibly change after the action (the operator saw clicks do nothing in demo).
+// visibly change after the action (the product owner saw clicks do nothing in demo).
 export async function alertAction(password: string, body: AlertActionRequest): Promise<AlertActionResponse> {
   if (demoMode) {
     await wait(120);
@@ -2660,7 +2660,7 @@ function demoAlerts(): Alert[] {
 
 // Default per-type proctor alert config — mirrors the backend
 // DEFAULT_PROCTOR_ALERT_SETTINGS so the demo console renders the same toggle list.
-// F9.3 (Wave6, the operator): show_to_invigilator DEFAULTS ALL OFF — the admin opts in
+// F9.3 (Wave6, product owner): show_to_invigilator DEFAULTS ALL OFF — the admin opts in
 // per type; nothing is shared with invigilators by default.
 const DEFAULT_DEMO_ALERT_SETTINGS: AlertSettings = {
   proctor: {

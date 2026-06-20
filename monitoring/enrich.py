@@ -3,8 +3,8 @@
 
 POLLER-ONLY. The deployed backend AND frontend are FROZEN/live and CANNOT be
 redeployed. Contest-eval alerts as built by alerts.build_alerts carry only the
-HackerRank username. the operator wants every alert row to ALSO show the candidate's
-NAME and ROOM so he can act on it directly.
+HackerRank username. The operator wants every alert row to ALSO show the candidate's
+NAME and ROOM so they can act on it directly.
 
 HOW THIS SURFACES WITH NO BACKEND/FRONTEND CHANGE
 -------------------------------------------------

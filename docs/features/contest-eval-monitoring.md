@@ -13,7 +13,7 @@ This page documents an **optional, secondary** add-on to the Aerele proctor plat
 | Candidate UX | Own React + Monaco editor, Judge0 Run/Submit, fullscreen-enforcement ladder | None — candidates take the contest on HackerRank, externally |
 | Integrity signals | Browser proctoring events (`source: proctor`) | Deterministic + LLM-assisted contest-eval analysis (`source: contest-eval`) |
 | Where alerts land | Admin **Live alerts** console (`/api/alerts`) | The **same** Admin Live alerts console (`/api/alerts`) |
-| Code | `backend/`, `frontend/` | `monitoring/*.py` + `night-run/verdict-queue/` |
+| Code | `backend/`, `frontend/` | `monitoring/*.py` + `monitoring/.data/verdict-queue/` |
 
 Because both sources POST to the same ingest, the admin Live alerts console shows them together. Its subtitle reads "Proctoring **and contest-eval** signals across all rooms," and the **SOURCE** filter lets an admin narrow to `contest-eval` vs `proctor`.
 
@@ -73,7 +73,7 @@ A per-cycle reload of `alert-config.json` lets you enable/disable a type or edit
 | `--api-key` | `""` | `x-api-key` (must equal `ALERTS_INGEST_API_KEY`). |
 | `--no-post` / `--dry-run` | off | Skip the POST; alerts still written to `.data/`. |
 | `--alert-config` | `monitoring/alert-config.json` | Per-type toggle/severity catalog. Missing file ⇒ all types enabled, dynamic severity. |
-| `--verdict-queue` | `night-run/verdict-queue` | File-queue dir for the LLM verdict seam. |
+| `--verdict-queue` | `monitoring/.data/verdict-queue` | File-queue dir for the LLM verdict seam (gitignored output). |
 | `--verdict-max-cycles` | `8` | Cycles to wait for a verdict before timing out (stays `pending`). |
 | `--no-enrich` | off | Skip candidate name+room enrichment. |
 | `--admin-password` | env `ADMIN_PASSWORD`, else `.data/session.local`, else none | Enables name+room enrichment via `GET /api/admin/sessions`. If none found, enrichment is **disabled** and the poller still runs (alerts stay username-only). |
@@ -121,7 +121,7 @@ Per cycle, `run_fetch(...)`:
 Ambiguous alerts are routed to a **file-queue** judgment seam that a human-driven Claude Code `/loop` drains. It **never** makes a network call, **never** spends money, and **never** blocks the poller.
 
 - **Which alerts route** (`is_ambiguous`): `web_paste` (any), `recurring_pair` at `warning` (single-hard), and `peer_copy_cluster` at `warning` (MED). Decisive signals — a conclusive `recurring_pair` (critical) and `tough_first_attempt` (critical) — go straight to the dashboard. `first_attempt_solve` (info) is a corroborator and is not routed alone.
-- **Flow:** `seam.request(alert)` writes `night-run/verdict-queue/pending/<id>.json` (atomic, idempotent). The `/loop` in `monitoring/verdict-responder-prompt.md` reads the actual code, applies the difficulty-weighting + Java-template rules, and writes `night-run/verdict-queue/done/<id>.json` with `status ∈ {real, false_positive, inconclusive}` (the responder must **not** write `pending`).
+- **Flow:** `seam.request(alert)` writes `monitoring/.data/verdict-queue/pending/<id>.json` (atomic, idempotent). The `/loop` in `monitoring/verdict-responder-prompt.md` reads the actual code, applies the difficulty-weighting + Java-template rules, and writes `monitoring/.data/verdict-queue/done/<id>.json` with `status ∈ {real, false_positive, inconclusive}` (the responder must **not** write `pending`).
 - **Polling:** `seam.poll(alert)` reads `done/` each cycle and attaches the verdict, clearing `pending/` when resolved. If no verdict appears within `--verdict-max-cycles` (default **8**), the verdict stays `{status: "pending"}` — the alert is never blocked.
 - **Swappable transport:** `VerdictSeam`'s `request`/`poll` are the only contract the poller depends on; a future C3 transport can plug in without touching `poller.py`. C3 is intentionally **not** built here.
 
@@ -168,7 +168,7 @@ A sibling two-step flow (`download_submission_events.sh` → `upload_submission_
 Live alerts carry candidate usernames and submission code, so the following are **gitignored** (confirmed in `proctor/.gitignore`):
 
 - `monitoring/.data/` — live alerts + fetched code + enrichment session file
-- `night-run/verdict-queue/` — pending/done verdict files
+- `monitoring/.data/verdict-queue/` — pending/done verdict files (gitignored)
 - `monitoring/**/data/raw/`, `monitoring/**/data/processed/`, `monitoring/**/code_*.json`, `monitoring/**/contest_*_meta.json` — fixtures and any pulled candidate code/meta
 
 The poller does **no** deploy of its own; it only POSTs to whatever `--api-base` you pass.

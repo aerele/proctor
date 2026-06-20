@@ -15,14 +15,10 @@ Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/inv
 5. **Open + distribute** — contest detail shows the **test (access) code** for the candidate landing and the per-contest **invigilator key/link**, both copyable and **Regenerate**-able (`/api/admin/contest-regenerate`). Regenerating immediately invalidates old codes/links.
 6. **Scale** — set the service **min-instances = 1** so the first candidate isn't hitting a cold start. *(deploy-time concern; see `docs/DEPLOY.md`.)*
 
-> Verified: `night-run/evidence/e2e/admin-setup/11-contest-detail-live.png`, `.../09-roster-preview.png`, `.../07-published-problem-list.png`.
-
 ## 2. AT START
 
 - **Invigilators** open `<web>/invigilator?contest=<slug>&key=<key>` → enter a **name only** (tokenized; the name is recorded against every code they release). Pick the room → room console.
 - **Candidates** open the access-code link — **distribute the full `?contest=<slug>` link, not the bare domain**: if a legacy settings doc exists the bare `/` can show the legacy shell with no code box (E2E-live F6) → **Stage 1 Permissions** (share **Entire Screen** + allow camera/mic/clipboard; recording starts) → **Stage 2 Fullscreen** → **Stage 3 Details**: type the unique ID → roster lookup pre-fills name/email/room → **"Yes, this is me"** → **Stage 4 workspace**. If the room start-gate is on, the candidate **waits** until the invigilator releases the room.
-
-> Verified: `night-run/evidence/e2e/candidate/01-permissions-gate.png` → `04-details-filled.png`; `invigilator/01-portal-entry-nameonly.png`, `02-room-picker.png`.
 
 ## 3. DURING — where to watch / what to do
 
@@ -39,14 +35,10 @@ Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/inv
 
 **Invigilator room actions** (`routes/invigilator.mjs`): release/regenerate the room **START** code (only when room-gate enabled), **open room** (start-now/allow-all), mint **unlock** code, per-student exemptions, per-student unlock. Invigilators see **only** alert types the admin marked "Share with invigilator" (**default: all OFF**).
 
-> Verified: `night-run/evidence/e2e/candidate/11-enforcement-overlay.png`, `12-enforcement-locked.png`; `invigilator/05-unlock-code-generated.png`, `06-candidate-table-exemption-toggles.png`; `admin-review/01-live-stats.png`, `04a-alerts-console.png`, `05-ip-report-drilldown.png`, `06-attendance.png`.
-
 ## 4. AFTER
 
 1. **Results** tab — ranked table (per-problem best, integrity column). Shortlist / select / reject candidates, then **Mark selection done** (freezes a snapshot + starts the retention clock). CSV export. Cross-round per-person view in **People**; recordings in **Recordings** (screen + camera, events/alerts timeline, click-to-jump).
 2. **Data lifecycle** (contest detail) — **Export** first (downloads a self-contained archive). Then the **triple-gated Purge**: a prior export must exist + tick "I understand…" + **type the contest slug exactly**. Purge deletes sessions/submissions/recordings; **scores and selection always survive** (tombstone). Evidence auto-deletes via GCS lifecycle at **age 3 days**; export zips at **age 11 days** (`backend/gcs-lifecycle.json`).
-
-> Verified: `night-run/evidence/e2e/admin-review/07d-results-selection-done.png`, `09-export-done-purge-enabled.png`.
 
 ---
 

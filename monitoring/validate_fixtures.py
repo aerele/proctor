@@ -10,6 +10,7 @@ cycle produces only contract-valid alerts.
 This reads the fixtures READ-ONLY (never writes into the contest-eval repo).
 """
 import json
+import os
 import sys
 import subprocess
 from pathlib import Path
@@ -19,7 +20,10 @@ sys.path.insert(0, str(HERE))
 import contest_eval_core as core
 import alerts as alertmod
 
-FIX_BASE = Path("<your-contest-eval-data-dir>/MCET-06-26")
+# Fixture data lives outside the repo (local-only; not shipped). Point
+# CONTEST_EVAL_DATA at your own contest-eval data dir to reproduce against it.
+FIX_BASE = Path(os.environ.get("CONTEST_EVAL_DATA",
+                               str(HERE / ".data" / "fixtures" / "contest")))
 SLOTS = [("386521-slot1", "386521", "coding-contest-mcet-june-2026"),
          ("386562-slot2", "386562", "coding-contest-mcet-june-2026")]
 

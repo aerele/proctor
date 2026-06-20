@@ -21,8 +21,8 @@ set -euo pipefail
 # The plain passwords are NEVER passed to the build; only their hashes are.
 # =============================================================================
 
-PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID first, for example: export PROJECT_ID=aerele-proctor}"
-REGION="${REGION:-asia-south1}"
+PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID first, e.g.: export PROJECT_ID=your-gcp-project-id}"
+REGION="${REGION:-asia-south1}"  # override with your chosen region
 API_URL="${API_URL:?Set API_URL to the deployed Cloud Function URL}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:?Set ADMIN_PASSWORD first (its sha256 is baked as VITE_ADMIN_PASSWORD_HASH)}"
 INVIGILATOR_PASSWORD="${INVIGILATOR_PASSWORD:?Set INVIGILATOR_PASSWORD first (its sha256 is baked as VITE_INVIGILATOR_PASSWORD_HASH)}"
@@ -33,8 +33,8 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/web:latest"
 # ----- LIVE-TEST SAFETY GATE ------------------------------------------------
 # proctor-web serves the LIVE exam UI. Refuse to deploy while a test is in
 # progress unless explicitly overridden. Runs the live-activity preflight
-# (scripts/deploy-preflight.sh) — see _nightrun/eval-service-deploy.md
-# (DEPLOY SAFETY). An agent deploying this MUST surface the verdict to the user
+# (scripts/deploy-preflight.sh) — see docs/DEPLOY.md (DEPLOY SAFETY). An agent
+# deploying this MUST surface the verdict to the user
 # and get an explicit override; "I'll be careful" is not enough.
 #   SKIP_LIVE_CHECK=1      skip the check entirely (CI / known-idle)
 #   DEPLOY_OVERRIDE_LIVE=1 proceed despite a live/uncertain verdict (human override)

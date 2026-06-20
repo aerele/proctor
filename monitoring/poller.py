@@ -216,8 +216,8 @@ def build_argparser():
                    help="per-type alert toggle/severity catalog (JSON). Missing "
                         "file => all types enabled with dynamic severity.")
     p.add_argument("--verdict-queue",
-                   default=str(HERE.parent / "night-run" / "verdict-queue"),
-                   help="file-queue dir for the LLM verdict seam")
+                   default=str(HERE / ".data" / "verdict-queue"),
+                   help="file-queue dir for the LLM verdict seam (gitignored output)")
     p.add_argument("--verdict-max-cycles", type=int, default=8,
                    help="cycles to wait for a verdict before timing out (stays pending)")
     p.add_argument("--no-post", action="store_true", help="do not POST alerts")

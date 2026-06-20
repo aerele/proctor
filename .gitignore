@@ -1,3 +1,4 @@
+# Dependencies & build artifacts
 node_modules/
 dist/
 coverage/
@@ -5,31 +6,32 @@ coverage/
 __pycache__/
 *.pyc
 .DS_Store
-.env
-.env.local
-.env.*.local
-.env.deploy.local
-.local-resource-names.env
 backend/.aws-sam/
 backend/build/
 frontend/dist/
 
-# overnight-run scratch + secrets + build artifacts
-night-run/verdict-queue/
-
-# junk/ — temporary data files, real student PII, analysis outputs (never commit)
-junk/
+# Secrets & local env — NEVER commit. Use the *.example templates instead.
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+!.env.*.example
+.env.deploy.local
+.local-resource-names.env
+*.bak
+*.bak.*
 *.pem
+*-key.json
+service-account*.json
+
+# Scratch / local-only notes & data (real candidate PII, analysis outputs — never commit)
+junk/
+local-notes/
+.claude/
 
 # contest-eval monitoring: live/PII output (alerts carry candidate usernames + code)
 monitoring/.data/
-# never commit fixtures or candidate PII pulled from contest-eval into this repo
 monitoring/**/data/raw/
 monitoring/**/data/processed/
 monitoring/**/code_*.json
 monitoring/**/contest_*_meta.json
-spike/proctor-extension.crx
-spike/iframe-test/proctor-extension.crx
-spike/iframe-test/proctor-extension.zip
-.claude/
-local-notes/
