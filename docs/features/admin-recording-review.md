@@ -41,10 +41,6 @@ This matters because of the identity model: a person-mode session stores `userna
 - Signed evidence URLs expire ~1h; `refreshUrls` re-resolves by the **same** stored key (`loadedNormRef`), so an in-place URL refresh never changes which session is shown.
 - The neighbouring **Evidence → Review** dashboard's free search resolves the same way since 2026-06-12: when a typed display Candidate ID returns no sessions, it resolves the id against the sessions list to the stored `username_norm`(s) and re-queries by the exact key (bounded to a few keys when one display id maps to several stored keys) — `search()` in `frontend/src/admin/AdminApp.tsx`. Before that, searching e.g. "TEC002" on a roster contest came back silently empty.
 
-Before the fix, browsing a person-mode candidate produced an empty player:
-
-![Pre-FIX-B1: clicking a person-mode candidate showed "No sessions found"](../assets/e2e/admin-review/03-recordings-player-broken.png)
-
 ---
 
 ## The player: screen + camera playback
@@ -88,7 +84,7 @@ The Camera source selected, with its low-res chunk count and the "camera recorde
 
 Below the **Summary** card sits the continuous timeline scrubber (a drill-down behind the **Show / Hide timeline detail** toggle, which defaults **ON / expanded**). All labels are relative to the **Test start time** anchor, so `00:00` is exam start.
 
-![Timeline scrubber with submission markers, a hatched recording gap, severity-colored alert dots, an event lane, and the click-to-jump activity log](../assets/wave2-13-admin-recordings-timeline.png)
+![Timeline scrubber with submission markers, a hatched recording gap, severity-colored alert dots, an event lane, and the click-to-jump activity log](../assets/verification/wave2-13-admin-recordings-timeline.png)
 
 The scrubber renders:
 

@@ -122,7 +122,7 @@ Behaviour from `invigilatorReleaseCode` / `invigilatorOpenRoom`:
 - Both mutations require the admin to have enabled the room gate (`requireGateEnabledFor` → 400 `room_gate_disabled` otherwise).
 - The OTP is a 6-digit code, stored in plaintext deliberately (it is a short-lived room-coordination code the invigilator must be able to re-display, not a data-guarding credential; online guessing is bounded by a per-session attempt cap on the candidate side).
 
-![Room start gate — code active, Regenerate + Start-now, "Code released by Priya"](../assets/s3-verify-04-room-code-released.png)
+![Room start gate — code active, Regenerate + Start-now, "Code released by Priya"](../assets/verification/s3-verify-04-room-code-released.png)
 
 ---
 

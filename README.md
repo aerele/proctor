@@ -82,10 +82,12 @@ recommendation** you can defend in a review.
 
 ## Screenshots
 
-> Replace these placeholders with your own captures, or use the synthetic-data
-> screenshots already under [`docs/assets/`](docs/assets/) (all use fabricated
-> personas — no real candidate data). The primary set lives under
-> [`docs/assets/harness/`](docs/assets/harness/).
+> These use synthetic personas; swap in your own captures if you prefer. Every
+> screenshot under [`docs/assets/`](docs/assets/) uses fabricated personas — no
+> real candidate data. The four images below are from the curated
+> [`docs/assets/harness/`](docs/assets/harness/) set; the per-feature guides under
+> [`docs/features/`](docs/features/) embed their own step-by-step walkthrough
+> captures (mostly under `docs/assets/e2e/` and `e2e-live/`).
 
 | Admin live monitoring | Ranked results + integrity |
 |---|---|
@@ -251,7 +253,7 @@ points:
 - **[`docs/DEPLOY.md`](docs/DEPLOY.md)** — the from-scratch Google Cloud deploy runbook.
 - **[`docs/EXAM-DAY-OPS.md`](docs/EXAM-DAY-OPS.md)** / **[`docs/CONDUCTOR-GUIDE.md`](docs/CONDUCTOR-GUIDE.md)** — the action-ordered exam-day runbooks.
 - **[`docs/features/candidate-evaluation.md`](docs/features/candidate-evaluation.md)** — the integrity + talent evaluation engine (the D1–D17 signal families).
-- **[`docs/PROCTORING_RESEARCH.md`](docs/PROCTORING_RESEARCH.md)** / **[`docs/PLATFORM_ALTERNATIVES.md`](docs/PLATFORM_ALTERNATIVES.md)** / **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — the threat-model research and roadmap behind the design.
+- **[`docs/proctoring-research.md`](docs/proctoring-research.md)** / **[`docs/platform-alternatives.md`](docs/platform-alternatives.md)** / **[`docs/ROADMAP.md`](docs/ROADMAP.md)** — the threat-model research and roadmap behind the design.
 
 ## Configuration reference
 

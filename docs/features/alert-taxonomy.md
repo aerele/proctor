@@ -78,7 +78,7 @@ The admin console **Settings → Proctor alert types** panel reads `GET /api/adm
 
 The settings doc stores only deltas; `mergeAlertSettings` always merges stored values over the defaults so the API returns the complete per-type set and a partial/invalid payload can never persist an unknown type or invalid severity.
 
-![Admin Settings — Proctor alert types panel: per-type enable, Share with invigilator, severity, and the tab_away threshold](../assets/wave2-08-admin-alerts-console.png)
+![Admin Settings — Proctor alert types panel: per-type enable, Share with invigilator, severity, and the tab_away threshold](../assets/verification/wave2-08-admin-alerts-console.png)
 
 ### `invalid_share_surface` was removed from the catalog
 
@@ -145,7 +145,7 @@ The console also supports a client-side **Group by** control — `none` (flat), 
 
 ![Admin Live alerts console — both sources, newest first, with Source / Severity / Room / Group-by filters](../assets/e2e/admin-review/04a-alerts-console.png)
 
-![Admin Live alerts console grouped by alert type](../assets/wave2-09b-admin-alerts-grouped-type.png)
+![Admin Live alerts console grouped by alert type](../assets/verification/wave2-09b-admin-alerts-grouped-type.png)
 
 Archiving is handled by `POST /api/admin/alert-action` (`{ action: "archive" | "unarchive", ids }`, handler `adminAlertAction`), which toggles the `archived` flag on the listed alert docs and reports back any ids that did not exist (so a stale id never fails the whole batch).
 

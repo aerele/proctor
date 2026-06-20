@@ -92,8 +92,8 @@ Per-area, code-verified deep dives under [`features/`](features/).
 These predate the current build and capture the design rationale rather than the
 shipped surfaces:
 
-- [`PROCTORING_RESEARCH.md`](PROCTORING_RESEARCH.md) — threat model + browser-proctoring research.
-- [`PLATFORM_ALTERNATIVES.md`](PLATFORM_ALTERNATIVES.md) — platform alternatives evaluated.
+- [`proctoring-research.md`](proctoring-research.md) — threat model + browser-proctoring research.
+- [`platform-alternatives.md`](platform-alternatives.md) — platform alternatives evaluated.
 - [`ROADMAP.md`](ROADMAP.md) — design background and roadmap.
 
 ### Design history — specs & plans (`superpowers/`)
@@ -128,4 +128,10 @@ so the specs still match the frontend code).
   screenshot.
 
 Screenshots used throughout these pages are kept under
-[`assets/`](assets/) so `docs/` is self-contained.
+[`assets/`](assets/) so `docs/` is self-contained. The tree carries a few
+capture sets from different runs, kept intentionally because each is still
+referenced: `assets/harness/` (the curated set the README front-page samples),
+`assets/e2e/` + `assets/e2e-live/` (the per-feature walkthrough captures most
+guides embed), and `assets/verification/` (one-off verification grabs from the
+`s2-`/`s3-`/`wave2-` build waves). All use synthetic personas — no real
+candidate data.

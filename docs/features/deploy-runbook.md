@@ -162,7 +162,7 @@ In `full` mode `--set-env-vars` passes the entire live env map: `EVIDENCE_BUCKET
 
 The script ends by printing the **Backend URL** — copy it into `API_URL` before the frontend deploy.
 
-![Deployed proctor live in an exam capture (dev stack)](../assets/deployed-in-exam-capture-verified.png)
+![Deployed proctor live in an exam capture (dev stack)](../assets/verification/deployed-in-exam-capture-verified.png)
 
 *The candidate workspace running against a deployed stack — confirmation that the backend + frontend deploy described here yields a working in-exam experience.*
 
