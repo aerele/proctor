@@ -8,7 +8,10 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "lint": "tsc -b --pretty false",
-    "test": "vitest run"
+    "test": "vitest run",
+    "shots:check": "playwright test",
+    "shots:update": "playwright test --update-snapshots",
+    "shots:docs": "playwright test && node scripts/shots-to-docs.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -22,6 +25,7 @@
     "vite": "^5.4.11"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "autoprefixer": "^10.4.20",

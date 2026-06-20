@@ -98,6 +98,44 @@ export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") 
 export const evalApiBaseUrl = import.meta.env.VITE_EVAL_API_URL?.replace(/\/$/, "") ?? apiBaseUrl;
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 export const isDemoMode = demoMode;
+
+// --- Deterministic demo clock + ids (opt-in, for the screenshot harness) ------
+// Demo data is non-deterministic in two ways that flake pixel-diffs: (a) every
+// `created_at`/`server_now` is wall-clock-relative so "20m ago" labels drift,
+// and (b) newly-created demo sessions get `crypto.randomUUID()` ids. When the
+// build env `VITE_DEMO_FREEZE_NOW=<ISO>` is set (unset in prod/normal-dev →
+// fully inert), we freeze "now" to that instant and hand out seeded counter ids
+// instead of random UUIDs, so the demo UI renders byte-identically every run.
+// Additive + env-gated: with the env unset, demoNowMs() === Date.now() and
+// demoUuid() === crypto.randomUUID(), i.e. existing behavior is unchanged.
+const demoFreezeNowRaw = (import.meta.env.VITE_DEMO_FREEZE_NOW ?? "").trim();
+const demoFrozenNowMs: number | null = (() => {
+  if (!demoFreezeNowRaw) return null;
+  const ms = Date.parse(demoFreezeNowRaw);
+  return Number.isFinite(ms) ? ms : null;
+})();
+export const isDemoClockFrozen = demoFrozenNowMs !== null;
+
+/** "now" for demo stamps — the frozen instant when VITE_DEMO_FREEZE_NOW is a
+ *  valid ISO date, else the real wall clock. */
+export function demoNowMs(): number {
+  return demoFrozenNowMs ?? Date.now();
+}
+/** ISO "now" for demo `server_now` fields (frozen-clock-aware). */
+export function demoNowIso(): string {
+  return new Date(demoNowMs()).toISOString();
+}
+
+let demoUuidCounter = 0;
+/** A demo session id — a deterministic, seeded value under a frozen clock,
+ *  else a real random UUID (unchanged default behavior). */
+export function demoUuid(): string {
+  if (demoFrozenNowMs === null) return crypto.randomUUID();
+  demoUuidCounter += 1;
+  // RFC-4122-shaped but fully deterministic: "demo0000-0000-4000-8000-<seq>".
+  const seq = demoUuidCounter.toString(16).padStart(12, "0");
+  return `demo0000-0000-4000-8000-${seq}`;
+}
 const demoSettingsKey = "aerele-proctor-demo-settings";
 const demoSessionsKey = "aerele-proctor-demo-sessions";
 // v3: F6.7 retimed the demo alerts INTO their candidates' demo recording
@@ -351,7 +389,7 @@ function demoSessionResponse(session: DemoSession, contest?: ContestSummary | nu
     // S5: demo sessions read the exam end time from the demo settings store.
     // S-D: person-contest sessions read the exam end time from the CONTEST doc.
     end_at: (contest ? contest.end_at : getDemoSettings()?.end_at) || "",
-    server_now: new Date().toISOString()
+    server_now: demoNowIso()
   };
 }
 
@@ -450,7 +488,7 @@ function demoPersonStart(
   const existingLive = readDemoSessions().find(
     (item) => item.username_norm === identity.username_norm && item.contest_slug === contest.slug && item.status !== "ended"
   );
-  const sessionId = crypto.randomUUID();
+  const sessionId = demoUuid();
   const session: DemoSession = {
     session_id: sessionId,
     status: existingLive ? "pending_approval" : "active",
@@ -644,7 +682,7 @@ export async function heartbeat(params: {
       end_at: getDemoSettings()?.end_at || "",
       enforcement: demoEnforcement(),
       enforcement_exemptions: session?.enforcement_exemptions ?? {},
-      server_now: new Date().toISOString()
+      server_now: demoNowIso()
     };
   }
   return request<HeartbeatResponse>("/api/heartbeat", {
@@ -970,7 +1008,9 @@ type DemoAdminSessionRow = {
 const DEMO_CONTEST_SLUG = "mcet-june-2026"; // the slug DEMO_RECORDING_SESSIONS uses
 
 // Base "now" for the demo created_at stamps, captured once at module load.
-const DEMO_NOW_MS = Date.now();
+// Frozen to VITE_DEMO_FREEZE_NOW when set (screenshot determinism), else the
+// real wall clock — see demoNowMs() above.
+const DEMO_NOW_MS = demoNowMs();
 const demoCreated = (offsetMin: number) => new Date(DEMO_NOW_MS - offsetMin * 60_000).toISOString();
 
 // The full demo admin session population both fetchAdminStats and fetchSessionsList
@@ -1471,7 +1511,7 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
     const endAt = contestSlug
       ? (scopedContest ? scopedContest.end_at || "" : scopedContest ? getDemoSettings()?.end_at || "" : "")
       : getDemoSettings()?.end_at || "";
-    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000, end_at: endAt, server_now: new Date().toISOString() };
+    return { contest_slug: contestSlug || null, room: room || null, stats, rooms: demoRooms, disconnected_staleness_ms: 45000, end_at: endAt, server_now: demoNowIso() };
   }
 
   const query = new URLSearchParams();
@@ -1792,11 +1832,45 @@ export interface HealthCheckResponse {
 }
 
 export async function runHealthCheck(password: string, mode: HealthCheckMode): Promise<HealthCheckResponse> {
+  if (demoMode) {
+    await wait(300);
+    assertDemoAdmin(password);
+    return demoHealthCheck(mode);
+  }
   return request<HealthCheckResponse>("/api/admin/health-check", {
     method: "POST",
     headers: { "x-admin-password": password },
     body: JSON.stringify({ mode })
   });
+}
+
+// Demo pre-flight verdict — a synthetic all-green readiness report so the
+// populated SystemHealthPanel card is screenshottable offline. The Judge0 exec
+// probe is "skip" in light mode and "green" in full mode (mirrors prod
+// semantics); `ran_at` rides the frozen demo clock so the rendered timestamp is
+// diff-stable.
+function demoHealthCheck(mode: HealthCheckMode): HealthCheckResponse {
+  const full = mode === "full";
+  const checks: HealthCheckItem[] = [
+    { id: "datastore", label: "Datastore (Firestore)", status: "green", latency_ms: 42, detail: "Read/write round-trip OK." },
+    { id: "storage", label: "Evidence storage (GCS)", status: "green", latency_ms: 88, detail: "Bucket reachable; lifecycle policy present." },
+    { id: "signer", label: "Signed-URL signer", status: "green", latency_ms: 31, detail: "v4 signing credentials valid." },
+    {
+      id: "judge0",
+      label: "Code execution (Judge0)",
+      status: full ? "green" : "skip",
+      latency_ms: full ? 612 : 0,
+      detail: full ? "2 sample executions returned the expected output." : "Skipped in light mode (no paid executions)."
+    }
+  ];
+  return {
+    overall: "green",
+    mode,
+    ran_at: demoNowIso(),
+    duration_ms: full ? 773 : 161,
+    checks,
+    cleanup: { ok: true, detail: "Removed 1 probe artifact." }
+  };
 }
 
 // ---- demo Results dataset (parity for the NEW tab — acceptance bar S4) ------
@@ -3561,7 +3635,9 @@ function randomDemoCode(length: number, alphabet = DEMO_CODE_ALPHABET): string {
 const DAY_MS_DEMO = 24 * 60 * 60 * 1000;
 
 function seedDemoContests(): ContestSummary[] {
-  const nowMs = Date.now();
+  // Frozen under VITE_DEMO_FREEZE_NOW so the Contests panel dates + data-lifecycle
+  // retention countdowns are diff-stable for screenshots (else real wall clock).
+  const nowMs = demoNowMs();
   const now = new Date(nowMs).toISOString();
   return [
     {
@@ -3932,7 +4008,7 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
       camera_recording: demoCameraRecording(),
       start_at: contest.start_at,
       end_at: contest.end_at,
-      server_now: new Date().toISOString()
+      server_now: demoNowIso()
     };
   }
   return request<ContestExamConfig>(`/api/exam-config?contest=${encodeURIComponent(slug)}`, { method: "GET" });

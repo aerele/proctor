@@ -1,0 +1,307 @@
+{
+  "evaluations": [
+    {
+      "identity_key": "kec~21cs017",
+      "candidate_id": "21CS017",
+      "username_norm": "asha_r",
+      "name": "Asha Ramanathan",
+      "coverage": { "confidence": "high", "editor_events_n": 1840, "shell_events_n": 12, "submissions_n": 9 },
+      "talent": {
+        "composite": 94,
+        "total_score": 300,
+        "max_total": 300,
+        "n_solved_full": 3,
+        "first_attempt_solves": 1,
+        "hardest_tier": "hard",
+        "honest_reach": ["max-window-sum"],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "easy" },
+          "reverse-words": { "genuine_arc": true, "_tier": "med" },
+          "max-window-sum": { "genuine_arc": true, "_tier": "hard" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.04, "foreign_pastes": [] },
+      "tiers": { "talent": "strong", "integrity": "clean", "one_line": "Solved all three incl. the hard problem with genuine, typed solve arcs." },
+      "flags": []
+    },
+    {
+      "identity_key": "psg~22it004",
+      "candidate_id": "22IT004",
+      "username_norm": "bala_s",
+      "name": "Bala Subramanian",
+      "coverage": { "confidence": "high", "editor_events_n": 1520, "shell_events_n": 9, "submissions_n": 7 },
+      "talent": {
+        "composite": 81,
+        "total_score": 250,
+        "max_total": 300,
+        "n_solved_full": 2,
+        "first_attempt_solves": 0,
+        "hardest_tier": "med",
+        "honest_reach": ["max-window-sum"],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "easy" },
+          "reverse-words": { "genuine_arc": true, "_tier": "med" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.18, "foreign_pastes": [] },
+      "tiers": { "talent": "strong", "integrity": "watch", "one_line": "Two solid solves; one brief away-episode warrants a glance." },
+      "flags": [
+        { "code": "foreign_paste", "severity": "warning", "problem_id": "reverse-words", "evidence": "A short snippet appears pasted rather than typed; matches no peer.", "weak": true }
+      ]
+    },
+    {
+      "identity_key": "kec~21cs033",
+      "candidate_id": "21CS033",
+      "username_norm": "chitra_n",
+      "name": "Chitra Nair",
+      "coverage": { "confidence": "high", "editor_events_n": 1290, "shell_events_n": 7, "submissions_n": 6 },
+      "talent": {
+        "composite": 71,
+        "total_score": 250,
+        "max_total": 300,
+        "n_solved_full": 2,
+        "first_attempt_solves": 0,
+        "hardest_tier": "med",
+        "honest_reach": [],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "med" },
+          "reverse-words": { "genuine_arc": true, "_tier": "med" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.09, "foreign_pastes": [] },
+      "tiers": { "talent": "moderate", "integrity": "clean", "one_line": "Steady mid-tier solver, clean telemetry across two genuine medium solves." },
+      "flags": []
+    },
+    {
+      "identity_key": "psg~22it019",
+      "candidate_id": "22IT019",
+      "username_norm": "deepak_r",
+      "name": "Deepak Rao",
+      "coverage": { "confidence": "high", "editor_events_n": 410, "shell_events_n": 21, "submissions_n": 5 },
+      "talent": {
+        "composite": 18,
+        "total_score": 250,
+        "max_total": 300,
+        "n_solved_full": 2,
+        "first_attempt_solves": 0,
+        "hardest_tier": "hard",
+        "honest_reach": [],
+        "per_problem": {
+          "sum-two": { "genuine_arc": false, "_tier": "easy" },
+          "max-window-sum": { "genuine_arc": false, "_tier": "hard" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.71, "foreign_pastes": [{ "problem_id": "max-window-sum" }] },
+      "tiers": { "talent": "weak", "integrity": "confirmed", "one_line": "Recurring-pair clone on the hard problem; talent composite capped." },
+      "flags": [
+        { "code": "recurring_pair_conclusive", "severity": "critical", "problem_id": "max-window-sum", "evidence": "Identical code with a peer on the hard problem, submitted 14s apart in the same room.", "weak": false },
+        { "code": "high_paste_ratio", "severity": "critical", "problem_id": null, "evidence": "0.71 of accepted code arrived as paste, not keystrokes.", "weak": false }
+      ]
+    },
+    {
+      "identity_key": "kec~21cs008",
+      "candidate_id": "21CS008",
+      "username_norm": "esha_p",
+      "name": "Esha Pillai",
+      "coverage": { "confidence": "medium", "editor_events_n": 760, "shell_events_n": 4, "submissions_n": 5 },
+      "talent": {
+        "composite": 66,
+        "total_score": 225,
+        "max_total": 300,
+        "n_solved_full": 2,
+        "first_attempt_solves": 0,
+        "hardest_tier": "med",
+        "honest_reach": ["reverse-words"],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "med" },
+          "reverse-words": { "genuine_arc": true, "_tier": "med" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.11, "foreign_pastes": [] },
+      "tiers": { "talent": "moderate", "integrity": "clean", "one_line": "Genuine effort across two medium problems; partial reach on the third." },
+      "flags": []
+    },
+    {
+      "identity_key": "psg~22it041",
+      "candidate_id": "22IT041",
+      "username_norm": "farhan_a",
+      "name": "Farhan Ali",
+      "coverage": { "confidence": "medium", "editor_events_n": 540, "shell_events_n": 8, "submissions_n": 4 },
+      "talent": {
+        "composite": 38,
+        "total_score": 200,
+        "max_total": 300,
+        "n_solved_full": 2,
+        "first_attempt_solves": 0,
+        "hardest_tier": "med",
+        "honest_reach": [],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "easy" },
+          "reverse-words": { "genuine_arc": false, "_tier": "med" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.34, "foreign_pastes": [{ "problem_id": "reverse-words" }] },
+      "tiers": { "talent": "moderate", "integrity": "flag", "one_line": "Elevated paste ratio with externally-sourced code on the second problem." },
+      "flags": [
+        { "code": "foreign_paste_after_away", "severity": "warning", "problem_id": "reverse-words", "evidence": "Code pasted shortly after a tab-away; origin not in the typed history.", "weak": false }
+      ]
+    },
+    {
+      "identity_key": "kec~21cs025",
+      "candidate_id": "21CS025",
+      "username_norm": "gita_m",
+      "name": "Gita Menon",
+      "coverage": { "confidence": "high", "editor_events_n": 980, "shell_events_n": 3, "submissions_n": 4 },
+      "talent": {
+        "composite": 41,
+        "total_score": 160,
+        "max_total": 300,
+        "n_solved_full": 1,
+        "first_attempt_solves": 0,
+        "hardest_tier": "med",
+        "honest_reach": ["reverse-words"],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "easy" },
+          "reverse-words": { "genuine_arc": true, "_tier": "med" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.07, "foreign_pastes": [] },
+      "tiers": { "talent": "moderate", "integrity": "clean", "one_line": "One full solve with a believable score climb; single genuine medium solve." },
+      "flags": []
+    },
+    {
+      "identity_key": "psg~22it012",
+      "candidate_id": "22IT012",
+      "username_norm": "harish_k",
+      "name": "Harish Kumar",
+      "coverage": { "confidence": "medium", "editor_events_n": 420, "shell_events_n": 2, "submissions_n": 3 },
+      "talent": {
+        "composite": 30,
+        "total_score": 100,
+        "max_total": 300,
+        "n_solved_full": 1,
+        "first_attempt_solves": 0,
+        "hardest_tier": "easy",
+        "honest_reach": [],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "easy" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.13, "foreign_pastes": [] },
+      "tiers": { "talent": "weak", "integrity": "clean", "one_line": "Single easy solve, no further reach." },
+      "flags": []
+    },
+    {
+      "identity_key": "kec~21cs049",
+      "candidate_id": "21CS049",
+      "username_norm": "ishita_b",
+      "name": "Ishita Bhat",
+      "coverage": { "confidence": "high", "editor_events_n": 360, "shell_events_n": 16, "submissions_n": 4 },
+      "talent": {
+        "composite": 21,
+        "total_score": 90,
+        "max_total": 300,
+        "n_solved_full": 0,
+        "first_attempt_solves": 0,
+        "hardest_tier": "med",
+        "honest_reach": [],
+        "per_problem": {
+          "sum-two": { "genuine_arc": false, "_tier": "easy" },
+          "reverse-words": { "genuine_arc": false, "_tier": "med" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.63, "foreign_pastes": [{ "problem_id": "sum-two" }, { "problem_id": "reverse-words" }] },
+      "tiers": { "talent": "weak", "integrity": "flag", "one_line": "Paste ratio over 0.6 across the scoring problems." },
+      "flags": [
+        { "code": "high_paste_ratio", "severity": "warning", "problem_id": null, "evidence": "Most accepted code arrived as paste across two problems.", "weak": false }
+      ]
+    },
+    {
+      "identity_key": "psg~22it027",
+      "candidate_id": "22IT027",
+      "username_norm": "jayant_v",
+      "name": "Jayant Verma",
+      "coverage": { "confidence": "low", "editor_events_n": 90, "shell_events_n": 1, "submissions_n": 2 },
+      "talent": {
+        "composite": 19,
+        "total_score": 60,
+        "max_total": 300,
+        "n_solved_full": 0,
+        "first_attempt_solves": 0,
+        "hardest_tier": "easy",
+        "honest_reach": [],
+        "per_problem": {
+          "sum-two": { "genuine_arc": false, "_tier": "easy" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.08, "foreign_pastes": [] },
+      "tiers": { "talent": "weak", "integrity": "inconclusive", "one_line": "Partial single solve; thin editor telemetry limits assessment." },
+      "flags": []
+    },
+    {
+      "identity_key": "kec~21cs061",
+      "candidate_id": "21CS061",
+      "username_norm": "naveen_t",
+      "name": "Naveen Thomas",
+      "coverage": { "confidence": "high", "editor_events_n": 1610, "shell_events_n": 6, "submissions_n": 8 },
+      "talent": {
+        "composite": 88,
+        "total_score": 280,
+        "max_total": 300,
+        "n_solved_full": 3,
+        "first_attempt_solves": 1,
+        "hardest_tier": "hard",
+        "honest_reach": ["max-window-sum"],
+        "per_problem": {
+          "sum-two": { "genuine_arc": true, "_tier": "easy" },
+          "reverse-words": { "genuine_arc": true, "_tier": "med" },
+          "max-window-sum": { "genuine_arc": true, "_tier": "hard" }
+        }
+      },
+      "integrity": { "paste_ratio": 0.05, "foreign_pastes": [] },
+      "tiers": { "talent": "strong", "integrity": "clean", "one_line": "Three genuine solves incl. the hard problem; clean editor history." },
+      "flags": []
+    },
+    {
+      "identity_key": "psg~22it038",
+      "candidate_id": "22IT038",
+      "username_norm": "lokesh_b",
+      "name": "Lokesh Babu",
+      "coverage": { "confidence": "low", "editor_events_n": 0, "shell_events_n": 0, "submissions_n": 0 },
+      "talent": {
+        "composite": 0,
+        "total_score": 0,
+        "max_total": 300,
+        "n_solved_full": 0,
+        "first_attempt_solves": 0,
+        "hardest_tier": "none",
+        "honest_reach": [],
+        "per_problem": {}
+      },
+      "integrity": { "paste_ratio": 0, "foreign_pastes": [] },
+      "tiers": { "talent": "weak", "integrity": "inconclusive", "one_line": "Enrolled identity with no captured session data — not ranked." },
+      "flags": []
+    }
+  ],
+  "meta": {
+    "schema_version": 1,
+    "evaluator_version": "1",
+    "contest_slug": "mcet-june-2026",
+    "computed_at": "2026-06-05T09:30:00.000Z",
+    "clusters": {
+      "exact": [
+        {
+          "ch": "max-window-sum",
+          "hardness": "hard",
+          "members": [
+            { "user": "psg~22it019", "created": 1749116400 },
+            { "user": "kec~21cs017", "created": 1749116386 }
+          ]
+        }
+      ]
+    },
+    "recurring_pairs": [
+      { "pair": ["psg~22it019", "kec~21cs017"], "n_problems": 1, "n_hard": 1, "problems": ["max-window-sum"] }
+    ]
+  }
+}

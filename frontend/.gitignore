@@ -1,0 +1,6 @@
+# Playwright visual-harness transient artifacts (NOT the committed baselines,
+# which live in tests/visual/__screenshots__/ and ARE tracked).
+/test-results/
+/playwright-report/
+/blob-report/
+/.last-run.json
