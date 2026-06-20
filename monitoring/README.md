@@ -89,11 +89,11 @@ auto ≤10-solver hard derivation.
 
 ```bash
 # offline (no browser, no HR network) — validation / replay
-python3 poller.py --fixtures <your-contest-eval-data-dir>/386521-slot1 \
-  --contest-id 386521 --slug coding-contest-mcet-june-2026 --once --no-post
+python3 poller.py --fixtures <your-contest-eval-data-dir>/<id>-slot1 \
+  --contest-id <id> --slug <slug> --once --no-post
 
 # live loop, posting to the backend
-python3 poller.py --slug coding-contest-mcet-june-2026 --contest-id 386521 \
+python3 poller.py --slug <slug> --contest-id <id> \
   --api-base https://<backend> --api-key "$ALERTS_INGEST_API_KEY" --interval 60
 
 # single live cycle, dry run (writes alerts to .data/, no POST)

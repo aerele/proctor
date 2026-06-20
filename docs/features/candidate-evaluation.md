@@ -17,6 +17,12 @@ Evaluation runs **only on the admin's button press** (no auto-run at contest
 end). It reads only persisted session evidence + submissions — nothing
 exam-time — so a contest is evaluable the moment the window closes.
 
+The read-time **hire-recommendation report** (the `/eval-ui` Evaluation tab,
+served by the proctor-eval service) turns each scorecard into a defensible
+FOR / AGAINST argument a reviewer can break:
+
+![Evaluation tab — per-candidate hire-recommendation report](../assets/harness/evaluation/01-recommendation-report.png)
+
 ---
 
 ## What it computes — the D1–D17 signal families
