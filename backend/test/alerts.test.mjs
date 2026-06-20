@@ -290,6 +290,32 @@ test("ingestAlerts is idempotent on alert.id (merge, no duplicate doc)", async (
   assert.equal(stored.title, "Second", "merge applied the latest payload");
 });
 
+test("ingestAlerts neutralizes a '/'-bearing alert.id before using it as a Firestore doc id", async () => {
+  const fakeFirestore = makeFakeFirestore();
+  __setClientsForTest({ firestore: fakeFirestore });
+  const headers = { "x-api-key": TEST_API_KEY };
+
+  // A `/` in a doc id is a Firestore resource-path separator; an unsanitized id
+  // could error or land the doc off the alerts collection. The id must be
+  // neutralized (every out-of-charset char → `_`) before .doc().
+  const res = await call(makeReq({
+    method: "POST", path: "/api/alerts", headers,
+    body: validAlert({ id: "proctor:recording_stopped:alice/../../other:contest-1:2026-06-04T10:00:00Z" })
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ingested, 1);
+
+  const store = fakeFirestore._collections.get("test_alerts");
+  assert.equal(store.size, 1, "one alert ingested");
+  const [storedKey] = [...store.keys()];
+  assert.ok(!storedKey.includes("/"), `doc id must not contain '/' — got ${JSON.stringify(storedKey)}`);
+  assert.equal(
+    storedKey,
+    "proctor:recording_stopped:alice_.._.._other:contest-1:2026-06-04T10:00:00Z",
+    "every char outside [A-Za-z0-9:._-] is replaced with '_'"
+  );
+});
+
 test("ingestAlerts derives a stable id when none is provided", async () => {
   const fakeFirestore = makeFakeFirestore();
   __setClientsForTest({ firestore: fakeFirestore });

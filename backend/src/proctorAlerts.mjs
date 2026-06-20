@@ -442,7 +442,14 @@ export function makeProctorAlerts(ctx) {
   }
 
   function alertRef(alertId) {
-    return getFirestore().collection(alertsCollection).doc(String(alertId));
+    // Sanitize before use as a Firestore doc id: a `/` in a doc id is a
+    // resource-path separator (even-segment counts throw; odd-segment counts
+    // write to a nested subcollection), so an ingest-supplied id could error or
+    // land a doc off the alerts collection. Well-formed ids are already within
+    // this charset, so this is a no-op for them. Defense-in-depth on the
+    // API-key-gated ingest surface and the admin verdict/archive paths.
+    const safeId = String(alertId).replace(/[^A-Za-z0-9:._-]/g, "_");
+    return getFirestore().collection(alertsCollection).doc(safeId);
   }
 
   return {
