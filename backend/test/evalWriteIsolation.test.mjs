@@ -140,7 +140,5 @@ test("a multi-name allowlist permits each listed collection and blocks the rest"
 
 // Restore the unset state so any later import of this module in the same process
 // is not left guarded (cross-file hygiene; ?buster already isolates, but belt-and-braces).
-test("teardown: clear the allowlist", () => {
-  configureClients({ evalWriteAllowlist: "" });
-  assert.ok(true);
-});
+// Run at module scope — not as a test — since it asserts nothing.
+configureClients({ evalWriteAllowlist: "" });
