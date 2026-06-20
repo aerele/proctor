@@ -1,0 +1,55 @@
+# Dependabot configuration for the aerele/proctor npm-workspaces monorepo.
+# One npm entry per workspace dir that has a package.json. The root lockfile
+# (package-lock.json) is at "/", so Dependabot resolves transitive updates from
+# there; per-workspace entries surface direct-dependency updates for each app.
+# Minor/patch updates are grouped to keep PR volume low; majors stay separate
+# so breaking bumps get reviewed individually.
+version: 2
+updates:
+  # Workspace root (holds package-lock.json + shared tooling)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      root-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Backend service
+  - package-ecosystem: "npm"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Frontend app
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Video worker
+  - package-ecosystem: "npm"
+    directory: "/video-worker"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      video-worker-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
