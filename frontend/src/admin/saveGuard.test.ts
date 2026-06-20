@@ -1,9 +1,9 @@
-// D1 (the operator decision, Wave6): warn-on-save confirm gate. The exact trigger was
+// D1 (product-owner decision, Wave6): warn-on-save confirm gate. The exact trigger was
 // not recoverable from disk; the implemented interpretation is the clearest
 // impactful one — saving an edit to a published problem that is referenced by an
 // OPEN (running/active) contest, so the admin knows the edit changes what
 // candidates currently sitting that contest see. Pure decision logic only; the
-// UI binds window.confirm to it. See flags_for_karthi.
+// UI binds window.confirm to it. See flags for the product owner.
 import { describe, expect, it } from "vitest";
 import {
   contestsReferencingProblem,

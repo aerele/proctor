@@ -293,7 +293,7 @@ test("no-roster person contest: person_id null, username_norm = identityNorm(can
 });
 
 // 2026-06-18 exam-eve: NO-ROSTER duplicate-login / re-login is the live-exam
-// case (~700 self-entering students). the operator's identity model: uniqueness key =
+// case (~700 self-entering students). The product owner's identity model: uniqueness key =
 // (typed candidate id, contest). A 2nd login on the SAME (roll, contest) is the
 // SAME student re-logging-in — must be graceful (replay resumes; a concurrent
 // 2nd login WAITS via pending_approval, never corrupts the single identity).
@@ -305,7 +305,7 @@ test("NO-ROSTER re-login: replay returns the SAME session; concurrent 2nd login 
 
   // First login by a self-entered roll number.
   const first = await call(startReq({
-    contest: contest.slug, candidate_id: "23 CS 091",
+    contest: contest.slug, candidate_id: "23 CS 200",
     name: "Devan", email: "devan@x.com", consent_accepted: true
   }));
   assert.equal(first.statusCode, 200, JSON.stringify(first.body));
@@ -315,7 +315,7 @@ test("NO-ROSTER re-login: replay returns the SAME session; concurrent 2nd login 
   // still active — no new session, no lock contention. This is what the frontend
   // /api/session/resume + start-replay path does on a refresh/reconnect.
   const replay = await call(startReq({
-    contest: contest.slug, candidate_id: "23 CS 091",
+    contest: contest.slug, candidate_id: "23 CS 200",
     name: "Devan", email: "devan@x.com", consent_accepted: true,
     session_id: first.body.session_id
   }));
@@ -328,7 +328,7 @@ test("NO-ROSTER re-login: replay returns the SAME session; concurrent 2nd login 
   // pending_approval, blocked by the first session. (Admin approve/bypass
   // promotes it; the first never loses its slot silently.)
   const second = await call(startReq({
-    contest: contest.slug, candidate_id: "23 CS 091",
+    contest: contest.slug, candidate_id: "23 CS 200",
     name: "Devan", email: "devan@x.com", consent_accepted: true
   }));
   assert.equal(second.statusCode, 200, JSON.stringify(second.body));
@@ -339,7 +339,7 @@ test("NO-ROSTER re-login: replay returns the SAME session; concurrent 2nd login 
   // (c) Dedicated resume by the first token re-enters the existing session
   // (identity-checked: same typed id resolves to the same username_norm).
   const resume = await call(resumeReq({
-    session_id: first.body.session_id, contest: contest.slug, candidate_id: "23 CS 091"
+    session_id: first.body.session_id, contest: contest.slug, candidate_id: "23 CS 200"
   }));
   assert.equal(resume.statusCode, 200, JSON.stringify(resume.body));
   assert.equal(resume.body.session_id, first.body.session_id);

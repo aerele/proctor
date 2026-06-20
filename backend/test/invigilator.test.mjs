@@ -641,7 +641,7 @@ test("alert-settings: show_to_invigilator defaults ALL OFF (Wave6 opt-in) + bool
   const get = await call(makeReq({ method: "GET", path: "/api/admin/alert-settings", headers: adminHeaders }));
   assert.equal(get.statusCode, 200);
   const p = get.body.proctor;
-  // Wave6 (the operator): the admin opts IN per type — NOTHING is shared by default.
+  // Wave6 (product owner): the admin opts IN per type — NOTHING is shared by default.
   for (const type of Object.keys(p)) {
     assert.equal(p[type].show_to_invigilator, false, `${type} must default to NOT shared`);
   }
@@ -658,7 +658,7 @@ test("alert-settings: show_to_invigilator defaults ALL OFF (Wave6 opt-in) + bool
   assert.equal(reread.body.proctor.tab_hidden.show_to_invigilator, true);
 });
 
-// Wave6 (the operator): back-compat — a settings doc saved BEFORE the share flag
+// Wave6 (product owner): back-compat — a settings doc saved BEFORE the share flag
 // existed (no show_to_invigilator on any type) must surface NOTHING. The merge
 // fills the absent flag with the default (false), so a historical doc never
 // silently leaks alerts to invigilators.
