@@ -40,14 +40,19 @@ const CHOKEPOINT_FILE = "contests.mjs";
 //                             session context, defaulting "" only when missing
 //                             (decomp B13: moved to routes/session.mjs)
 //   - endAllLiveSessions      end-now sweep, same per-session slug semantics
+//                             (decomp B14: moved to routes/adminSessions.mjs)
 //   - resolveActionTargets    bulk POST body where the slug comes straight from
 //                             the request, not a resolved contest doc
+//                             (decomp B14: moved to routes/adminSessions.mjs)
 //   - adminSessionDetails     same request-supplied slug contract
+//                             (decomp B14: moved to routes/adminSessions.mjs)
 // Decomp B13 moved findLiveSessionFor (raw-where #1) into routes/session.mjs;
-// the allowlist key is re-pinned here IN THE SAME COMMIT (the count bump IS the
-// review flag). The remaining 3 stay in handler.mjs until B14 relocates them
-// into routes/adminSessions.mjs.
-const RAW_FILTER_ALLOWLIST = { "handler.mjs": 3, "routes/session.mjs": 1 };
+// decomp B14 moved the other three (raw-where #2/#3/#4) into
+// routes/adminSessions.mjs. Each step re-pins the allowlist IN ITS OWN COMMIT
+// (the count bump IS the review flag) via the SAFER move-with-pin default — these
+// three stay RAW (request-supplied slug semantics); migrating them through
+// scopedQuery to an empty allowlist is a separate, Karthi-gated decision.
+const RAW_FILTER_ALLOWLIST = { "routes/session.mjs": 1, "routes/adminSessions.mjs": 3 };
 
 test("scoping lint: contest_slug filters = pinned legacy sites + exactly one chokepoint", () => {
   const counts = {};
