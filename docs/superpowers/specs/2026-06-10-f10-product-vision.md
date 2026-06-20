@@ -41,21 +41,21 @@ Three-layer content model (Library → Template → Instance, the Mettl definiti
 ### 2.2 College — `proctor_colleges` (doc id = `college_norm`)
 
 ```js
-{ college_norm: "kec",            // identityNorm(name) — FROZEN once created
-  name: "KEC",                    // display, admin-editable (rename = display only)
+{ college_norm: "acme",           // identityNorm(name) — FROZEN once created
+  name: "ACME",                   // display, admin-editable (rename = display only)
   created_at, source: "roster_upload" | "manual" }
 ```
 
 First-class (locked). An identity namespace and grouping axis — no per-college settings, no SPOC/contacts (candidate, §8).
 
-**Canonicalization gate (gap fix — protects the locked multi-round auto-link).** Roster upload runs a college-match step *before* any person is upserted: every distinct college string in the CSV is normalized and matched against `proctor_colleges`. Exact-norm match → linked silently. No match → the upload preview blocks with *"This upload creates N NEW college(s): 'K.E.C.' — use existing 'KEC' or create new?"* and the admin must map-or-confirm each one. This is the only enforceable moment to stop spelling drift from forking every person in the drive.
+**Canonicalization gate (gap fix — protects the locked multi-round auto-link).** Roster upload runs a college-match step *before* any person is upserted: every distinct college string in the CSV is normalized and matched against `proctor_colleges`. Exact-norm match → linked silently. No match → the upload preview blocks with *"This upload creates N NEW college(s): 'A.C.M.E.' — use existing 'ACME' or create new?"* and the admin must map-or-confirm each one. This is the only enforceable moment to stop spelling drift from forking every person in the drive.
 
 ### 2.3 Person — `proctor_persons` (doc id = `person_id`)
 
 ```js
-{ person_id: "kec~21cs001",       // "{college_norm}~{unique_id_norm}", deterministic (wave-4: "~" separator —
+{ person_id: "acme~21cs001",      // "{college_norm}~{unique_id_norm}", deterministic (wave-4: "~" separator —
                                   //  outside the sanitized charset, so derivation is injective; was "--")
-  college_norm: "kec",            // components stored, never parsed back out
+  college_norm: "acme",           // components stored, never parsed back out
   unique_id: "21 CS 001",         // display form, latest upload wins
   unique_id_norm: "21cs001",      // identityNorm(unique_id) — existing function
   name, email?, phone?, extra: {…other CSV columns},
@@ -128,7 +128,7 @@ F9's doc survives wholesale (slugify rules, slug immutable after first session, 
   previous_contest_slug: null,                    // round N-1 pointer
   previous_mode: "subset" | "fresh_csv" | null,
   problems: [{ problem_id, points, order }],      // replaces problem_id (legacy shim reads old field)
-  colleges: ["kec", "psgtech"],                   // derived from roster at upload, read-only
+  colleges: ["acme", "globex"],                   // derived from roster at upload, read-only
   identity_mode: "person",
   camera_recording: { enabled: true, fps: 10, width: 320 },
   invigilator_key: "k7Jq…" }                      // per-contest token, regenerable (locked)
@@ -190,7 +190,7 @@ Per-contest `rooms[]`, `proctor_room_gates` (start codes, unlock codes, open sta
 
 - Shared alert contract unchanged; person-mode norms slot into existing composite ids.
 - **Problem-id partitioning:** once contests carry `problems[]`, contest-eval similarity (peer-copy/web-paste) is computed **per problem**; submission-event ids and alert dedupe keys gain a `problem_id` component on new data (S-F scope, accept-both on ingest).
-- **Multi-college projection rule:** wherever a candidate is rendered on an operational surface (invigilator rows, alerts, attendance, sessions, Results) and `contest.colleges.length > 1`, the college is appended to the label-driven identity ("Roll Number 21CS001 · KEC") — two same-roll candidates are now humanly distinguishable, not just key-distinct.
+- **Multi-college projection rule:** wherever a candidate is rendered on an operational surface (invigilator rows, alerts, attendance, sessions, Results) and `contest.colleges.length > 1`, the college is appended to the label-driven identity ("Roll Number 21CS001 · ACME") — two same-roll candidates are now humanly distinguishable, not just key-distinct.
 - Review collections: F9 `{norm}::{reviewer}::{slug}` ids unchanged. Recordings Review mode gains a synced camera pane, and (late-stage) a **code-replay scrubber** over the already-captured editor-event NDJSON.
 
 ### 2.14 Results & cross-round views
@@ -240,7 +240,7 @@ Export (GCS-first zip, paginated readers, JSONL truth + CSV derivations) → tri
 ### J1 — Admin sets up a drive (template → contest → roster → links)
 
 1. **Template** (once per round-type): Templates tab → "Aptitude Round 1" → pick problems from bank (tags/search), order, points → defaults (camera ON @10fps, room gate ON, enforcement knobs, identity label "Roll Number", duration) → save. Or clone.
-2. **Contest:** Contests tab → New → pick template (or blank) → name "KEC June 2026 — Round 1" → live slug preview → window (end_at prefilled from duration) → rooms → settings pre-filled, editable → create (`draft`). Two parallel colleges = two contests, zero shared state (no-bleed canary suite is the proof).
+2. **Contest:** Contests tab → New → pick template (or blank) → name "Spring 2026 — Round 1" → live slug preview → window (end_at prefilled from duration) → rooms → settings pre-filled, editable → create (`draft`). Two parallel colleges = two contests, zero shared state (no-bleed canary suite is the proof).
 3. **Roster:** contest detail → upload CSV → college gate (map-or-confirm new names) → dup-reject with line numbers if dirty → persons upserted/auto-linked, enrollments materialized, colleges chip-listed.
 4. **Links out:** candidate URL + invigilator URL (+ QR for both). Set `open` (publish gate). Lab admins pre-open the candidate URL.
 5. **Day-before:** the always-open **system-check contest** (a tiny no-roster contest from a preset template) verifies each weak lab machine — permissions, fullscreen, Judge0 round-trip. Day-of: demo mode + admin's own smoke run.

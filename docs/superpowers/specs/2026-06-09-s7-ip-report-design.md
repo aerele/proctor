@@ -56,7 +56,7 @@ Response `200`:
 
 ```json
 {
-  "contest_slug": "mcet-june-2026",
+  "contest_slug": "spring-2026-round-1",
   "room": null,
   "scope": "live",
   "total_sessions": 412,

@@ -24,7 +24,7 @@ We build it in **slices** (architect-style: each slice locked and valid before t
 4. **Capture depth (Slice 1):** keystrokes (insert/delete), paste, **editor cursor position, selection range**, line changes, focus/blur, run/submit. **OS mouse-movement is DEFERRED** to the analytics slice. (Editor cursor/selection is low-volume + high-signal — the "revisiting / non-linear editing" signal; OS mouse-pointer is the noisy one we skip.) Coalesce rapid cursor moves.
 5. **Candidate identity:** **roster-based** (NOT pure self-asserted) — see §6/§7. Pre-fed compulsory student list + unique-ID confirm + fullscreen-first + room-wise session-start OTP + invigilator ID check.
 6. **Editor session = proctor session** — one `session_id` ties screen recording + keystroke capture + submissions to one identity.
-7. **Cost (corrected):** hosted Judge0 is ~€0.001/$0.0011 **per submission** (judge0.com → RapidAPI). Billed per student-submit, a KEC-scale event (~9k submissions) ≈ **~$10**; ~$100–150/year. (My earlier $800–1,850/yr figure was ~7× too high — it wrongly billed each hidden test-case + sample-run as a separate unit. Corrected here.) Self-host ephemeral GCE would be ~$30–80/yr but is parked.
+7. **Cost (corrected):** hosted Judge0 is ~€0.001/$0.0011 **per submission** (judge0.com → RapidAPI). Billed per student-submit, a large event (~9k submissions) ≈ **~$10**; ~$100–150/year. (My earlier $800–1,850/yr figure was ~7× too high — it wrongly billed each hidden test-case + sample-run as a separate unit. Corrected here.) Self-host ephemeral GCE would be ~$30–80/yr but is parked.
 
 ---
 

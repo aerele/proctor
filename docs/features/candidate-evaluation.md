@@ -54,7 +54,7 @@ in one block (`THRESHOLDS` in `evaluationMetrics.mjs`).
 | ID | Signal | What it measures |
 |----|--------|------------------|
 | D11 | `active_ms` per problem | Editor-timeline time, gaps > 60 s excluded. |
-| D12 | Stub-delta | Final code vs the problem stub, line-level edit distance. `score>0 AND delta<10 lines` ⇒ `partial_gamer` (the KEC gem-gamer lesson). |
+| D12 | Stub-delta | Final code vs the problem stub, line-level edit distance. `score>0 AND delta<10 lines` ⇒ `partial_gamer` (catches a partial score earned by barely editing the stub rather than solving). |
 | D13 | Honest reach | Unsolved with ≥2 submits AND `active_ms ≥10 min` AND `paste_ratio < 0.3` ⇒ genuine reach. |
 | D14 | First-attempt solve | First submit accepted, no prior failed run — neutral alone, flag only paired with D1/D2/D10. |
 | — | Iteration arcs / breadth | `{runs, submits, wrong_before_solve, score_climb}`; `n_solved_full`, `n_medplus_solved`, `hardest_tier`, `languages`. |
