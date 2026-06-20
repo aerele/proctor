@@ -1,6 +1,6 @@
 # Exam-Day Operations Runbook (1 page)
 
-For the person running a live test on the Aerele proctor platform. Every behavior below is verified against this repo's routes/UI; anything not directly verifiable is marked **(unverified)**. Console = `<web-url>/admin`, unlocked with `ADMIN_PASSWORD`.
+For the **platform operator/admin** running a live test on the Aerele proctor platform. Every behavior below is verified against this repo's routes/UI; anything not directly verifiable is marked **(unverified)**. Console = `<web-url>/admin`, unlocked with `ADMIN_PASSWORD`. (For a **non-technical on-site conductor**, hand them the plain-language [`CONDUCTOR-GUIDE.md`](CONDUCTOR-GUIDE.md) instead; the narrated route-by-route version is [`features/exam-day-ops-runbook.md`](features/exam-day-ops-runbook.md).)
 
 Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/invigilator?contest=<slug>&key=<invigilator_key>` (derived in `admin/contestAdmin.ts`).
 
