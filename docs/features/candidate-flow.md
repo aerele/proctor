@@ -105,8 +105,10 @@ is me."**
 
 ![Stage 3 details — roster identity lookup](../assets/e2e/candidate/03-details-roster.png)
 
-The lookup component is `IdentityLookupPanel` (`frontend/src/candidate/panels/IdentityLookupPanel.tsx`). It is a two-step
-panel: *Step 1 — confirm your identity* (ID entry + "Find me"), then an *"Is
+The lookup is inlined in the candidate app (`frontend/src/candidate/StudentApp.tsx` —
+the `rosterLookup` call plus the `IdentityCard` confirmation card in
+`frontend/src/candidate/panels/IdentityCard.tsx`). It is a two-step
+flow: *Step 1 — confirm your identity* (ID entry + "Find me"), then an *"Is
 this you?"* confirmation card showing the matched fields, with "Yes, this is me"
 / "No — search again". Once confirmed it collapses to a compact
 "Identity confirmed: `<id>`" bar with a "Not you? Re-enter ID" reset.

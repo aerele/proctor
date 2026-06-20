@@ -34,8 +34,9 @@ backend routes. A developer should start here:
 | React glue: tick, POST, persistence | `frontend/src/shell/useEnforcement.ts` |
 | Takeover overlay UI | `frontend/src/shell/EnforcementOverlay.tsx` |
 | Candidate unlock-code entry panel | `UnlockCodePanel` in `frontend/src/candidate/panels/UnlockCodePanel.tsx` |
-| Wiring + locked screen + admin settings UI | `frontend/src/App.tsx` (`StudentApp`, `AdminSettings`) |
-| Backend violation/unlock routes | `backend/src/handler.mjs` |
+| Wiring + locked screen (candidate) | `StudentApp` in `frontend/src/candidate/StudentApp.tsx` |
+| Admin enforcement-settings UI | `frontend/src/admin/views/Settings.tsx` |
+| Backend violation/unlock routes | `backend/src/routes/sessionGates.mjs` |
 | Invigilator unlock / unlock-code / exempt | `backend/src/routes/invigilator.mjs` |
 
 > Decomposition note: the backend has been decomposed (behaviour-preserving).
@@ -109,7 +110,7 @@ transition in `enforcement.ts`.
 The same overlay, captured during a wave-2 verification run with the countdown at
 48 seconds (a deployment configured with a longer re-entry window):
 
-![L1 overlay during a wave-2 run, countdown at 48 seconds](../assets/wave2-05-hardblock-overlay.png)
+![L1 overlay during a wave-2 run, countdown at 48 seconds](../assets/verification/wave2-05-hardblock-overlay.png)
 
 Key blocking-phase behaviours (all in `enforcement.ts`):
 
@@ -167,7 +168,7 @@ proctor.
 
 The same locked screen reached via L1 countdown expiry during a wave-2 run:
 
-![L2 locked screen after countdown expiry (wave-2 run)](../assets/wave2-05b-locked-after-expiry.png)
+![L2 locked screen after countdown expiry (wave-2 run)](../assets/verification/wave2-05b-locked-after-expiry.png)
 
 ### Server-side reconciliation (defence in depth)
 
@@ -222,7 +223,7 @@ After any release, the candidate client resets to a fresh ladder
 candidate workspace **resumed after a code unlock** (the Sum-of-Two-Numbers
 problem editor with the proctor event log flowing again):
 
-![Candidate workspace resumed after a code unlock](../assets/s3-verify-09-workspace-unlocked-after-code.png)
+![Candidate workspace resumed after a code unlock](../assets/verification/s3-verify-09-workspace-unlocked-after-code.png)
 
 > Note: this screenshot illustrates the **post-unlock resumed workspace**, not
 > the code-entry moment itself.

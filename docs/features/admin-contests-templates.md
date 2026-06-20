@@ -10,12 +10,12 @@ The **Contests** and **Templates** tabs are where an admin defines and runs an e
 
 | Surface | Frontend | Backend |
 | --- | --- | --- |
-| Templates tab | `frontend/src/admin/TemplatesPanel.tsx`, `frontend/src/admin/templateForm.ts` | `backend/src/templates.mjs`, route bodies in `backend/src/handler.mjs` |
-| Contests tab + detail | `frontend/src/admin/ContestsPanel.tsx`, `frontend/src/admin/contestAdmin.ts` | `backend/src/contests.mjs`, `backend/src/contestProblems.mjs`, route bodies in `backend/src/handler.mjs` |
+| Templates tab | `frontend/src/admin/TemplatesPanel.tsx`, `frontend/src/admin/templateForm.ts` | `backend/src/templates.mjs`, route bodies in `backend/src/routes/adminTemplates.mjs` |
+| Contests tab + detail | `frontend/src/admin/ContestsPanel.tsx`, `frontend/src/admin/contestAdmin.ts` | `backend/src/contests.mjs`, `backend/src/contestProblems.mjs`, route bodies in `backend/src/routes/adminContests.mjs` |
 | Global contest scope picker, `?contest=` routing, access-code landing | `frontend/src/admin/views/ContestScopePicker.tsx`; `frontend/src/candidate/CandidateRouter.tsx` + `frontend/src/candidate/AccessCodeLanding.tsx` | `backend/src/routes/public.mjs` (`resolveAccessCode`, with the helper in `backend/src/contests.mjs`) |
-| Live-reference / live-save guards | `frontend/src/admin/saveGuard.ts`, `frontend/src/admin/ProblemBank.tsx` | `backend/src/handler.mjs` (`enforceContestProblemsEditRules`, `adminSaveProblem`, `adminDeleteProblem`), `backend/src/contestProblems.mjs` (`findProblemReferences`) |
+| Live-reference / live-save guards | `frontend/src/admin/saveGuard.ts`, `frontend/src/admin/ProblemBank.tsx` | `backend/src/routes/adminContests.mjs` (`enforceContestProblemsEditRules`), `backend/src/routes/adminProblems.mjs` (`adminSaveProblem`, `adminDeleteProblem`), `backend/src/contestProblems.mjs` (`findProblemReferences`) |
 
-> **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central request dispatch table; the contest and template route bodies live in `backend/src/routes/adminContests.mjs` and `backend/src/routes/adminTemplates.mjs` (with the domain logic in `backend/src/contests.mjs` + `backend/src/templates.mjs`), and shared helpers in `lib/*.mjs` + `config.mjs`. Routes are cited by HTTP path, which is stable regardless of which module holds the body.
+> **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central request dispatch table; the contest and template route bodies live in `backend/src/routes/adminContests.mjs` and `backend/src/routes/adminTemplates.mjs`, and the problem-bank route bodies (save/delete/list) in `backend/src/routes/adminProblems.mjs` (with the domain logic in `backend/src/contests.mjs` + `backend/src/templates.mjs`), and shared helpers in `lib/*.mjs` + `config.mjs`. Routes are cited by HTTP path, which is stable regardless of which module holds the body.
 
 ---
 
@@ -99,7 +99,7 @@ Open the tab from the admin nav (`Contests`). The header reads: *"Each contest i
 | Start time | "optional now, required to open" |
 | End time | "template duration prefills when blank" |
 
-The slug is **auto-derived from the name** (`slugify` in `contests.mjs`: lowercase, spaces→`-`, strip non-`[a-z0-9-]`, collapse/trim dashes — e.g. `"KEC June 2026 — Round 1"` → `kec-june-2026-round-1`). Slug collisions get a `-2`/`-3`… suffix; the synthesized legacy slug and any slug already carrying orphaned data are skipped so a new contest can never absorb an old population.
+The slug is **auto-derived from the name** (`slugify` in `contests.mjs`: lowercase, spaces→`-`, strip non-`[a-z0-9-]`, collapse/trim dashes — e.g. `"Spring 2026 — Round 1"` → `spring-2026-round-1`). Slug collisions get a `-2`/`-3`… suffix; the synthesized legacy slug and any slug already carrying orphaned data are skipped so a new contest can never absorb an old population.
 
 A contest is always created as **draft**. On success:
 
@@ -138,7 +138,7 @@ Selecting **Detail** opens an in-place panel for that contest. The draft view sh
 ### Candidate access — code + link
 
 - **Candidate link:** `<origin>/?contest=<slug>` with **Copy**.
-- **Test code:** the 6-character access code (alphabet `A–Z` + `2–9`, no `0/1/O/I` lookalikes; minted at create) with **Copy**, **Regenerate**, and — added 2026-06-12 — a **Set custom code** box for a hand-out-friendly code (e.g. `KEC226`). Regenerating asks *"Regenerate the test code? The old code stops working immediately."* (`regenerateContestSecretApi` → `POST /api/admin/contest-regenerate`, `field: access_code`). Candidates open the link directly or type the code on the landing page.
+- **Test code:** the 6-character access code (alphabet `A–Z` + `2–9`, no `0/1/O/I` lookalikes; minted at create) with **Copy**, **Regenerate**, and — added 2026-06-12 — a **Set custom code** box for a hand-out-friendly code (e.g. `SPRING26`). Regenerating asks *"Regenerate the test code? The old code stops working immediately."* (`regenerateContestSecretApi` → `POST /api/admin/contest-regenerate`, `field: access_code`). Candidates open the link directly or type the code on the landing page.
 
 **Custom test code.** The input beside Regenerate normalizes as you type (uppercase, whitespace stripped, capped at 6 chars — `normalizeTestCodeInput()` in `contestAdmin.ts`) and pre-flights the obvious mistakes inline before the request ("0 and 1 are never used in test codes…", "Use letters A-Z and digits 2-9 only.", "Test codes are exactly 6 characters." — `testCodeIssue()`). Submitting calls `POST /api/admin/contest-set-code` (`setContestAccessCode` in `contests.mjs`); the server re-validates and owns uniqueness, and its error messages render verbatim inline in the Candidate access box:
 

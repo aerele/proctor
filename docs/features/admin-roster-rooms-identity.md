@@ -12,12 +12,12 @@ The same upload UI drives **two backends**, chosen by whether the admin has a co
 
 | Path | When | Backend | College column | Identity |
 | --- | --- | --- | --- | --- |
-| **Legacy / global** | No contest selected (or the synthesized legacy contest) | `handler.mjs` `adminSaveRoster` → global roster | not required | `username_norm` = normalized unique id (no college) |
+| **Legacy / global** | No contest selected (or the synthesized legacy contest) | `routes/public.mjs` `adminSaveRoster` → global roster | not required | `username_norm` = normalized unique id (no college) |
 | **Per-contest / person** | A real `identity_mode:"person"` contest is selected | `identity.mjs` `saveContestRoster` | **compulsory** | `person_id = "{college_norm}~{uid_norm}"`, stable across contests |
 
-`adminSaveRoster` (`backend/src/handler.mjs`) dispatches: if the upload names a real person-mode contest it routes to `saveContestRoster` (`backend/src/identity.mjs`); otherwise it keeps the legacy global-roster path bit-for-bit. A `?contest=` param that names anything other than a real person contest is a hard `400 per_contest_roster_requires_person_contest` — uploads never silently fall back to the global roster when the admin asked for a contest.
+`adminSaveRoster` (`backend/src/routes/public.mjs`) dispatches: if the upload names a real person-mode contest it routes to `saveContestRoster` (`backend/src/identity.mjs`); otherwise it keeps the legacy global-roster path bit-for-bit. A `?contest=` param that names anything other than a real person contest is a hard `400 per_contest_roster_requires_person_contest` — uploads never silently fall back to the global roster when the admin asked for a contest.
 
-Component: `CandidateRosterSection` in `frontend/src/App.tsx` (rendered both on the per-contest detail page and in the legacy Settings tab).
+Component: `CandidateRosterSection` in `frontend/src/admin/views/Settings.tsx` (rendered both on the per-contest detail page and in the legacy Settings tab).
 
 ---
 
@@ -99,7 +99,7 @@ A person-mode upload writes to three collections (`identity.mjs`):
 
 The room list is served to candidates via `GET /api/exam-config` (legacy) or `?contest=` (`contestExamConfig`).
 
-**Candidate POV** (`RoomField`, `frontend/src/App.tsx`): if rooms are configured the candidate gets a **dropdown** ("Select your room…", the configured rooms, then **Other…** which reveals a free-text box). If **no** rooms are configured the field falls back to a plain free-text "Room number" input.
+**Candidate POV** (`RoomField`, `frontend/src/candidate/panels/RoomField.tsx`): if rooms are configured the candidate gets a **dropdown** ("Select your room…", the configured rooms, then **Other…** which reveals a free-text box). If **no** rooms are configured the field falls back to a plain free-text "Room number" input.
 
 **Room-gate (room start codes).** A separate opt-in: when enabled, candidates wait after recording starts until their room's invigilator releases a 6-digit code (or presses "Start now") from `/invigilator`.
 
@@ -109,13 +109,13 @@ The room list is served to candidates via `GET /api/exam-config` (legacy) or `?c
 
 The screenshot below (legacy Settings tab) shows the **Rooms (comma-separated)** field and the Candidate roster panel in its empty state.
 
-![Legacy Settings tab — Proctoring gate with Rooms field, and the empty Candidate roster panel](../assets/s2-verify-02-roster-preview.png)
+![Legacy Settings tab — Proctoring gate with Rooms field, and the empty Candidate roster panel](../assets/verification/s2-verify-02-roster-preview.png)
 
 ---
 
 ## Downloadable roster template CSV
 
-**Admin POV.** A **Download template CSV** button next to the file picker downloads `roster-template.csv` client-side (`buildRosterTemplateCsv` in `frontend/src/roster/rosterTemplate.ts`). Headers are exactly the parser's accepted field names, compulsory-first, so a filled template re-uploads with every column auto-mapped and `unique_id` pre-picked as the ID column. It ships with **2 example rows** (KEC sample students) to show the expected shape.
+**Admin POV.** A **Download template CSV** button next to the file picker downloads `roster-template.csv` client-side (`buildRosterTemplateCsv` in `frontend/src/roster/rosterTemplate.ts`). Headers are exactly the parser's accepted field names, compulsory-first, so a filled template re-uploads with every column auto-mapped and `unique_id` pre-picked as the ID column. It ships with **2 example rows** (sample students) to show the expected shape.
 
 **Current template columns** (`ROSTER_TEMPLATE_COLUMNS`):
 
@@ -130,7 +130,7 @@ The screenshot below (legacy Settings tab) shows the **Rooms (comma-separated)**
 
 > **Screenshot drift (unverified against current build):** `wave2-15-admin-roster-template-button.png` (below) shows the helper text as *compulsory: unique_id, name · optional: roll_number, email, room* — i.e. **before** `college` was added as a compulsory template column. The button and download behavior are current; the listed compulsory set in that older screenshot predates the compulsory-college change in `rosterTemplate.ts`.
 
-![Admin — Download template CSV button and template-columns helper text](../assets/wave2-15-admin-roster-template-button.png)
+![Admin — Download template CSV button and template-columns helper text](../assets/verification/wave2-15-admin-roster-template-button.png)
 
 ### Multi-round roster linking to existing persons
 
@@ -142,12 +142,12 @@ There is no separate "link" action — linking is automatic. Because `person_id`
 
 **Admin POV** (Settings tab → **Review roster** section → **Download all details** button). Paste a list of Candidate IDs, then export a CSV with **one row per input ID** (blank cells when a candidate was not found, so the operator can see who is missing).
 
-- Frontend: `downloadDetailsCsv` + `buildDetailsCsv` (`frontend/src/App.tsx`). CSV header: `candidate_id,name,email,roll_number,room`. File: `candidate-details.csv`.
+- Frontend: `downloadDetailsCsv` (`frontend/src/admin/AdminApp.tsx`) + `buildDetailsCsv` (`frontend/src/admin/csv.ts`). CSV header: `candidate_id,name,email,roll_number,room`. File: `candidate-details.csv`.
 - Backend: `POST /api/admin/session-details` (`adminSessionDetails`). Each row is projected **straight from the session doc with zero GCS access** (bounded Firestore fan-out, concurrency 12) — deliberately GCS-free so a large list never triggers the Cloud Run GCS/IAM fan-out storm. Input order is preserved one-to-one; up to `REVIEW_ROSTER_LIMIT` (5000) IDs per request.
 
 > This pulls details from **session docs** (candidates who have started), so it surfaces who actually showed up — distinct from the contest **Results/People** export and the full **contest-export** archive (`POST /api/admin/contest-export`).
 
-![Settings tab — Review roster with "Download all details" button (and "Roster saved: 3 students" active state above)](../assets/s2-verify-03-roster-active.png)
+![Settings tab — Review roster with "Download all details" button (and "Roster saved: 3 students" active state above)](../assets/verification/s2-verify-03-roster-active.png)
 
 ---
 
@@ -155,7 +155,7 @@ There is no separate "link" action — linking is automatic. Because `person_id`
 
 While a roster is active, candidate login **requires** a roster match — the server re-enforces this at `/api/session/start` regardless of client state (`roster_id_required` / `not_on_roster`).
 
-**Legacy path (unique-ID confirm flow).** Component `IdentityLookupPanel` (`frontend/src/App.tsx`), backend `POST /api/roster/lookup` (`rosterLookup`):
+**Legacy path (unique-ID confirm flow).** The lookup is inlined in the candidate app (`frontend/src/candidate/StudentApp.tsx` — `rosterLookup` call + `IdentityCard` confirm card), backend `POST /api/roster/lookup` (`rosterLookup`):
 
 1. *Step 1 — confirm your identity.* The candidate types their unique ID (labelled with `unique_id_label`) and presses **Find me**.
 2. **Match found:** an *"Is this you?"* card shows the matched record — unique id, name, roll number, **masked email** (e.g. `as**@example.com`), candidate id, room — with **Yes, this is me** / **No — search again**. Confirming prefills the form from the roster (roster is the source of truth; mapped fields are server-overridden at session start) and the panel collapses to *"Identity confirmed"* with a **Not you? Re-enter ID** reset.
@@ -163,11 +163,11 @@ While a roster is active, candidate login **requires** a roster match — the se
 
 `/api/roster/lookup` is public and ID-enumerable, mitigated by a best-effort **per-IP rate limit** (60 misses/min; successful found-id lookups are *refunded* so a NAT'd hall of real logins is never throttled). The limiter is per-instance/in-memory — documented as best-effort, not a global guarantee.
 
-![Candidate — wrong ID error on the legacy unique-ID confirm step](../assets/s2-verify-04-wrong-id-error.png)
+![Candidate — wrong ID error on the legacy unique-ID confirm step](../assets/verification/s2-verify-04-wrong-id-error.png)
 
-![Candidate — "Is this you?" confirm card with masked email](../assets/s2-verify-05-confirm-card.png)
+![Candidate — "Is this you?" confirm card with masked email](../assets/verification/s2-verify-05-confirm-card.png)
 
-**Person path (server-resolved identity).** For a person contest the candidate just types their ID; the server resolves it against the *contest* roster (`resolvePersonRosterIdentity` in `backend/src/routes/session.mjs` → `findContestRosterEntries`):
+**Person path (server-resolved identity).** For a person contest the candidate just types their ID; the server resolves it against the *contest* roster (`resolvePersonRosterIdentity` in `backend/src/routes/session.mjs` → `findContestRosterEntries` in `backend/src/identity.mjs`):
 
 - 0 matches → `403 not_on_roster`.
 - 1 match → that person.
@@ -181,20 +181,20 @@ Name/roll/email are taken from the roster (the source of truth), never re-typed 
 
 | Concern | Route / function | File |
 | --- | --- | --- |
-| Save roster (dispatch) | `POST /api/admin/roster` → `adminSaveRoster` | `backend/src/handler.mjs` |
+| Save roster (dispatch) | `POST /api/admin/roster` → `adminSaveRoster` | `backend/src/routes/public.mjs` |
 | Per-contest/person save | `saveContestRoster` | `backend/src/identity.mjs` |
-| Roster summary (meta only) | `GET /api/admin/roster` → `adminGetRoster` / `getContestRosterSummary` | `handler.mjs` / `identity.mjs` |
-| Public exam config (label + rooms + gate) | `GET /api/exam-config` → `publicExamConfig` / `contestExamConfig` | `backend/src/handler.mjs` |
-| Candidate roster lookup (legacy) | `POST /api/roster/lookup` → `rosterLookup` | `backend/src/handler.mjs` |
-| Person identity resolve (login) | `resolvePersonRosterIdentity` / `findContestRosterEntries` | `handler.mjs` / `identity.mjs` |
-| Download-all-details | `POST /api/admin/session-details` → `adminSessionDetails` | `backend/src/handler.mjs` |
-| Upload UI | `CandidateRosterSection`, `IdentityLookupPanel`, `RoomField` | `frontend/src/App.tsx` |
+| Roster summary (meta only) | `GET /api/admin/roster` → `adminGetRoster` / `getContestRosterSummary` | `routes/public.mjs` / `identity.mjs` |
+| Public exam config (label + rooms + gate) | `GET /api/exam-config` → `publicExamConfig` / `contestExamConfig` | `backend/src/routes/public.mjs` |
+| Candidate roster lookup (legacy) | `POST /api/roster/lookup` → `rosterLookup` | `backend/src/routes/public.mjs` |
+| Person identity resolve (login) | `resolvePersonRosterIdentity` / `findContestRosterEntries` | `routes/session.mjs` / `identity.mjs` |
+| Download-all-details | `POST /api/admin/session-details` → `adminSessionDetails` | `backend/src/routes/adminSessions.mjs` |
+| Upload UI | `CandidateRosterSection` (`admin/views/Settings.tsx`); candidate lookup inlined in `candidate/StudentApp.tsx` (`IdentityCard`); `RoomField` (`candidate/panels/RoomField.tsx`) | `frontend/src/` |
 | CSV parse + mapping | `parseRoster`, `suggestMapping` | `frontend/src/roster/parseRoster.ts` |
 | Template CSV | `buildRosterTemplateCsv`, `ROSTER_TEMPLATE_COLUMNS` | `frontend/src/roster/rosterTemplate.ts` |
 | Person-roster client logic | `evaluatePersonRosterUpload`, `buildCollegeResolutions` | `frontend/src/roster/personRoster.ts` |
 | Identity core | `personIdOf`, `identityNorm`, `PERSON_ID_SEPARATOR` | `backend/src/identity.mjs` |
 
-> **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central dispatch table; the route bodies live in `backend/src/routes/*.mjs` factory modules — the candidate roster lookup (`POST /api/roster/lookup`) in `routes/public.mjs`, the admin roster read/upload (`GET/POST /api/admin/roster`) in `routes/adminSessions.mjs` — and the identity pipeline in `backend/src/identity.mjs`. Routes above are cited by HTTP path, which is stable regardless of which module holds the body.
+> **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central dispatch table; the route bodies live in `backend/src/routes/*.mjs` factory modules — the candidate roster lookup (`POST /api/roster/lookup`) and the admin roster read/upload (`GET/POST /api/admin/roster`) both in `routes/public.mjs`, the person-identity login resolve in `routes/session.mjs`, and download-all-details in `routes/adminSessions.mjs` — with the identity pipeline in `backend/src/identity.mjs`. Routes above are cited by HTTP path, which is stable regardless of which module holds the body.
 
 ---
 

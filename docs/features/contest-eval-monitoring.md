@@ -17,13 +17,13 @@ This page documents an **optional, secondary** add-on to the Aerele proctor plat
 
 Because both sources POST to the same ingest, the admin Live alerts console shows them together. Its subtitle reads "Proctoring **and contest-eval** signals across all rooms," and the **SOURCE** filter lets an admin narrow to `contest-eval` vs `proctor`.
 
-![Admin Live alerts console — the shared pipeline both proctoring and contest-eval alerts feed into; note the SOURCE / SEVERITY / ROOM filters and the contest-slug filter](../assets/wave2-08-admin-alerts-console.png)
+![Admin Live alerts console — the shared pipeline both proctoring and contest-eval alerts feed into; note the SOURCE / SEVERITY / ROOM filters and the contest-slug filter](../assets/verification/wave2-08-admin-alerts-console.png)
 
-![Live alerts console grouped by alert type](../assets/wave2-09b-admin-alerts-grouped-type.png)
+![Live alerts console grouped by alert type](../assets/verification/wave2-09b-admin-alerts-grouped-type.png)
 
 > The two screenshots above show real proctoring alerts (`ip_changed`) in the shared console. The repo's evidence set does not include a screenshot of `contest-eval`-sourced alerts in this console, so the contest-eval rows are not pictured here — see [Gaps](#gaps-unverified).
 
-**Backing code (admin side):** the ingest route `POST /api/alerts` and the console-read routes live in `backend/src/handler.mjs` (`ingestAlerts`, `normalizeAlert`); the console UI is the Admin Live alerts surface (see [admin-live-monitoring.md](admin-live-monitoring.md)).
+**Backing code (admin side):** the ingest route `POST /api/alerts` (`ingestAlerts`) and the console-read routes (`adminAlerts`) live in `backend/src/routes/alerts.mjs`, with the shared `normalizeAlert` domain helper in `backend/src/proctorAlerts.mjs`; the console UI is the Admin Live alerts surface (see [admin-live-monitoring.md](admin-live-monitoring.md)).
 
 ---
 
