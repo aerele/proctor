@@ -69,7 +69,7 @@ Every type defaults to **enabled: true**. Severity defaults are critical for the
 
 ### Admin configuration: `/api/admin/alert-settings`
 
-The admin console **Settings → Proctor alert types** panel reads `GET /api/admin/alert-settings` and saves through `POST /api/admin/alert-settings` (admin-authed; handlers `adminGetAlertSettings` / `adminSaveAlertSettings` in `backend/src/routes/alerts.mjs`; UI in `frontend/src/admin/views/settings.tsx`, header "Proctor alert types", "Changes save immediately"). Per type the admin can:
+The admin console **Settings → Proctor alert types** panel reads `GET /api/admin/alert-settings` and saves through `POST /api/admin/alert-settings` (admin-authed; handlers `adminGetAlertSettings` / `adminSaveAlertSettings` in `backend/src/routes/alerts.mjs`; UI in `frontend/src/admin/views/Settings.tsx`, header "Proctor alert types", "Changes save immediately"). Per type the admin can:
 
 - **Enable / disable** the type (checkbox by the type name). Disabling hides the alert; for `fullscreen_enforcement` it hides the alert only — the block-mode lock itself is policy governed by `enforcement_mode`, not by this toggle.
 - **Override severity** (critical / warning / info dropdown).

@@ -123,7 +123,7 @@ Ambiguous alerts are routed to a **file-queue** judgment seam that a human-drive
 - **Which alerts route** (`is_ambiguous`): `web_paste` (any), `recurring_pair` at `warning` (single-hard), and `peer_copy_cluster` at `warning` (MED). Decisive signals — a conclusive `recurring_pair` (critical) and `tough_first_attempt` (critical) — go straight to the dashboard. `first_attempt_solve` (info) is a corroborator and is not routed alone.
 - **Flow:** `seam.request(alert)` writes `monitoring/.data/verdict-queue/pending/<id>.json` (atomic, idempotent). The `/loop` in `monitoring/verdict-responder-prompt.md` reads the actual code, applies the difficulty-weighting + Java-template rules, and writes `monitoring/.data/verdict-queue/done/<id>.json` with `status ∈ {real, false_positive, inconclusive}` (the responder must **not** write `pending`).
 - **Polling:** `seam.poll(alert)` reads `done/` each cycle and attaches the verdict, clearing `pending/` when resolved. If no verdict appears within `--verdict-max-cycles` (default **8**), the verdict stays `{status: "pending"}` — the alert is never blocked.
-- **Swappable transport:** `VerdictSeam`'s `request`/`poll` are the only contract the poller depends on; a future C3 transport can plug in without touching `poller.py`. C3 is intentionally **not** built here.
+- **Swappable transport:** `VerdictSeam`'s `request`/`poll` are the only contract the poller depends on; a future messaging/notification transport can plug in without touching `poller.py`. Such a transport is intentionally **not** built here.
 
 ---
 

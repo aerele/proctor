@@ -14,15 +14,16 @@ verdict stays {status: 'pending'} and the alert is NEVER blocked — the dashboa
 shows it as pending. This seam never makes a network call and never spends money.
 
 INTERFACE IS SWAPPABLE: VerdictSeam is the only contract the poller depends on
-(request / poll). A future C3 transport (or any other backend) can implement the
-same two methods without touching poller.py. We deliberately do NOT build C3 here.
+(request / poll). A future messaging/notification transport (e.g. routing requests
+over a DM/chat backend) can implement the same two methods without touching
+poller.py. We deliberately do NOT build such a transport here.
 
 Verdict schema (what the responder MUST write to done/<id>.json):
   {
     "id": "<same id>",
     "status": "real" | "false_positive" | "inconclusive",  # never "pending" from responder
     "reason": "<= 2000 chars human explanation",
-    "by": "<responder identity, e.g. 'claude-code/verdict-loop'>"
+    "by": "<responder identity, e.g. 'agent/verdict-loop'>"
   }
 Anything else (missing/extra status, malformed json) is treated as still-pending.
 """

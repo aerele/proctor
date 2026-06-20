@@ -23,7 +23,7 @@ The HackerRank-companion lineage survives only as **legacy code paths** kept for
 
 The frontend is a single React + Vite + TypeScript + Tailwind app. It picks a surface from `window.location.pathname` — there is no router library; the selection is a literal prefix check.
 
-`frontend/src/App.tsx` is now a ~26-line pathname router (post-decomposition): it imports the three surface roots and dispatches on the path, then re-exports `csvField` for a back-compat test import. The surface UI lives under per-area folders (`candidate/`, `admin/`, `invigilator/`, plus shared `ui/`, `shell/`, `coding/`, `roster/`, `results/`, `people/`, `problems/`, `markers/`, `attendance/`):
+`frontend/src/App.tsx` is now a ~21-line pathname router (post-decomposition): it imports the three surface roots and dispatches on the path. The surface UI lives under per-area folders (`candidate/`, `admin/`, `invigilator/`, plus shared `ui/`, `shell/`, `coding/`, `roster/`, `results/`, `people/`, `problems/`, `markers/`, `attendance/`):
 
 ```
 if (window.location.pathname.startsWith("/invigilator")) return <InvigilatorApp />;

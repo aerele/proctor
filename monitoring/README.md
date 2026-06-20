@@ -132,8 +132,8 @@ writes `done/<id>.json`. The poller reads `done/` each cycle and attaches the ve
 verdict appears within `--verdict-max-cycles`, the verdict stays `{status:"pending"}` —
 **the poller never blocks**.
 
-The seam interface (`request` / `poll`) is swappable: a future C3 transport can plug in without
-touching `poller.py`. (C3 is intentionally **not** built here.)
+The seam interface (`request` / `poll`) is swappable: a future messaging/notification transport
+can plug in without touching `poller.py`. (Such a transport is intentionally **not** built here.)
 
 ## Validation
 

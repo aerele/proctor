@@ -89,7 +89,8 @@ three terminal values, so a malformed or `pending` verdict safely leaves the ale
 
 ## Swapping the transport later
 
-The poller only depends on `VerdictSeam.request()` / `.poll()`. A future **C3** transport (or
-any other backend) can implement those two methods and route requests over Telegram/DM instead
-of the filesystem — `poller.py` would not change. Do NOT build C3 here; this file-queue is the
+The poller only depends on `VerdictSeam.request()` / `.poll()`. A future messaging/notification
+transport (or any other backend) can implement those two methods and route requests over a
+DM/chat backend instead of the filesystem — `poller.py` would not change. Do NOT build such a
+transport here; this file-queue is the
 v1 transport.
