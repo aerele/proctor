@@ -2,11 +2,13 @@
   "name": "aerele-proctor",
   "private": true,
   "version": "0.1.0",
-  "description": "HackerRank companion proctoring app for screen recording and evidence collection.",
+  "description": "Aerele Proctor — a self-hosted own-editor coding-exam platform: live screen + camera proctoring, Judge0 Run/Submit, and a calibrated integrity + talent hire-recommendation evaluation.",
+  "license": "MIT",
   "scripts": {
     "dev": "npm --workspace frontend run dev",
     "build": "npm --workspace frontend run build",
     "lint": "npm --workspace frontend run lint",
+    "test": "npm --workspace backend run test",
     "backend:test": "npm --workspace backend run test"
   },
   "workspaces": [
