@@ -5,6 +5,9 @@
   "license": "MIT",
   "type": "module",
   "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "start": "functions-framework --target=api"

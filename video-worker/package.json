@@ -5,6 +5,9 @@
   "license": "MIT",
   "type": "module",
   "main": "src/server.mjs",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/server.mjs",
     "check": "node --check src/server.mjs"
