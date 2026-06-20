@@ -24,7 +24,7 @@ The global **Contest** scope picker (top-right of the nav header) scopes the pic
 
 The left **Find a student** panel lists sessions that actually recorded chunks. Search is case-insensitive over candidate ID, name, and room. Each row shows the candidate ID, name, room, created-at, and a screen-chunk count badge. Clicking a row loads that candidate's sessions into the player.
 
-- Backing route: `GET /api/admin/recording-sessions` (handler `adminRecordingSessions`, `handler.mjs:2949`). It returns a lightweight list — **no GCS listing, no signed URLs** — preferring docs with `chunk_count > 0`, sorted newest-first, capped at 500. If no doc reports a positive `chunk_count` (legacy data), it falls back to listing all sessions so the picker is never empty.
+- Backing route: `GET /api/admin/recording-sessions` (handler `adminRecordingSessions`, `backend/src/routes/adminSessions.mjs`). It returns a lightweight list — **no GCS listing, no signed URLs** — preferring docs with `chunk_count > 0`, sorted newest-first, capped at 500. If no doc reports a positive `chunk_count` (legacy data), it falls back to listing all sessions so the picker is never empty.
 - Frontend fetch: `fetchRecordingSessions` (`api.ts`). A 404 (endpoint not deployed) degrades to a manual **Candidate ID** entry box instead of the search list — `endpointAvailable` flips false.
 
 ### Sessions "View recording" deep-link
@@ -37,9 +37,9 @@ Picker rows and the Sessions deep-link both carry the session's **exact stored**
 
 This matters because of the identity model: a person-mode session stores `username_norm = person_id = "{college_norm}~{uid_norm}"`, which the candidate ID can never re-normalize back to. Before FIX-B1, the player keyed on `normalize(candidate_id)`, so person-mode sessions resolved to nothing — screen+camera playback, the event/alert timeline, and the review queue all showed empty, and every alert read "No recording attached".
 
-- Loading a candidate calls `loadUser(displayLabel, …, lookupNorm)` (`RecordingReview.tsx`), which passes the exact key to `GET /api/admin/sessions?username_norm=<key>` (handler `adminSessions`, `handler.mjs:2874`). When both `username_norm` and `username` are sent, the exact `username_norm` wins; the re-normalizing `?username=` path is kept for back-compat / manual entry.
+- Loading a candidate calls `loadUser(displayLabel, …, lookupNorm)` (`RecordingReview.tsx`), which passes the exact key to `GET /api/admin/sessions?username_norm=<key>` (handler `adminSessions`, `backend/src/routes/adminSessions.mjs`). When both `username_norm` and `username` are sent, the exact `username_norm` wins; the re-normalizing `?username=` path is kept for back-compat / manual entry.
 - Signed evidence URLs expire ~1h; `refreshUrls` re-resolves by the **same** stored key (`loadedNormRef`), so an in-place URL refresh never changes which session is shown.
-- The neighbouring **Evidence → Review** dashboard's free search resolves the same way since 2026-06-12: when a typed display Candidate ID returns no sessions, it resolves the id against the sessions list to the stored `username_norm`(s) and re-queries by the exact key (bounded to a few keys when one display id maps to several stored keys) — `search()` in `App.tsx`. Before that, searching e.g. "TEC002" on a roster contest came back silently empty.
+- The neighbouring **Evidence → Review** dashboard's free search resolves the same way since 2026-06-12: when a typed display Candidate ID returns no sessions, it resolves the id against the sessions list to the stored `username_norm`(s) and re-queries by the exact key (bounded to a few keys when one display id maps to several stored keys) — `search()` in `frontend/src/admin/AdminApp.tsx`. Before that, searching e.g. "TEC002" on a roster contest came back silently empty.
 
 Before the fix, browsing a person-mode candidate produced an empty player:
 
@@ -63,7 +63,7 @@ A recording restart within one session — share-drop recovery, lock→unlock, r
 
 1. the recorder persists a per-(session, kind) **sessionStorage high-water mark** at index-allocation time and resumes the count from it (`frontend/src/chunkContinuity.ts`, `useProctorRecorder.ts`);
 2. the start/resume response reports the server's `chunk_count` / `screen_chunk_index_hwm` / `camera_chunk_index_hwm`, covering a brand-new tab after a crash — the continuation base is the max over every leg;
-3. `/api/upload-url` **bumps** any requested index at/below its own per-kind high-water mark to hwm+1, so even a stale cached bundle can never get a write URL onto a surviving object (`createUploadUrl` in `handler.mjs`).
+3. `/api/upload-url` **bumps** any requested index at/below its own per-kind high-water mark to hwm+1, so even a stale cached bundle can never get a write URL onto a surviving object (`createUploadUrl` in `backend/src/routes/sessionTelemetry.mjs`).
 
 The end-of-test manifest is **cumulative across stints** (`mergeManifest`), and `buildPlaylist` orders the playlist **chronologically** (real-time offset, then index). For sessions recorded after the fix that equals index order; for legacy multi-stint sessions whose restarts overwrote early indexes with late bytes, it restores true play order and keeps the player's binary-search seeking invariant (sorted offsets) intact. A multi-stint session therefore plays in recorded order with **honest hatched gaps** wherever recording was down. Two honest caveats: video already destroyed by pre-fix overwrites is unrecoverable, and on those legacy sessions the gap totals under-count what was actually lost.
 
@@ -118,7 +118,7 @@ The **Activity log** card lists the three per-candidate streams merged onto the 
 
 ### Capped-event note when the stream is truncated
 
-The backend caps the per-session event listing at **2000** events (`SESSION_EVENTS_LIMIT`, `adminSessionEvents`, `handler.mjs:3140`). When the stream is truncated, the log shows an amber note — *"Showing the first N events — the event log was truncated server-side"* — instead of presenting a partial log as the whole story (`sessionEventsTruncated` → `ActivityLogPanel`).
+The backend caps the per-session event listing at **2000** events (`SESSION_EVENTS_LIMIT`, `adminSessionEvents`, `backend/src/routes/adminSessions.mjs`). When the stream is truncated, the log shows an amber note — *"Showing the first N events — the event log was truncated server-side"* — instead of presenting a partial log as the whole story (`sessionEventsTruncated` → `ActivityLogPanel`).
 
 A submission marker selected in the log, jumping the scrubber, is visible in this verified run:
 
@@ -128,9 +128,9 @@ Backing routes:
 
 | Stream | Route | Handler |
 |---|---|---|
-| Events | `GET /api/admin/session-events?session_id=` | `adminSessionEvents` (`handler.mjs:3140`) — parses `events/*.jsonl` under the session GCS prefix; projects each to `{type, timestamp, small scalar detail}`; returns `{events, truncated}` |
+| Events | `GET /api/admin/session-events?session_id=` | `adminSessionEvents` (`backend/src/routes/adminSessions.mjs`) — parses `events/*.jsonl` under the session GCS prefix; projects each to `{type, timestamp, small scalar detail}`; returns `{events, truncated}` |
 | Alerts | `GET /api/admin/alerts` (contest-scoped, `include_archived`) | filtered client-side to the candidate via `alertsForCandidate` |
-| Submissions | `GET /api/admin/submission-events?username=&contest_slug=` | `adminSubmissionEvents` (`handler.mjs:3300`) |
+| Submissions | `GET /api/admin/submission-events?username=&contest_slug=` | `adminSubmissionEvents` (`backend/src/routes/submissionEvents.mjs`) |
 
 All three degrade to empty on failure/404 and **never block playback**.
 
@@ -156,7 +156,7 @@ Always shown above the scrubber, the **Summary** card is the first-class readout
 
 The **Review mode** toggle layers a multi-reviewer verdict workflow over the same player. A name gate (persisted in `localStorage` so a refresh keeps the reviewer in) leads to a header strip (reviewer name · N done · "Your reviews" re-watch list) and big **Yes (1)** / **No (0)** verdict buttons (keyboard `Y` / `N`). The server serves students one at a time; the left picker is hidden because the server chooses who you watch next. When no recording is found for a served student, the panel says so but still allows scoring (or Skip).
 
-Backing routes: `POST /api/admin/review-next`, `POST /api/admin/review-verdict`, `GET /api/admin/review-mine` (handlers `adminReviewNext` / `adminReviewVerdict` / `adminReviewMine`, `handler.mjs:4913+`). A 404 on any of these degrades to a "review workflow not deployed yet" notice (`reviewUnavailable`).
+Backing routes: `POST /api/admin/review-next`, `POST /api/admin/review-verdict`, `GET /api/admin/review-mine` (handlers `adminReviewNext` / `adminReviewVerdict` / `adminReviewMine`, `backend/src/routes/review.mjs`). A 404 on any of these degrades to a "review workflow not deployed yet" notice (`reviewUnavailable`).
 
 ---
 

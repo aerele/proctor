@@ -4,13 +4,13 @@ The admin console's **live-monitoring surfaces** let an exam administrator watch
 
 > **Product context.** Proctor is a standalone own-editor exam platform: candidates work inside our React + Monaco editor with Judge0-backed Run/Submit, and HackerRank was dropped from the candidate path (F8.2). The monitoring surfaces below watch sessions created by that own-editor flow. Separately, an **optional contest-eval monitoring poller** (`monitoring/`, Python) live-watches an *externally-hosted* HackerRank contest and emits cheating signals into the **same** alerts pipeline; those show up in the Live alerts console with `source: contest-eval`. The poller is an optional add-on, not the primary product.
 
-All surfaces in this page live in the admin frontend (`frontend/src/App.tsx`) and are gated by the admin password (`x-admin-password`, `requireAdmin` on every backing route in `backend/src/handler.mjs`). Backend internals were partially split into `lib/*.mjs`, `routes/invigilator.mjs`, and `config.mjs` (decomp B0/B1), but that refactor is paused/partial — the dispatch table and the handler bodies for every route below still live in `handler.mjs`.
+All surfaces in this page live in the admin frontend under `frontend/src/admin/` — the `/admin` surface (`frontend/src/App.tsx` is now just a ~26-line pathname router) — and are gated by the admin password (`x-admin-password`, `requireAdmin` on every backing route). The backend is decomposed: `backend/src/handler.mjs` owns the central dispatch table (plus a few cross-factory helpers kept single-source), while the route bodies live in `backend/src/routes/*.mjs` factory modules wired in at handler module scope.
 
 ---
 
 ## The admin nav — six sections + the contest scope (redesigned 2026-06-12)
 
-The admin header is one card with at most two slim rows, replacing the old 13 flat tabs that wrapped onto two cluttered rows. The grouping is a pure, unit-tested model (`ADMIN_NAV_GROUPS` / `groupOfView()` in `frontend/src/admin/adminNav.ts`); the render lives in `AdminApp` (`App.tsx`).
+The admin header is one card with at most two slim rows, replacing the old 13 flat tabs that wrapped onto two cluttered rows. The grouping is a pure, unit-tested model (`ADMIN_NAV_GROUPS` / `groupOfView()` in `frontend/src/admin/adminNav.ts`); the render lives in `AdminApp` (`frontend/src/admin/AdminApp.tsx`).
 
 - **Top row — six section tabs** (ops-first order): **Live** (Live stats / Live alerts / Sessions / IP report), **Contest** (Contests / Attendance / Results), **Evidence** (Review / Recordings), **Authoring** (Problems / Templates), **People**, **Settings**.
 - **Contest scope picker, top-right of the same row** (`ContestScopePicker`): it scopes **every** admin screen, so it sits above them all. A single dropdown (`All contests` plus every contest), a **Clear** button, and an `(unknown slug)` literal option so a deep link to an old/purged slug is never silently dropped. The selection persists in this tab's URL `?contest=` param — two tabs run two parallel drives.
@@ -28,23 +28,22 @@ The admin header is one card with at most two slim rows, replacing the old 13 fl
 
 ### Exam-time card — follows the contest scope
 
-Above the status cards sits the **Exam time** card (`ExamTimeCard` in `App.tsx`): the current end time with a live remaining countdown (computed against the **server** clock — skew captured from the stats poll — so the admin display agrees with the students'), **+15 / +5 / −5 min** quick deltas, an absolute **new end time** field (typed-text datetime — see [admin-contests-templates.md](./admin-contests-templates.md)), and a deliberate two-click **End exam now**. Changes reach students within ~15 s via their heartbeat; "End exam now" also force-ends every live session in scope.
+Above the status cards sits the **Exam time** card (`ExamTimeCard` in `frontend/src/admin/views/ExamTimeCard.tsx`): the current end time with a live remaining countdown (computed against the **server** clock — skew captured from the stats poll — so the admin display agrees with the students'), **+15 / +5 / −5 min** quick deltas, an absolute **new end time** field (typed-text datetime — see [admin-contests-templates.md](./admin-contests-templates.md)), and a deliberate two-click **End exam now**. Changes reach students within ~15 s via their heartbeat; "End exam now" also force-ends every live session in scope.
 
-Which schedule the card shows **and writes** follows the global contest scope (fixed 2026-06-12 — before that it always read/wrote the legacy Settings schedule, whatever the scope), and an explicit chip names it so the wrong schedule can never be edited on exam day:
+The card always follows the global contest scope, and an explicit chip names it so the wrong window can never be edited on exam day:
 
 | Scope | Chip | Reads / writes |
 | --- | --- | --- |
 | A real contest selected | **Contest: {slug}** | that contest's window, via `POST /api/admin/contest-exam-time` — the same API as Contests → Detail |
-| No scope (or the synthesized legacy row selected) | **Legacy schedule** | the legacy Settings schedule, via `POST /api/admin/exam-time` |
 | A scoped slug not in the contests list (deep link / list still loading) | **Unknown contest: {slug} — controls disabled** | display only; every write is disabled |
 
-Server side, a contest-scoped `GET /api/admin/stats` now returns **that contest's** `end_at` (`adminStats` in `handler.mjs`); an unknown slug carries no window and renders the "no schedule" line rather than the wrong clock.
+Server side, a contest-scoped `GET /api/admin/stats` returns **that contest's** `end_at` (`adminStats` in `backend/src/routes/adminStats.mjs`); an unknown slug carries no window and renders the "no schedule" line rather than the wrong clock.
 
-![Exam-time card unscoped — the "Legacy schedule" chip names the legacy Settings schedule explicitly](../assets/e2e-live/r3-allcontests-legacy-chip.png)
+![Admin Live stats — status cards with the scope-following Exam-time card and the contest scope picker top-right](../assets/harness/admin-review/01-live-stats.png)
 
 ### Status cards
 
-Seven cards (`StatsDashboard` in `App.tsx`), each backed by a count from `GET /api/admin/stats` (`adminStats` in `handler.mjs`):
+Seven cards (`StatsDashboard` in `frontend/src/admin/views/StatsDashboard.tsx`), each backed by a count from `GET /api/admin/stats` (`adminStats` in `backend/src/routes/adminStats.mjs`):
 
 | Card | Source field | Meaning |
 | --- | --- | --- |
@@ -60,11 +59,11 @@ The "Disconnected" count is a *derived* signal: it counts sessions that are stil
 
 ### Room filter
 
-A **Room** dropdown (`RoomFilter`) scopes the counts to a single room. The list of rooms comes back in the `rooms` array of the stats response, computed over the **full contest scope before** the room filter is applied (`distinctRooms` in `handler.mjs`), so the dropdown always lists every room even while one is selected. Selecting a room re-fetches with `?room=`. The room list is capped at `ROOMS_LIST_LIMIT` (200).
+A **Room** dropdown (`RoomFilter` in `frontend/src/admin/views/RoomFilter.tsx`) scopes the counts to a single room. The list of rooms comes back in the `rooms` array of the stats response, computed over the **full contest scope before** the room filter is applied (`distinctRooms` in `backend/src/handler.mjs`), so the dropdown always lists every room even while one is selected. Selecting a room re-fetches with `?room=`. The room list is capped at `ROOMS_LIST_LIMIT` (200).
 
 ### 5-second auto-poll
 
-While the admin is on **Live stats** or **Live alerts**, a `setInterval` at `ADMIN_POLL_INTERVAL_MS` (5000 ms) re-fetches in addition to the manual Refresh button (the auto-poll effect in `App.tsx`). The Sessions, IP report, and Attendance tabs are **not** auto-polled (each requires a manual Refresh) — confirmed by their own load-on-open-only effects.
+While the admin is on **Live stats** or **Live alerts**, a `setInterval` at `ADMIN_POLL_INTERVAL_MS` (5000 ms) re-fetches in addition to the manual Refresh button (the auto-poll effect in the admin app shell `frontend/src/admin/AdminApp.tsx`). The Sessions, IP report, and Attendance tabs are **not** auto-polled (each requires a manual Refresh) — confirmed by their own load-on-open-only effects.
 
 ### Clickable cards → Sessions drill-down
 
@@ -74,13 +73,13 @@ Each card (except "Not started / total") is a button (`StatCard` with `onClick`)
 
 ## Sessions view + session detail card
 
-**Admin POV.** The **Sessions** tab (`SessionsView` in `App.tsx`) is a lightweight, GCS-free table of session rows from `GET /api/admin/sessions-list` (`adminSessionsList` in `handler.mjs`). It lists **every** session doc — including zero-chunk pending sessions that the recordings picker would hide — classified server-side by the **same** rules as the stat cards so the row counts match the cards exactly. Rows are scoped to the global contest filter and a room, and a **Status** dropdown re-fetches server-side.
+**Admin POV.** The **Sessions** tab (`SessionsView` in `frontend/src/admin/views/SessionsView.tsx`) is a lightweight, GCS-free table of session rows from `GET /api/admin/sessions-list` (`adminSessionsList` in `backend/src/routes/adminSessions.mjs`). It lists **every** session doc — including zero-chunk pending sessions that the recordings picker would hide — classified server-side by the **same** rules as the stat cards so the row counts match the cards exactly. Rows are scoped to the global contest filter and a room, and a **Status** dropdown re-fetches server-side.
 
 Columns: Candidate (+ name), Room, Contest, Status, Chunks, Started; plus an **Action** column (an Approve quick-action) only when filtered to `pending_approval`.
 
 When the status filter is `disconnected`, a note explains it is a derived liveness state (the server classifies these as active sessions whose latest liveness signal has gone stale). If the `sessions-list` endpoint is not deployed, the view shows an "endpoint not deployed yet" warning and Live stats still works.
 
-Clicking any row opens the **session detail card** (`SessionDetailCard`), backed by `GET /api/admin/session-detail` (`adminSessionDetail`).
+Clicking any row opens the **session detail card** (`SessionDetailCard`), backed by `GET /api/admin/session-detail` (`adminSessionDetail` in `backend/src/routes/adminSessions.mjs`).
 
 ![Session detail card for a locked candidate](../assets/e2e/admin-review/02-session-detail-asha.png)
 
@@ -110,7 +109,7 @@ Deep links: **View recording** (disabled with a tooltip when there are no chunks
 
 ## Session actions: approve / lock / unlock / bypass / end
 
-**Admin POV.** Session actions change a candidate's live state. They are issued from the session detail card, the alerts console rows, the alerts bulk bar, the Sessions Approve quick-action, and the IP-report drill-down. All route through `POST /api/admin/session-action` (`adminSessionAction` → `applySessionAction` in `handler.mjs`). The frontend validity table (`admin/alertActions.ts`) **mirrors the backend exactly**.
+**Admin POV.** Session actions change a candidate's live state. They are issued from the session detail card, the alerts console rows, the alerts bulk bar, the Sessions Approve quick-action, and the IP-report drill-down. All route through `POST /api/admin/session-action` (`adminSessionAction` → `applySessionAction` in `backend/src/routes/adminSessions.mjs`). The frontend validity table (`admin/alertActions.ts`) **mirrors the backend exactly**.
 
 | Action | Wire name | UI label | Effect |
 | --- | --- | --- | --- |
@@ -135,7 +134,7 @@ Bulk buttons in the alerts console show the **union** of valid actions across th
 
 ## Live alerts console
 
-**Admin POV.** The **Live alerts** tab (`AlertsConsole` in `App.tsx`) shows proctoring and contest-eval signals across all rooms, **newest first**, auto-refreshing every 5 s (the same poll as Live stats). It is backed by `GET /api/admin/alerts` (`adminAlerts` in `handler.mjs`). Each row can carry a recorded evidence clip.
+**Admin POV.** The **Live alerts** tab (`AlertsConsole` in `frontend/src/admin/views/AlertsConsole.tsx`) shows proctoring and contest-eval signals across all rooms, **newest first**, auto-refreshing every 5 s (the same poll as Live stats). It is backed by `GET /api/admin/alerts` (`adminAlerts` in `backend/src/routes/alerts.mjs`). Each row can carry a recorded evidence clip.
 
 ![Live alerts console with filters and selection bar](../assets/e2e/admin-review/04a-alerts-console.png)
 
@@ -164,7 +163,7 @@ Selection is a `Set` of alert ids that **survives the 5 s auto-refresh** (`alert
 
 ![Alerts bulk selection bar](../assets/e2e/admin-review/04b-alerts-bulk-selection.png)
 
-**Archive selected** / **Unarchive selected** act on **all** selected ids (not just the visible ones) via `POST /api/admin/alert-action` (`adminAlertAction`), which toggles the `archived` flag with `merge:true` and reports back `updated` + any `missing` ids. Archived alerts are hidden from the default list and reachable via **Show archived**.
+**Archive selected** / **Unarchive selected** act on **all** selected ids (not just the visible ones) via `POST /api/admin/alert-action` (`adminAlertAction` in `backend/src/routes/alerts.mjs`), which toggles the `archived` flag with `merge:true` and reports back `updated` + any `missing` ids. Archived alerts are hidden from the default list and reachable via **Show archived**.
 
 ![Archive confirmation banner](../assets/e2e/admin-review/04d-alerts-archived-confirm.png)
 
@@ -184,7 +183,7 @@ When a row carries `download_url` (a signed read URL the backend resolves for `v
 
 ## IP report
 
-**Admin POV.** The **IP report** tab (`IpReportView` in `App.tsx`) is the proxy/off-campus detection surface: one row per IP, **biggest clusters first**, backed by `GET /api/admin/ip-report` (`adminIpReport` → `buildIpReport` in `backend/src/ipReport.mjs`). The interpretation stays with the admin — the report never auto-flags.
+**Admin POV.** The **IP report** tab (`IpReportView` in `frontend/src/admin/views/IpReportView.tsx`) is the proxy/off-campus detection surface: one row per IP, **biggest clusters first**, backed by `GET /api/admin/ip-report` (`adminIpReport` in `backend/src/routes/adminSessions.mjs` → `buildIpReport` in `backend/src/ipReport.mjs`). The interpretation stays with the admin — the report never auto-flags.
 
 ![IP report with a drilled-down cluster](../assets/e2e/admin-review/05-ip-report-drilldown.png)
 
@@ -208,7 +207,7 @@ Clicking an IP row expands it into the candidate sessions on that IP (`IpCandida
 
 ## Attendance
 
-**Admin POV.** The **Attendance** tab (`AttendancePanel` in `App.tsx`) reconciles the roster against session docs, backed by `GET /api/admin/attendance` (`adminAttendance` in `handler.mjs`). It loads on tab-open and when the global contest filter changes, with a manual **Refresh** — **no auto-poll** (each call scans the whole roster + session set). Math is mirrored in `attendance/computeAttendance.ts` for the demo branch and tests.
+**Admin POV.** The **Attendance** tab (`AttendancePanel` in `frontend/src/admin/views/AttendancePanel.tsx`) reconciles the roster against session docs, backed by `GET /api/admin/attendance` (`adminAttendance` in `backend/src/routes/adminSessions.mjs`). It loads on tab-open and when the global contest filter changes, with a manual **Refresh** — **no auto-poll** (each call scans the whole roster + session set). Math is mirrored in `attendance/computeAttendance.ts` for the demo branch and tests.
 
 ![Attendance with taken / in-progress / completed / not-taken cards and the absentee table](../assets/e2e/admin-review/06-attendance.png)
 
@@ -236,17 +235,17 @@ The **Absentees** table lists each absentee's Unique ID, Name, Roll number, Room
 
 **How it works.** A candidate going away is detected near-live by two cooperating mechanisms — there is no live socket; the admin learns of it within one 5 s stats poll.
 
-1. **Tab-close beacon (candidate POV).** The exam shell registers `visibilitychange` and `pagehide` listeners (in `StudentApp`, `App.tsx`) that fire `navigator.sendBeacon` to `POST /api/session/beacon` (`recordBeacon` in `handler.mjs`). `visibilitychange → hidden` sends `kind:'hidden'`, `pagehide` sends `kind:'closing'`, and returning to the foreground sends `kind:'visible'`. The beacon survives unload and is gated only by the session token (no admin auth — `sendBeacon` allows no custom headers). Each beacon stamps `last_seen_at`; the away signals (`hidden`/`closing`) also raise a `tab_hidden` warning alert **if the `tab_hidden` alert type is enabled** in settings (per-day dedupe so a flurry collapses to one alert per session per day).
+1. **Tab-close beacon (candidate POV).** The exam shell registers `visibilitychange` and `pagehide` listeners (in `StudentApp`, `frontend/src/candidate/StudentApp.tsx`) that fire `navigator.sendBeacon` to `POST /api/session/beacon` (`recordBeacon` in `backend/src/routes/sessionTelemetry.mjs`). `visibilitychange → hidden` sends `kind:'hidden'`, `pagehide` sends `kind:'closing'`, and returning to the foreground sends `kind:'visible'`. The beacon survives unload and is gated only by the session token (no admin auth — `sendBeacon` allows no custom headers). Each beacon stamps `last_seen_at`; the away signals (`hidden`/`closing`) also raise a `tab_hidden` warning alert **if the `tab_hidden` alert type is enabled** in settings (per-day dedupe so a flurry collapses to one alert per session per day).
 
-2. **Heartbeat staleness (server-derived).** The exam shell heartbeats roughly every `heartbeat_interval_seconds` (15 s — `recordHeartbeat`). An active session is classified **disconnected** when its newest liveness stamp — `last_heartbeat_at` or `last_seen_at` (the beacon), whichever is newer — is older than `DISCONNECTED_STALENESS_MS`. Only when neither liveness stamp exists does it fall back to `created_at`, so a session that started but never heart-beat still ages into disconnected instead of looking permanently fresh (`isStaleSession` in `handler.mjs`).
+2. **Heartbeat staleness (server-derived).** The exam shell heartbeats roughly every `heartbeat_interval_seconds` (15 s — `recordHeartbeat` in `backend/src/routes/sessionTelemetry.mjs`). An active session is classified **disconnected** when its newest liveness stamp — `last_heartbeat_at` or `last_seen_at` (the beacon), whichever is newer — is older than `DISCONNECTED_STALENESS_MS`. Only when neither liveness stamp exists does it fall back to `created_at`, so a session that started but never heart-beat still ages into disconnected instead of looking permanently fresh (`isStaleSession` in `backend/src/handler.mjs`).
 
 The "Disconnected" stat card and the Sessions `disconnected` filter both read this derived state; it is never a stored doc status. The threshold and interval defaults:
 
 | Constant | Default | Env override | Where |
 | --- | --- | --- | --- |
 | `DISCONNECTED_STALENESS_MS` | 45000 (45 s) | `DISCONNECTED_STALENESS_MS` | `config.mjs` |
-| heartbeat interval | 15 s | *(not env — server-set in the start/heartbeat response)* | `handler.mjs` |
-| `ADMIN_POLL_INTERVAL_MS` | 5000 (5 s) | *(frontend constant, not env)* | `App.tsx` |
+| heartbeat interval | 15 s | *(not env — server-set in the start/heartbeat response)* | `routes/session.mjs` |
+| `ADMIN_POLL_INTERVAL_MS` | 5000 (5 s) | *(frontend constant, not env)* | `admin/AdminApp.tsx` |
 
 ---
 
@@ -255,7 +254,7 @@ The "Disconnected" stat card and the Sessions `disconnected` filter both read th
 | Constant | Default | Meaning |
 | --- | --- | --- |
 | `ALERTS_QUERY_LIMIT` | 500 | Max alert docs scanned/returned per console fetch |
-| `SESSIONS_QUERY_LIMIT` | 2000 | Max session docs scanned for stats/sessions/ip/attendance |
+| `SESSIONS_QUERY_LIMIT` | 6000 | Max session docs scanned for stats/sessions/ip/attendance |
 | `SESSIONS_LIST_PAGE_LIMIT` | 500 | Max rows in a sessions-list page (live rows kept first) |
 | `ROOMS_LIST_LIMIT` | 200 | Max distinct room labels in a dropdown |
 | `IP_REPORT_IPS_LIMIT` | 200 | Max IP groups per IP report |
@@ -266,7 +265,7 @@ The "Disconnected" stat card and the Sessions `disconnected` filter both read th
 | Show archived | **OFF** | Archived alerts hidden by default |
 | Enforcement exemptions | **OFF** | Sessions carry no exemptions until toggled |
 
-`SESSIONS_QUERY_LIMIT`, `SESSIONS_LIST_PAGE_LIMIT`, `ALERTS_QUERY_LIMIT`, `ROOMS_LIST_LIMIT` are module constants in `handler.mjs`; the IP-report caps are exported from `backend/src/ipReport.mjs`; `DISCONNECTED_STALENESS_MS` comes from `config.mjs` (env-overridable).
+`SESSIONS_QUERY_LIMIT`, `SESSIONS_LIST_PAGE_LIMIT`, `ALERTS_QUERY_LIMIT`, and `ROOMS_LIST_LIMIT` are module constants in `backend/src/handler.mjs` (`ALERTS_QUERY_LIMIT` is also consumed by `backend/src/routes/alerts.mjs`); the IP-report caps are exported from `backend/src/ipReport.mjs`; `DISCONNECTED_STALENESS_MS` comes from `config.mjs` (env-overridable).
 
 ---
 

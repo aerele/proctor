@@ -13,11 +13,11 @@ The proctor platform is now a **standalone own-editor exam platform**: candidate
 
 ## The shared Alert JSON contract
 
-All three parties (proctor backend, contest-eval poller, admin console) agree on one `Alert` shape. The TypeScript type is `Alert` in `frontend/src/types.ts`; the backend validators live in `backend/src/handler.mjs`; the Python mirror is `_alert()` / `validate_alert()` in `monitoring/alerts.py`.
+All three parties (proctor backend, contest-eval poller, admin console) agree on one `Alert` shape. The TypeScript type is `Alert` in `frontend/src/types.ts`; the backend validators live in `backend/src/proctorAlerts.mjs`; the Python mirror is `_alert()` / `validate_alert()` in `monitoring/alerts.py`.
 
 ### Required-on-ingest fields
 
-On `POST /api/alerts` the backend (`normalizeAlert` in `handler.mjs`) **rejects with HTTP 400** any alert missing one of these:
+On `POST /api/alerts` the backend (`normalizeAlert` in `backend/src/proctorAlerts.mjs`) **rejects with HTTP 400** any alert missing one of these:
 
 | Field | Notes |
 | --- | --- |
@@ -48,7 +48,7 @@ The pipeline is **idempotent on `id`**. On ingest the backend does `alertRef(ale
 
 ## Proctor alerts (`source: proctor`)
 
-Proctor alerts are **server-derived** from the candidate's session: the heartbeat, the event stream, the liveness beacon, and the enforcement ladder all raise them. The full catalog of admin-configurable proctor types and their defaults is `DEFAULT_PROCTOR_ALERT_SETTINGS` in `handler.mjs`.
+Proctor alerts are **server-derived** from the candidate's session: the heartbeat, the event stream, the liveness beacon, and the enforcement ladder all raise them. The full catalog of admin-configurable proctor types and their defaults is `DEFAULT_PROCTOR_ALERT_SETTINGS` in `backend/src/proctorAlerts.mjs`.
 
 ### Catalog and defaults
 
@@ -69,7 +69,7 @@ Every type defaults to **enabled: true**. Severity defaults are critical for the
 
 ### Admin configuration: `/api/admin/alert-settings`
 
-The admin console **Settings → Proctor alert types** panel reads `GET /api/admin/alert-settings` and saves through `POST /api/admin/alert-settings` (admin-authed; handlers `adminGetAlertSettings` / `adminSaveAlertSettings`; UI in `App.tsx`, header "Proctor alert types", "Changes save immediately"). Per type the admin can:
+The admin console **Settings → Proctor alert types** panel reads `GET /api/admin/alert-settings` and saves through `POST /api/admin/alert-settings` (admin-authed; handlers `adminGetAlertSettings` / `adminSaveAlertSettings` in `backend/src/routes/alerts.mjs`; UI in `frontend/src/admin/views/settings.tsx`, header "Proctor alert types", "Changes save immediately"). Per type the admin can:
 
 - **Enable / disable** the type (checkbox by the type name). Disabling hides the alert; for `fullscreen_enforcement` it hides the alert only — the block-mode lock itself is policy governed by `enforcement_mode`, not by this toggle.
 - **Override severity** (critical / warning / info dropdown).
@@ -129,7 +129,7 @@ This same `x-api-key` mechanism authenticates the related `POST /api/submission-
 
 ## Admin read: `GET /api/admin/alerts`
 
-The admin **Live alerts console** (`App.tsx`, "Live alerts console", auto-refresh every 5s) reads `GET /api/admin/alerts` (handler `adminAlerts`, admin-authed). The console shows every alert from both sources, newest first, and resolves a signed `download_url` for any alert that has a `video_key` so a reviewer can open the recorded clip.
+The admin **Live alerts console** (`frontend/src/admin/views/AlertsConsole.tsx`, auto-refresh every 5s) reads `GET /api/admin/alerts` (handler `adminAlerts` in `backend/src/routes/alerts.mjs`, admin-authed). The console shows every alert from both sources, newest first, and resolves a signed `download_url` for any alert that has a `video_key` so a reviewer can open the recorded clip.
 
 Supported query filters (`AlertFilters`):
 

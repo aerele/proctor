@@ -15,10 +15,10 @@ The Problem Bank is where an admin authors the coding problems candidates solve 
 | Live-save confirm logic (client) | `frontend/src/admin/saveGuard.ts` |
 | API client calls | `frontend/src/api.ts` (`fetchProblems`, `fetchProblemDetail`, `saveProblem`, `deleteProblem`) |
 | Backend bank + validation | `backend/src/problems.mjs` (`validateProblemInput`, `cleanStubs`, `getProblem`, `getBankProblem`, `scoreSubmission`) |
-| Backend routes + guard | `backend/src/handler.mjs` (`adminListProblems`, `adminGetProblem`, `adminSaveProblem`, `adminDeleteProblem`, `contestProblemsPublic`, `publicStubsFor`) |
+| Backend routes + guard | `backend/src/routes/adminProblems.mjs` (`adminListProblems`, `adminGetProblem`, `adminSaveProblem`, `adminDeleteProblem`); candidate-facing projection (`contestProblemsPublic`, `publicStubsFor`) in `backend/src/routes/session.mjs` |
 | Candidate stub fallback + autocomplete | `frontend/src/coding/CodingWorkspace.tsx` (`STARTERS`, `starterFor`), `frontend/src/coding/completionProviders.ts`, `frontend/src/coding/MonacoEditor.tsx` |
 
-Backend routes (registered in `handler.mjs`, all require the admin password header `x-admin-password`):
+Backend routes (bodies in `backend/src/routes/adminProblems.mjs`, dispatched from `handler.mjs`'s table; all require the admin password header `x-admin-password`):
 
 | Method | Path | Handler |
 | --- | --- | --- |
@@ -109,7 +109,7 @@ How they flow end to end:
 
 1. **Authoring** — blank stub textareas are dropped on serialize (`stubsToDoc` / `draftToDoc`), so a stub-less problem is stored byte-identical to today (no `stubs` field). The backend mirrors this in `cleanStubs`: an empty/absent map is treated as absent and omitted from storage.
 2. **Backend validation** — `cleanStubs` allow-lists keys to supported languages, requires string values, and bounds each at 20000 chars (`STATEMENT_MAX`). A bad shape is a hard 400, never a silent drop.
-3. **Candidate session payload** — when a contest's problems are projected for candidates (`contestProblemsPublic` → `publicStubsFor` in `handler.mjs`), the live bank doc's stubs ride the per-problem payload (omitted when none). Because the bank doc is read at serve time via `getProblem`, an edited stub reaches new candidate loads without re-instantiating the contest.
+3. **Candidate session payload** — when a contest's problems are projected for candidates (`contestProblemsPublic` → `publicStubsFor` in `backend/src/routes/session.mjs`), the live bank doc's stubs ride the per-problem payload (omitted when none). Because the bank doc is read at serve time via `getProblem` (`backend/src/problems.mjs`), an edited stub reaches new candidate loads without re-instantiating the contest.
 4. **Candidate editor initial code** — `starterFor(problem, language)` in `CodingWorkspace.tsx` is the single source of truth: an author-supplied stub for that language wins; otherwise the generic read-stdin/print-stdout scaffold (`STARTERS`) is used. The same resolver drives the "is the code still the untouched starter?" check on language switch (`nextCodeOnLanguageSwitch`), so switching languages only replaces code that was never touched.
 
 > Note (corrects a common assumption): stubs are **not** snapshot-copied into templates. Proctor templates store only `{problem_id, points, order}` references (`backend/src/templates.mjs`); stubs live on the bank problem doc and are resolved live at serve time. Documenting them as "carried in the template snapshot" would be inaccurate.
@@ -130,7 +130,7 @@ When the admin clicks **Save problem**, `ProblemBank.tsx` calls `shouldConfirmLi
 
 ### Server enforcement (`adminSaveProblem`)
 
-The backend independently re-checks references (`findProblemReferences`) and enforces, in `handler.mjs`:
+The backend independently re-checks references (`findProblemReferences` in `backend/src/contestProblems.mjs`) and enforces, in `adminSaveProblem` (`backend/src/routes/adminProblems.mjs`):
 
 | Condition | Result |
 | --- | --- |
@@ -138,7 +138,7 @@ The backend independently re-checks references (`findProblemReferences`) and enf
 | **Hidden tests changed** while an **open** contest references it, and `body.confirm_live_edit !== problem.id` | `409 live_edit_confirmation_required` (with the open-contest slugs) |
 | Delete while any contest/template references it | `409 problem_referenced` |
 
-The server's typed-confirm key is `body.confirm_live_edit`, which must equal the problem id to override. Guard error bodies carry structured `contests` / `templates` slug lists merged into the standard JSON error shape (`handler.mjs` error handler).
+The server's typed-confirm key is `body.confirm_live_edit`, which must equal the problem id to override. Guard error bodies carry structured `contests` / `templates` slug lists merged into the standard JSON error shape (the handler's shared error wrapper).
 
 > (unverified / discrepancy worth flagging) The current `saveProblem` API client (`frontend/src/api.ts`) sends the problem doc only and does **not** include `confirm_live_edit`. So a hidden-test edit against an open contest would still receive `409 live_edit_confirmation_required` from the backend after the user accepts the client `window.confirm()` dialog. The two guards exist but are not connected end-to-end in this repo; treat "typed confirm flows through on accept" as unverified.
 
