@@ -32,21 +32,29 @@ export const RECOMMEND_VERSION = "1";
 export const BUCKET = {
   STRONG_HIRE: "strong_hire",
   HIRE_DESKCHECK: "hire_deskcheck",
+  SOLID_HIRE: "solid_hire",
+  GENUINE_COPIED: "genuine_copied",
   HOLD_REVIEW: "hold_review",
   EXCLUDE_INTEGRITY: "exclude_integrity",
   BELOW_BAR: "below_bar",
 };
 
-// Display order + labels for the buckets (UI consumes this).
+// Display order + labels for the buckets (UI consumes this). SOLID_HIRE ranks
+// BELOW strong_hire/hire_deskcheck and ABOVE hold/exclude/below_bar (it is still
+// a HIRE — the spec hard rule is that nobody drops below hire). GENUINE_COPIED is
+// a SEPARATE surfaced rescue bucket (a genuine solver who was copied FROM); it
+// sits after the hires, before hold, so a human sees exactly who was rescued.
 export const BUCKET_META = {
   [BUCKET.STRONG_HIRE]: { label: "Strong hire", tone: "good", order: 1 },
   [BUCKET.HIRE_DESKCHECK]: { label: "Hire — desk-check", tone: "warn", order: 2 },
-  [BUCKET.HOLD_REVIEW]: { label: "Hold — integrity review", tone: "warn", order: 3 },
-  [BUCKET.EXCLUDE_INTEGRITY]: { label: "Exclude — integrity", tone: "bad", order: 4 },
-  [BUCKET.BELOW_BAR]: { label: "Below the bar", tone: "muted", order: 5 },
+  [BUCKET.SOLID_HIRE]: { label: "Solid hire — genuine mid-tier solver", tone: "good", order: 3 },
+  [BUCKET.GENUINE_COPIED]: { label: "Genuine — their work was copied", tone: "good", order: 4 },
+  [BUCKET.HOLD_REVIEW]: { label: "Hold — integrity review", tone: "warn", order: 5 },
+  [BUCKET.EXCLUDE_INTEGRITY]: { label: "Exclude — integrity", tone: "bad", order: 6 },
+  [BUCKET.BELOW_BAR]: { label: "Below the bar", tone: "muted", order: 7 },
 };
 
-const HIRE_BUCKETS = new Set([BUCKET.STRONG_HIRE, BUCKET.HIRE_DESKCHECK]);
+const HIRE_BUCKETS = new Set([BUCKET.STRONG_HIRE, BUCKET.HIRE_DESKCHECK, BUCKET.SOLID_HIRE]);
 export function isHireBucket(bucket) {
   return HIRE_BUCKETS.has(bucket);
 }
@@ -62,11 +70,30 @@ export function isParticipant(card) {
   return (c.editor_events_n || 0) > 0 || (c.submissions_n || 0) > 0;
 }
 
+// Count this card's GENUINE MEDIUM solves: per_problem entries that carry a real
+// solve arc (genuine_arc===true) on a medium-tier problem (_tier==='med'). This is
+// the evidence behind SOLID_HIRE — a moderate-talent candidate with >=2 genuine
+// medium solves is a real mid-tier solver, not a stub-gamer. (The old strong-talent
+// gate was genuineHard>=1 || genuineMed>=2; after the (c) talent floor demotes thin
+// "strong" labels to moderate, this keeps those genuine mid-tier solvers as hires
+// rather than dropping them below the bar — the spec hard rule: nobody drops below
+// hire.) Robust to a missing/!object per_problem map.
+export function genuineMedCount(card) {
+  const pp = (card && card.talent && card.talent.per_problem) || {};
+  let n = 0;
+  for (const k of Object.keys(pp)) {
+    const e = pp[k] || {};
+    if (e.genuine_arc === true && e._tier === "med") n++;
+  }
+  return n;
+}
+
 // Per-candidate bucket + one-line reason. Integrity gates talent.
 //   confirmed                 -> EXCLUDE (regardless of score)
 //   flag                      -> HOLD for review
 //   strong talent + clean     -> STRONG HIRE
 //   strong talent + watch/inconclusive -> HIRE (desk-check note)
+//   moderate + >=2 genuine medium solves + clean/watch -> SOLID HIRE
 //   anything else             -> below the bar
 // `inconclusive` (missing-signal availability gate) is treated like `watch`:
 // never excludes, but can't fully clear — so a strong solver with inconclusive
@@ -121,6 +148,27 @@ export function recommendFor(card) {
       integrity_tier: integrity,
       composite,
     };
+  }
+  // SOLID HIRE: a moderate-talent candidate who still has >=2 genuine medium
+  // solves and a clean (or watch — a single desk-check note, still hire) record
+  // is a real mid-tier solver, kept as a HIRE (spec hard rule: nobody drops below
+  // hire). `confirmed`/`flag` already returned above, so a confirmed-integrity
+  // solid candidate never reaches here — integrity still gates talent.
+  if (talent === "moderate" && (integrity === "clean" || integrity === "watch")) {
+    const genuineMed = genuineMedCount(card);
+    if (genuineMed >= 2) {
+      const note =
+        integrity === "watch"
+          ? " (a single weak desk-check note — confirm in a short desk-check)"
+          : "";
+      return {
+        bucket: BUCKET.SOLID_HIRE,
+        reason: `Solid hire — genuine mid-tier solver: ${genuineMed} genuine medium solves${note}.`,
+        talent_tier: talent,
+        integrity_tier: integrity,
+        composite,
+      };
+    }
   }
   return {
     bucket: BUCKET.BELOW_BAR,
@@ -296,6 +344,120 @@ function peerEvidenceFor(identityKey, meta, byId) {
     .sort((a, b) => b.n_hard - a.n_hard || b.n_problems - a.n_problems);
 }
 
+// Count this card's GENUINE solve arcs across ALL tiers (per_problem entries with
+// genuine_arc===true) — the (b) gate for an origin rescue (>=2 real solve arcs).
+function genuineArcCount(card) {
+  const pp = (card && card.talent && card.talent.per_problem) || {};
+  let n = 0;
+  for (const k of Object.keys(pp)) {
+    if ((pp[k] || {}).genuine_arc === true) n++;
+  }
+  return n;
+}
+
+// How many FOREIGN pastes (code that appeared without being typed = externally
+// sourced) this card carries. A genuine origin has ZERO. Robust to a missing list.
+function foreignPasteCount(card) {
+  const fp = (card && card.integrity && card.integrity.foreign_pastes) || [];
+  return Array.isArray(fp) ? fp.length : 0;
+}
+
+// Does this card pass the GENUINE-ORIGIN profile gate (independent of submit
+// order)? (a) typed it themselves (paste_ratio < 0.12), (b) >=2 genuine solve
+// arcs, (c) NO foreign paste. The submit-FIRST requirement is applied per-group
+// by the caller. Mirrors the approved origin-rescue plan + junk/origin-analysis.mjs.
+function isGenuineOriginProfile(card) {
+  const pasteRatio = Number(card && card.integrity && card.integrity.paste_ratio) || 0;
+  return pasteRatio < 0.12 && genuineArcCount(card) >= 2 && foreignPasteCount(card) === 0;
+}
+
+// ORIGIN-RESCUE (d): "genuine — their work was copied". For each conclusive clone
+// group (meta.clusters.exact, whose members carry `created` submit timestamps) and
+// recurring pair (meta.recurring_pairs), rank members by submit time. The EARLIEST
+// member who (a) typed it (paste_ratio<0.12), (b) has >=2 genuine arcs, (c) has NO
+// foreign paste is a genuine ORIGIN — the identical copies came AFTER them — and is
+// rescued from exclude to a SEPARATE visible bucket: talent KEPT, integrity becomes
+// a NOTE not a block. If the EARLIEST member has a foreign paste, the whole group is
+// externally sourced → NO rescue (everyone stays excluded). Watch-retype copiers
+// (later submit / no arc) and external sources stay excluded/held.
+//
+// Returns Map<identity_key, { copied_by:[id...], chain:"Origin: X (copied by → Y, Z)",
+//   group_kind:"cluster"|"recurring_pair", group_label, arcs }>. Pure — no IO.
+//
+// `byId` resolves member ids → cards (for the profile gate + names). A member id
+// with no card (a phantom/peer outside the participant set) can never be a rescued
+// origin but DOES count for submit-ordering when it carries a cluster `created`.
+function computeOriginRescues(meta, byId) {
+  const rescues = new Map();
+  const nameOf = (id) => (byId.get(id) || {}).name || id;
+
+  // earliest-submit time per member, derived from every exact cluster they appear
+  // in (recurring pairs don't carry timestamps; clusters do). Lower = earlier.
+  const exact = (meta && meta.clusters && meta.clusters.exact) || [];
+  const firstSeen = new Map();
+  for (const cl of exact) {
+    for (const m of cl.members || []) {
+      if (!m || m.user == null) continue;
+      const t = Number(m.created);
+      if (!Number.isFinite(t)) continue;
+      const prev = firstSeen.get(m.user);
+      if (prev == null || t < prev) firstSeen.set(m.user, t);
+    }
+  }
+
+  // Each "group" is a member-id list with a comparator for submit order. Exact
+  // clusters order by the cluster's own per-problem `created`; recurring pairs
+  // order by each member's earliest-seen submit time (from firstSeen).
+  const groups = [];
+  for (const cl of exact) {
+    const members = (cl.members || [])
+      .filter((m) => m && m.user != null)
+      .map((m) => ({ user: m.user, t: Number(m.created) }))
+      .sort((a, b) => (a.t || 0) - (b.t || 0));
+    if (members.length < 2) continue;
+    groups.push({ kind: "cluster", label: cl.ch || "", order: members.map((m) => m.user) });
+  }
+  for (const p of (meta && meta.recurring_pairs) || []) {
+    if (!p || !Array.isArray(p.pair) || p.pair.length < 2) continue;
+    const order = p.pair
+      .slice()
+      .sort((a, b) => (firstSeen.has(a) ? firstSeen.get(a) : Infinity) - (firstSeen.has(b) ? firstSeen.get(b) : Infinity));
+    groups.push({ kind: "recurring_pair", label: (p.problems || []).join(", "), order });
+  }
+
+  for (const g of groups) {
+    const order = g.order;
+    if (!order || order.length < 2) continue;
+    const earliest = order[0];
+    const earliestCard = byId.get(earliest);
+    // earliest has a foreign paste (or no card / no profile) → whole group is
+    // externally sourced via them → NO rescue; everyone stays excluded.
+    if (!earliestCard || !isGenuineOriginProfile(earliestCard)) continue;
+    const copiedBy = order.slice(1);
+    const chain = `Origin: ${nameOf(earliest)} (copied by → ${copiedBy.map(nameOf).join(", ")})`;
+    const existing = rescues.get(earliest);
+    if (existing) {
+      // same candidate is the genuine origin of more than one group — merge the
+      // copier set + keep the richest chain (most copiers).
+      for (const c of copiedBy) if (existing.copied_by.indexOf(c) === -1) existing.copied_by.push(c);
+      if (copiedBy.length > (existing._n || 0)) {
+        existing.chain = chain;
+        existing._n = copiedBy.length;
+      }
+    } else {
+      rescues.set(earliest, {
+        copied_by: copiedBy.slice(),
+        chain,
+        group_kind: g.kind,
+        group_label: g.label,
+        arcs: genuineArcCount(earliestCard),
+        _n: copiedBy.length,
+      });
+    }
+  }
+  return rescues;
+}
+
 // Build the full cohort recommendation report from the raw scorecard list (the
 // `evaluations` array from GET /api/admin/contest-evaluations). Pure.
 //
@@ -319,10 +481,25 @@ export function computeRecommendationReport(evaluations, meta) {
   // cards so a peer is resolvable even if it were filtered elsewhere.
   const byId = new Map(cards.map((c) => [c && c.identity_key, c]));
 
+  // ORIGIN-RESCUE (d): genuine solvers who got copied FROM. Computed once over the
+  // cross-pass meta; applied per-card below (only overrides an EXCLUDE — integrity
+  // still gates everyone else).
+  const originRescues = computeOriginRescues(meta, byId);
+
   const enriched = participants.map((card) => {
     const rec = recommendFor(card);
     const flags = Array.isArray(card.flags) ? card.flags.map(annotateFlag) : [];
     const t = (card && card.talent) || {};
+    // RESCUE override: a confirmed/excluded candidate who is the genuine ORIGIN of
+    // a clone group (earliest submit + typed it + >=2 arcs + no foreign paste) is
+    // reclassified into the SEPARATE visible GENUINE_COPIED bucket — talent KEPT,
+    // integrity demoted to a NOTE. Only ever lifts an EXCLUDE; never touches a
+    // candidate the integrity gate would otherwise hire/hold/below-bar.
+    const rescue = rec.bucket === BUCKET.EXCLUDE_INTEGRITY ? originRescues.get(card.identity_key) : null;
+    const bucket = rescue ? BUCKET.GENUINE_COPIED : rec.bucket;
+    const reason = rescue
+      ? `Genuine solver — their work was copied. ${rescue.chain}. Typed it themselves with ${rescue.arcs} genuine solve arc${rescue.arcs === 1 ? "" : "s"} and no foreign paste, submitted first; integrity flag is a note, not a block.`
+      : rec.reason;
     return {
       identity_key: card.identity_key || "",
       name: displayName(card),
@@ -336,11 +513,14 @@ export function computeRecommendationReport(evaluations, meta) {
       integrity_tier: rec.integrity_tier,
       confidence: (card.coverage && card.coverage.confidence) || "",
       missing_signals: missingSignals(card),
-      bucket: rec.bucket,
-      bucket_label: (BUCKET_META[rec.bucket] || {}).label || rec.bucket,
-      reason: rec.reason,
+      bucket,
+      bucket_label: (BUCKET_META[bucket] || {}).label || bucket,
+      reason,
+      // origin-chain surfaced separately so the rescue is auditable per-person.
+      origin_chain: rescue ? rescue.chain : null,
+      copied_by: rescue ? rescue.copied_by.slice() : [],
       flags,
-      case: buildCase(card, rec.bucket, flags),
+      case: buildCase(card, bucket, flags),
       peer_evidence: peerEvidenceFor(card.identity_key, meta, byId),
       // surface the strongest (non-weak) integrity finding first for the dossier header
       top_finding: flags.filter((f) => !f.weak && f.severity === "critical")[0] || null,
@@ -365,6 +545,7 @@ export function computeRecommendationReport(evaluations, meta) {
   enriched.forEach((r) => (r.rank_delta = r.raw_rank - r.talent_rank));
 
   const hires = ranked.filter((r) => isHireBucket(r.bucket));
+  const genuineCopied = ranked.filter((r) => r.bucket === BUCKET.GENUINE_COPIED);
   const hold = ranked.filter((r) => r.bucket === BUCKET.HOLD_REVIEW);
   const excluded = ranked.filter((r) => r.bucket === BUCKET.EXCLUDE_INTEGRITY);
   const belowBar = ranked.filter((r) => r.bucket === BUCKET.BELOW_BAR);
@@ -393,9 +574,11 @@ export function computeRecommendationReport(evaluations, meta) {
       why_not:
         r.bucket === BUCKET.EXCLUDE_INTEGRITY
           ? "confirmed copying"
-          : r.bucket === BUCKET.HOLD_REVIEW
-            ? "needs integrity review (not a confirmed violation)"
-            : (r.flags.find((f) => f.code === "partial_gamer") ? "stub-gaming (partial credit, little real solving)" : "talent below bar on genuine work"),
+          : r.bucket === BUCKET.GENUINE_COPIED
+            ? "genuine solver whose work was copied — surfaced separately, not in the default hire set"
+            : r.bucket === BUCKET.HOLD_REVIEW
+              ? "needs integrity review (not a confirmed violation)"
+              : (r.flags.find((f) => f.code === "partial_gamer") ? "stub-gaming (partial credit, little real solving)" : "talent below bar on genuine work"),
     }));
 
   const counts = {
@@ -404,6 +587,8 @@ export function computeRecommendationReport(evaluations, meta) {
     phantoms,
     strong_hire: enriched.filter((r) => r.bucket === BUCKET.STRONG_HIRE).length,
     hire_deskcheck: enriched.filter((r) => r.bucket === BUCKET.HIRE_DESKCHECK).length,
+    solid_hire: enriched.filter((r) => r.bucket === BUCKET.SOLID_HIRE).length,
+    genuine_copied: genuineCopied.length,
     hold_review: hold.length,
     exclude_integrity: excluded.length,
     below_bar: belowBar.length,
@@ -418,6 +603,7 @@ export function computeRecommendationReport(evaluations, meta) {
     counts,
     ranked,
     hires,
+    genuineCopied,
     hold,
     excluded,
     belowBar,

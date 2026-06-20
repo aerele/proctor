@@ -7,6 +7,7 @@ import {
   collapseWs,
   normalizedLineDistance,
   replaySession,
+  isBareTemplate,
 } from "../src/evaluationReplay.mjs";
 
 // Helpers to build events tersely.
@@ -431,4 +432,177 @@ test("performance: 200k events well under a second", () => {
   const elapsed = Date.now() - start;
   assert.ok(out.events_n === 200000);
   assert.ok(elapsed < 2000, `replay took ${elapsed}ms`);
+});
+
+// ---- (a) bare-template foreign-paste suppression ----------------------------
+// Real HR templates (whitespace-collapsed, byte-accurate from the saved
+// scorecard cross_inputs.foreign_paste_texts) — pasting one is HR muscle memory,
+// carries zero algorithm signal, and must NOT be flagged foreign.
+const BARE_TEMPLATES = {
+  // JAVA_HR: imports → class Result { Complete the 'X' / Write your code here } → public class Main.
+  java:
+    "import java.io.*; import java.math.*; import java.security.*; import java.text.*; import java.util.*; import java.util.concurrent.*; import java.util.regex.*; class Result { /* * Complete the 'solve' function below. *compelete the 'solve' function below. * The function is expected to return an INTEGER. * The function accepts INTEGER_ARRAY s as parameter. */ public static int solve(List<Integer> s) { // Write your code here return 0; } } public class Main { public static void main(String[] args)",
+  // PY3_HR: shebang + stdlib imports → # Complete the 'X' → def X → if __name__ main.
+  python:
+    "#!/bin/python3 import math import os import random import re import sys # # Complete the 'minCoins' function below. # # The function is expected to return an INTEGER. # The function accepts INTEGER n as parameter. # def minCoins(n): # Write your code here return 0 if __name__ == '__main__': fptr = sys.stdout n = int(input().strip()) result = minCoins(n) fptr.write(str(result) + '\\n')",
+  // JS_HR: 'use strict' + fs + stdin scaffold → readLine → Complete the 'X'.
+  javascript:
+    "'use strict'; const fs = require('fs'); process.stdin.resume(); process.stdin.setEncoding('utf-8'); let inputString = ''; let currentLine = 0; process.stdin.on('data', function(inputStdin) { inputString += inputStdin; }); process.stdin.on('end', function() { inputString = inputString.split('\\n'); main(); }); function readLine() { return inputString[currentLine++]; } /* * Complete the 'minCoins' function below. * * The function is expected to return an INTEGER. * The function accepts INTEGER n as",
+  // CPP_BITS: bits/stdc++ + ltrim/rtrim decls → int X(){ Write your code here } → int main.
+  cpp:
+    '#include <bits/stdc++.h> using namespace std; string ltrim(const string &); string rtrim(const string &); /* * Complete the \'minCoins\' function below. * * The function is expected to return an INTEGER. * The function accepts INTEGER n as parameter. */ int minCoins(int n) { // Write your code here return 0; } int main() { ostream& fout = cout; string n_temp; getline(cin, n_temp); int n = stoi(ltrim(rtrim(n_temp))); int result = minCoins(n); fout << result << "\\n"; return 0; } string ltrim(const s',
+  // SQL_DDL: the problem's own CREATE TABLE + INSERT seed rows pasted into the query editor.
+  sql:
+    "CREATE TABLE ORDERS(id INT , customer VARCHAR(30),amount INT); INSERT INTO ORDERS VALUES (1, 'Alice', 600); INSERT INTO ORDERS VALUES (2, 'Alice', 700); INSERT INTO ORDERS VALUES (3, 'Bob', 1500); INSERT INTO ORDERS VALUES (4, 'Carol', 400);",
+};
+
+// The proctor's OWN generic STARTERS (CodingWorkspace.tsx STARTERS), collapsed.
+const PROCTOR_STARTERS = [
+  "# Read from standard input, print the answer to standard output.",
+  "#include <bits/stdc++.h> using namespace std; int main() { // Read from stdin, print the answer to stdout. return 0; }",
+  "import java.util.*; public class Main { public static void main(String[] args) { // Read from System.in, print the answer to System.out. } }",
+  '// Read from stdin, print the answer to stdout. const input = require("fs").readFileSync(0, "utf8");',
+  "-- Write your SQL query below.",
+];
+
+test("isBareTemplate: each real HR language template is recognized as bare", () => {
+  for (const [lang, tpl] of Object.entries(BARE_TEMPLATES)) {
+    assert.equal(isBareTemplate(tpl), true, `${lang} template should be bare`);
+  }
+});
+
+test("isBareTemplate: proctor's own generic STARTERS are bare", () => {
+  for (const s of PROCTOR_STARTERS) {
+    assert.equal(isBareTemplate(s), true, `starter should be bare: ${s.slice(0, 40)}`);
+  }
+});
+
+test("isBareTemplate: template + a real appended solution (over maxLen) is NOT bare", () => {
+  // Append a long genuine algorithm so the collapsed paste is clearly longer than
+  // the language maxLen bound (PY3 ~1000) — this is the case the bound protects.
+  const solution = Array.from(
+    { length: 70 },
+    (_, i) => `dp[${i}] = max(dp[${i - 1}], dp[${i}] + weight[${i}]) # transition ${i} of the recurrence`
+  ).join(" ");
+  const combo = collapseWs(BARE_TEMPLATES.python + " def solve(s): " + solution);
+  assert.ok(combo.length > 1000, `combo should exceed PY3 maxLen, got ${combo.length}`);
+  assert.equal(isBareTemplate(combo), false);
+});
+
+test("isBareTemplate: a genuinely foreign algorithm paste (no template preamble) is NOT bare", () => {
+  // ~300-char unique solution with no language preamble → not a template.
+  const foreign = collapseWs(
+    "public static int countSubsequences(int[] arr, int target) { int n = arr.length; int[][] dp = new int[n+1][target+1]; for (int i = 0; i <= n; i++) dp[i][0] = 1; for (int i = 1; i <= n; i++) for (int s = 1; s <= target; s++) { dp[i][s] = dp[i-1][s]; if (arr[i-1] <= s) dp[i][s] += dp[i-1][s-arr[i-1]]; } return dp[n][target]; }"
+  );
+  assert.ok(foreign.length >= 300);
+  assert.equal(isBareTemplate(foreign), false);
+});
+
+test("isBareTemplate: too-short snippet is NOT bare", () => {
+  assert.equal(isBareTemplate("int x = 5;"), false);
+  assert.equal(isBareTemplate(""), false);
+  // shebang preamble but no scaffold markers (a tiny real solution) → not bare.
+  assert.equal(
+    isBareTemplate("#!/bin/python3 import math import os import random import re import sys print(\"YES\")"),
+    false
+  );
+});
+
+test("replaySession: pasting a bare HR template is suppressed (foreign:false)", () => {
+  const P = "p1";
+  const tpl = BARE_TEMPLATES.python;
+  const events = [paste(P, 1000, tpl.length, 1, 1), repl(P, 1050, "", tpl, 1, 1, 1, 1)];
+  const out = replaySession(events, {});
+  const rec = out.pastes.find((p) => p.len >= REPLAY.MIN_FOREIGN_PASTE_LEN);
+  assert.ok(rec);
+  assert.equal(rec.foreign, false);
+});
+
+test("replaySession: bare template + a real long solution stays foreign", () => {
+  const P = "p1";
+  const solution = Array.from(
+    { length: 70 },
+    (_, i) => `dp[${i}] = max(dp[${i - 1}], dp[${i}] + weight[${i}]) # transition ${i}`
+  ).join(" ");
+  const paste1 = BARE_TEMPLATES.python + " def solve(s): " + solution; // clearly > maxLen
+  assert.ok(collapseWs(paste1).length > 1000);
+  const events = [paste(P, 1000, paste1.length, 1, 1), repl(P, 1050, "", paste1, 1, 1, 1, 1)];
+  const out = replaySession(events, {});
+  const rec = out.pastes.find((p) => p.len >= REPLAY.MIN_FOREIGN_PASTE_LEN);
+  assert.ok(rec);
+  assert.equal(rec.foreign, true);
+});
+
+// ---- (a) BODY-EMPTINESS GATE -------------------------------------------------
+// The bug: a real external/AI solution that RETAINS the HR scaffold (imports +
+// Main/main I/O) but fills the USER FUNCTION BODY with a real algorithm — yet is
+// shorter than maxLen (a complete medium solution is ~200-500 collapsed chars,
+// well under the 1000-1300 bound, and can even be SHORTER than the full bare
+// template). Length alone can never separate it, so isBareTemplate must also gate
+// on the user function body being a bare stub. These four are compact (~200-500
+// collapsed), retain each language's scaffold, and carry a real algorithm.
+const SCAFFOLD_RETAINING_SOLUTIONS = {
+  // JAVA: max-profit single-pass scan, inside class Result, Main scaffold retained.
+  java:
+    "import java.io.*; import java.math.*; import java.security.*; import java.text.*; import java.util.*; import java.util.concurrent.*; import java.util.regex.*; class Result { public static int solve(List<Integer> prices) { int minP = Integer.MAX_VALUE; int best = 0; for (int p : prices) { if (p < minP) minP = p; else if (p - minP > best) best = p - minP; } return best; } } public class Main { public static void main(String[] args) throws IOException {",
+  // CPP: prime check, bits/stdc++ + int main scaffold retained.
+  cpp:
+    "#include <bits/stdc++.h> using namespace std; string ltrim(const string &); string rtrim(const string &); int solve(int n) { if (n < 2) return 0; for (int i = 2; (long long)i * i <= n; i++) { if (n % i == 0) return 0; } return 1; } int main() { ostream& fout = cout; string n_temp; getline(cin, n_temp); int n = stoi(ltrim(rtrim(n_temp))); int result = solve(n); fout << result; return 0; }",
+  // PYTHON: greedy coin-change, shebang + if __name__ scaffold retained.
+  python:
+    "#!/bin/python3 import math import os import random import re import sys # # Complete the 'minCoins' function below. # def minCoins(n): coins = [25, 10, 5, 1] count = 0 for c in coins: while n >= c: n -= c count += 1 return count if __name__ == '__main__': fptr = sys.stdout n = int(input().strip()) result = minCoins(n) fptr.write(str(result) + '\\n')",
+  // JS: even-sum scan, use strict + readLine + main scaffold retained.
+  javascript:
+    "'use strict'; const fs = require('fs'); process.stdin.resume(); process.stdin.setEncoding('utf-8'); let inputString = ''; let currentLine = 0; process.stdin.on('data', d => { inputString += d; }); function readLine() { return inputString[currentLine++]; } /* Complete the 'solve' function below. */ function solve(s) { let total = 0; for (let i = 0; i < s.length; i++) { if (s[i] % 2 === 0) total += s[i]; } return total; } function main() { const n = parseInt(readLine()); }",
+};
+
+test("isBareTemplate: scaffold-retaining REAL solution (compact, < maxLen) is NOT bare", () => {
+  for (const [lang, src] of Object.entries(SCAFFOLD_RETAINING_SOLUTIONS)) {
+    const c = collapseWs(src);
+    // It is compact — squarely under the language maxLen bound (1000/1300) — so
+    // length alone could NOT distinguish it from a bare template.
+    assert.ok(c.length <= 600, `${lang} should be compact, got ${c.length}`);
+    assert.equal(isBareTemplate(c), false, `${lang} scaffold+real-algo must NOT be bare`);
+  }
+});
+
+test("isBareTemplate: bare preamble + real algorithm in body, UNDER old maxLen, is NOT bare", () => {
+  // Kadane's max-subarray substituted into the body; collapsed length is small
+  // (well under PY3 maxLen 1000), proving the body gate — not the length bound —
+  // is what rejects it.
+  const c = collapseWs(
+    "#!/bin/python3 import math import os import random import re import sys # Complete the 'solve' function below. def solve(a): best = a[0] cur = a[0] for x in a[1:]: cur = max(x, cur + x) best = max(best, cur) return best if __name__ == '__main__': print(solve([1, 2, 3]))"
+  );
+  assert.ok(c.length < 1000, `should be under PY3 maxLen, got ${c.length}`);
+  assert.equal(isBareTemplate(c), false);
+});
+
+test("isBareTemplate: genuine empty-stub bodies stay bare (cleanup preserved)", () => {
+  // Each real bare HR template — placeholder + trivial return/pass only — must
+  // STILL classify bare so the 0618 desk-check cleanup (224 honest candidates) is
+  // preserved. (BARE_TEMPLATES are byte-accurate empty stubs from the saved data.)
+  for (const [lang, tpl] of Object.entries(BARE_TEMPLATES)) {
+    assert.equal(isBareTemplate(tpl), true, `${lang} empty-stub template must stay bare`);
+  }
+  // Extra explicit empty-stub bodies seen in the real data (return 0 only, no
+  // placeholder; and a return-0-only Java body).
+  const pyStub = collapseWs(
+    "#!/bin/python3 import math import os import random import re import sys # # Complete the 'solve' function below. # def solve(s): return 0 if __name__ == '__main__': fptr = sys.stdout n = int(input().strip()) s = list(map(int, input().rstrip().split())) result = solve(s) fptr.write(str(result) + '\\n')"
+  );
+  assert.equal(isBareTemplate(pyStub), true);
+  const javaStub = collapseWs(
+    "import java.io.*; import java.math.*; import java.security.*; import java.text.*; import java.util.*; import java.util.concurrent.*; import java.util.regex.*; class Result { /* * Complete the 'solve' function below. */ public static int solve(List<Integer> s) { return 0; } } public class Main { public static void main(String[] args) throws IOException { BufferedReader b"
+  );
+  assert.equal(isBareTemplate(javaStub), true);
+});
+
+test("replaySession: scaffold-retaining real solution stays foreign (bug fix)", () => {
+  for (const [lang, src] of Object.entries(SCAFFOLD_RETAINING_SOLUTIONS)) {
+    const P = "p1";
+    const events = [paste(P, 1000, src.length, 1, 1), repl(P, 1050, "", src, 1, 1, 1, 1)];
+    const out = replaySession(events, {});
+    const rec = out.pastes.find((p) => p.len >= REPLAY.MIN_FOREIGN_PASTE_LEN);
+    assert.ok(rec, `${lang}: expected a foreign-eligible paste record`);
+    assert.equal(rec.foreign, true, `${lang} scaffold+real-algo paste must stay foreign`);
+  }
 });

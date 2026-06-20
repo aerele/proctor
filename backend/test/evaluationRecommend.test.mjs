@@ -11,12 +11,21 @@ import {
   BUCKET,
   isParticipant,
   recommendFor,
+  genuineMedCount,
   annotateFlag,
   computeRecommendationReport,
 } from "../src/evaluationRecommend.mjs";
 
 // --- fixture helper ---
-function card({ id, name, comp, score, talent, integrity, ed = 1000, subs = 5, shell = 100, conf = "high", flags = [] }) {
+// Optional (c)/(d) fields, all defaulting to the original behavior so the
+// pre-existing fixtures are byte-for-byte unchanged:
+//   per_problem  -> talent.per_problem (the genuine_arc/_tier solve-arc map)
+//   pasteRatio   -> integrity.paste_ratio (typed-vs-pasted; <0.12 = typed it)
+//   foreignPastes-> integrity.foreign_pastes count (externally-sourced code)
+function card({ id, name, comp, score, talent, integrity, ed = 1000, subs = 5, shell = 100, conf = "high", flags = [], per_problem = null, pasteRatio = 0, foreignPastes = 0 }) {
+  const integrityObj = { paste_ratio: pasteRatio, foreign_pastes: Array.from({ length: foreignPastes }, (_, i) => ({ len: 40, preview: `fp${i}` })) };
+  const talentObj = { composite: comp, total_score: score, max_total: 88 };
+  if (per_problem) talentObj.per_problem = per_problem;
   return {
     identity_key: id,
     candidate_id: id.toUpperCase(),
@@ -24,11 +33,20 @@ function card({ id, name, comp, score, talent, integrity, ed = 1000, subs = 5, s
     contest_slug: "fixture-contest",
     computed_at: "2026-06-12T12:00:00.000Z",
     coverage: { editor_events_n: ed, shell_events_n: shell, submissions_n: subs, confidence: conf },
-    talent: { composite: comp, total_score: score, max_total: 88 },
-    integrity: {},
+    talent: talentObj,
+    integrity: integrityObj,
     flags,
     tiers: { talent, integrity, one_line: `talent=${talent}; integrity=${integrity}` },
   };
+}
+// genuine-medium solve-arc map: `n` genuine med arcs + optional decoys (non-arc med
+// + genuine-but-hard) so genuineMedCount counts ONLY genuine_arc && _tier==='med'.
+function medArcs(n, { decoyMed = 0, genuineHard = 0 } = {}) {
+  const pp = {};
+  for (let i = 0; i < n; i++) pp[`gm${i}`] = { genuine_arc: true, _tier: "med", best_score: 10, max_points: 10 };
+  for (let i = 0; i < decoyMed; i++) pp[`dm${i}`] = { genuine_arc: false, _tier: "med", best_score: 4, max_points: 10 };
+  for (let i = 0; i < genuineHard; i++) pp[`gh${i}`] = { genuine_arc: true, _tier: "hard", best_score: 20, max_points: 20 };
+  return pp;
 }
 const F = (code, severity) => ({ code, severity, problem_id: null, evidence: `${code} evidence` });
 
@@ -220,4 +238,174 @@ test("report: empty / malformed input never throws", () => {
   assert.equal(computeRecommendationReport([], {}).counts.participants, 0);
   assert.equal(computeRecommendationReport(null, null).counts.participants, 0);
   assert.equal(computeRecommendationReport(undefined).counts.participants, 0);
+});
+
+// ============================================================================
+// (c) SOLID_HIRE — moderate talent + >=2 genuine medium solves stays a HIRE.
+// After the (c) talent floor demotes thin "strong" labels to moderate, the
+// genuine mid-tier solvers must NOT drop below hire. Integrity still gates.
+// ============================================================================
+
+test("genuineMedCount: counts only genuine_arc && _tier==='med' (ignores non-arc med + genuine hard)", () => {
+  assert.equal(genuineMedCount(card({ id: "g", name: "G", comp: 40, score: 40, talent: "moderate", integrity: "clean", per_problem: medArcs(2) })), 2);
+  // decoys must not count: 2 genuine-med + 3 non-arc med + 1 genuine-hard => still 2
+  assert.equal(genuineMedCount(card({ id: "g", name: "G", comp: 40, score: 40, talent: "moderate", integrity: "clean", per_problem: medArcs(2, { decoyMed: 3, genuineHard: 1 }) })), 2);
+  assert.equal(genuineMedCount(card({ id: "g", name: "G", comp: 40, score: 40, talent: "moderate", integrity: "clean", per_problem: medArcs(1) })), 1);
+  assert.equal(genuineMedCount({}), 0); // no per_problem -> 0, never throws
+});
+
+test("(c) recommendFor: moderate + gm>=2 + clean -> SOLID_HIRE (a hire)", () => {
+  const r = recommendFor(card({ id: "sh", name: "Solid", comp: 45, score: 44, talent: "moderate", integrity: "clean", per_problem: medArcs(2) }));
+  assert.equal(r.bucket, BUCKET.SOLID_HIRE);
+  assert.match(r.reason, /2 genuine medium solves/);
+});
+
+test("(c) recommendFor: moderate + gm==1 -> below_bar (NOT promoted)", () => {
+  const r = recommendFor(card({ id: "lo", name: "OneArc", comp: 30, score: 30, talent: "moderate", integrity: "clean", per_problem: medArcs(1) }));
+  assert.equal(r.bucket, BUCKET.BELOW_BAR);
+});
+
+test("(c) recommendFor: moderate + gm>=2 + confirmed -> EXCLUDE (integrity gates talent)", () => {
+  const r = recommendFor(card({ id: "cx", name: "ConfirmedSolid", comp: 45, score: 44, talent: "moderate", integrity: "confirmed", per_problem: medArcs(3) }));
+  assert.equal(r.bucket, BUCKET.EXCLUDE_INTEGRITY);
+});
+
+test("(c) recommendFor: moderate + gm>=2 + watch -> SOLID_HIRE (watch = desk-check note, still a hire)", () => {
+  const r = recommendFor(card({ id: "sw", name: "SolidWatch", comp: 42, score: 41, talent: "moderate", integrity: "watch", per_problem: medArcs(2), flags: [F("clone_cluster", "warning")] }));
+  assert.equal(r.bucket, BUCKET.SOLID_HIRE);
+});
+
+test("(c) recommendFor: moderate + gm>=2 + flag -> HOLD (flag still holds, never SOLID_HIRE)", () => {
+  const r = recommendFor(card({ id: "sf", name: "SolidFlag", comp: 42, score: 41, talent: "moderate", integrity: "flag", per_problem: medArcs(3), flags: [F("high_paste_ratio", "critical")] }));
+  assert.equal(r.bucket, BUCKET.HOLD_REVIEW);
+});
+
+test("(c) report: SOLID_HIRE is a hire bucket, counted + ranked below strong/deskcheck, above hold/below_bar", () => {
+  const cohort = [
+    card({ id: "s1", name: "Strong Clean", comp: 70, score: 60, talent: "strong", integrity: "clean" }),
+    card({ id: "m1", name: "Solid Mid", comp: 45, score: 44, talent: "moderate", integrity: "clean", per_problem: medArcs(2) }),
+    card({ id: "m2", name: "Solid Watch", comp: 43, score: 42, talent: "moderate", integrity: "watch", per_problem: medArcs(2), flags: [F("clone_cluster", "warning")] }),
+    card({ id: "m3", name: "Thin Mid", comp: 30, score: 30, talent: "moderate", integrity: "clean", per_problem: medArcs(1) }),
+  ];
+  const rep = computeRecommendationReport(cohort, {});
+  assert.equal(rep.counts.solid_hire, 2); // m1, m2
+  assert.equal(rep.counts.hires, 3); // s1 + m1 + m2 (solid counts as a hire)
+  assert.ok(rep.hires.some((r) => r.identity_key === "m1") && rep.hires.some((r) => r.identity_key === "m2"));
+  // m3 (gm==1) is NOT promoted
+  assert.equal(rep.belowBar.find((r) => r.identity_key === "m3").bucket, BUCKET.BELOW_BAR);
+  // ordering: BUCKET_META.order puts solid below strong/deskcheck and above hold/below_bar
+  assert.ok(rep.counts.solid_hire >= 1);
+});
+
+// ============================================================================
+// (d) ORIGIN-RESCUE — GENUINE_COPIED: the genuine solver who got copied FROM is
+// reclassified out of exclude into a SEPARATE visible bucket (talent kept,
+// integrity = a note). Earliest submit + typed it + >=2 arcs + no foreign paste.
+// ============================================================================
+
+// origin/copier fixtures: all confirmed-integrity (so they start EXCLUDED), with
+// distinct profiles. `genuine` = typed it, 2 arcs, no foreign. `copier` = typed
+// but 0 arcs (watch-retype). `external` = a foreign paste.
+function genuineMember(id, name) {
+  return card({ id, name, comp: 50, score: 50, talent: "strong", integrity: "confirmed", per_problem: medArcs(2), pasteRatio: 0.02, foreignPastes: 0, flags: [F("recurring_pair_conclusive", "critical")] });
+}
+function copierMember(id, name) {
+  return card({ id, name, comp: 20, score: 50, talent: "weak", integrity: "confirmed", per_problem: medArcs(0), pasteRatio: 0.0, foreignPastes: 0, flags: [F("recurring_pair_conclusive", "critical")] });
+}
+function externalMember(id, name) {
+  return card({ id, name, comp: 20, score: 50, talent: "weak", integrity: "confirmed", per_problem: medArcs(2), pasteRatio: 0.5, foreignPastes: 2, flags: [F("high_paste_ratio", "critical")] });
+}
+
+test("(d) 3-member cluster: earliest is typed+2arcs+no-foreign -> earliest GENUINE_COPIED, others stay excluded; chain surfaced", () => {
+  const cohort = [
+    genuineMember("o1", "Origin One"),
+    copierMember("k1", "Copier One"),
+    copierMember("k2", "Copier Two"),
+  ];
+  const meta = {
+    clusters: {
+      exact: [
+        { ch: "p-med", hardness: "med", members: [
+          { user: "o1", created: 1000 }, // earliest
+          { user: "k1", created: 1300 },
+          { user: "k2", created: 1600 },
+        ] },
+      ],
+    },
+    recurring_pairs: [],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  // o1 rescued
+  assert.equal(rep.counts.genuine_copied, 1);
+  const o1 = rep.genuineCopied.find((r) => r.identity_key === "o1");
+  assert.ok(o1, "o1 should be in the GENUINE_COPIED bucket");
+  assert.equal(o1.bucket, BUCKET.GENUINE_COPIED);
+  assert.equal(o1.talent_tier, "strong"); // talent KEPT
+  assert.deepEqual(o1.copied_by.sort(), ["k1", "k2"]);
+  assert.match(o1.origin_chain, /Origin: Origin One \(copied by → /);
+  assert.match(o1.origin_chain, /Copier One/);
+  assert.match(o1.origin_chain, /Copier Two/);
+  assert.match(o1.reason, /their work was copied/);
+  // copiers stay excluded, NOT rescued, NOT hired
+  assert.ok(rep.excluded.some((r) => r.identity_key === "k1"));
+  assert.ok(rep.excluded.some((r) => r.identity_key === "k2"));
+  assert.ok(!rep.genuineCopied.some((r) => r.identity_key === "k1" || r.identity_key === "k2"));
+  // GENUINE_COPIED is a SEPARATE bucket — NOT silently merged into hires
+  assert.ok(!rep.hires.some((r) => r.identity_key === "o1"));
+});
+
+test("(d) cluster where earliest has a foreign paste -> whole cluster external, NONE rescued", () => {
+  const cohort = [
+    externalMember("x1", "External First"), // earliest, has foreign paste
+    genuineMember("g2", "Genuine Later"), // typed+arcs but submitted LATER
+    copierMember("k3", "Copier"),
+  ];
+  const meta = {
+    clusters: {
+      exact: [
+        { ch: "p-med", hardness: "med", members: [
+          { user: "x1", created: 500 }, // earliest, foreign -> kills the whole cluster
+          { user: "g2", created: 900 },
+          { user: "k3", created: 1200 },
+        ] },
+      ],
+    },
+    recurring_pairs: [],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  assert.equal(rep.counts.genuine_copied, 0); // no rescue when earliest is external
+  assert.ok(rep.excluded.some((r) => r.identity_key === "x1"));
+  assert.ok(rep.excluded.some((r) => r.identity_key === "g2")); // later genuine NOT rescued
+  assert.ok(rep.excluded.some((r) => r.identity_key === "k3"));
+});
+
+test("(d) recurring pair: earliest genuine origin rescued; ranked by each member's earliest submit", () => {
+  const cohort = [genuineMember("o3", "Pair Origin"), copierMember("k4", "Pair Copier")];
+  const meta = {
+    // the pair's submit order is derived from the exact-cluster timestamps
+    clusters: { exact: [{ ch: "p1", hardness: "med", members: [{ user: "o3", created: 100 }, { user: "k4", created: 800 }] }] },
+    recurring_pairs: [{ pair: ["o3", "k4"], n_problems: 4, problems: ["p1", "p2", "p3", "p4"] }],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  const o3 = rep.genuineCopied.find((r) => r.identity_key === "o3");
+  assert.ok(o3);
+  assert.deepEqual(o3.copied_by, ["k4"]);
+  assert.match(o3.origin_chain, /Origin: Pair Origin \(copied by → Pair Copier\)/);
+  assert.ok(rep.excluded.some((r) => r.identity_key === "k4"));
+});
+
+test("(d) a moderate-with-gm2 origin that was only WATCH (not confirmed) is NOT touched by the rescue (rescue only lifts an EXCLUDE)", () => {
+  // this candidate is already a SOLID_HIRE via (c); the rescue must not steal it.
+  const cohort = [
+    card({ id: "sh2", name: "Solid Not Excluded", comp: 45, score: 44, talent: "moderate", integrity: "watch", per_problem: medArcs(2), pasteRatio: 0.02, foreignPastes: 0, flags: [F("clone_cluster", "warning")] }),
+    copierMember("k5", "Copier"),
+  ];
+  const meta = {
+    clusters: { exact: [{ ch: "p1", hardness: "med", members: [{ user: "sh2", created: 100 }, { user: "k5", created: 700 }] }] },
+    recurring_pairs: [],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  // sh2 stays a SOLID_HIRE (it was never excluded), not moved into GENUINE_COPIED
+  assert.ok(rep.hires.some((r) => r.identity_key === "sh2"));
+  assert.ok(!rep.genuineCopied.some((r) => r.identity_key === "sh2"));
 });

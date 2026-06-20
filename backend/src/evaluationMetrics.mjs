@@ -20,7 +20,7 @@ import {
   analyzeClones,
 } from "./evaluationClone.mjs";
 
-export const EVALUATOR_VERSION = "1";
+export const EVALUATOR_VERSION = "2";
 
 export const THRESHOLDS = {
   // D3 — switch-away → paste correlation window (paste/burst within 10s of episode end).
@@ -372,7 +372,16 @@ export function buildScorecard(input) {
   const flags = [];
 
   let total_score = 0;
-  let gamedPartialPoints = 0; // D12: partial credit earned with a near-stub submit
+  // D12 (widened 2026-06-20): partial credit earned on ANY non-genuine partial.
+  // Every partial (best_score>0 && effMax>0 && best_score<effMax) has
+  // genuine_arc=false (genuine_arc requires solvedFull), so partial points are
+  // never talent evidence — discount the FULL partial total from the composite,
+  // not just the near-stub (stub_delta<10) subset. Honest partial progress is
+  // still credited separately via honest_reach/reach_frac, so this is
+  // calibration-positive and demote-only-by-rank (recommendFor buckets on tiers,
+  // never composite). The narrower near-stub subset still gets the surfaced
+  // partial_gamer info flag below (a specific signal), but the DISCOUNT is wide.
+  let discountedPartialPoints = 0;
   let n_solved_full = 0;
   let n_medplus_solved = 0;
   let hardestRank = 0; // 0 none,1 easy,2 med,3 hard
@@ -474,13 +483,25 @@ export function buildScorecard(input) {
       });
     }
 
-    // D12 partial gamer. Severity "info" (v1 default, KPR 2026-06-12 review):
-    // gaming partial credit off a near-stub submit is a TALENT honesty signal
-    // (the KEC gem-gamer lesson) — it discounts the composite below and gates
-    // honest-reach, but it is not cheating evidence, so it must not drag the
-    // orthogonal integrity axis to "watch" on its own.
-    if (best_score > 0 && effMax > 0 && best_score < effMax && stub_delta_lines != null && stub_delta_lines < THRESHOLDS.STUB_DELTA_LINES) {
-      gamedPartialPoints += best_score;
+    // D12 partial-credit discount (widened 2026-06-20). EVERY partial is a
+    // non-genuine partial (genuine_arc requires solvedFull; a partial has
+    // best_score<effMax so solvedFull=false), so its points are not talent
+    // evidence — discount the FULL partial total from the composite. The
+    // accumulator below is subtracted from score_frac in computeComposite. This
+    // is a single accumulation per problem (no double-count with the near-stub
+    // info flag, which only EMITS a surfaced signal and no longer adds points).
+    const isPartial = best_score > 0 && effMax > 0 && best_score < effMax;
+    if (isPartial) {
+      discountedPartialPoints += best_score;
+    }
+    // D12 partial gamer flag. Severity "info" (v1 default, KPR 2026-06-12
+    // review): gaming partial credit off a near-stub submit is a TALENT honesty
+    // signal (the KEC gem-gamer lesson) — kept as a specific surfaced signal on
+    // the near-stub (stub_delta<10) subset. It is not cheating evidence, so it
+    // must not drag the orthogonal integrity axis to "watch" on its own. The
+    // composite discount is now wider (all partials, above); this flag stays
+    // scoped to the near-stub subset and adds NO additional discount.
+    if (isPartial && stub_delta_lines != null && stub_delta_lines < THRESHOLDS.STUB_DELTA_LINES) {
       flags.push({
         code: "partial_gamer",
         severity: "info",
@@ -693,7 +714,7 @@ export function buildScorecard(input) {
   // ---- talent composite + tiers ----
   const composite = computeComposite({
     total_score,
-    gamedPartialPoints,
+    discountedPartialPoints,
     maxTotal,
     per_problem,
     problemPoints,
@@ -811,12 +832,15 @@ export function buildScorecard(input) {
 //   reach_frac    = min(1, honest_reach/2)
 // integrity confirmed ⇒ composite = min(composite, 20).
 const TIER_WEIGHT = { easy: 1, med: 2, hard: 4 };
-function computeComposite({ total_score, gamedPartialPoints = 0, maxTotal, per_problem, problemPoints, hardness, allPids, n_solved_full, honest_reach }) {
-  // KEC gem-gamer discount (v1, KPR 2026-06-12 review): partial points earned
-  // on partial_gamer-flagged problems (near-stub submits) are not talent
-  // evidence — exclude them from score_frac so a 7-problem stub-gamer cannot
-  // outrank a genuine 2-problem solver on the composite.
-  const score_frac = maxTotal > 0 ? Math.max(0, total_score - gamedPartialPoints) / maxTotal : 0;
+function computeComposite({ total_score, discountedPartialPoints = 0, maxTotal, per_problem, problemPoints, hardness, allPids, n_solved_full, honest_reach }) {
+  // Partial-credit discount (widened 2026-06-20). Partial points are earned on
+  // non-genuine partials (genuine_arc requires a full solve), so they are not
+  // talent evidence — exclude the FULL partial total from score_frac so a
+  // multi-problem stub/partial-gamer cannot outrank a genuine 2-problem solver
+  // on the composite. (Originally this discounted only near-stub partials —
+  // KEC gem-gamer lesson, KPR 2026-06-12 review.) Honest partial progress is
+  // still credited separately via reach_frac, so widening is calibration-safe.
+  const score_frac = maxTotal > 0 ? Math.max(0, total_score - discountedPartialPoints) / maxTotal : 0;
   let weightAll = 0;
   let weightSolved = 0;
   for (const pid of allPids) {
@@ -886,14 +910,22 @@ function deriveTiers({ flags, talent, integrity, coverage = {} }) {
   }
 
   // talent tier
-  // strong ⇔ ≥1 hard OR ≥2 med solved with genuine arcs; moderate ⇔ ≥1 med+
-  // genuine OR strong_gem; else weak.
+  // strong ⇔ ≥1 hard genuine OR ≥3 med genuine OR honest_reach present;
+  // moderate ⇔ ≥1 med+ genuine OR strong_gem; else weak.
+  // STRONG FLOOR (tightened 2026-06-20): the prior gate (genuineMed>=2) let
+  // thin-strong labels through in weak fields. The correct floor is
+  // hard>=1 || med>=3 || reach>0 — it demotes exactly the 20 thin labels and
+  // demotes ZERO of the 5 KPR selected interns (Anita 23cb204 gm=4 survives
+  // via med>=3; a hard-or-reach-only floor would wrongly demote her). A demoted
+  // thin-strong (gm=2,gh=0,reach=0) falls to moderate via genuineMedPlus>=1,
+  // not below. honest_reach is the talent object's reach list.
   const genuineHard = countGenuine(talent, "hard");
   const genuineMed = countGenuine(talent, "med");
   const genuineMedPlus = genuineHard + genuineMed;
+  const hasHonestReach = Array.isArray(talent.honest_reach) && talent.honest_reach.length > 0;
   const strongGem = hasCode("strong_gem");
   let talentTier = "weak";
-  if (genuineHard >= 1 || genuineMed >= 2) talentTier = "strong";
+  if (genuineHard >= 1 || genuineMed >= 3 || hasHonestReach) talentTier = "strong";
   else if (genuineMedPlus >= 1 || strongGem) talentTier = "moderate";
   else talentTier = "weak";
 

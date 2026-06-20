@@ -85,7 +85,7 @@ function sub(o) {
 }
 
 test("EVALUATOR_VERSION and THRESHOLDS constants", () => {
-  assert.equal(EVALUATOR_VERSION, "1");
+  assert.equal(EVALUATOR_VERSION, "2");
   assert.equal(THRESHOLDS.AWAY_PASTE_WINDOW_MS, 10000);
   assert.equal(THRESHOLDS.SUPERHUMAN_CPS, 14);
   assert.equal(THRESHOLDS.SUPERHUMAN_RUN, 25);
@@ -214,7 +214,7 @@ function baseInput(overrides) {
 test("buildScorecard basic schema + identity fields", () => {
   const sc = buildScorecard(baseInput({}));
   assert.equal(sc.schema_version, 1);
-  assert.equal(sc.evaluator_version, "1");
+  assert.equal(sc.evaluator_version, "2");
   assert.equal(sc.contest_slug, "c1");
   assert.equal(sc.person_id, null);
   assert.equal(sc.username_norm, "u1");
@@ -272,6 +272,90 @@ test("buildScorecard stub-delta partial gamer (D12)", () => {
   // The gem-gamer discount: gamed partial points are excluded from score_frac,
   // so this 40-point near-stub partial contributes ~0 to the composite.
   assert.ok(sc.talent.composite <= 5, `composite ${sc.talent.composite} should exclude gamed points`);
+});
+
+// (b) widened discount (2026-06-20): a non-genuine partial whose stub_delta is
+// LARGE (>=10 lines, so the near-stub partial_gamer flag does NOT fire) must
+// STILL be discounted from the composite — every partial is genuine_arc=false.
+test("buildScorecard widened partial discount: stub_delta>=10 partial still discounted (b)", () => {
+  const stub = baseInput({}).stubsByProblem.p1[0]; // 3-line stub
+  // A long, substantially-diverged final body → stub_delta_lines >= 10, so this
+  // is NOT a near-stub partial (no partial_gamer flag), yet it scored partial.
+  const finalCode =
+    "public class Main {\n" +
+    "  static int helper(int n){\n" +
+    "    int acc = 0;\n" +
+    "    for (int i = 0; i < n; i++) {\n" +
+    "      acc += i * i;\n" +
+    "      if (acc > 1000) acc -= 7;\n" +
+    "    }\n" +
+    "    return acc;\n" +
+    "  }\n" +
+    "  public static void main(String[] a){\n" +
+    "    System.out.println(helper(10));\n" +
+    "  }\n" +
+    "}\n";
+  const events = [ins("p1", 1000, finalCode, 1, 1)];
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: events,
+      stubsByProblem: { p1: [stub] },
+      problemPoints: { p1: 100 },
+      submissions: [sub({ problem_id: "p1", verdict: "wrong_answer", score: 40, max_points: 100, source_code: finalCode, created_at: tsAt(1500) })],
+    })
+  );
+  // confirm this is the diverged (non-near-stub) branch: no partial_gamer flag.
+  assert.ok(sc.talent.per_problem.p1.stub_delta_lines >= THRESHOLDS.STUB_DELTA_LINES);
+  assert.equal(sc.flags.find((f) => f.code === "partial_gamer"), undefined);
+  // not a full solve → genuine_arc=false; the 40 partial points are discounted.
+  assert.equal(sc.talent.per_problem.p1.genuine_arc, false);
+  assert.equal(sc.talent.total_score, 40);
+  // score_frac contributes 0 (40-40 discounted); hardness/genuine/reach all 0
+  // for an unsolved problem ⇒ composite 0.
+  assert.equal(sc.talent.composite, 0, `composite ${sc.talent.composite} should discount the diverged partial`);
+});
+
+// (b) a FULL solve is never discounted — its points reach the composite.
+test("buildScorecard widened partial discount: full solve is NOT discounted (b)", () => {
+  const code = "class S { int solve(){ return 1; } }";
+  const { events, endMs } = typeOut("p1", 0, code);
+  events.push(submitEv("p1", endMs + 1000));
+  const sc = buildScorecard(
+    baseInput({
+      hardness: () => "med",
+      editorEvents: events,
+      submissions: [sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: code, created_at: tsAt(endMs + 1000) })],
+    })
+  );
+  // full solve: best_score==max_points ⇒ NOT a partial ⇒ not discounted.
+  assert.equal(sc.talent.total_score, 100);
+  assert.equal(sc.flags.find((f) => f.code === "partial_gamer"), undefined);
+  // score_frac = 100/100 = 1 ⇒ 55*1 contributes ⇒ composite well above 0.
+  assert.ok(sc.talent.composite >= 55, `composite ${sc.talent.composite} should credit the full solve`);
+});
+
+// (b) near-stub partial: discounted exactly ONCE (no double-count with the
+// widened path) and still emits the partial_gamer info flag.
+test("buildScorecard widened partial discount: near-stub discounted once, no double-count (b)", () => {
+  const stub = "public class Main {\n  public static void main(String[] a){\n    // Write your code here\n  }\n}\n";
+  const finalCode = "public class Main {\n  public static void main(String[] a){\n    System.out.println(1);\n  }\n}\n";
+  const events = [ins("p1", 1000, finalCode, 1, 1)];
+  const sc = buildScorecard(
+    baseInput({
+      editorEvents: events,
+      stubsByProblem: { p1: [stub] },
+      problemPoints: { p1: 100 },
+      submissions: [sub({ problem_id: "p1", verdict: "wrong_answer", score: 40, max_points: 100, source_code: finalCode, created_at: tsAt(1500) })],
+    })
+  );
+  // near-stub: the surfaced info flag is preserved.
+  assert.ok(sc.flags.find((f) => f.code === "partial_gamer" && f.severity === "info"));
+  // single discount: 40 partial points subtracted once → score_frac=(40-40)/100=0,
+  // and no other talent component fires (unsolved) → composite exactly 0. A
+  // double-count would clamp at the same 0 here, so verify the discount equals
+  // the partial total (not 2x) by checking total_score carries the raw 40.
+  assert.equal(sc.talent.total_score, 40);
+  assert.equal(sc.talent.composite, 0, `composite ${sc.talent.composite} should subtract the partial exactly once`);
 });
 
 test("buildScorecard honest reach (D13)", () => {
@@ -439,6 +523,91 @@ test("buildScorecard genuine arc + talent tier (strong on hard genuine solve)", 
   assert.equal(sc.talent.per_problem.p1.genuine_arc, true);
   assert.equal(sc.talent.n_solved_full, 1);
   assert.equal(sc.talent.hardest_tier, "hard");
+  assert.equal(sc.tiers.talent, "strong"); // gh=1 ⇒ strong (survives tightened gate)
+});
+
+// ---- (c) strong-talent gate floor (tightened 2026-06-20) -------------------
+// strong ⇔ gh>=1 || gm>=3 || honest_reach>0. A thin-strong (gm=2,gh=0,reach=0)
+// now falls to MODERATE (not below). Build N genuine MED full-solves on distinct
+// problems with a per-pid hardness map; optionally an honest-reach problem.
+function genuineMedSolve(pid, startMs) {
+  // typed-majority full solve with a prior wrong submit → genuine_arc med.
+  const code = `class S${pid} { int solve(){ /* ${pid} */ return 1; } }`;
+  const { events, endMs } = typeOut(pid, startMs, code);
+  events.push(runEv(pid, endMs + 1000));
+  events.push(submitEv(pid, endMs + 2000));
+  const submissions = [
+    sub({ _id: `${pid}w`, problem_id: pid, verdict: "wrong_answer", score: 40, max_points: 100, source_code: code, created_at: tsAt(endMs + 1500) }),
+    sub({ _id: `${pid}a`, problem_id: pid, verdict: "accepted", score: 100, max_points: 100, source_code: code, created_at: tsAt(endMs + 2500) }),
+  ];
+  return { events, submissions, endMs: endMs + 3000 };
+}
+function buildMedScorecard(nMed, { withReach = false } = {}) {
+  const medPids = [];
+  let events = [];
+  let submissions = [];
+  let t = 0;
+  const points = {};
+  for (let i = 0; i < nMed; i++) {
+    const pid = `m${i}`;
+    medPids.push(pid);
+    points[pid] = 100;
+    const g = genuineMedSolve(pid, t);
+    events = events.concat(g.events);
+    submissions = submissions.concat(g.submissions);
+    t = g.endMs + 1000;
+  }
+  if (withReach) {
+    // honest reach: unsolved, >=2 submits, active>=10min, paste<0.3 (typed).
+    const rp = "rp";
+    points[rp] = 100;
+    let rt = 0;
+    for (let i = 0; i < 40; i++) {
+      events.push(singleChar(rp, rt, "a", 1));
+      rt += 20000; // 20s gaps → active accrues past 10min
+    }
+    submissions.push(sub({ _id: "rp1", problem_id: rp, verdict: "wrong_answer", score: 50, max_points: 100, source_code: "code here long enough", created_at: tsAt(100000) }));
+    submissions.push(sub({ _id: "rp2", problem_id: rp, verdict: "wrong_answer", score: 60, max_points: 100, source_code: "code here longer", created_at: tsAt(700000) }));
+  }
+  const hardness = (pid) => (medPids.includes(pid) ? "med" : "easy");
+  return buildScorecard(
+    baseInput({
+      editorEvents: events,
+      submissions,
+      problemPoints: points,
+      stubsByProblem: {},
+      hardness,
+      maxTotal: 100 * Object.keys(points).length,
+    })
+  );
+}
+
+test("(c) talent gate: gm=2/gh=0/reach=0 ⇒ MODERATE (was strong)", () => {
+  const sc = buildMedScorecard(2);
+  assert.equal(sc.talent.n_medplus_solved, 2);
+  assert.equal(sc.talent.honest_reach.length, 0);
+  // 2 genuine med, no hard, no reach: demoted from old strong → moderate (not weak).
+  assert.equal(sc.tiers.talent, "moderate");
+});
+
+test("(c) talent gate: gm=3/gh=0/reach=0 ⇒ STRONG", () => {
+  const sc = buildMedScorecard(3);
+  assert.equal(sc.talent.n_medplus_solved, 3);
+  assert.equal(sc.tiers.talent, "strong");
+});
+
+test("(c) talent gate: gm=4/gh=0/reach=0 ⇒ STRONG (Anita-like survives)", () => {
+  // The KPR selected intern Anita (23cb204, gm=4) must NOT be demoted — the
+  // floor uses med>=3, not a hard-or-reach-only floor.
+  const sc = buildMedScorecard(4);
+  assert.equal(sc.talent.n_medplus_solved, 4);
+  assert.equal(sc.tiers.talent, "strong");
+});
+
+test("(c) talent gate: gm=2 + honest_reach>0 ⇒ STRONG", () => {
+  const sc = buildMedScorecard(2, { withReach: true });
+  assert.equal(sc.talent.n_medplus_solved, 2);
+  assert.ok(sc.talent.honest_reach.length > 0);
   assert.equal(sc.tiers.talent, "strong");
 });
 

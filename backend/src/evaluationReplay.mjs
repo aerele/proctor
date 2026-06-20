@@ -614,6 +614,202 @@ function mapToObj(map) {
   return o;
 }
 
+// BARE-TEMPLATE RECOGNIZER (foreign-paste suppression, 2026-06-20).
+//
+// Candidates paste the standard HackerRank language template (imports + I/O
+// scaffold + an empty function body, NO algorithm) into the proctor editor out
+// of HR muscle memory. The proctor's own author stubs / generic STARTERS don't
+// carry the full HR template, so that template load was misclassified as a
+// FOREIGN paste — pure desk-check NOISE carrying zero talent/integrity signal.
+//
+// A paste is a bare template iff (on the WHITESPACE-COLLAPSED text):
+//   - it STARTS WITH a canonical per-language preamble (the FIXED imports/IO
+//     header — never the variable per-problem function name), AND
+//   - it contains the expected scaffold markers (each marker GROUP must have at
+//     least one hit; groups make markers tolerant of scaffold variance — some
+//     templates use `class Solution` not `class Result`, some have no class), AND
+//   - the collapsed length is within `maxLen` (a LENGTH BOUND, not a truncated
+//     flag — real data shows untruncated templates at ~275-867 collapsed chars
+//     vs the 2000-char editor cap). The bound is what keeps a template+REAL
+//     SOLUTION paste (strictly longer) classified foreign.
+// Plus the proctor's OWN short generic STARTERS (collapsed, exact) are bare.
+//
+// SQL is special: a genuine SQL answer is a SELECT/query, NEVER a CREATE TABLE,
+// so the problem's own DDL + seed rows pasted into the query editor is always
+// boilerplate. Matched case-insensitively (collapseWs preserves case).
+const BARE_TEMPLATE_SIGNATURES = [
+  {
+    // JAVA_HR: imports → `class Result { ...Complete the 'X'... }` → public class Main.
+    preamble: "import java.io.*; import java.math.*; import java.security.*;",
+    markerGroups: [
+      ["class Result", "public class Main", "public class Solution"],
+      ["Write your code here", "Complete the", "return 0;"],
+    ],
+    maxLen: 1300,
+  },
+  {
+    // PY3_HR: shebang + stdlib imports → `# Complete the 'X'...` → def X → if __name__ main.
+    preamble: "#!/bin/python3 import math import os import random import re import sys",
+    markerGroups: [["if __name__", "def ", "fptr", "Complete the"]],
+    maxLen: 1000,
+  },
+  {
+    // JS_HR: 'use strict' + fs + stdin scaffold → readLine → function X → main.
+    preamble: "'use strict'; const fs = require('fs'); process.stdin.resume();",
+    markerGroups: [["process.stdin.on", "readLine", "inputString", "Complete the"]],
+    maxLen: 1300,
+  },
+  {
+    // CPP_BITS: bits/stdc++ + ltrim/rtrim decls → int X(){ Write your code here } → int main.
+    preamble: "#include <bits/stdc++.h> using namespace std;",
+    markerGroups: [["int main(", "ltrim", "Write your code here", "Complete the"]],
+    maxLen: 1300,
+  },
+];
+
+// SQL DDL/seed boilerplate: contains "create table" AND ("insert into" OR
+// "expected output"). Length is generous — schema + seed rows run long.
+const SQL_DDL_MAXLEN = 4000;
+
+// The proctor's own generic STARTERS (CodingWorkspace.tsx STARTERS), collapsed.
+// Loading one of these is a bare scaffold, never a foreign paste. Exact match
+// (these are short + fixed; substring would over-reach on generic comments).
+const PROCTOR_STARTERS_COLLAPSED = new Set([
+  "# Read from standard input, print the answer to standard output.",
+  "#include <bits/stdc++.h> using namespace std; int main() { // Read from stdin, print the answer to stdout. return 0; }",
+  "import java.util.*; public class Main { public static void main(String[] args) { // Read from System.in, print the answer to System.out. } }",
+  '// Read from stdin, print the answer to stdout. const input = require("fs").readFileSync(0, "utf8");',
+  "-- Write your SQL query below.",
+]);
+
+// Isolate the candidate's USER FUNCTION body region from a collapsed HR-template
+// paste, per language. This is the region the candidate fills with their
+// algorithm — distinct from (a) the fixed import/scaffold PREAMBLE and (b) the
+// fixed stdin/stdout I/O SCAFFOLD (which itself contains loops/calls to read
+// input and print output, and must NOT be mistaken for the candidate's work).
+//
+// The body is bounded:
+//   - START: the user function SIGNATURE (`def X(...):` / `int X(...) {` /
+//     `function X(...) {`), or the `// Write your code here` / `# Write your
+//     code here` placeholder if present.
+//   - END: the I/O scaffold boundary for that language (`if __name__`,
+//     `public class Main`, `int main(`, `main()`). If the paste was TRUNCATED
+//     before that boundary, the visible tail after the signature is the body.
+//
+// Returns the body substring, or null when the body region is not visible yet
+// (signature/placeholder truncated away) — callers then keep the paste bare,
+// because a preview that shows only scaffold carries no algorithm to judge.
+function bareTemplateUserBody(c) {
+  // PY3_HR: between `def X(...):` and `if __name__`.
+  if (c.startsWith("#!/bin/python3")) {
+    const m = c.match(/def\s+\w+\s*\([^)]*\)\s*:/);
+    if (!m) return null;
+    let rest = c.slice(m.index + m[0].length);
+    const k = rest.indexOf("if __name__");
+    if (k >= 0) rest = rest.slice(0, k);
+    return rest;
+  }
+  // JAVA_HR: inside `class Result`, before `public class Main` (the I/O class).
+  if (c.startsWith("import java.io.")) {
+    const end = c.indexOf("public class Main");
+    const region = end >= 0 ? c.slice(0, end) : c;
+    const bi = region.indexOf("// Write your code here");
+    if (bi >= 0) return region.slice(bi + "// Write your code here".length);
+    const sigs = [...region.matchAll(/\)\s*\{/g)];
+    if (!sigs.length) return null;
+    const last = sigs[sigs.length - 1];
+    return region.slice(last.index + last[0].length);
+  }
+  // CPP_BITS: the user fn body, before `int main(`.
+  if (c.startsWith("#include <bits/stdc++.h>")) {
+    const end = c.indexOf("int main(");
+    const region = end >= 0 ? c.slice(0, end) : c;
+    const bi = region.indexOf("// Write your code here");
+    if (bi >= 0) return region.slice(bi + "// Write your code here".length);
+    const sigs = [...region.matchAll(/\)\s*\{/g)];
+    if (!sigs.length) return null;
+    const last = sigs[sigs.length - 1];
+    return region.slice(last.index + last[0].length);
+  }
+  // JS_HR: the user `function X(...) {` (after the `Complete the` doc), before main().
+  if (c.startsWith("'use strict'")) {
+    const cm = c.indexOf("Complete the");
+    if (cm < 0) return null;
+    const rest = c.slice(cm);
+    const fm = rest.match(/function\s+\w+\s*\([^)]*\)\s*\{/);
+    if (!fm) return null;
+    let body = rest.slice(fm.index + fm[0].length);
+    const k = body.search(/\}\s*main\s*\(/);
+    if (k >= 0) body = body.slice(0, k);
+    return body;
+  }
+  return null;
+}
+
+// BODY-EMPTINESS GATE: true iff the candidate's user function body contains a
+// real problem-specific algorithm (loops, assignments, conditionals, multiple
+// statements) BEYOND the stub placeholder + trivial `return 0` / `return` /
+// `pass`. A bare HR template's body is just the placeholder + a trivial return;
+// a retained-scaffold external/AI solution fills it with algorithm. When the
+// body region is not visible (truncated preview), this returns false so the
+// paste stays bare (conservative re: the desk-check cleanup — a missed
+// suppression only re-adds a NOTE, whereas a wrong suppression masks a paste).
+function bareTemplateBodyHasAlgorithm(c) {
+  const body = bareTemplateUserBody(c);
+  if (body == null) return false;
+  // Strip the stub placeholder, the trivial return/pass, and pure punctuation.
+  const residue = body
+    .replace(/\/\/\s*Write your code here/gi, "")
+    .replace(/#\s*Write your code here/gi, "")
+    .replace(/\breturn\s+0\b/g, "")
+    .replace(/\breturn\b/g, "")
+    .replace(/\bpass\b/g, "")
+    .replace(/[{}();,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!residue) return false; // genuine empty stub body → still bare.
+  // A loop / conditional is unambiguous algorithm.
+  if (/\b(for|while|if|elif|else)\b/.test(residue)) return true;
+  // An assignment (= not part of ==/<=/>=/!=) is real work.
+  if (/[A-Za-z_)\]]\s*=\s*[^=]/.test(residue)) return true;
+  // Otherwise: several non-trivial tokens left over ⇒ real statements, not stub.
+  if (residue.split(" ").filter(Boolean).length >= 4) return true;
+  return false;
+}
+
+// True iff `collapsed` (already whitespace-collapsed) is a bare language template
+// (scaffolding only, no problem-specific algorithm). Exported so the metrics
+// layer and tests share the one recognizer. See BARE_TEMPLATE_SIGNATURES.
+export function isBareTemplate(collapsed) {
+  if (!collapsed) return false;
+  const c = String(collapsed);
+  if (PROCTOR_STARTERS_COLLAPSED.has(c)) return true;
+  for (const sig of BARE_TEMPLATE_SIGNATURES) {
+    if (!c.startsWith(sig.preamble)) continue;
+    if (c.length > sig.maxLen) continue;
+    const allGroupsHit = sig.markerGroups.every((group) => group.some((m) => c.includes(m)));
+    if (!allGroupsHit) continue;
+    // Preamble + scaffold markers match — but a real external/AI solution can
+    // RETAIN the scaffold and fill the user function body with an algorithm
+    // while staying under maxLen (even shorter than the full bare template), so
+    // length alone cannot separate them. Require the user function body to be a
+    // bare stub: if it holds a real algorithm, this is a foreign paste, not a
+    // bare template.
+    if (bareTemplateBodyHasAlgorithm(c)) return false;
+    return true;
+  }
+  // SQL DDL/seed boilerplate (case-insensitive; genuine SQL answers are queries).
+  const lc = c.toLowerCase();
+  if (
+    c.length <= SQL_DDL_MAXLEN &&
+    lc.includes("create table") &&
+    (lc.includes("insert into") || lc.includes("expected output"))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 // Foreign iff collapsed text (≥30) is NOT a substring of:
 //  - the current problem's pre-change content
 //  - any other problem's current content (lazily collapsed + cached)
@@ -623,6 +819,10 @@ function mapToObj(map) {
 function isForeign(text, beforeContent, curSt, allProblems, selfHistory, collapsedStubs, collapsedExtraSelf) {
   const c = collapseWs(text);
   if (c.length < REPLAY.MIN_FOREIGN_PASTE_LEN) return false;
+  // A bare language template (HR muscle-memory paste) carries zero talent /
+  // integrity signal — suppress it before the substring checks. The maxLen bound
+  // inside isBareTemplate keeps a template+real-solution paste (longer) foreign.
+  if (isBareTemplate(c)) return false;
   if (collapseWs(beforeContent).includes(c)) return false;
   for (const [, st] of allProblems) {
     if (st === curSt) continue;
