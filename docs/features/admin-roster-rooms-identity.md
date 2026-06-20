@@ -167,7 +167,7 @@ While a roster is active, candidate login **requires** a roster match — the se
 
 ![Candidate — "Is this you?" confirm card with masked email](../assets/s2-verify-05-confirm-card.png)
 
-**Person path (server-resolved identity).** For a person contest the candidate just types their ID; the server resolves it against the *contest* roster (`resolvePersonRosterIdentity` in `handler.mjs` → `findContestRosterEntries`):
+**Person path (server-resolved identity).** For a person contest the candidate just types their ID; the server resolves it against the *contest* roster (`resolvePersonRosterIdentity` in `backend/src/routes/session.mjs` → `findContestRosterEntries`):
 
 - 0 matches → `403 not_on_roster`.
 - 1 match → that person.

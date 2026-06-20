@@ -12,7 +12,7 @@ The **Contests** and **Templates** tabs are where an admin defines and runs an e
 | --- | --- | --- |
 | Templates tab | `frontend/src/admin/TemplatesPanel.tsx`, `frontend/src/admin/templateForm.ts` | `backend/src/templates.mjs`, route bodies in `backend/src/handler.mjs` |
 | Contests tab + detail | `frontend/src/admin/ContestsPanel.tsx`, `frontend/src/admin/contestAdmin.ts` | `backend/src/contests.mjs`, `backend/src/contestProblems.mjs`, route bodies in `backend/src/handler.mjs` |
-| Global contest scope picker, `?contest=` routing, access-code landing | `frontend/src/App.tsx` (`ContestScopePicker`, `AccessCodeLanding`) | `backend/src/contests.mjs` (`resolveAccessCode`) |
+| Global contest scope picker, `?contest=` routing, access-code landing | `frontend/src/admin/views/ContestScopePicker.tsx`; `frontend/src/candidate/CandidateRouter.tsx` + `frontend/src/candidate/AccessCodeLanding.tsx` | `backend/src/routes/public.mjs` (`resolveAccessCode`, with the helper in `backend/src/contests.mjs`) |
 | Live-reference / live-save guards | `frontend/src/admin/saveGuard.ts`, `frontend/src/admin/ProblemBank.tsx` | `backend/src/handler.mjs` (`enforceContestProblemsEditRules`, `adminSaveProblem`, `adminDeleteProblem`), `backend/src/contestProblems.mjs` (`findProblemReferences`) |
 
 > **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central request dispatch table; the contest and template route bodies live in `backend/src/routes/adminContests.mjs` and `backend/src/routes/adminTemplates.mjs` (with the domain logic in `backend/src/contests.mjs` + `backend/src/templates.mjs`), and shared helpers in `lib/*.mjs` + `config.mjs`. Routes are cited by HTTP path, which is stable regardless of which module holds the body.
@@ -76,7 +76,7 @@ Saving shows a confirmation message and returns you to the list:
 
 ### Instantiation = snapshot copy
 
-A template is **not** linked live to the contests it spawns. On instantiate (`instantiateTemplatePayload` in `handler.mjs`), the template's `problems[]` and every `defaults.*` field are **snapshot-copied onto the contest doc as the contest's own fields**. Editing a template afterward changes nothing in already-created contests. The contest keeps `template_slug` only as **display-only provenance** (it cannot be edited; the backend rejects attempts). Instantiation re-validates that every referenced problem exists and is **published right now** (`requirePublishedProblems`; otherwise `400 template_problems_unavailable`).
+A template is **not** linked live to the contests it spawns. On instantiate (`instantiateTemplatePayload` in `backend/src/routes/adminContests.mjs`), the template's `problems[]` and every `defaults.*` field are **snapshot-copied onto the contest doc as the contest's own fields**. Editing a template afterward changes nothing in already-created contests. The contest keeps `template_slug` only as **display-only provenance** (it cannot be edited; the backend rejects attempts). Instantiation re-validates that every referenced problem exists and is **published right now** (`requirePublishedProblems`; otherwise `400 template_problems_unavailable`).
 
 There are additional template endpoints wired in the handler — `template-archive` and `template-clone` (`POST /api/admin/template-archive`, `POST /api/admin/template-clone`) — but the current Templates UI performs archive-as-list-filter and duplicate via the create path rather than calling clone, so those endpoints are not exercised by this tab *(unverified that the UI ever calls them)*.
 
@@ -239,7 +239,7 @@ On top of the server guards, the Problem Bank UI adds a client-side **warn-on-sa
 
 ### Scope picker (scopes every admin screen)
 
-The global contest scope lives **top-right of the admin nav header** (`ContestScopePicker` in `App.tsx`; the 2026-06-12 nav redesign compacted the old below-nav selector bar into the header — it scopes every screen, so it sits above them all). It is a single dropdown — `All contests` plus every contest (`name (slug) — status`, `· legacy` on the synth row) — with a **Clear** button. Selecting a contest scopes Live stats (including the exam-time card), Sessions, Alerts, IP report, Attendance, Results, Review and Recordings to that contest's `contest_slug`; the **People** tab is cross-round by design and ignores the selector.
+The global contest scope lives **top-right of the admin nav header** (`ContestScopePicker` in `frontend/src/admin/views/ContestScopePicker.tsx`; the 2026-06-12 nav redesign compacted the old below-nav selector bar into the header — it scopes every screen, so it sits above them all). It is a single dropdown — `All contests` plus every contest (`name (slug) — status`, `· legacy` on the synth row) — with a **Clear** button. Selecting a contest scopes Live stats (including the exam-time card), Sessions, Alerts, IP report, Attendance, Results, Review and Recordings to that contest's `contest_slug`; the **People** tab is cross-round by design and ignores the selector.
 
 - The selection is **per browser tab**: it is written to this tab's URL `?contest=<slug>` via `history.replaceState`, so a reload or duplicated tab keeps its scope and two tabs run two parallel drives.
 - An initial `?contest=` URL param always wins; with no param, a single open contest auto-selects (else `All contests`) — `defaultContestSelection`.
@@ -247,7 +247,7 @@ The global contest scope lives **top-right of the admin nav header** (`ContestSc
 
 ### `?contest=` candidate routing + access-code landing
 
-On the candidate side (`App.tsx`):
+On the candidate side (`frontend/src/candidate/CandidateRouter.tsx`):
 
 - **`?contest=<slug>`** pins the student app to that contest and fetches its exam-config (`GET` contest exam-config). A present-but-bad param shows the access-code landing page; an absent param keeps the legacy flow.
 - The **access-code landing page** (`AccessCodeLanding`) is the bare entry for lab machines: the candidate types the 6-character test code, which resolves via the public, rate-limited `POST /api/access-code` (`resolveAccessCode`) and redirects to the pinned `?contest=` URL. Codes resolve **only open** contests — a draft/archived/unknown code is indistinguishable (no contest enumeration).

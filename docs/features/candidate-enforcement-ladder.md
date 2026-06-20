@@ -33,7 +33,7 @@ backend routes. A developer should start here:
 | Switch-away debounce reducer (pure) | `frontend/src/shell/switchAway.ts` |
 | React glue: tick, POST, persistence | `frontend/src/shell/useEnforcement.ts` |
 | Takeover overlay UI | `frontend/src/shell/EnforcementOverlay.tsx` |
-| Candidate unlock-code entry panel | `UnlockCodePanel` in `frontend/src/App.tsx` |
+| Candidate unlock-code entry panel | `UnlockCodePanel` in `frontend/src/candidate/panels/UnlockCodePanel.tsx` |
 | Wiring + locked screen + admin settings UI | `frontend/src/App.tsx` (`StudentApp`, `AdminSettings`) |
 | Backend violation/unlock routes | `backend/src/handler.mjs` |
 | Invigilator unlock / unlock-code / exempt | `backend/src/routes/invigilator.mjs` |
@@ -50,29 +50,32 @@ backend routes. A developer should start here:
 
 | Route | Purpose |
 |-------|---------|
-| `POST /api/session/enforcement-violation` | Candidate reports the L1 ladder tripped; **the server** decides lock vs alert-only (`sessionEnforcementViolation` in `handler.mjs`). |
-| `POST /api/session/unlock-gate` | Candidate releases an enforcement lock with the room's 6-digit unlock code (`sessionUnlockGate` in `handler.mjs`). |
-| `POST /api/invigilator/unlock-code` | Mint / re-display / regenerate the room's enforcement-unlock code (`invigilatorUnlockCode` in `routes/invigilator.mjs`). |
+| `POST /api/session/enforcement-violation` | Candidate reports the L1 ladder tripped; **the server** decides lock vs alert-only (`sessionEnforcementViolation` in `backend/src/routes/sessionGates.mjs`, applying the domain logic in `backend/src/enforcement.mjs`). |
+| `POST /api/session/unlock-gate` | Candidate releases an enforcement lock with the room's 6-digit unlock code (`sessionUnlockGate` in `backend/src/routes/sessionGates.mjs`). |
+| `POST /api/invigilator/unlock-code` | Mint / re-display / regenerate the room's enforcement-unlock code (`invigilatorUnlockCode` in `backend/src/routes/invigilator.mjs`). |
 | `POST /api/invigilator/unlock` | Release one student's enforcement lock from the room dashboard (`invigilatorUnlock`). |
 | `POST /api/invigilator/exempt` | Toggle a per-student enforcement exemption (`invigilatorExempt`). |
-| `POST /api/admin/session-action` | Admin `unlock` / `exempt` actions (`applySessionAction` in `handler.mjs`). |
+| `POST /api/admin/session-action` | Admin `unlock` / `exempt` actions (`applySessionAction` in `backend/src/routes/adminSessions.mjs`). |
 
 ## Configuration (admin)
 
-An admin sets the ladder's three knobs under the proctor **Settings** tab
-(`AdminSettings` in `App.tsx`). They ride exam-config / session start / heartbeat
-so changes apply to a live session. Every value is NaN-guarded server-side
-(`enforcementConfig` in `handler.mjs`), so a corrupt or blank setting falls back
-to its default rather than stranding candidates.
+An admin sets the ladder's three knobs per contest/template, in the contest +
+template authoring forms (`frontend/src/admin/templateForm.ts` +
+`frontend/src/admin/ContestsPanel.tsx`). They ride exam-config / session start /
+heartbeat so changes apply to a live session. Every value is normalized +
+NaN-guarded server-side (`normalizeTemplateEnforcement` in
+`backend/src/templates.mjs`; resolved at runtime via `backend/src/enforcement.mjs`),
+so a corrupt or blank setting falls back to its default rather than stranding
+candidates.
 
 | Setting (admin label) | Field | Default | Meaning |
 |-----------------------|-------|---------|---------|
 | Fullscreen re-entry countdown (seconds, blank = 20) | `fullscreen_reentry_seconds` | **20** | L1 countdown to type the phrase and re-enter fullscreen. Minimum 1. |
 | Fullscreen exit limit (exits beyond this lock, blank = 2) | `fullscreen_exit_limit` | **2** | Exits **beyond** this count escalate straight to L2. `0` = the first exit escalates immediately. |
-| Enforcement mode | `enforcement_mode` | **`block`** | `block` = countdown expiry / exit limit **locks** the test. `alert_first` = raise a critical alert, **never** auto-lock. |
+| Enforcement mode | `mode` | **`block`** | `block` = countdown expiry / exit limit **locks** the test. `alert_first` = raise a critical alert, **never** auto-lock. |
 
-The defaults are also the client fallbacks in `App.tsx` (`reentrySeconds ?? 20`,
-`exitLimit ?? 2`, `mode ?? "block"`), so the out-of-the-box behaviour is
+The defaults are also the client fallbacks in `frontend/src/candidate/StudentApp.tsx` (`fullscreen_reentry_seconds ?? 20`,
+`fullscreen_exit_limit ?? 2`, `mode ?? "block"`), so the out-of-the-box behaviour is
 **block mode, 20-second countdown, lock after more than 2 exits**.
 
 ## L1 — blocking (self-serve resume)
@@ -144,7 +147,7 @@ Key blocking-phase behaviours (all in `enforcement.ts`):
 
 On either trigger the client POSTs `/api/session/enforcement-violation`. **The
 server decides the consequence from its own settings, never the client**
-(`sessionEnforcementViolation` → `applyEnforcementViolation` in `handler.mjs`):
+(`sessionEnforcementViolation` in `backend/src/routes/sessionGates.mjs` → `applyEnforcementViolation` in `backend/src/enforcement.mjs`):
 
 - raises a critical `fullscreen_enforcement` alert (admin-configurable display;
   disabling the alert never disables the lock — policy lives in
@@ -171,7 +174,7 @@ The same locked screen reached via L1 countdown expiry during a wave-2 run:
 The candidate POST is only the **fast path**. A client that blocks that single
 URL or clears its localStorage ladder used to neutralise the hard block. The
 server now **derives the same violations from evidence it already receives**
-(`reconcileFullscreenEnforcement` in `handler.mjs`): it counts unexpected
+(`reconcileFullscreenEnforcement` in `backend/src/enforcement.mjs`): it counts unexpected
 `fullscreen_exit` events and uses the heartbeat's `fullscreen` field plus a
 re-entry grace window (`ENFORCEMENT_COUNTDOWN_GRACE_SECONDS = 15`) to close the
 countdown server-side. Exempt sessions are skipped; `alert_first` mode alerts
@@ -183,7 +186,7 @@ There are three release paths. All of them reset the exit ladder
 (`fullscreen_exit_count` / `fullscreen_out_since` → 0/null) so a single later
 accident is an L1 episode again, not an instant re-lock.
 
-**1. Candidate enters the room's unlock code** (`UnlockCodePanel` in `App.tsx` →
+**1. Candidate enters the room's unlock code** (`UnlockCodePanel` in `candidate/panels/UnlockCodePanel.tsx` →
 `POST /api/session/unlock-gate`). The locked screen shows a **"Have the unlock
 code?"** panel with a 6-digit numeric entry. The room proctor reads the candidate
 a code; on a match the session returns to `active`.
@@ -212,7 +215,7 @@ admin-released — an invigilator cannot undo a deliberate admin lock
 (`not_enforcement_locked`).
 
 **3. Admin unlocks** from the console (`POST /api/admin/session-action` with
-`action: "unlock"`, `applySessionAction` in `handler.mjs`).
+`action: "unlock"`, `applySessionAction` in `backend/src/routes/adminSessions.mjs`).
 
 After any release, the candidate client resets to a fresh ladder
 (`useEnforcement.ts` "lock was SERVED" effect). The screenshot below shows a
@@ -267,7 +270,7 @@ an admin or invigilator can **exempt one student** from `fullscreen` and/or
   (`sessionEnforcementViolation` returns `{ exempt: true }`).
 
 **Default: exemptions are OFF.** New sessions start with
-`enforcement_exemptions: {}` (`handler.mjs`); a candidate is exempt only after an
+`enforcement_exemptions: {}` (sanitized by `sanitizeExemptions` in `backend/src/enforcement.mjs`); a candidate is exempt only after an
 explicit admin/invigilator toggle.
 
 ## Switch-away debounce (F5.4) — notify, do not block
@@ -297,7 +300,7 @@ the raw events.
 ## Alert visibility default
 
 The `fullscreen_enforcement` alert defaults to `enabled`, `severity: "critical"`,
-and **`show_to_invigilator: false`** (`DEFAULT_ALERT_SETTINGS` in `handler.mjs`).
+and **`show_to_invigilator: false`** (`DEFAULT_PROCTOR_ALERT_SETTINGS` in `backend/src/proctorAlerts.mjs`).
 So out of the box the enforcement alert is raised and visible in the **admin**
 console but is **not** pushed into the invigilator portal's selective alert feed
 unless an admin shares that type. (Invigilators still see the per-student lock

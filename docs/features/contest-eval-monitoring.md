@@ -29,9 +29,9 @@ Because both sources POST to the same ingest, the admin Live alerts console show
 
 ## The shared alert contract (ingest)
 
-Both the poller and the platform POST to **`POST /api/alerts`** with an `x-api-key` header that must equal the backend env **`ALERTS_INGEST_API_KEY`** (gate: `requireApiKey` in `handler.mjs`).
+Both the poller and the platform POST to **`POST /api/alerts`** with an `x-api-key` header that must equal the backend env **`ALERTS_INGEST_API_KEY`** (gate: `requireApiKey` in `backend/src/lib/auth.mjs`).
 
-Required-on-ingest fields (enforced by `normalizeAlert` in `handler.mjs`, mirrored client-side by `alerts.validate_alert`):
+Required-on-ingest fields (enforced by `normalizeAlert` in `backend/src/proctorAlerts.mjs`, mirrored client-side by `alerts.validate_alert`):
 
 | Field | Notes |
 |---|---|
@@ -138,7 +138,7 @@ How it works (`analyze_recording`):
 3. **Detect absent runs** — continuous frames scoring below `--threshold` (default **0.6**) for longer than `--min-gap-seconds`.
 4. **Build + POST one `tab_away` alert per run** — `source: proctor`, `severity: warning`, with the gap start mapped to a wall-clock offset, structured `data` (offsets, per-frame scores), a `video_key`, and a `#t=<seconds>` **W3C Media Fragment** deep-link to the recording at the gap start.
 
-**Threshold source of truth.** The minimum-gap threshold's source of truth is the **admin console** (Settings → Proctor alert types → `tab_away` → threshold seconds), default **12**, round-tripped as `proctor.tab_away.threshold_seconds` through `GET`/`POST /api/admin/alert-settings` (`adminGetAlertSettings` / `adminSaveAlertSettings` in `handler.mjs`; default constant `TAB_AWAY_DEFAULT_THRESHOLD_SECONDS`). Precedence: explicit `--min-gap-seconds` → live admin-console value (when `--admin-password` + `--api-base` given) → built-in default `12`.
+**Threshold source of truth.** The minimum-gap threshold's source of truth is the **admin console** (Settings → Proctor alert types → `tab_away` → threshold seconds), default **12**, round-tripped as `proctor.tab_away.threshold_seconds` through `GET`/`POST /api/admin/alert-settings` (`adminGetAlertSettings` / `adminSaveAlertSettings` in `backend/src/routes/alerts.mjs`; default constant `TAB_AWAY_DEFAULT_THRESHOLD_SECONDS`). Precedence: explicit `--min-gap-seconds` → live admin-console value (when `--admin-password` + `--api-base` given) → built-in default `12`.
 
 > **Held for real-world accuracy tuning.** The detector requires a real `--logo` crop (a tight PNG of the HackerRank wordmark) and a real recording to tune `--region`/`--threshold`/`--interval`. The code raises a clear error if `--logo` is not provided. The synthetic self-test (`test_tab_away.py`) proves the pipeline + contract, not real-world accuracy. See `monitoring/tab-away-README.md`.
 

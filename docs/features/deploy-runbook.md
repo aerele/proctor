@@ -246,7 +246,7 @@ The split is load-bearing (Wave-7 review finding): export zips are the recovery 
 
 ## 6. Optional video-merge worker
 
-**Source:** [`video-worker/deploy-gcp.sh`](../../video-worker/deploy-gcp.sh) · worker code `video-worker/src/server.mjs`; the backend deep-links to its output via `merged_video_key` in `handler.mjs`.
+**Source:** [`video-worker/deploy-gcp.sh`](../../video-worker/deploy-gcp.sh) · worker code `video-worker/src/server.mjs`; the backend deep-links to its output via the session doc's `merged_video_key` field.
 
 The worker is **optional**. It stitches a session's 30-second screen chunks into one playable review video, remuxes with `ffmpeg`, and writes `merged_video_key` (+ `merged_at`) back onto the session doc — which is what the admin recording-review player and "sure-shot" alert deep-links point to.
 
@@ -259,7 +259,7 @@ It creates `DEST_BUCKET` if missing, applies the **same** `backend/gcs-lifecycle
 
 ### The cross-bucket `video_key` 404 caveat
 
-Documented in [`video-worker/README.md`](../../video-worker/README.md) and reflected in `handler.mjs` (`sureShotVideoKey` returns `session.merged_video_key || null`):
+Documented in [`video-worker/README.md`](../../video-worker/README.md) and reflected in the backend's alert video-key resolver (`sureShotVideoKey` in `backend/src/proctorAlerts.mjs` returns `session.merged_video_key || null`):
 
 > If `DEST_BUCKET` ≠ `EVIDENCE_BUCKET`, the backend signs the alert `video_key` **against the evidence bucket**, so a deep-link to a merged video that actually lives in the review-video bucket can **404**.
 
