@@ -365,7 +365,7 @@ function foreignPasteCount(card) {
 // Does this card pass the GENUINE-ORIGIN profile gate (independent of submit
 // order)? (a) typed it themselves (paste_ratio < 0.12), (b) >=2 genuine solve
 // arcs, (c) NO foreign paste. The submit-FIRST requirement is applied per-group
-// by the caller. Mirrors the approved origin-rescue plan + junk/origin-analysis.mjs.
+// by the caller. Mirrors the approved origin-rescue plan.
 function isGenuineOriginProfile(card) {
   const pasteRatio = Number(card && card.integrity && card.integrity.paste_ratio) || 0;
   return pasteRatio < 0.12 && genuineArcCount(card) >= 2 && foreignPasteCount(card) === 0;

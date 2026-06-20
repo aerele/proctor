@@ -1,4 +1,4 @@
-// frontend/src/admin/views/settings.tsx
+// frontend/src/admin/views/Settings.tsx
 // Admin Settings sub-sections (candidate roster, proctor alert types, contest-eval
 // alert types reference, review roster), extracted verbatim from App.tsx (F3).
 import { Fragment, useEffect, useMemo, useState } from "react";

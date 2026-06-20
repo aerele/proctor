@@ -38,7 +38,7 @@ import { ContestScopePicker } from "./views/ContestScopePicker";
 import { ExamTimeCard, type ExamTimeCardScope } from "./views/ExamTimeCard";
 import { ReviewSessionCard } from "./views/ReviewSessionCard";
 import { AlertsConsole } from "./views/AlertsConsole";
-import { CandidateRosterSection, ProctorAlertTypesSection, ContestEvalAlertTypesSection, ReviewRosterSection } from "./views/settings";
+import { CandidateRosterSection, ProctorAlertTypesSection, ContestEvalAlertTypesSection, ReviewRosterSection } from "./views/Settings";
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;

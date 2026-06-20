@@ -8,7 +8,7 @@
 // quote (') so the spreadsheet treats it as literal text, while still applying
 // RFC-4180 quoting for embedded commas / quotes / newlines.
 import { describe, it, expect } from "vitest";
-import { csvField } from "./App";
+import { csvField } from "./csvField";
 
 describe("csvField — formula-injection neutralization (M8)", () => {
   it("prefixes a leading = with a single quote", () => {

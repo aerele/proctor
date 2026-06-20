@@ -1,5 +1,4 @@
 import { InvigilatorApp } from "./InvigilatorApp";
-import { csvField } from "./csvField";
 import { CandidateRouter } from "./candidate/CandidateRouter";
 import { AdminApp } from "./admin/AdminApp";
 
@@ -19,8 +18,4 @@ export function App() {
   const isAdmin = window.location.pathname.startsWith("/admin");
   return isAdmin ? <AdminApp /> : <CandidateRouter />;
 }
-
-// csvField (CSV-injection neutralizer, M8) lives in ./csvField; re-exported here
-// for the existing csvField.test.ts which imports it from "./App".
-export { csvField };
 
