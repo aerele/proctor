@@ -80,7 +80,7 @@ function contestRef(slug) {
 
 // ---- slugify (F8 decision 1 / F9 §2.1) --------------------------------------
 // lowercase, trim, whitespace→"-", strip non [a-z0-9-]; runs of dashes collapse
-// and edge dashes drop so "KEC June 2026 — Round 1" → "kec-june-2026-round-1"
+// and edge dashes drop so "Acme College — Round 1" → "acme-college-round-1"
 // (the em-dash strips clean instead of leaving "---"). Empty result = invalid
 // name; collisions get the -2/-3… suffix at create time.
 export function slugify(name) {

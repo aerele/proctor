@@ -553,7 +553,7 @@ test("legacy upload (no contest) writes EXACTLY today's docs: no persons, no col
   }
 });
 
-// ---- F-B (KPR 2026-06-12): the roster-clear typed-confirm gate -----------------
+// ---- F-B (real-data hardening): the roster-clear typed-confirm gate -----------------
 // Clearing the roster of a LIVE contest that has sessions/enrollments flips
 // the identity keying for later joins (person-keyed → anonymous) and splits
 // Results. It now requires the typed contest slug (confirm_clear). A draft
@@ -614,7 +614,7 @@ test("F-B roster clear: contest with NO sessions/enrollments clears without conf
   assert.equal(firestore._collections.get("ic_enrollments")?.size ?? 0, 0);
 });
 
-// ---- F-D (KPR 2026-06-12): unique-ID shape warnings (warn-only) ----------------
+// ---- F-D (real-data hardening): unique-ID shape warnings (warn-only) ----------------
 // The incident roster's unique-ID column carried HackerRank usernames and
 // "_KPRIET"-suffixed roll numbers while students were told to type their
 // "Roll Number" — every lookup 403'd. The upload now WARNS (never blocks)

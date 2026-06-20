@@ -61,10 +61,11 @@ export function isHireBucket(bucket) {
 
 // A PARTICIPANT is a scorecard with real evidence — at least one editor event OR
 // one submission. Zero-evidence rows (roster/enrollment identities whose
-// sessions never linked, e.g. the KPR mid-contest roster-clear phantoms: 61 of
-// 120 live KPR docs are composite-0 clean placeholders) are NOT participants and
-// are excluded from every ranked view. This is the availability principle at the
-// cohort level: no data ⇒ not a candidate to rank, never a fabricated "clean 0".
+// sessions never linked — e.g. a mid-contest roster clear can leave many
+// composite-0 clean placeholder docs that are not real participants) are NOT
+// participants and are excluded from every ranked view. This is the availability
+// principle at the cohort level: no data ⇒ not a candidate to rank, never a
+// fabricated "clean 0".
 export function isParticipant(card) {
   const c = (card && card.coverage) || {};
   return (c.editor_events_n || 0) > 0 || (c.submissions_n || 0) > 0;

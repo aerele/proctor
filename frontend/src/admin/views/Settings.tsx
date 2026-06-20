@@ -34,7 +34,7 @@ export function CandidateRosterSection({ password, contestSlug }: { password: st
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  // F-D (KPR 2026-06-12): warn-only unique-ID shape warnings from the upload.
+  // F-D (real-data hardening): warn-only unique-ID shape warnings from the upload.
   const [idWarnings, setIdWarnings] = useState<string[]>([]);
   // S-C panels: the college map-or-confirm gate + per-college decisions
   // ("" = create new, otherwise the existing college_norm to map onto), and
@@ -168,7 +168,7 @@ export function CandidateRosterSection({ password, contestSlug }: { password: st
     setMessage("");
     setError("");
     try {
-      // F-B (KPR 2026-06-12): a LIVE contest with sessions/enrollments refuses
+      // F-B (real-data hardening): a LIVE contest with sessions/enrollments refuses
       // the clear until the admin types the contest slug — the server's 409
       // carries the exact consequence, shown verbatim in the dialog.
       let response: { ok: boolean } | null;
@@ -429,7 +429,7 @@ Type the contest slug "${contest}" to clear the roster anyway:`);
           ) : null}
 
           {message ? <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{message}</div> : null}
-          {/* F-D (KPR 2026-06-12): warn-only ID-shape warnings — loud, never blocking. */}
+          {/* F-D (real-data hardening): warn-only ID-shape warnings — loud, never blocking. */}
           {idWarnings.length > 0 ? (
             <div className="mt-4 space-y-2 rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
               <p className="font-semibold"><AlertTriangle size={16} className="mr-2 inline" />Check the unique-ID column before the exam:</p>

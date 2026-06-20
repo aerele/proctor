@@ -593,7 +593,7 @@ test("start naming an unknown contest → 400 unknown_contest; a draft person co
   assert.equal(draft.body.error, "contest_not_open");
 });
 
-// ---- F-C (KPR 2026-06-12): enrollment-spine fallback after a roster clear ------
+// ---- F-C (real-data hardening): enrollment-spine fallback after a roster clear ------
 // The incident: roster cleared mid-contest → every later join keyed
 // anonymously even when the typed id matched a surviving enrolled person.
 // With the fix, roster-meta-absent + enrollment spine present → EXACT

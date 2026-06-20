@@ -108,7 +108,7 @@ describe("buildResultsCsv", () => {
   it("header + per-problem title columns + integrity + selection + eval; rows in order", () => {
     const csv = buildResultsCsv(ROWS, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
     const lines = csv.split("\n");
-    // P1: the 6 eval columns sit after selection_status, before the KPR-2026
+    // P1: the 6 eval columns sit after selection_status, before the
     // trailing "unmatched" column — EXACT order/headers match the backend CSV.
     expect(lines[0]).toBe("rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,talent_tier,talent_composite,integrity_tier,paste_pct,eval_flags,eval_one_line,unmatched");
     // Row "a" has no evaluation → the 6 eval cells are blank.
@@ -136,7 +136,7 @@ describe("buildResultsCsv", () => {
     expect(csv.split("\n")[1]).toBe("1,21CS001,Asha,KEC,130,80,0,0,0,none,none,,,,,,,");
   });
 
-  it("KPR 2026-06-12: unmatched rows export with the yes flag (+ eval cells)", () => {
+  it("unmatched rows export with the yes flag (+ eval cells)", () => {
     const rows = [row({
       person_id: "", username_norm: "23cs200", candidate_id: "23CS200", name: "Devan R K", college: "", total: 100, unmatched: true,
       evaluation: evaluation({ talent_tier: "weak", integrity_tier: "watch", composite: 12, paste_ratio: 0.05, flags_by_severity: { critical: 0, warning: 1, info: 0 }, one_line: "Thin signal." })
@@ -205,7 +205,7 @@ describe("evaluation threading + tier filters", () => {
   });
 });
 
-// ---- KPR 2026-06-12: unmatched identities --------------------------------------
+// ---- Real-data hardening: unmatched identities --------------------------------------
 
 describe("countUnmatched", () => {
   it("counts only rows flagged unmatched", () => {

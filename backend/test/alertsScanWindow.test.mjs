@@ -3,7 +3,7 @@
 //
 // Without an orderBy, Firestore returns the first `limit(n)` docs in DOC-ID
 // order, and the archived filter only runs in memory AFTERWARDS. A pile of
-// bulk-archived old alerts whose ids sort first (the real KEC pile:
+// bulk-archived old alerts whose ids sort first (a real archived pile,
 // `contest-eval:first_attempt_solve:*`) therefore fills the entire scan window
 // and live alerts NEVER reach the in-memory filter — the console shows zero.
 //
@@ -121,7 +121,7 @@ function makeRes() {
 }
 async function call(req) { const res = makeRes(); await api(req, res); return res; }
 
-// The real KEC pile: bulk-archived contest-eval alerts whose ids sort FIRST
+// A real archived pile: bulk-archived contest-eval alerts whose ids sort FIRST
 // alphabetically ("contest-eval:…" < "proctor:…"), enough to fill the whole
 // scan window on their own. No video_key, so no storage fake is needed.
 function seedArchivedPile(firestore) {

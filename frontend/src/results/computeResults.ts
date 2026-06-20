@@ -53,7 +53,7 @@ export type ResultRow = {
   selection_status: SelectionStatus;
   from_snapshot: boolean;
   room: string;
-  /** KPR 2026-06-12: a scoring identity NOT consumed by any enrollment (e.g.
+  /** Real-data hardening: a scoring identity NOT consumed by any enrollment (e.g.
    *  an anonymous post-roster-clear session). person_id is "" on these rows;
    *  scores come straight from submissions and the UI badges them loudly. */
   unmatched?: boolean;
@@ -75,7 +75,7 @@ export type ContestResultsResponse =
       selection_done_at: string | null;
       problems: ResultProblem[];
       rows: ResultRow[];
-      /** KPR 2026-06-12: count of unmatched submitter rows (absent on older backends). */
+      /** Real-data hardening: count of unmatched submitter rows (absent on older backends). */
       unmatched_count?: number;
       /** 2026-06-18 exam-eve: true when the contest has NO roster AND no
        *  enrollments — every identity is self-entered, so all rows land in the
@@ -86,7 +86,7 @@ export type ContestResultsResponse =
       generated_at: string;
     };
 
-// KPR 2026-06-12: the banner count — prefers the rows themselves so it works
+// Real-data hardening: the banner count — prefers the rows themselves so it works
 // against older backends that don't send unmatched_count.
 export function countUnmatched(rows: ResultRow[]): number {
   return rows.filter((row) => row.unmatched === true).length;
@@ -155,7 +155,7 @@ export function buildResultsCsv(rows: ResultRow[], problems: ResultProblem[]): s
     // P1 candidate-evaluation: SAME 6 columns/order as backend buildResultsCsv,
     // inserted after selection_status and before unmatched. Blank when null.
     "talent_tier", "talent_composite", "integrity_tier", "paste_pct", "eval_flags", "eval_one_line",
-    // KPR 2026-06-12: flagged in the export too — a hiring decision must never
+    // Real-data hardening: flagged in the export too — a hiring decision must never
     // mistake an unverified typed id for a roster-verified one.
     "unmatched"
   ].map(csvField).join(",");

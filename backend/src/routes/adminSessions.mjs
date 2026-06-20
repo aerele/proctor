@@ -283,7 +283,7 @@ async function adminSessionsList(req) {
       camera_chunk_count: Number(doc.camera_chunk_count || 0),
       created_at: doc.created_at || "",
       status: doc.status || "",
-      // F-C (KPR 2026-06-12): loud admin-visible signal — this session started
+      // F-C (real-data hardening): loud admin-visible signal — this session started
       // anonymously on a contest that HAS an enrollment spine (typed id
       // resolved to no person). False/absent everywhere else.
       identity_unresolved: doc.identity_unresolved === true
@@ -569,7 +569,7 @@ async function adminAttendance(req) {
 // PII-minimized: mapped identity fields + college, no email, no raw fields.
 async function personContestAttendance(contest) {
   const meta = await getContestRosterMeta(contest);
-  // KPR 2026-06-12: a CLEARED roster used to collapse attendance to
+  // Real-data hardening: a CLEARED roster used to collapse attendance to
   // "not configured" even though the enrollment spine (persons minted by the
   // last upload) survives the clear — fall back to it instead of hiding.
   if (!meta) return personEnrollmentAttendance(contest);
@@ -634,7 +634,7 @@ async function personContestAttendance(contest) {
   };
 }
 
-// KPR 2026-06-12: attendance from the ENROLLMENT SPINE when the roster was
+// Real-data hardening: attendance from the ENROLLMENT SPINE when the roster was
 // cleared (roster_meta off) but the durable enrollments survive. Same shape as
 // the roster-driven report plus source:"enrollments" + an explicit note, so
 // the admin knows exactly what they are looking at — never a silent blank.

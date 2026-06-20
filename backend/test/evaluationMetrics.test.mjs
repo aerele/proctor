@@ -266,7 +266,7 @@ test("buildScorecard stub-delta partial gamer (D12)", () => {
   );
   const flag = sc.flags.find((f) => f.code === "partial_gamer");
   assert.ok(flag);
-  // v1 default (KPR 2026-06-12 review): talent-honesty signal, severity info —
+  // v1 default (from real-data review): talent-honesty signal, severity info —
   // it must not drag the orthogonal integrity axis to "watch" on its own.
   assert.equal(flag.severity, "info");
   // The gem-gamer discount: gamed partial points are excluded from score_frac,
@@ -428,7 +428,7 @@ test("buildScorecard replay-vs-submission mismatch detect (D16b) → telemetry_t
 });
 
 test("buildScorecard GLITCH GATE: mismatch on a glitchy replay is a coverage gap, never tamper (D16b/D16c)", () => {
-  // Real-data case (KPR 2026-06-12): the initial stub load was never captured,
+  // Real-data case: the initial stub load was never captured,
   // so the first delete targets a range the empty replay buffer doesn't have →
   // glitch. The replayed snapshot then mismatches the submission, but that is
   // base-content desync, not tamper evidence.
@@ -598,7 +598,7 @@ test("(c) talent gate: gm=3/gh=0/reach=0 ⇒ STRONG", () => {
 });
 
 test("(c) talent gate: gm=4/gh=0/reach=0 ⇒ STRONG (Anita-like survives)", () => {
-  // The KPR selected intern Anita (23cb204, gm=4) must NOT be demoted — the
+  // The Anita-like genuinely-selected candidate (gm=4) must NOT be demoted — the
   // floor uses med>=3, not a hard-or-reach-only floor.
   const sc = buildMedScorecard(4);
   assert.equal(sc.talent.n_medplus_solved, 4);

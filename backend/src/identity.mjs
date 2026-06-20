@@ -366,7 +366,7 @@ export async function saveContestRoster(contest, body, actor = {}) {
   const collegeNorms = [...new Set(unique.map((c) => c.collegeNorm))].sort();
   await col("contests").doc(contest.slug).set({ colleges: collegeNorms, updated_at: now }, { merge: true });
 
-  // F-D (KPR 2026-06-12): warn-only unique-ID shape check rides the success
+  // F-D (real-data hardening): warn-only unique-ID shape check rides the success
   // response (key present only when something was flagged — older callers and
   // exact-shape assertions never see it on clean uploads).
   const idShapeWarnings = uniqueIdShapeWarnings(unique.map((c) => c.uniqueId));
@@ -511,7 +511,7 @@ async function raiseRosterRemovedAlert(contest, enrollment, version, now) {
   });
 }
 
-// KPR 2026-06-12 incident (F-B): the EXACT consequence a mid-contest roster
+// REAL-INCIDENT HARDENING (F-B): the EXACT consequence a mid-contest roster
 // clear has on identity keying — served verbatim in the 409 payload so the
 // admin UI can show it and the operator reads it BEFORE confirming.
 export const ROSTER_CLEAR_CONSEQUENCE =
@@ -536,7 +536,7 @@ function contestLiveOrInWindow(contest) {
 // are durable person × contest rows and deliberately survive (a later upload
 // reconciles them); persons/colleges are never touched.
 //
-// F-B (KPR 2026-06-12): clearing the roster of a LIVE contest that already has
+// F-B (real-data hardening): clearing the roster of a LIVE contest that already has
 // sessions or enrollments flips the identity keying for every later join
 // (person-keyed → anonymous) and silently splits Results. That must never be a
 // one-click action: it now requires the typed contest slug in body.confirm_clear
@@ -579,7 +579,7 @@ async function clearContestRoster(contest, body = {}, actor = {}) {
     contest_slug: contest.slug,
     cleared_at: now
   });
-  // KPR 2026-06-12: the incident clear left NO server-side trail (we had to
+  // The real incident's clear left NO server-side trail (we had to
   // reconstruct it from Cloud Run request logs). Every clear is now audited.
   await writeAudit({
     action: "roster_cleared",
@@ -591,7 +591,7 @@ async function clearContestRoster(contest, body = {}, actor = {}) {
   return { ok: true, configured: false, contest: contest.slug, count: 0, skipped: [] };
 }
 
-// ---- F-C (KPR 2026-06-12): enrollment-spine identity fallback -----------------
+// ---- F-C (real-data hardening): enrollment-spine identity fallback -----------------
 //
 // When a person contest's roster meta is ABSENT (cleared mid-contest) but the
 // contest HAS an enrollment spine (the persons/enrollments minted by the last
@@ -628,7 +628,7 @@ export async function resolveEnrollmentSpineMatches(contest, typedId) {
   return { spine: true, matches };
 }
 
-// ---- F-D (KPR 2026-06-12): unique-ID shape warnings (WARN-ONLY, never block) --
+// ---- F-D (real-data hardening): unique-ID shape warnings (WARN-ONLY, never block) --
 //
 // The incident's root authoring footgun: the roster CSV's unique-ID column
 // carried HackerRank usernames + "_KPRIET"-suffixed roll numbers while the

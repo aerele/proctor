@@ -201,7 +201,7 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
   const roomOptions = useMemo(() => [...new Set(rows.map((r) => r.room).filter(Boolean))].sort(), [rows]);
   const visibleRows = useMemo(() => filterResultRows(rows, filters), [rows, filters]);
   const counts = useMemo(() => selectionCounts(rows), [rows]);
-  // KPR 2026-06-12: unmatched submitter rows (identities not on the roster).
+  // Real-data hardening: unmatched submitter rows (identities not on the roster).
   const unmatchedTotal = useMemo(() => countUnmatched(rows), [rows]);
 
   // Selection operates on enrollments — unmatched rows have no person_id, so
@@ -407,7 +407,7 @@ export function ResultsPanel({ password, contestSlug }: { password: string; cont
             </p>
           ) : null}
 
-          {/* KPR 2026-06-12: unmatched submitters are shown LOUDLY, never dropped.
+          {/* Real-data hardening: unmatched submitters are shown LOUDLY, never dropped.
               2026-06-18 exam-eve: a NO-ROSTER contest is all self-entered by
               design — neutral copy, no alarm; rostered contests stay loud. */}
           {unmatchedTotal > 0 ? (

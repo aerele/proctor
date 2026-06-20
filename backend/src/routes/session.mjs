@@ -213,7 +213,7 @@ async function startPersonSession(req, body, contest) {
     const typed = String(body.candidate_id ?? body.hackerrank_username ?? "").trim();
     if (!typed) return badRequest("candidate_id is required");
 
-    // F-C (KPR 2026-06-12): roster meta absent but the contest HAS an
+    // F-C (real-data hardening): roster meta absent but the contest HAS an
     // enrollment spine (roster uploaded then cleared) → EXACT normalized match
     // of the typed id against the enrolled persons' unique ids keys the
     // session to the person anyway (username_norm = person_id), so Results
@@ -244,7 +244,7 @@ async function startPersonSession(req, body, contest) {
       // linking (documented limitation). When a spine EXISTS but the typed id
       // didn't match it (or matched ambiguously), flag the session LOUDLY so
       // the admin Sessions list shows the identity never resolved — being
-      // unknowingly wrong is not acceptable (KPR 2026-06-12).
+      // unknowingly wrong is not acceptable (real-data hardening).
       identity = {
         person_id: null,
         college_norm: "",
@@ -312,7 +312,7 @@ async function startPersonSession(req, body, contest) {
     chunk_count: 0,
     camera_chunk_count: 0,
     enforcement_exemptions: {},
-    // F-C (KPR 2026-06-12): conditional keys only — legacy/no-spine session
+    // F-C (real-data hardening): conditional keys only — legacy/no-spine session
     // docs keep their exact key set. identity_unresolved marks an anonymous
     // session on a contest that HAS an enrollment spine (typed id matched
     // nothing); identity_source records a spine-resolved keying for forensics.

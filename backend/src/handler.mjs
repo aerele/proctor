@@ -1654,7 +1654,7 @@ async function adminContestSelectionDone(req) {
   // the SAME numbers the Results table shows (single source of truth).
   const snapshotByPerson = new Map();
   for (const row of data.rows) {
-    if (row.unmatched) continue; // no enrollment to stamp (KPR 2026-06-12 rows)
+    if (row.unmatched) continue; // no enrollment to stamp (unmatched rows)
     const perProblem = {};
     for (const cell of row.per_problem) perProblem[cell.problem_id] = cell.best_score;
     snapshotByPerson.set(row.person_id, {
@@ -1892,7 +1892,7 @@ async function adminContestPurge(req) {
   if (results && Array.isArray(results.rows)) {
     const snapshotByPerson = new Map();
     for (const row of results.rows) {
-      if (row.unmatched) continue; // no enrollment to stamp (KPR 2026-06-12 rows)
+      if (row.unmatched) continue; // no enrollment to stamp (unmatched rows)
       const perProblem = {};
       for (const cell of row.per_problem || []) perProblem[cell.problem_id] = cell.best_score;
       snapshotByPerson.set(row.person_id, {

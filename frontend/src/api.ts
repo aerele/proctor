@@ -3459,7 +3459,7 @@ export async function uploadRoster(password: string, payload: RosterUploadReques
 
 // POST /api/admin/roster {clear:true} — roster off (login reverts to legacy).
 // S-C: with `contest`, clears THAT contest's roster (enrollments survive).
-// KPR 2026-06-12 (F-B): a LIVE contest with sessions/enrollments refuses the
+// Real-data hardening (F-B): a LIVE contest with sessions/enrollments refuses the
 // clear with 409 roster_clear_confirmation_required until confirm_clear echoes
 // the typed contest slug — callers pass it after the explicit dialog.
 export async function clearRoster(password: string, contest?: string, confirmClear?: string): Promise<{ ok: boolean } | null> {

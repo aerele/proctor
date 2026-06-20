@@ -102,7 +102,7 @@ export function AttendancePanel({ password, contestSlug }: { password: string; c
         </div>
       ) : (
         <>
-          {/* KPR 2026-06-12: enrollment-spine fallback after a roster clear — say so explicitly. */}
+          {/* Real-data hardening: enrollment-spine fallback after a roster clear — say so explicitly. */}
           {report.source === "enrollments" && report.note ? (
             <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
               <AlertTriangle size={16} className="mr-2 inline" />{report.note}

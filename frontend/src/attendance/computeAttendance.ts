@@ -26,7 +26,7 @@ export type AttendanceCore = {
 };
 
 // GET /api/admin/attendance response. `configured:false` carries nothing else.
-// KPR 2026-06-12: source/note appear when a cleared-roster person contest
+// Real-data hardening: source/note appear when a cleared-roster person contest
 // falls back to its surviving enrollment spine (server-computed; absentee
 // roll_number/room are blank because the roster column mapping is gone).
 export type AttendanceReport =

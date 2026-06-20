@@ -165,7 +165,7 @@ test("buildResultsCsv: header + one row per candidate, per-problem columns, inte
   const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true });
   const csv = buildResultsCsv(rows, [{ problem_id: "p1", title: "Sum Two" }, { problem_id: "p2", title: "Reverse" }]);
   const lines = csv.split("\n");
-  // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
+  // Real-data hardening: trailing "unmatched" column flags identity-unmatched rows.
   // P1 (E): 6 candidate-evaluation columns sit after selection_status, before
   // unmatched; blank here (this fixture has no evaluations attached).
   assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,talent_tier,talent_composite,integrity_tier,paste_pct,eval_flags,eval_one_line,unmatched");
@@ -188,7 +188,7 @@ test("buildResultsCsv: CSV-injection guard on candidate-supplied fields", () => 
   assert.match(csv, /,",evil\n"/); // comma + newline name field quoted
 });
 
-// ---- KPR 2026-06-12: unmatched identities (loud-or-right) -----------------------
+// ---- Real-data hardening: unmatched identities (loud-or-right) -----------------------
 
 // The incident shape: a roster clear mid-contest flips later joins to
 // anonymous keying (username_norm = bare typed id, person_id null). Those

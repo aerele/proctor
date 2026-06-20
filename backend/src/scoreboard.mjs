@@ -259,7 +259,7 @@ export function buildResultsRows({
     });
   }
 
-  // ---- UNMATCHED IDENTITIES (KPR 2026-06-12 incident: loud-or-right) ----------
+  // ---- UNMATCHED IDENTITIES (real-incident hardening: loud-or-right) ----------
   // Scoreboard identities NOT consumed by any enrollment — e.g. sessions that
   // joined anonymously after a mid-contest roster clear (username_norm = bare
   // typed id, never equal to any enrollment person_id). These were previously
@@ -370,7 +370,7 @@ export function buildResultsCsv(rows, problems = []) {
     // unmatched. Blank cells when the row has no evaluation (behavior-preserving
     // for un-evaluated contests).
     "talent_tier", "talent_composite", "integrity_tier", "paste_pct", "eval_flags", "eval_one_line",
-    // KPR 2026-06-12: unmatched-identity rows are flagged in the export too —
+    // Real-data hardening: unmatched-identity rows are flagged in the export too —
     // a hiring decision must never mistake an unverified typed id for a
     // roster-verified one. "yes" on flagged rows, blank otherwise.
     "unmatched"

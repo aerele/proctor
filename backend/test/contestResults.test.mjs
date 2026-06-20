@@ -245,7 +245,7 @@ test("contest-results?format=csv: header + per-problem columns + integrity + sel
   const res = await call(makeReq({ method: "GET", path: "/api/admin/contest-results", headers: ADMIN_HEADERS, query: { contest: contest.slug, format: "csv" } }));
   assert.equal(res.statusCode, 200);
   const lines = res.body.csv.split("\n");
-  // KPR 2026-06-12: trailing "unmatched" column flags identity-unmatched rows.
+  // Real-data hardening: trailing "unmatched" column flags identity-unmatched rows.
   // P1 (E): 6 candidate-evaluation columns precede unmatched; blank here because
   // the contest has not been evaluated (no scorecards joined).
   assert.equal(lines[0], "rank,candidate_id,name,college,total,Sum Two,Reverse,critical_alerts,warning_alerts,info_alerts,review_verdict,selection_status,talent_tier,talent_composite,integrity_tier,paste_pct,eval_flags,eval_one_line,unmatched");
@@ -338,7 +338,7 @@ test("PURGE-SURVIVOR: with submissions deleted, results fall back to final_snaps
   assert.equal(asha.name, "Asha");
 });
 
-// ---- KPR 2026-06-12: unmatched submitters (the live-exam scoring failure) ------
+// ---- Real-data hardening: unmatched submitters (the live-exam scoring failure) ------
 
 test("contest-results: post-clear anonymous submitters ride as unmatched rows with scores + unmatched_count (never silently dropped)", async () => {
   const firestore = freshClients();

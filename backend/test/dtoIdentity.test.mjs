@@ -489,7 +489,7 @@ test("attendance for a person contest joins ITS roster by person_id and reports 
   assert.deepEqual(legacy.body, { configured: false });
 });
 
-// ---- KPR 2026-06-12: attendance after a roster clear (enrollment-spine fallback)
+// ---- Real-data hardening: attendance after a roster clear (enrollment-spine fallback)
 
 test("attendance falls back to the enrollment spine when the roster was cleared — explicit source + note, never a silent blank", async () => {
   const { firestore } = freshClients();

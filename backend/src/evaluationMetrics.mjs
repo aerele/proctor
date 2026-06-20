@@ -489,9 +489,9 @@ export function buildScorecard(input) {
     if (isPartial) {
       discountedPartialPoints += best_score;
     }
-    // D12 partial gamer flag. Severity "info" (v1 default, KPR 2026-06-12
+    // D12 partial gamer flag. Severity "info" (v1 default, from real-data
     // review): gaming partial credit off a near-stub submit is a TALENT honesty
-    // signal (the KEC gem-gamer lesson) — kept as a specific surfaced signal on
+    // signal (a real gem-gamer case taught this) — kept as a specific surfaced signal on
     // the near-stub (stub_delta<10) subset. It is not cheating evidence, so it
     // must not drag the orthogonal integrity axis to "watch" on its own. The
     // composite discount is now wider (all partials, above); this flag stays
@@ -641,7 +641,7 @@ export function buildScorecard(input) {
     if (snapCollapsed === collapseWs(src)) continue;
     const dist = normalizedLineDistance(best.snap.content, src);
     if (dist > THRESHOLDS.MISMATCH) {
-      // EMPTY-SNAPSHOT GUARD (KPR 2026-06-12): a near-empty replayed buffer
+      // EMPTY-SNAPSHOT GUARD (real-data hardening): a near-empty replayed buffer
       // means the base content (the pre-seeded stub) was never captured — the
       // candidate barely touched this problem and the capture has no base to
       // replay. Telemetry suppression cannot produce this shape (suppression
@@ -653,7 +653,7 @@ export function buildScorecard(input) {
   }
   // ≥1 mismatch with editor coverage present ⇒ telemetry_tampered (critical).
   // BUT no mismatch flag when the problem has zero editor events.
-  // GLITCH GATE (real-data hardening, KPR 2026-06-12): some sessions never
+  // GLITCH GATE (real-data hardening): some sessions never
   // capture the initial stub load (Monaco init race / mid-session reload
   // restoring a draft without events), so the replay reconstructs keystroke
   // deltas over the wrong base — every snapshot then "mismatches" at 0.85+
@@ -833,7 +833,7 @@ function computeComposite({ total_score, discountedPartialPoints = 0, maxTotal, 
   // talent evidence — exclude the FULL partial total from score_frac so a
   // multi-problem stub/partial-gamer cannot outrank a genuine 2-problem solver
   // on the composite. (Originally this discounted only near-stub partials —
-  // KEC gem-gamer lesson, KPR 2026-06-12 review.) Honest partial progress is
+  // a real gem-gamer case in the calibration data widened it.) Honest partial progress is
   // still credited separately via reach_frac, so widening is calibration-safe.
   const score_frac = maxTotal > 0 ? Math.max(0, total_score - discountedPartialPoints) / maxTotal : 0;
   let weightAll = 0;
@@ -909,8 +909,8 @@ function deriveTiers({ flags, talent, integrity, coverage = {} }) {
   // strong_gem; else weak.
   // STRONG FLOOR (tightened 2026-06-20): the prior gate (genuineMed>=2) let
   // thin-strong labels through in weak fields → tightened to hard>=1 || med>=3.
-  // It demotes the thin labels and demotes ZERO of the 5 KPR selected interns
-  // (Anita 23cb204 gm=4 survives via med>=3). A demoted thin-strong
+  // It demotes the thin labels and demotes ZERO of the calibration cohort's
+  // genuinely-selected candidates (a gm=4 candidate survives via med>=3). A demoted thin-strong
   // (gm=2,gh=0) falls to moderate via genuineMedPlus>=1, not below.
   // honest_reach is DELIBERATELY NOT a strong-qualifier (calibration 2026-06-20):
   // on the live recompute it labeled 0-solve candidates "strong" (165/166 of one
@@ -1044,7 +1044,7 @@ function buildCrossInputs({ foreign_pastes, replay, sessions, submissions, allPi
     if (accepted_norms[s.problem_id].length < 3) accepted_norms[s.problem_id].push(norm);
   }
   // failed_norms: coreExact of non-accepted submission sources per problem.
-  // NEAR-STUB EXCLUSION (real-data hardening, KPR 2026-06-12): unmodified or
+  // NEAR-STUB EXCLUSION (real-data hardening): unmodified or
   // barely-modified stubs and trivial one-line guesses converge across many
   // honest candidates (5-person "clusters" of the bare java stub; a 7-person
   // cluster of `return n-k;`). Identical FAILED code is only low-FP copying

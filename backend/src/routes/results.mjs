@@ -132,7 +132,7 @@ export function makeResultsRoutes(ctx) {
       purged ? new Map() : getPersonsByIds(activeIds),
       getCollegeNameMap(),
       purged ? new Map() : integrityByPersonFor(contest),
-      // KPR 2026-06-12: session docs enrich UNMATCHED submitter rows (name typed
+      // Real-data hardening: session docs enrich UNMATCHED submitter rows (name typed
       // at login). Skipped on the purged path (sessions are deleted by then).
       purged ? null : scopedQuery(getFirestore().collection(sessionCollection), contest).limit(sessionsQueryLimit).get()
     ]);
@@ -176,7 +176,7 @@ export function makeResultsRoutes(ctx) {
       selection_done_at: contest.selection_done_at || null,
       problems,
       rows,
-      // KPR 2026-06-12: count of scoring identities NOT consumed by any
+      // Real-data hardening: count of scoring identities NOT consumed by any
       // enrollment — drives the loud "N submitters not on the roster" banner.
       unmatched_count: rows.filter((row) => row.unmatched).length,
       // 2026-06-18 exam-eve: when the whole contest is self-entered (no roster, no
@@ -191,7 +191,7 @@ export function makeResultsRoutes(ctx) {
   // (= person_id under person mode) + this contest's review records grouped the
   // same way. ONE bounded scan each, scoped to the contest. summarizeIntegrity
   // (pure) folds them in buildResultsRows.
-  // KPR 2026-06-12: grouped by EVERY username_norm in the contest (no active-
+  // Real-data hardening: grouped by EVERY username_norm in the contest (no active-
   // enrollment filter) so UNMATCHED submitter rows keep their integrity column
   // too — buildResultsRows looks up matched rows by person_id and unmatched rows
   // by their scoreboard norm; matched-row values are identical to before (the

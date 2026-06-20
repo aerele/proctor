@@ -3,7 +3,7 @@
 // PII-FREE synthetic cohort (fabricated ids/names) shaped like a real scorecard
 // list, designed so EVERY bucket, the phantom filter, the talent/raw ranking,
 // and BOTH comparison surfaces (missed-by-raw-score, raw-score-traps) are
-// exercised. The real-KPR oracle check lives outside the repo (junk/, PII) and
+// exercised. The real-data oracle check lives outside the repo (junk/, PII) and
 // is run manually before deploy; this file is the committed, data-free contract.
 import { test } from "node:test";
 import assert from "node:assert/strict";
