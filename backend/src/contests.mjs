@@ -9,6 +9,7 @@
 //     §2.1 (F9 contest doc, frozen), §2.3 (no-bleed mechanisms), §3 (lifecycle
 //     placeholders)
 import { randomBytes, randomInt } from "node:crypto";
+import { httpError } from "./lib/http.mjs";
 import { SUPPORTED_LANGUAGES } from "./problems.mjs";
 import {
   normalizeProblemEntries,
@@ -583,10 +584,4 @@ function parseWindowDate(raw, field) {
 
 function isAlreadyExists(err) {
   return err?.code === 6 || /ALREADY_EXISTS/i.test(String(err?.message || ""));
-}
-
-function httpError(statusCode, message) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  return error;
 }

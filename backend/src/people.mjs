@@ -5,6 +5,7 @@
 // per-contest live integrity + the contest docs; this module joins them into one
 // row per contest the person attempted. Kept pure so the cross-round scorecard
 // unit-tests without a DB and the handler never re-joins inline.
+import { csvField } from "./lib/sanitize.mjs";
 
 // Normalize whatever integrity blob we have (live summary OR a stored
 // final_snapshot.integrity, which may be partial) into the ONE shape the UI
@@ -151,11 +152,4 @@ export function buildScorecardCsv(person = {}, rows = []) {
     row.selection_status
   ].map((value) => csvField(String(value))).join(","));
   return [header, ...lines].join("\n");
-}
-
-function csvField(value) {
-  let v = String(value ?? "");
-  if (v && /^[=+\-@\t\r]/.test(v)) v = `'${v}`;
-  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
 }

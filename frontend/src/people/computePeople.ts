@@ -3,6 +3,7 @@
 // transforms over the backend payload so they unit-test without a render
 // harness. Shapes mirror the backend (people.mjs buildScorecardRows + the
 // /api/admin/people directory rows).
+import { csvField } from "../csvField";
 
 export type SelectionStatus = "none" | "shortlisted" | "selected" | "rejected";
 
@@ -122,11 +123,4 @@ export function buildScorecardCsv(
     row.selection_status
   ].map((value) => csvField(String(value))).join(","));
   return [header, ...lines].join("\n");
-}
-
-function csvField(value: string): string {
-  let v = String(value ?? "");
-  if (v && /^[=+\-@\t\r]/.test(v)) v = `'${v}`;
-  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
 }

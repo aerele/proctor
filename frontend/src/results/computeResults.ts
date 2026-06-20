@@ -2,6 +2,7 @@
 // (vision §2.14). The ranked table, its filters, and the CSV export are pure
 // transforms over the backend rollup so they unit-test without a render
 // harness. The ResultRow shape mirrors backend scoreboard.buildResultsRows.
+import { csvField } from "../csvField";
 
 export type SelectionStatus = "none" | "shortlisted" | "selected" | "rejected";
 
@@ -189,10 +190,3 @@ export function evalFlagsLabel(flags: { critical: number; warning: number; info:
   return `${flags.critical}C/${flags.warning}W/${flags.info}I`;
 }
 
-// RFC-4180-ish, same M8 formula-injection guard the rest of the app uses.
-function csvField(value: string): string {
-  let v = value;
-  if (v && /^[=+\-@\t\r]/.test(v)) v = "'" + v;
-  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
-}

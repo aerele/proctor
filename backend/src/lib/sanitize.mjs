@@ -117,3 +117,13 @@ export function maskPasscode(value) {
   const text = String(value);
   return `${"*".repeat(Math.max(0, text.length - 2))}${text.slice(-2)}`;
 }
+
+// CSV-injection neutralizer (M8 formula guard): a cell that could be read as a
+// spreadsheet formula gets a leading apostrophe; cells with commas/quotes/
+// newlines are quoted with doubled inner quotes (RFC-4180).
+export function csvField(value) {
+  let v = String(value ?? "");
+  if (v && /^[=+\-@\t\r]/.test(v)) v = `'${v}`;
+  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
+}

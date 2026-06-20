@@ -9,6 +9,7 @@
 // S-J contract: Results endpoint = scopedQuery over proctor_submissions →
 // computeScoreboard(submissions, contestProblemEntries(contest) ids) → columns
 // in entry order. S-I ships the module + denorm so S-J is a thin wrapper.
+import { csvField } from "./lib/sanitize.mjs";
 
 // Rows keyed by candidate (username_norm, carrying person_id/candidate_id).
 // Tie-break (exact algorithm, spec §3.3): per candidate, walk submissions in
@@ -402,16 +403,6 @@ export function buildResultsCsv(rows, problems = []) {
     return cells.map((value) => csvField(String(value))).join(",");
   });
   return [header, ...lines].join("\n");
-}
-
-// Same escaping rules as the frontend csvField (M8 formula guard): a cell that
-// could be read as a spreadsheet formula gets a leading apostrophe; cells with
-// commas/quotes/newlines are quoted with doubled inner quotes.
-function csvField(value) {
-  let v = String(value ?? "");
-  if (v && /^[=+\-@\t\r]/.test(v)) v = `'${v}`;
-  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
 }
 
 // One SESSION's per-problem submission summary — startResponse ships this so a

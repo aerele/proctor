@@ -3,6 +3,7 @@
 // (spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md):
 // taken = >=1 matching session (any status); in_progress = any non-ended;
 // completed = all ended; blank/off-roster session ids -> unmatched_sessions.
+import { csvField } from "../csvField";
 
 export type AttendanceAbsentee = {
   unique_id: string;
@@ -80,17 +81,6 @@ export function computeAttendance(
     absentees,
     unmatched_sessions: unmatched
   };
-}
-
-// RFC-4180-ish escaping, same rules as App.tsx's csvField (kept local so this
-// module stays pure + importable by both api.ts and App.tsx). Cells starting
-// with a formula trigger are prefixed with ' so spreadsheets treat them as
-// text — roster fields are candidate-supplied (M8, same guard as App.tsx).
-function csvField(value: string): string {
-  let v = value;
-  if (v && /^[=+\-@\t\r]/.test(v)) v = "'" + v;
-  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
 }
 
 // Absentees CSV for the exam-day report: fixed header + one row per absentee.

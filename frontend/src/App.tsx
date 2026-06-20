@@ -22,6 +22,7 @@ import { ADMIN_NAV_GROUPS, groupOfView, type AdminView } from "./admin/adminNav"
 import { DateTimeField } from "./admin/DateTimeField";
 import { MultiProblemWorkspace } from "./coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "./coding/problemSwitch";
+import { csvField } from "./csvField";
 import { buildAbsenteesCsv, type AttendanceReport } from "./attendance/computeAttendance";
 import * as studentCopy from "./studentCopy";
 import { CAMERA_FPS_MAX, CAMERA_FPS_MIN, CAMERA_WIDTH_MAX, CAMERA_WIDTH_MIN, cameraRecordingFromForm, normalizeCameraRecording } from "./cameraRecording";
@@ -3965,17 +3966,9 @@ function ContestEvalAlertTypesSection() {
   );
 }
 
-// Escape one CSV field per RFC-4180 AND neutralize spreadsheet formula injection.
-// A candidate-controlled cell (name/username) starting with = + - @ — or a leading
-// tab / carriage return that some apps strip before re-checking — executes as a
-// formula when the export is opened in Excel/Sheets. Prefix any such cell with a
-// single quote (') so the spreadsheet treats it as literal text, THEN apply the
-// RFC-4180 quoting (wrap in quotes + double embedded quotes for comma/quote/CR/LF).
-export function csvField(value: string): string {
-  const neutralized = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-  if (/[",\n\r]/.test(neutralized)) return `"${neutralized.replace(/"/g, '""')}"`;
-  return neutralized;
-}
+// csvField (CSV-injection neutralizer, M8) lives in ./csvField; re-exported here
+// for the existing csvField.test.ts which imports it from "./App".
+export { csvField };
 
 // Build the reviews CSV: header `candidate_id,reviewer_name,verdict`, one row
 // per review record, verdict rendered as 1/0. Exported by the Settings page.

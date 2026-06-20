@@ -211,7 +211,7 @@ export function normalizedLineDistance(a, b) {
   return dist / Math.max(1, Math.max(A.length, B.length));
 }
 
-function trimTrailingEmpty(lines) {
+export function trimTrailingEmpty(lines) {
   const out = lines.slice();
   while (out.length > 1 && out[out.length - 1] === "") out.pop();
   return out;

@@ -25,6 +25,8 @@
 // components are always stored as fields alongside them.
 import { randomUUID } from "node:crypto";
 import { ALL_CONTESTS, scopedQuery } from "./contests.mjs";
+import { httpError } from "./lib/http.mjs";
+import { mapWithConcurrency, sanitizeSegment } from "./lib/sanitize.mjs";
 
 // Wave-4 review fix: a single char OUTSIDE the sanitized component charset
 // [a-zA-Z0-9._-], so personIdOf is injective BY CONSTRUCTION — no
@@ -80,12 +82,6 @@ function col(name) {
 
 export function normalizeUniqueId(value) {
   return String(value).trim().toLowerCase().replace(/\s+/g, "");
-}
-
-export function sanitizeSegment(value) {
-  const cleaned = String(value).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-  if (cleaned === "" || /^\.+$/.test(cleaned)) return "_";
-  return cleaned;
 }
 
 export function identityNorm(value) {
@@ -858,19 +854,6 @@ export async function writeAudit(entry, actor = {}, at = new Date().toISOString(
 
 // ---- small local helpers ------------------------------------------------------
 
-async function mapWithConcurrency(items, limit, fn) {
-  const results = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
-  return results;
-}
-
 function resolveCollegeColumn(body, mapping, columns) {
   const explicit = String(body.college_column || "").trim();
   if (explicit && columns.includes(explicit)) return explicit;
@@ -880,11 +863,4 @@ function resolveCollegeColumn(body, mapping, columns) {
 
 function isAlreadyExists(error) {
   return error?.code === 6 || /ALREADY_EXISTS/i.test(String(error?.message || ""));
-}
-
-function httpError(statusCode, message, payload) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  if (payload) error.payload = payload;
-  return error;
 }
