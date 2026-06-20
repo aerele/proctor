@@ -9,8 +9,9 @@ entirely inside our React + Monaco workspace against a Judge0-backed executor.
 `monitoring/` contest-eval poller still exists separately for externally-hosted
 contests and is not part of this flow — see [Related](#related).)
 
-The candidate app is a single React app (`frontend/src/App.tsx`, the
-`StudentApp` component). Onboarding is a strict **5-stage** ladder rendered by
+The candidate app's surface root is `frontend/src/candidate/StudentApp.tsx`
+(`frontend/src/App.tsx` is now just a ~26-line pathname router that dispatches the
+candidate / admin / invigilator surfaces). Onboarding is a strict **5-stage** ladder rendered by
 the exam shell (`frontend/src/shell/examShell.ts`), and the stage is derived
 **purely** from `permissionsReady → fullscreen → gate/status` so a stage can
 never be skipped.
@@ -67,7 +68,7 @@ stopped and an `InvalidShareSurfaceError` is thrown **before** any recording
 begins (it also emits an `invalid_share_surface` audit event). The recorder
 *refuses* a non-monitor share.
 
-- Component / gate: `PermissionsGate` (in `App.tsx`), visibility from
+- Component / gate: `PermissionsGate` (`frontend/src/shell/PermissionsGate.tsx`), visibility from
   `permissionsGateVisible()`.
 - Acquisition helpers: `acquireScreenShareStream()`,
   `acquireCameraMicrophone()` (camera+mic → camera-only → mic-only fallback
@@ -86,7 +87,7 @@ from start to finish — enter fullscreen to continue."*
 Fullscreen is required **before** identity is collected, so a candidate cannot
 fill in someone else's details in a small window and hand the laptop over. The
 overlay renders only at Stage 2 (`fullscreenGateVisible()` in
-`examShell.ts`); the component is `FullscreenGate` in `App.tsx`.
+`examShell.ts`); the component is `FullscreenGate` (`frontend/src/shell/FullscreenGate.tsx`).
 
 **Note (unverified):** the precise "anti-proxy" rationale is reflected in the
 stage ordering and code comments; this page documents the observable ordering
@@ -104,13 +105,13 @@ is me."**
 
 ![Stage 3 details — roster identity lookup](../assets/e2e/candidate/03-details-roster.png)
 
-The lookup component is `IdentityLookupPanel` (`App.tsx`). It is a two-step
+The lookup component is `IdentityLookupPanel` (`frontend/src/candidate/panels/IdentityLookupPanel.tsx`). It is a two-step
 panel: *Step 1 — confirm your identity* (ID entry + "Find me"), then an *"Is
 this you?"* confirmation card showing the matched fields, with "Yes, this is me"
 / "No — search again". Once confirmed it collapses to a compact
 "Identity confirmed: `<id>`" bar with a "Not you? Re-enter ID" reset.
 
-- Lookup route: `POST /api/roster/lookup` (`rosterLookup()` in `handler.mjs`).
+- Lookup route: `POST /api/roster/lookup` (`rosterLookup()` in `backend/src/routes/public.mjs`).
   Returns only the **minimum confirmation set** — mapped name/roll/room/username
   plus a **masked** email; the raw email and any unmapped columns never leave
   via this route. The route is rate-limited per IP (M3); see
@@ -135,7 +136,7 @@ identity mode (`candidateFormMode()` / `candidateFormReady()` in
 | `legacy` | unique ID (if roster required) + candidate ID + name + roll + valid email + room + consent |
 
 Room is chosen from a pre-fed dropdown (with an "Other…" free-text fallback) via
-`RoomField` (`App.tsx`); it falls back to a plain text field when no rooms are
+`RoomField` (`frontend/src/candidate/panels/RoomField.tsx`); it falls back to a plain text field when no rooms are
 configured.
 
 **Room-gate waiting variant.** When a contest enables the room gate
@@ -147,7 +148,7 @@ hint reads *"Recording is active. Waiting for your room's exam code to be
 released."*
 
 - Backing flag: `room_gate_enabled` on the start response
-  (`startResponse()` in `handler.mjs`); client gate in `App.tsx`
+  (`startResponse()` in `backend/src/routes/session.mjs`); client gate in `candidate/StudentApp.tsx`
   (`examGateActive`), poll via `pollRoomGate`.
 
 ---
@@ -182,7 +183,7 @@ Stages 1–3 raises no flag and is not counted against the candidate.
 Once recording is live (and the room is released), the candidate lands in the
 own-editor workspace. Since the exam-shell redesign (2026-06-12), **the
 workspace IS the page** for an in-exam own-editor session (recording +
-released — the branch condition in `App.tsx` is `hasProblem && status ===
+released — the branch condition in `candidate/StudentApp.tsx` is `hasProblem && status ===
 "recording" && gate === "running" && !examGateActive`):
 
 - a **slim ~40 px dark strip** pinned to the top (see
@@ -217,7 +218,7 @@ Everything that used to sit around the editor now tucks behind the strip's
 content (the toggle also scrolls to top so it surfaces even when the candidate
 is deep in a problem). The panel is **always mounted** — collapsing is
 CSS-only — so no telemetry or preview host ever unmounts (the exam branch in
-`App.tsx`). It contains:
+`candidate/StudentApp.tsx`). It contains:
 
 - **Recording health** — recording state, uploaded chunks, per-source
   screen/camera/microphone capture states, session id, start/current IP
@@ -230,7 +231,7 @@ CSS-only — so no telemetry or preview host ever unmounts (the exam branch in
 ![Proctoring panel expanded — recording health, entry review files, rules reminder, recent proctor events](../assets/e2e-live/a5-w2-proctoring-expanded.png)
 
 The rule-mandated **camera self-view** floats as a small bottom-right dock
-(`CameraDock` in `App.tsx`): a dark tile with the camera state label, a
+(`CameraDock` in `frontend/src/candidate/panels/CameraDock.tsx`): a dark tile with the camera state label, a
 pop-out (picture-in-picture) button, and a minimize toggle that collapses it
 to a pill. Both visual states keep the `<video>` host mounted — the camera
 *capture* lives in the recorder and never depends on this preview.
@@ -269,8 +270,8 @@ methods.
 
 | Action | Tests run | Result shown | Route |
 |--------|-----------|--------------|-------|
-| **Run** | **Sample** tests only (visible) | Per-test passed/failed + captured stdout; sample input/expected echoed back | `POST /api/exec/run` (`execRun()` in `handler.mjs`) |
-| **Submit** | **Hidden** tests | A single verdict (Accepted / Wrong answer / error) + score; stored | `POST /api/exec/submit` (`execSubmit()` in `handler.mjs`) |
+| **Run** | **Sample** tests only (visible) | Per-test passed/failed + captured stdout; sample input/expected echoed back | `POST /api/exec/run` (`execRun()` in `backend/src/routes/exec.mjs`) |
+| **Submit** | **Hidden** tests | A single verdict (Accepted / Wrong answer / error) + score; stored | `POST /api/exec/submit` (`execSubmit()` in `backend/src/routes/exec.mjs`) |
 
 Both call the live Judge0 executor through `judge0Adapter.mjs`
 (`makeJudge0Adapter().runBatch()`), batched, polled, with bounded concurrency
@@ -312,7 +313,7 @@ kept."
 
 Editor activity (`code_run`, `code_submit`, focus/keystroke batches, and
 `problem_switched` markers) is batched and posted via `POST /api/editor-events`
-(`ingestEditorEvents()` in `handler.mjs`).
+(`ingestEditorEvents()` in `backend/src/routes/sessionTelemetry.mjs`).
 
 ---
 
@@ -374,7 +375,7 @@ decision (`shellHeaderMode()` in `examShell.ts`):
   time change propagates within one heartbeat (≤15 s) — no reload
   (`onExamTimeChange` in `useProctorRecorder.ts`).
 - **Warning strip clears on recovery (fixed 2026-06-12).** The spoken-warning
-  text strip under the chrome (`reloadWarning` in `App.tsx`) now clears when
+  text strip under the chrome (`reloadWarning` in `candidate/StudentApp.tsx`) now clears when
   live state recovers (recording resumes / the lock is released) instead of
   showing a stale "Screen sharing stopped…" or "Your test has been locked…"
   until the next reload.
@@ -385,21 +386,21 @@ decision (`shellHeaderMode()` in `examShell.ts`):
 
 **Reload.** A reload does not lose the session. The session token is persisted
 (`sessionStorageKeyFor()` in `candidateRouting.ts`), and on load the app calls
-`POST /api/session/resume` (`resumeSession()` in `handler.mjs`) to restore the
+`POST /api/session/resume` (`resumeSession()` in `backend/src/routes/session.mjs`) to restore the
 **same** session **without re-collecting details**. Because media streams never
 survive a reload, the candidate reruns Stage 1+2 (permissions + fullscreen) and
 then presses **"Resume recording"** — recording resumes on a fresh user gesture
-(`resumeRecording()` in `App.tsx`). Per-problem code drafts are restored from
+(`resumeRecording()` in `candidate/StudentApp.tsx`). Per-problem code drafts are restored from
 `localStorage`.
 
 **Second device → pending approval.** If a *different* device/browser starts a
 session for a candidate who already has a live (active/locked/pending) session,
 the second start is created as **`pending_approval`** so two live sessions never
 run at once. The decision is made atomically by acquiring the live-slot lock
-(`acquireLiveSlot()`; `startSession()` in `handler.mjs`). The candidate sees a
+(`acquireLiveSlot()`; `startSession()` in `backend/src/routes/session.mjs`). The candidate sees a
 "Waiting for proctor approval" screen — *"Another session is already active for
 your Candidate ID."* — with a **Check again** button (`BlockedScreen` in
-`App.tsx`). A proctor approves the device (or the candidate waits for the other
+`frontend/src/candidate/panels/BlockedScreen.tsx`). A proctor approves the device (or the candidate waits for the other
 session to be unlocked/ended).
 
 ![Second device — waiting for proctor approval](../assets/e2e/candidate/13-duplicate-session-pending.png)
@@ -448,7 +449,7 @@ high-water mark and the server-reported `chunk_count` / `*_chunk_index_hwm`
 on start/resume, and the server's `/api/upload-url` bumps any stale index at
 or below its own per-kind high-water mark, so no write URL can ever land on a
 surviving object (`frontend/src/chunkContinuity.ts`, `useProctorRecorder.ts`;
-`createUploadUrl` in `handler.mjs`). The end-of-test manifest is cumulative
+`createUploadUrl` in `backend/src/routes/sessionTelemetry.mjs`). The end-of-test manifest is cumulative
 across stints (`mergeManifest`).
 
 ---
@@ -463,18 +464,18 @@ could orphan a session:
 | Shared a tab/window instead of the whole screen | "Share your ENTIRE screen — press the button again and pick the whole screen." (`invalid_surface`, `screenShareFailureMessage()`) |
 | Cancelled / blocked the screen share | "Screen share was cancelled or blocked. Press the button again, choose your Entire Screen, and Allow." (`share_cancelled`) |
 | Screen sharing stopped mid-exam | A recoverable "Resume screen share" prompt + spoken warning; logged, tab must stay open |
-| End-submit failed after recording stopped | Stays on a recoverable "error" state with an inline **Retry** (`retryEnd()` in `App.tsx`) — no reload, so the session is never orphaned as incomplete |
+| End-submit failed after recording stopped | Stays on a recoverable "error" state with an inline **Retry** (`retryEnd()` in `candidate/StudentApp.tsx`) — no reload, so the session is never orphaned as incomplete |
 
 **Ending the test.** The candidate presses **End test** (in the slim top
-strip during the exam), which opens an `EndTestPanel` (`App.tsx`) with a
+strip during the exam), which opens an `EndTestPanel` (`frontend/src/candidate/panels/EndTestPanel.tsx`) with a
 required **integrity-assurance checkbox**:
 *"I assure that I worked independently, did not copy, did not use AI/external
 help, and submitted only my own solution."* "End and close session" is disabled
 until the box is checked. On end, the client calls
 `POST /api/session/validate-end` then stops the recorder, uploads the final
 chunk, and calls `POST /api/session/end` with the manifest and
-`assuranceAccepted` (`stop()` in `App.tsx`; `validateEndSession()` /
-`endSession()` in `handler.mjs`).
+`assuranceAccepted` (`stop()` in `candidate/StudentApp.tsx`; `validateEndSession()` /
+`endSession()` in `backend/src/routes/session.mjs`).
 
 ![Candidate end state — session pending / final](../assets/e2e/candidate/14-candidate-final-pending.png)
 
