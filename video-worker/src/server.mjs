@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import { once } from "node:events";
@@ -69,7 +69,17 @@ function requireAuth(req) {
   const header = req.headers.authorization || "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
   const token = bearer || req.headers["x-worker-token"];
-  if (token !== WORKER_TOKEN) throw httpError(401, "Unauthorized");
+  if (!safeEqual(token, WORKER_TOKEN)) throw httpError(401, "Unauthorized");
+}
+
+// Constant-time string compare (mirrors the backend's lib/sanitize.mjs safeEqual):
+// hash both inputs to a fixed-width SHA-256 digest then timingSafeEqual, so an
+// attacker cannot recover WORKER_TOKEN byte-by-byte via response timing and the
+// compare never throws on a length mismatch.
+function safeEqual(a, b) {
+  const hashA = createHash("sha256").update(String(a ?? ""), "utf8").digest();
+  const hashB = createHash("sha256").update(String(b ?? ""), "utf8").digest();
+  return timingSafeEqual(hashA, hashB);
 }
 
 function normalizeUsernames(body) {
