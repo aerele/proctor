@@ -19,6 +19,7 @@ import { makeAdminStatsRoutes } from "./routes/adminStats.mjs";
 import { makeAdminPeopleRoutes } from "./routes/adminPeople.mjs";
 import { makeResultsRoutes } from "./routes/results.mjs";
 import { makeReviewRoutes } from "./routes/review.mjs";
+import { makeAlertRoutes } from "./routes/alerts.mjs";
 import { makeHealthCheckRoutes } from "./routes/healthCheck.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
@@ -361,6 +362,45 @@ const {
   cameraRecordingConfigFor,
   screenMarkersConfigFor
 } = enforcement;
+
+// Factory seam (decomp B9): the proctor-alert ROUTES (poller ingest + admin feed
+// + archive batch + alert-settings get/save). ctx closes over THIS instance's
+// live-client getter, the auth guards (requireApiKey for ingest, requireAdmin for
+// the rest), the http transport helpers, the contest-scope resolver + chokepoint,
+// the shared room helpers, the signed-url resolver, the proctorAlerts domain
+// helpers (normalizeAlert / alertRef / getAlertSettings / mergeAlertSettings) BY
+// REFERENCE — single source — the ALL_CONTESTS sentinel BY REFERENCE, and the
+// env-captured collection names / caps / settings id BY VALUE. Instantiated AFTER
+// makeProctorAlerts so its domain helpers are available. The returned route
+// handlers are destructured into the SAME names the dispatch table uses, so the
+// dispatch lines stay byte-identical (canaryIsolation).
+const alertRoutes = makeAlertRoutes({
+  getFirestore,
+  requireApiKey,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  isTruthyParam,
+  contestScopeOf,
+  scopedQuery,
+  normalizeRoomFilter,
+  distinctRooms,
+  resolveSignedReadUrl,
+  normalizeAlert,
+  alertRef,
+  getAlertSettings,
+  mergeAlertSettings,
+  allContests: ALL_CONTESTS,
+  alertsCollection: ALERTS_COLLECTION,
+  alertsQueryLimit: ALERTS_QUERY_LIMIT,
+  sessionCollection: SESSION_COLLECTION,
+  sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
+  settingsCollection: SETTINGS_COLLECTION,
+  alertSettingsId: ALERT_SETTINGS_ID
+});
+const {
+  ingestAlerts, adminAlerts, adminAlertAction, adminGetAlertSettings, adminSaveAlertSettings
+} = alertRoutes;
 
 // Factory seam (decomp B1, A2): the invigilator route domain. ctx closes over
 // THIS instance's live-client getter, the auth guard from makeAuth, the neutral
@@ -4188,132 +4228,20 @@ async function adminSessionDetails(req) {
 // heartbeat / invigilator-ctx / alert-route call site stays byte-identical
 // (canaryIsolation). The cross-domain enforcement helpers sanitizeExemptions +
 // intOrZero are passed into the factory by reference (single source).
-async function ingestAlerts(req) {
-  requireApiKey(req);
-  const body = parseBody(req);
-  const rawAlerts = Array.isArray(body?.alerts) ? body.alerts : [body];
-  if (!rawAlerts.length) return badRequest("No alerts provided");
-  if (rawAlerts.length > 500) return badRequest("Too many alerts in one request (max 500)");
 
-  const now = new Date().toISOString();
-  const normalized = rawAlerts.map((alert, index) => normalizeAlert(alert, index, now));
-
-  // Idempotent merge keyed on alert.id so retried deliveries do not duplicate.
-  await Promise.all(normalized.map((alert) => alertRef(alert.id).set(alert, { merge: true })));
-
-  return { ok: true, ingested: normalized.length, ids: normalized.map((alert) => alert.id) };
-}
-
-// normalizeAlert + normalizeVerdict moved to the makeProctorAlerts(ctx) factory
-// in src/proctorAlerts.mjs (decomp B9a); destructured at module scope above and
-// still consumed by the resident ingestAlerts route until B9 moves it.
-
-async function adminAlerts(req) {
-  requireAdmin(req);
-  const scope = await contestScopeOf(req.query?.contest_slug);
-  const severity = req.query?.severity;
-  const source = req.query?.source;
-  const room = normalizeRoomFilter(req.query?.room);
-  const includeArchived = isTruthyParam(req.query?.include_archived);
-
-  // B6: applying ALL THREE equality filters server-side (contest_slug + severity
-  // + source) would need a composite Firestore index that doesn't exist. To stay
-  // index-free (lower risk than relying on a deployed composite index), we push
-  // AT MOST ONE equality filter to Firestore — the most selective, contest_slug —
-  // and filter the remaining fields in memory. ALERTS_QUERY_LIMIT bounds the scan.
-  let query = getFirestore().collection(ALERTS_COLLECTION);
-  if (scope !== ALL_CONTESTS) {
-    query = scopedQuery(query, scope);
-  } else {
-    // Zero-alerts bug (2026-06-10 investigation, root cause #1): without an
-    // orderBy, Firestore fills the limit() window in DOC-ID order, so a
-    // bulk-archived pile whose ids sort first (contest-eval:first_attempt_solve:*)
-    // crowds every live alert out of the scan BEFORE the in-memory archived
-    // filter runs. Order newest-first so the window always holds the most
-    // recent docs. The archived filter STAYS in memory: legacy docs omit the
-    // field, so an `archived == false` equality would drop live legacy alerts.
-    // Single-field orderBy rides the automatic index; combining it with the
-    // contest_slug equality filter above WOULD need a composite index, so the
-    // contest-scoped branch keeps the bare (index-free) scan.
-    query = query.orderBy("timestamp", "desc");
-  }
-
-  const snapshot = await query.limit(ALERTS_QUERY_LIMIT).get();
-  const alerts = snapshot.docs
-    .map((doc) => doc.data())
-    .filter((alert) => !severity || alert.severity === String(severity))
-    .filter((alert) => !source || alert.source === String(source))
-    .filter((alert) => !room || String(alert.room || "") === room)
-    // Archive: exclude archived alerts by default; include them only when the
-    // caller opts in with include_archived=true. A missing `archived` field on a
-    // legacy doc is treated as not-archived.
-    .filter((alert) => includeArchived || !alert.archived)
-    .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
-    .slice(0, ALERTS_QUERY_LIMIT);
-
-  const withUrls = await Promise.all(alerts.map(async (alert) => {
-    if (!alert.video_key) return { ...alert, download_url: null };
-    const downloadUrl = await resolveSignedReadUrl(alert.video_key);
-    return { ...alert, download_url: downloadUrl };
-  }));
-
-  // Distinct rooms come from the SESSION docs (capped) so the console dropdown
-  // lists every room, not just rooms that happen to have an alert. Scoped to the
-  // same contest as the alerts query.
-  const rooms = await listSessionRooms(scope);
-
-  return { alerts: withUrls, rooms };
-}
-
-// Distinct room labels across session docs in the given RESOLVED contest scope
-// (ALL_CONTESTS for unscoped), capped. Shared by adminAlerts so its room
-// dropdown matches adminStats'.
-async function listSessionRooms(scope) {
-  const snapshot = await scopedQuery(getFirestore().collection(SESSION_COLLECTION), scope)
-    .limit(SESSIONS_QUERY_LIMIT)
-    .get();
-  return distinctRooms(snapshot.docs.map((doc) => doc.data()));
-}
+// The proctor-alert ROUTES — ingestAlerts (poller ingest) + adminAlerts (admin
+// feed) + the alerts-only listSessionRooms helper — moved VERBATIM to the
+// makeAlertRoutes(ctx) factory in routes/alerts.mjs (decomp B9); destructured at
+// module scope above so the dispatch lines stay byte-identical (canaryIsolation).
+// They consume the proctorAlerts domain helpers (normalizeAlert / alertRef /
+// getAlertSettings / mergeAlertSettings) threaded through the factory ctx.
 
 // isTruthyParam moved to lib/http.mjs (decomp B0); imported at the top.
 
 // ---- Alert archive (admin) -------------------------------------------------
-//
-// Toggle the `archived` flag on a set of alert docs. The frontend calls this
-// after a session approve to also-archive that session's alerts, and from a
-// manual archive/unarchive control. archived alerts are hidden from
-// GET /api/admin/alerts unless include_archived=true.
-async function adminAlertAction(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const action = String(body.action || "");
-  if (!["archive", "unarchive"].includes(action)) {
-    return badRequest("action must be archive or unarchive");
-  }
-  const ids = Array.isArray(body.ids) ? body.ids.filter((id) => id !== undefined && id !== null && id !== "") : [];
-  if (!ids.length) return badRequest("ids[] must be a non-empty array of alert ids");
-
-  const archived = action === "archive";
-  const now = new Date().toISOString();
-  const updated = [];
-  const missing = [];
-  for (const rawId of ids) {
-    const id = String(rawId);
-    // merge:true so we only touch the archive fields and never clobber the rest
-    // of the alert doc. Skip ids that don't exist so a stale id can't 500 the
-    // whole batch — report them back so the console can surface it.
-    const ref = alertRef(id);
-    const doc = await ref.get();
-    if (!doc.exists) {
-      missing.push(id);
-      continue;
-    }
-    await ref.set({ archived, archived_at: archived ? now : null }, { merge: true });
-    updated.push(id);
-  }
-
-  return { ok: true, action, archived, updated, missing };
-}
+// adminAlertAction (archive/unarchive a batch of alert docs) moved VERBATIM to the
+// makeAlertRoutes(ctx) factory in routes/alerts.mjs (decomp B9); destructured at
+// module scope above so the dispatch line stays byte-identical (canaryIsolation).
 
 // ---- S3: invigilator portal + room start gate -------------------------------
 //
@@ -4495,31 +4423,11 @@ async function sessionUnlockGate(req) {
 // dispatch line stays byte-identical (canaryIsolation).
 
 // ---- Proctor alert settings (admin) ----------------------------------------
-//
-// GET returns the full per-type config (defaults merged with stored overrides)
-// so the console can render a complete toggle list. POST upserts the doc; only
-// known types and valid severities are persisted, and a missing/blank `enabled`
-// falls back to the default so a partial payload can't corrupt the config.
-async function adminGetAlertSettings(req) {
-  requireAdmin(req);
-  return await getAlertSettings();
-}
-
-async function adminSaveAlertSettings(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  const incoming = body && typeof body.proctor === "object" && body.proctor !== null ? body.proctor : {};
-
-  // Normalize against the known type set + defaults so a bad/partial payload
-  // can never persist an unknown type or an invalid severity.
-  const merged = mergeAlertSettings(incoming);
-  const now = new Date().toISOString();
-  await getFirestore().collection(SETTINGS_COLLECTION).doc(ALERT_SETTINGS_ID).set({
-    proctor: merged.proctor,
-    updated_at: now
-  });
-  return merged;
-}
+// adminGetAlertSettings + adminSaveAlertSettings moved VERBATIM to the
+// makeAlertRoutes(ctx) factory in routes/alerts.mjs (decomp B9); destructured at
+// module scope above so the dispatch lines stay byte-identical (canaryIsolation).
+// They read/write the alert-settings doc via the proctorAlerts domain helpers
+// (getAlertSettings / mergeAlertSettings) threaded through the factory ctx.
 
 // resolveSignedReadUrl moved to lib/clients.mjs (decomp B0); imported at the top.
 
