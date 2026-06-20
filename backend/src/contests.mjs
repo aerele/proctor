@@ -19,9 +19,6 @@ import {
 import { contestProblemEntries } from "./contestProblems.mjs";
 
 export const CONTEST_STATUSES = ["draft", "open", "archived"];
-// F10 §7 row S-B: "unique_id" is deleted from the design before any code
-// exists. Every contest is "person".
-export const IDENTITY_MODES = ["person"];
 
 const NAME_MAX = 200;
 const IDENTITY_LABEL_MAX = 80;

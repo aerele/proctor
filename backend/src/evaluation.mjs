@@ -1,9 +1,8 @@
 // backend/src/evaluation.mjs — the candidate-evaluation ORCHESTRATOR (P1).
 //
 // Two layers:
-//   1. PURE wrappers (evaluateCandidate / crossCandidatePass) re-exported for the
-//      local analysis driver + tests — they touch no I/O and just compose the
-//      pure metric modules.
+//   1. PURE wrapper (evaluateCandidate) re-exported for the local analysis driver
+//      + tests — it touches no I/O and just composes the pure metric modules.
 //   2. makeEvaluation(ctx) — the I/O layer. It gathers session/submission docs
 //      via the ctx.scopedQuery chokepoint (NO raw contest_slug filters — that is
 //      the scopingLint contract), pulls editor/shell/clipboard evidence from GCS
@@ -48,18 +47,6 @@ function jobDocId(slug) {
 // reuse the exact orchestrator entry point without the I/O layer.
 export function evaluateCandidate(input) {
   return buildScorecard(input);
-}
-
-// Pure cross-candidate pass: run the analysis, apply each patch to its
-// candidate's scorecard, and return the meta doc + the patched scorecards.
-// `candidates` carry { identityKey, scorecard, submissions, pastes, finalContents,
-// room, ips, cross_inputs }; `problems` is [{ problem_id }].
-export function crossCandidatePass(candidates, problems) {
-  const { meta, patches } = crossCandidateAnalysis({ candidates, problems });
-  const scorecards = candidates.map((c) =>
-    applyCrossPatches(c.scorecard, patches.get(c.identityKey))
-  );
-  return { meta, scorecards };
 }
 
 // ---------------------------------------------------------------------------

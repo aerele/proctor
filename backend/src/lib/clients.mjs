@@ -2,7 +2,7 @@
 // test-injection seams (decomp B0). This is the ONE place that owns the live
 // Firestore/Storage handles and the Judge0 adapter, so the test swap via
 // __setClientsForTest / __setJudge0AdapterForTest propagates to EVERY consumer
-// that reads through getFirestore()/getStorage()/judge0().
+// that reads through getFirestore()/bucket()/judge0().
 //
 // Env-derived configuration (the evidence bucket name, signed-URL expiry, and
 // the Judge0 connection params) is INJECTED by handler.mjs via configureClients
@@ -144,9 +144,6 @@ export function getFirestore() {
     _guardedBase = firestore;
   }
   return _guardedFirestore;
-}
-export function getStorage() {
-  return storage;
 }
 
 // Env-derived config injected once at handler module-load. Defaults keep this
