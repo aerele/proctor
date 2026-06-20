@@ -20,6 +20,7 @@ import { makeAdminPeopleRoutes } from "./routes/adminPeople.mjs";
 import { makeResultsRoutes } from "./routes/results.mjs";
 import { makeReviewRoutes } from "./routes/review.mjs";
 import { makeAlertRoutes } from "./routes/alerts.mjs";
+import { makeSessionGateRoutes } from "./routes/sessionGates.mjs";
 import { makeHealthCheckRoutes } from "./routes/healthCheck.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
@@ -437,10 +438,45 @@ const invigilatorRoutes = makeInvigilatorRoutes({
 const {
   invigilatorOverview, invigilatorRoom, invigilatorReleaseCode, invigilatorOpenRoom,
   invigilatorExempt, invigilatorUnlockCode, invigilatorUnlock,
-  // Room-gate helpers the invigilator module owns; the still-resident session
-  // routes (sessionRoomGate / sessionUnlockGate) reuse gateRoomKey + getRoomGate.
+  // Room-gate helpers the invigilator module owns; the session-gate routes
+  // (routes/sessionGates.mjs) reuse gateRoomKey + getRoomGate via ctx by reference.
   gateRoomKey, getRoomGate
 } = invigilatorRoutes;
+
+// Factory seam (decomp B10): the candidate-side session GATE routes (room-gate
+// poll/unlock + the L1 enforcement-violation self-report + the L2 code unlock).
+// ctx closes over the session-doc helpers, the http transport helpers, the
+// resident personContestForSession resolver, the invigilator-owned room-gate
+// helpers gateRoomKey + getRoomGate BY REFERENCE, the enforcement domain
+// (sanitizeExemptions / intOrZero / enforcementConfigFor / applyEnforcementViolation)
+// + the proctorAlerts domain (getAlertSettings) BY REFERENCE — single source — plus
+// FieldValue / safeEqual and the env-captured GATE_ATTEMPT_LIMIT +
+// ENFORCEMENT_LOCK_REASON BY VALUE. Instantiated AFTER makeInvigilatorRoutes (room-
+// gate helpers) and after makeEnforcement/makeProctorAlerts (domain helpers). The
+// returned handlers are destructured into the SAME names the dispatch table uses,
+// so the dispatch lines stay byte-identical (canaryIsolation).
+const sessionGateRoutes = makeSessionGateRoutes({
+  getSession,
+  requireWritableSession,
+  sessionRef,
+  personContestForSession,
+  gateRoomKey,
+  getRoomGate,
+  parseBody,
+  requireFields,
+  badRequest,
+  httpError,
+  safeEqual,
+  FieldValue,
+  sanitizeExemptions,
+  intOrZero,
+  enforcementConfigFor,
+  applyEnforcementViolation,
+  getAlertSettings,
+  gateAttemptLimit: GATE_ATTEMPT_LIMIT,
+  enforcementLockReason: ENFORCEMENT_LOCK_REASON
+});
+const { sessionRoomGate, sessionEnforcementViolation, sessionUnlockGate } = sessionGateRoutes;
 
 // Factory seam (P1): the candidate-evaluation orchestrator + its admin routes.
 // makeEvaluation gathers contest-scoped Firestore docs (ALL reads through the
@@ -4256,163 +4292,16 @@ async function adminSessionDetails(req) {
 // invigilatorReleaseCode/OpenRoom/UnlockCode/Unlock/Exempt moved VERBATIM to
 // the makeInvigilatorRoutes(ctx) factory in routes/invigilator.mjs (decomp B1).
 // The route handlers are destructured at module scope (see the factory call near
-// the top); gateRoomKey + getRoomGate come back too so the still-resident
-// session routes (sessionRoomGate / sessionUnlockGate) reuse them.
+// the top); gateRoomKey + getRoomGate come back too so the session-gate routes
+// (routes/sessionGates.mjs) reuse them via ctx.
 
-// POST /api/session/room-gate — candidate-side gate poll/unlock. Auth = the
-// unguessable session token (like /api/events), never admin auth. With no
-// `code` it is a cheap status poll (the client re-polls ~5 s, so an invigilator
-// start-now admits candidates with ZERO typing); with a `code` it attempts the
-// room OTP. Recording/events/heartbeats are deliberately NOT gated — a
-// candidate "waiting" is still recorded. The attempt cap is checked BEFORE the
-// compare so a capped session stays capped even with the right code.
-async function sessionRoomGate(req) {
-  const body = parseBody(req);
-  requireFields(body, ["session_id"]);
-  const session = requireWritableSession(await getSession(String(body.session_id)));
-  // The gate FLAG follows the session's contest (person contests own
-  // room_gate_enabled as an S-I snapshot field); the gate DOC below is
-  // per-(contest_slug, room). An orphaned session (no current contest) is
-  // ungated.
-  const contest = await personContestForSession(session);
-  const gateEnabled = Boolean(contest?.room_gate_enabled);
-  if (!gateEnabled) {
-    return { gate_enabled: false, exam_started: true, exam_started_at: session.exam_started_at || null };
-  }
-  if (session.exam_started_at) {
-    return { gate_enabled: true, exam_started: true, exam_started_at: session.exam_started_at };
-  }
-  const contestSlug = session.contest_slug || "";
-  const roomKey = gateRoomKey(session.room);
-  const gate = await getRoomGate(contestSlug, roomKey);
-  const now = new Date().toISOString();
-
-  if (gate && gate.mode === "open") {
-    await sessionRef(session.session_id).update({ exam_started_at: now, exam_start_method: "room_open", updated_at: now });
-    return { gate_enabled: true, exam_started: true, exam_started_at: now };
-  }
-
-  const code = body.code === undefined || body.code === null ? "" : String(body.code).trim();
-  if (!code) {
-    return { gate_enabled: true, exam_started: false, room: session.room || "" };
-  }
-
-  if (Number(session.gate_attempt_count || 0) >= GATE_ATTEMPT_LIMIT) {
-    throw httpError(429, "too_many_attempts");
-  }
-  if (gate && gate.mode === "otp" && gate.otp && safeEqual(code, gate.otp)) {
-    await sessionRef(session.session_id).update({ exam_started_at: now, exam_start_method: "otp", updated_at: now });
-    return { gate_enabled: true, exam_started: true, exam_started_at: now };
-  }
-  await sessionRef(session.session_id).update({ gate_attempt_count: FieldValue.increment(1), updated_at: now });
-  throw httpError(403, "invalid_code");
-}
-
-// ---- F5.3/F5.6: fullscreen enforcement violation + candidate unlock --------
-
-const ENFORCEMENT_VIOLATION_PHASES = ["countdown_expired", "exit_limit"];
-// ENFORCEMENT_LOCK_REASON moved UP to the non-env constants block (decomp B1) so
-// the makeInvigilatorRoutes(ctx) factory call at module scope can pass it without
-// hitting the const's temporal dead zone. Value unchanged.
-
-// POST /api/session/enforcement-violation — the candidate client reports that
-// the L1 ladder tripped (ack countdown expired, or the exit limit was
-// exceeded). Auth = the unguessable session token, like /api/events. The
-// SERVER decides the consequence from its own settings (never the client):
-//   - exempt session            → no-op (the client raced a fresh exemption)
-//   - always                    → critical fullscreen_enforcement alert
-//   - enforcement_mode "block"  → lock the session (locked_reason
-//     "fullscreen_enforcement"; release = room code via /api/session/unlock-gate
-//     or an admin/invigilator unlock)
-//   - "alert_first"             → alert only; the client holds the ack overlay.
-async function sessionEnforcementViolation(req) {
-  const body = parseBody(req);
-  requireFields(body, ["session_id"]);
-  const phase = String(body.phase || "");
-  if (!ENFORCEMENT_VIOLATION_PHASES.includes(phase)) {
-    return badRequest(`phase must be one of ${ENFORCEMENT_VIOLATION_PHASES.join(", ")}`);
-  }
-  const session = requireWritableSession(await getSession(String(body.session_id)));
-
-  // Server-side exemption check is authoritative — a stale client that missed
-  // the heartbeat exemption update can never lock an exempted candidate.
-  const exemptions = sanitizeExemptions(session.enforcement_exemptions);
-  if (exemptions.fullscreen === true) {
-    return { ok: true, locked: false, exempt: true };
-  }
-
-  // The consequence follows the SESSION's config source — its person contest's
-  // snapshot enforcement, or the normalized defaults for an orphaned session.
-  const contest = await personContestForSession(session);
-  const enforcement = enforcementConfigFor(contest);
-  const exitCount = Math.max(0, intOrZero(body.exit_count));
-  const alertSettings = await getAlertSettings();
-  const { locked } = await applyEnforcementViolation(session, { phase, exitCount, enforcement, alertSettings });
-  if (!locked) {
-    return { ok: true, locked: false, mode: "alert_first" };
-  }
-  return { ok: true, locked: true, locked_reason: ENFORCEMENT_LOCK_REASON, mode: "block" };
-}
-
-// applyEnforcementViolation (the single consequence of a tripped enforcement
-// ladder) + the SERVER-SIDE reconciliation pair (reconcileFullscreenEnforcement /
-// reconcileEnforcementCountdown, with ENFORCEMENT_COUNTDOWN_GRACE_SECONDS) moved
-// to the makeEnforcement(ctx) factory in src/enforcement.mjs (decomp B10a);
-// destructured at module scope above and consumed by the resident
-// sessionEnforcementViolation route + telemetry (recordEvents/heartbeat). The
-// proctorAlerts raisers they call (alertTypeConfig/upsertProctorAlert) arrive in
-// the factory ctx by reference (single source).
-
-// POST /api/session/unlock-gate — candidate-side release of an ENFORCEMENT
-// lock using the room's dedicated UNLOCK code (gate.unlock_otp, minted via
-// /api/invigilator/unlock-code — "call your room proctor"). Wave-2 review fix:
-// NEVER the start OTP — every candidate in an OTP-gated room typed that code
-// to begin, so accepting it here made the L2 lock self-serve. Admin locks
-// (no/different locked_reason) are NOT code-releasable: they need an
-// admin/invigilator unlock. Mirrors the room-gate attempt-cap pattern:
-// NaN-guarded counter, checked BEFORE the compare so a capped session stays
-// capped even with the right code. When NO unlock code has been minted there
-// is nothing to brute-force, so the attempt does NOT burn toward the cap
-// (distinct no_unlock_code error → the candidate UI says "ask your proctor").
-// Deliberately consults the gate DOC regardless of room_gate_enabled — the
-// unlock code releases a lock, it does not gate a start.
-async function sessionUnlockGate(req) {
-  const body = parseBody(req);
-  requireFields(body, ["session_id", "code"]);
-  const session = await getSession(String(body.session_id));
-  if (session.status !== "locked" || session.locked_reason !== ENFORCEMENT_LOCK_REASON) {
-    throw httpError(403, "not_enforcement_locked");
-  }
-  if (intOrZero(session.unlock_attempt_count) >= GATE_ATTEMPT_LIMIT) {
-    throw httpError(429, "too_many_attempts");
-  }
-  const code = String(body.code).trim();
-  const now = new Date().toISOString();
-  const gate = await getRoomGate(session.contest_slug || "", gateRoomKey(session.room));
-  if (!gate || !gate.unlock_otp) {
-    throw httpError(403, "no_unlock_code");
-  }
-  if (code && safeEqual(code, gate.unlock_otp)) {
-    await sessionRef(session.session_id).update({
-      status: "active",
-      unlocked_at: now,
-      locked_reason: null,
-      unlock_method: "room_code",
-      // Wave-2: reset the server-side exit ladder (mirrors the client's
-      // post-release reset — a later accident is L1 again, not an instant relock).
-      fullscreen_exit_count: 0,
-      fullscreen_out_since: null,
-      // Wave-3: a successful unlock also clears the brute-force counter — wrong
-      // tries from THIS lock must not creep a later re-lock toward the
-      // permanent 429 cap (the proctor was in the loop; the slate is clean).
-      unlock_attempt_count: 0,
-      updated_at: now
-    });
-    return { ok: true, status: "active" };
-  }
-  await sessionRef(session.session_id).update({ unlock_attempt_count: FieldValue.increment(1), updated_at: now });
-  throw httpError(403, "invalid_code");
-}
+// The candidate-side session GATE routes — sessionRoomGate (room-gate poll/unlock)
+// + sessionEnforcementViolation (the L1 self-report, with ENFORCEMENT_VIOLATION_PHASES)
+// + sessionUnlockGate (the L2 code release) — moved VERBATIM to the
+// makeSessionGateRoutes(ctx) factory in routes/sessionGates.mjs (decomp B10);
+// destructured at module scope above so the dispatch lines stay byte-identical
+// (canaryIsolation). They consume the enforcement + proctorAlerts domains and the
+// invigilator-owned room-gate helpers (gateRoomKey/getRoomGate) via the factory ctx.
 
 // requireExamStarted (the S3 exec gate enforcement check) moved to the
 // makeEnforcement(ctx) factory in src/enforcement.mjs (decomp B10a); destructured
