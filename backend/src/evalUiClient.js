@@ -111,15 +111,15 @@ function colsBtn(headers) {
 // a clickable ID span: click copies the id to the clipboard + flashes "copied".
 function copyableId(idText, cls) {
   if (idText == null || idText === "") return null;
-  const span = el("span", { class: (cls || "id") + " copyable", title: "Click to copy" }, String(idText));
+  const span = el("span", { class: (cls || "id") + " copyable", title: "Copy ID to clipboard" }, String(idText));
   span.addEventListener("click", (e) => {
     e.stopPropagation();
     e.preventDefault();
     const flash = () => {
       const prev = span.textContent;
-      span.textContent = "copied ✓";
+      span.textContent = "copied to clipboard ✓";
       span.classList.add("copied");
-      setTimeout(() => { span.textContent = prev; span.classList.remove("copied"); }, 1000);
+      setTimeout(() => { span.textContent = prev; span.classList.remove("copied"); }, 1100);
     };
     // execCommand fallback — works inside a cross-origin iframe where the async
     // Clipboard API may be blocked by permissions policy (the parent frame does
