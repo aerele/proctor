@@ -20,7 +20,7 @@ import {
   analyzeClones,
 } from "./evaluationClone.mjs";
 
-export const EVALUATOR_VERSION = "2";
+export const EVALUATOR_VERSION = "3";
 
 export const THRESHOLDS = {
   // D3 — switch-away → paste correlation window (paste/burst within 10s of episode end).
@@ -910,22 +910,24 @@ function deriveTiers({ flags, talent, integrity, coverage = {} }) {
   }
 
   // talent tier
-  // strong ⇔ ≥1 hard genuine OR ≥3 med genuine OR honest_reach present;
-  // moderate ⇔ ≥1 med+ genuine OR strong_gem; else weak.
+  // strong ⇔ ≥1 hard genuine OR ≥3 med genuine; moderate ⇔ ≥1 med+ genuine OR
+  // strong_gem; else weak.
   // STRONG FLOOR (tightened 2026-06-20): the prior gate (genuineMed>=2) let
-  // thin-strong labels through in weak fields. The correct floor is
-  // hard>=1 || med>=3 || reach>0 — it demotes exactly the 20 thin labels and
-  // demotes ZERO of the 5 KPR selected interns (Anita 23cb204 gm=4 survives
-  // via med>=3; a hard-or-reach-only floor would wrongly demote her). A demoted
-  // thin-strong (gm=2,gh=0,reach=0) falls to moderate via genuineMedPlus>=1,
-  // not below. honest_reach is the talent object's reach list.
+  // thin-strong labels through in weak fields → tightened to hard>=1 || med>=3.
+  // It demotes the thin labels and demotes ZERO of the 5 KPR selected interns
+  // (Anita 23cb204 gm=4 survives via med>=3). A demoted thin-strong
+  // (gm=2,gh=0) falls to moderate via genuineMedPlus>=1, not below.
+  // honest_reach is DELIBERATELY NOT a strong-qualifier (calibration 2026-06-20):
+  // on the live recompute it labeled 0-solve candidates "strong" (165/166 of one
+  // contest's strong tier were reach-only, 58 with zero full solves). honest_reach
+  // is a genuine *effort* signal credited in the COMPOSITE (reach_frac), never the
+  // talent tier — trying hard on an unsolved problem is not "strong talent".
   const genuineHard = countGenuine(talent, "hard");
   const genuineMed = countGenuine(talent, "med");
   const genuineMedPlus = genuineHard + genuineMed;
-  const hasHonestReach = Array.isArray(talent.honest_reach) && talent.honest_reach.length > 0;
   const strongGem = hasCode("strong_gem");
   let talentTier = "weak";
-  if (genuineHard >= 1 || genuineMed >= 3 || hasHonestReach) talentTier = "strong";
+  if (genuineHard >= 1 || genuineMed >= 3) talentTier = "strong";
   else if (genuineMedPlus >= 1 || strongGem) talentTier = "moderate";
   else talentTier = "weak";
 

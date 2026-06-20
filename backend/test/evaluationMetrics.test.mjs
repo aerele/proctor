@@ -85,7 +85,7 @@ function sub(o) {
 }
 
 test("EVALUATOR_VERSION and THRESHOLDS constants", () => {
-  assert.equal(EVALUATOR_VERSION, "2");
+  assert.equal(EVALUATOR_VERSION, "3");
   assert.equal(THRESHOLDS.AWAY_PASTE_WINDOW_MS, 10000);
   assert.equal(THRESHOLDS.SUPERHUMAN_CPS, 14);
   assert.equal(THRESHOLDS.SUPERHUMAN_RUN, 25);
@@ -214,7 +214,7 @@ function baseInput(overrides) {
 test("buildScorecard basic schema + identity fields", () => {
   const sc = buildScorecard(baseInput({}));
   assert.equal(sc.schema_version, 1);
-  assert.equal(sc.evaluator_version, "2");
+  assert.equal(sc.evaluator_version, "3");
   assert.equal(sc.contest_slug, "c1");
   assert.equal(sc.person_id, null);
   assert.equal(sc.username_norm, "u1");
@@ -527,9 +527,10 @@ test("buildScorecard genuine arc + talent tier (strong on hard genuine solve)", 
 });
 
 // ---- (c) strong-talent gate floor (tightened 2026-06-20) -------------------
-// strong ⇔ gh>=1 || gm>=3 || honest_reach>0. A thin-strong (gm=2,gh=0,reach=0)
-// now falls to MODERATE (not below). Build N genuine MED full-solves on distinct
-// problems with a per-pid hardness map; optionally an honest-reach problem.
+// strong ⇔ gh>=1 || gm>=3. A thin-strong (gm=2,gh=0) now falls to MODERATE (not
+// below). honest_reach is NOT a strong-qualifier (it credits the composite only).
+// Build N genuine MED full-solves on distinct problems with a per-pid hardness
+// map; optionally an honest-reach problem.
 function genuineMedSolve(pid, startMs) {
   // typed-majority full solve with a prior wrong submit → genuine_arc med.
   const code = `class S${pid} { int solve(){ /* ${pid} */ return 1; } }`;
@@ -604,11 +605,13 @@ test("(c) talent gate: gm=4/gh=0/reach=0 ⇒ STRONG (Anita-like survives)", () =
   assert.equal(sc.tiers.talent, "strong");
 });
 
-test("(c) talent gate: gm=2 + honest_reach>0 ⇒ STRONG", () => {
+test("(c) talent gate: gm=2 + honest_reach>0 ⇒ MODERATE (reach is NOT a strong-qualifier)", () => {
   const sc = buildMedScorecard(2, { withReach: true });
   assert.equal(sc.talent.n_medplus_solved, 2);
   assert.ok(sc.talent.honest_reach.length > 0);
-  assert.equal(sc.tiers.talent, "strong");
+  // honest_reach credits the composite (reach_frac), NOT the talent tier: a
+  // 0-hard / 2-med solver with reach stays MODERATE — trying ≠ strong talent.
+  assert.equal(sc.tiers.talent, "moderate");
 });
 
 test("composite formula hand-computed", () => {
