@@ -10,6 +10,20 @@
 // parser, 400 helper, the makeEvaluation instance, and resolveContest) arrives
 // through ctx, exactly like makeInvigilatorRoutes.
 
+// The SINGLE source of truth for the eval-route allowlist: the exact
+// "METHOD /path" dispatch keys these three handlers are wired under in
+// handler.mjs. The proctor-eval entry (eval-server.mjs) derives its path
+// allowlist (and its OPTIONS-preflight gate) from THIS set via handler.mjs's
+// re-export, so the eval service can never serve a route the routes module
+// doesn't declare, and the allowlist can never drift from the wiring (#112
+// LOW-8). Keep these strings in lockstep with handler.mjs's dispatch lines for
+// the eval domain.
+export const EVAL_ROUTE_KEYS = Object.freeze([
+  "POST /api/admin/contest-evaluate",
+  "GET /api/admin/contest-evaluations",
+  "GET /api/admin/contest-evaluate-status"
+]);
+
 export function makeEvaluationRoutes(ctx) {
   const { requireAdmin, parseBody, badRequest, resolveContest, evaluation } = ctx;
 

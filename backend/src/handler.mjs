@@ -50,7 +50,7 @@ import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
 import { makeEvaluation } from "./evaluation.mjs";
 import { makeProctorAlerts } from "./proctorAlerts.mjs";
 import { makeEnforcement, sanitizeExemptions, intOrZero } from "./enforcement.mjs";
-import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
+import { makeEvaluationRoutes, EVAL_ROUTE_KEYS } from "./routes/evaluation.mjs";
 import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
 import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
 import { makeAdminContestsRoutes } from "./routes/adminContests.mjs";
@@ -1345,6 +1345,13 @@ export const api = async (req, res) => {
 // env-lint allowlist at handler.mjs + config.mjs). This export does not alter the
 // `api` dispatcher in any way — proctor-api's behavior is unchanged.
 export const corsOrigin = PUBLIC_APP_ORIGIN;
+
+// Re-export the eval-route allowlist (declared in routes/evaluation.mjs, the
+// module that owns these routes) ADDITIVELY so the proctor-eval entry
+// (src/eval-server.mjs) derives its path allowlist + OPTIONS-preflight gate from
+// the SAME source of truth the routes are wired against — it can never drift
+// (#112 LOW-8). Does not alter the `api` dispatcher; proctor-api is unchanged.
+export { EVAL_ROUTE_KEYS };
 
 // ---- candidate SESSION-LIFECYCLE routes (start / resume / validate-end / end)
 // The session-lifecycle route bodies (startSession / resumeSession /

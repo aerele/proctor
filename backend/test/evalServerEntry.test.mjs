@@ -215,6 +215,31 @@ test("evalApi serves the CORS preflight (OPTIONS → 204) with the configured or
   assert.match(res.headers["access-control-allow-headers"], /x-admin-password/);
 });
 
+// #112 LOW-7: the OPTIONS preflight is forwarded to the shared handler ONLY for a
+// path the eval service actually serves (an EVAL_ROUTES path). A preflight for any
+// OTHER path (a test-taking route, a non-eval admin route) is a CORS-headed 404
+// emitted by the entry — it is NOT forwarded to `api`.
+test("evalApi does NOT forward an OPTIONS preflight for a non-eval path (404, not forwarded)", async () => {
+  freshClients();
+  const sessionPreflight = await call(makeReq({ method: "OPTIONS", path: "/api/session/start" }));
+  assert.equal(sessionPreflight.statusCode, 404, JSON.stringify(sessionPreflight.body));
+  assert.equal(sessionPreflight.body.error, "Not found");
+  // Still CORS-headed so a cross-origin caller reads the JSON 404, not a CORS error.
+  assert.equal(sessionPreflight.headers["access-control-allow-origin"], "https://proctor-web.example");
+
+  const adminPreflight = await call(makeReq({ method: "OPTIONS", path: "/api/admin/contests" }));
+  assert.equal(adminPreflight.statusCode, 404, JSON.stringify(adminPreflight.body));
+});
+
+test("evalApi DOES forward the OPTIONS preflight for every eval API path (204)", async () => {
+  freshClients();
+  for (const path of ["/api/admin/contest-evaluate", "/api/admin/contest-evaluations", "/api/admin/contest-evaluate-status"]) {
+    const res = await call(makeReq({ method: "OPTIONS", path }));
+    assert.equal(res.statusCode, 204, `${path}: ${JSON.stringify(res.body)}`);
+    assert.equal(res.headers["access-control-allow-origin"], "https://proctor-web.example");
+  }
+});
+
 test("evalApi applies CORS headers to its 404 fallthrough (cross-origin caller reads the 404, not a CORS error)", async () => {
   freshClients();
   const res = await call(makeReq({ method: "GET", path: "/api/admin/contests", headers: ADMIN_HEADERS }));

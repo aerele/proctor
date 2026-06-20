@@ -31,18 +31,21 @@
 // the already-env-configured `api`, and takes the CORS origin from handler.mjs's
 // `corsOrigin` export), so it does not widen the env-lint allowlist (handler.mjs
 // + config.mjs remain the only env readers).
-import { api, corsOrigin } from "./handler.mjs";
+import { api, corsOrigin, EVAL_ROUTE_KEYS } from "./handler.mjs";
 import { send, setCors } from "./lib/http.mjs";
 import { EVAL_UI_HTML, getClientAppSource, getRecommendModuleSource } from "./evalUiPage.mjs";
 
-// The ONLY routes proctor-eval serves. Mirrors handler.mjs's dispatch lines for
-// the eval domain (POST contest-evaluate, GET contest-evaluations, GET
-// contest-evaluate-status). Keep this list in lockstep with routes/evaluation.mjs.
-const EVAL_ROUTES = new Set([
-  "POST /api/admin/contest-evaluate",
-  "GET /api/admin/contest-evaluations",
-  "GET /api/admin/contest-evaluate-status"
-]);
+// The ONLY routes proctor-eval serves. DERIVED from EVAL_ROUTE_KEYS — the single
+// source of truth declared in routes/evaluation.mjs (re-exported via handler.mjs)
+// alongside the handlers themselves — so this allowlist can NEVER drift from the
+// routes routes/evaluation.mjs actually wires (#112 LOW-8). Each key is a
+// "METHOD /path" string matching `${req.method} ${requestPath(req)}` below.
+const EVAL_ROUTES = new Set(EVAL_ROUTE_KEYS);
+
+// The PATHS of those routes (the second token of each "METHOD /path" key), used
+// to gate the OPTIONS preflight forward: a preflight is forwarded ONLY for a path
+// the eval service serves. Also derived from EVAL_ROUTE_KEYS so it can't drift.
+const EVAL_PATHS = new Set(EVAL_ROUTE_KEYS.map((key) => key.slice(key.indexOf(" ") + 1)));
 
 // Resolve the request path the SAME way handler.mjs's `api` does, so the
 // allowlist match and the downstream dispatch agree exactly.
@@ -105,8 +108,19 @@ export const evalApi = async (req, res) => {
       return res.status(200).send(getRecommendModuleSource());
     }
   }
-  if (req.method === "OPTIONS") return api(req, res);
-  const key = `${req.method} ${requestPath(req)}`;
+  // OPTIONS preflight: forward to `api` (which emits setCors + 204) ONLY for a
+  // path the eval service actually serves — i.e. the path of one of the eval API
+  // routes (the browser preflights the SAME path it will then POST/GET). Gating
+  // on EVAL_ROUTES membership (#112 LOW-7) means a preflight for an unrelated
+  // path is a CORS-headed 404 here, never forwarded to the shared handler. The
+  // /eval-ui* assets are GET-only same-origin self-fetches that need no preflight.
+  const path = requestPath(req);
+  if (req.method === "OPTIONS") {
+    if (EVAL_PATHS.has(path)) return api(req, res);
+    setCors(res, corsOrigin);
+    return send(res, 404, { error: "Not found" });
+  }
+  const key = `${req.method} ${path}`;
   if (EVAL_ROUTES.has(key)) return api(req, res);
   setCors(res, corsOrigin);
   return send(res, 404, { error: "Not found" });
