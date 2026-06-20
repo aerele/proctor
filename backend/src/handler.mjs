@@ -11,6 +11,7 @@ import { makeEvaluation } from "./evaluation.mjs";
 import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
 import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
 import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
+import { makeAdminContestsRoutes } from "./routes/adminContests.mjs";
 import { makeSubmissionEventsRoutes } from "./routes/submissionEvents.mjs";
 import { makeAdminStatsRoutes } from "./routes/adminStats.mjs";
 import { makeAdminPeopleRoutes } from "./routes/adminPeople.mjs";
@@ -411,6 +412,46 @@ const adminProblemsRoutes = makeAdminProblemsRoutes({
 const {
   adminListProblems, adminGetProblem, adminSaveProblem, adminDeleteProblem
 } = adminProblemsRoutes;
+
+// Factory seam (decomp B4): the admin contest-lifecycle route domain. ctx closes
+// over THIS instance's live-client getter, the auth guard from makeAuth, the http
+// transport helpers, the env-captured contests/submissions collection names, the
+// scopedQuery chokepoint, the contests/templates/problems domain fns, the
+// contest-problems reader, and the resident endAllLiveSessions sweep (by
+// reference — it owns raw-where #2 and stays in handler.mjs until B14). The
+// returned route handlers are destructured into the SAME names the dispatch table
+// uses, so the dispatch lines stay byte-identical (canaryIsolation). The contest
+// helpers it owns (instantiateTemplatePayload / requirePublishedProblems /
+// enforceContestProblemsEditRules) move with the routes — currently used only here.
+const adminContestsRoutes = makeAdminContestsRoutes({
+  getFirestore,
+  requireAdmin,
+  parseBody,
+  requireFields,
+  badRequest,
+  httpError,
+  httpErrorWith,
+  contestsCollection: CONTESTS_COLLECTION,
+  submissionsCollection: SUBMISSIONS_COLLECTION,
+  scopedQuery,
+  listContests,
+  createContest,
+  updateContest,
+  setContestStatus,
+  regenerateContestSecret,
+  setContestAccessCode,
+  applyContestExamTime,
+  getTemplate,
+  normalizeProblemEntries,
+  getProblem,
+  getBankProblem,
+  contestProblemEntries,
+  endAllLiveSessions
+});
+const {
+  adminListContests, adminCreateContest, adminUpdateContest, adminContestStatus,
+  adminContestRegenerate, adminContestSetCode, adminContestExamTime
+} = adminContestsRoutes;
 
 // Factory seam (decomp B5): the poller-sourced submission-time markers route
 // domain. ctx closes over THIS instance's live-client getter, the env-captured
@@ -2076,197 +2117,15 @@ async function endSession(req) {
 // byte-identical (canaryIsolation). Thin glue over src/templates.mjs as before.
 
 // ---- S-B: contests (F9 §2 / F10 §2.7) ----------------------------------------
-// Thin admin glue over src/contests.mjs (validation + slug/access-code minting
-// live there).
-
-async function adminListContests(req) {
-  requireAdmin(req);
-  const includeArchived = ["1", "true"].includes(String(req.query?.include_archived ?? "").toLowerCase());
-  // Hide ephemeral __healthcheck-* canaries from the ADMIN-FACING list (the
-  // Contests panel + scope picker consume this route). The hide is at the
-  // RESPONSE layer ONLY — the shared listContests() still returns them so the
-  // health check's orphanSweep can find + purge leftover canaries. slugify()
-  // strips leading underscores, so no real contest slug can start with "__".
-  const contests = await listContests({ includeArchived });
-  return { contests: contests.filter((c) => !String(c.slug || "").startsWith("__healthcheck-")) };
-}
-
-async function adminCreateContest(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  let payload = body;
-  if (body.template_slug !== undefined && body.template_slug !== null && String(body.template_slug).trim() !== "") {
-    payload = await instantiateTemplatePayload(body);
-  } else if (body.problems !== undefined && Array.isArray(body.problems) && body.problems.length) {
-    // Direct problems[] (no template): same published-right-now rule.
-    const checked = normalizeProblemEntries(body.problems);
-    if (!checked.ok) return badRequest(checked.error);
-    await requirePublishedProblems(checked.entries, "problems_unavailable");
-  }
-  return { ok: true, contest: await createContest(payload) };
-}
-
-// S-I §1.4.1: snapshot-on-instantiate — copy the template's problems[] and
-// every defaults.* field onto the contest doc AS THE CONTEST'S OWN FIELDS.
-// Body values win over template defaults (the create form pre-fills, the admin
-// may edit before posting). duration_minutes only PREFILLS end_at; an explicit
-// end_at always wins. Template edits after this moment change nothing.
-async function instantiateTemplatePayload(body) {
-  const template = await getTemplate(body.template_slug);
-  if (!template) throw httpError(404, "template_not_found");
-  if (template.archived) throw httpError(400, "template_archived");
-
-  let entries = template.problems || [];
-  if (body.problems !== undefined) {
-    const checked = normalizeProblemEntries(body.problems);
-    if (!checked.ok) return badRequest(checked.error);
-    entries = checked.entries;
-  }
-  // §1.4.4: every entry must reference an existing PUBLISHED problem right now.
-  await requirePublishedProblems(entries, "template_problems_unavailable");
-
-  const defaults = template.defaults || {};
-  let endAt = body.end_at;
-  if ((endAt === undefined || endAt === null || endAt === "") && body.start_at) {
-    const startMs = Date.parse(String(body.start_at));
-    if (Number.isFinite(startMs)) {
-      endAt = new Date(startMs + (defaults.duration_minutes ?? 120) * 60_000).toISOString();
-    }
-  }
-  const pick = (bodyValue, templateValue) => (bodyValue !== undefined ? bodyValue : templateValue);
-  return {
-    name: body.name,
-    listed: body.listed,
-    start_at: body.start_at,
-    end_at: endAt,
-    problems: entries.map((entry) => ({ ...entry })), // the contest's own copy
-    template_slug: template.slug,                      // display-only provenance
-    identity_label: pick(body.identity_label, defaults.identity_label),
-    // Dress-rehearsal finding (2026-06-12): rooms was silently DROPPED on
-    // template-instantiate while direct creates accept it — forward it.
-    rooms: body.rooms,
-    room_gate_enabled: pick(body.room_gate_enabled, defaults.room_gate_enabled),
-    camera_recording: pick(body.camera_recording, defaults.camera_recording),
-    screen_markers: pick(body.screen_markers, defaults.screen_markers),
-    enforcement: pick(body.enforcement, defaults.enforcement),
-    evidence_retention_days: pick(body.evidence_retention_days, defaults.evidence_retention_days),
-    languages: pick(body.languages, defaults.languages)
-  };
-}
-
-// Contest problems must be servable to candidates the moment the contest can
-// open: existing published bank/seed docs only. Reasons: draft|missing.
-async function requirePublishedProblems(entries, errorName) {
-  const unavailable = [];
-  for (const entry of entries) {
-    if (await getProblem(entry.problem_id)) continue;
-    const bank = await getBankProblem(entry.problem_id);
-    unavailable.push({ problem_id: entry.problem_id, reason: bank ? "draft" : "missing" });
-  }
-  if (unavailable.length) throw httpErrorWith(400, errorName, { problems: unavailable });
-}
-
-async function adminUpdateContest(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug"]);
-  if (body.problems !== undefined) await enforceContestProblemsEditRules(String(body.slug), body);
-  return { ok: true, contest: await updateContest(String(body.slug), body) };
-}
-
-// S-I §1.4.5 (veto-able defaults): contest problems[] edits are free while
-// draft; once OPEN —
-//   adding an entry            -> requires body.confirm === true
-//   removing an entry that has stored submissions in THIS contest -> 409
-//   changing an entry's points -> typed contest-slug confirmation (best scores
-//     are computed live, so the change applies retroactively)
-async function enforceContestProblemsEditRules(slug, body) {
-  const doc = await getFirestore().collection(CONTESTS_COLLECTION).doc(slug).get();
-  if (!doc.exists) throw httpError(404, "contest_not_found");
-  const existing = doc.data();
-
-  const checked = normalizeProblemEntries(Array.isArray(body.problems) && body.problems.length ? body.problems : []);
-  const entries = checked.ok ? checked.entries : [];
-  if (Array.isArray(body.problems) && body.problems.length && !checked.ok) return badRequest(checked.error);
-  await requirePublishedProblems(entries, "problems_unavailable");
-
-  if (existing.status !== "open") return; // draft/archived edits are free
-
-  const oldEntries = contestProblemEntries(existing);
-  const oldById = new Map(oldEntries.map((entry) => [entry.problem_id, entry]));
-  const newById = new Map(entries.map((entry) => [entry.problem_id, entry]));
-
-  const added = entries.filter((entry) => !oldById.has(entry.problem_id));
-  if (added.length && body.confirm !== true) {
-    throw httpErrorWith(409, "problem_add_requires_confirm", {
-      problems: added.map((entry) => entry.problem_id)
-    });
-  }
-
-  for (const entry of oldEntries) {
-    if (newById.has(entry.problem_id)) continue;
-    // Removal: blocked when this contest already stored submissions for it.
-    const snapshot = await scopedQuery(getFirestore().collection(SUBMISSIONS_COLLECTION), existing)
-      .where("problem_id", "==", entry.problem_id)
-      .limit(1)
-      .get();
-    if (snapshot.docs.length) {
-      throw httpErrorWith(409, "problem_has_submissions", { problem_id: entry.problem_id });
-    }
-  }
-
-  const pointsEdited = entries.filter((entry) =>
-    oldById.has(entry.problem_id)
-    && (oldById.get(entry.problem_id).points ?? null) !== (entry.points ?? null));
-  if (pointsEdited.length && body.confirm_points_edit !== existing.slug) {
-    throw httpErrorWith(409, "points_edit_confirmation_required", {
-      contest: existing.slug,
-      problems: pointsEdited.map((entry) => entry.problem_id)
-    });
-  }
-}
-
-async function adminContestStatus(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug", "status"]);
-  return { ok: true, contest: await setContestStatus(String(body.slug), String(body.status)) };
-}
-
-// S-D: POST /api/admin/contest-regenerate {slug, field} — mint a fresh
-// access_code or invigilator_key (vision §2.7: both are regenerate-able).
-async function adminContestRegenerate(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug", "field"]);
-  return { ok: true, contest: await regenerateContestSecret(String(body.slug), String(body.field)) };
-}
-
-// W4: POST /api/admin/contest-set-code {slug, access_code} — set a CUSTOM test
-// code. contests.mjs owns the format rule (6 chars, mint alphabet) and the
-// unique-among-OPEN-contests check.
-async function adminContestSetCode(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug", "access_code"]);
-  return { ok: true, contest: await setContestAccessCode(String(body.slug), String(body.access_code)) };
-}
-
-// S-D: POST /api/admin/contest-exam-time {slug, end_at|extend_minutes|end_now}
-// — the legacy S5 exam-time card, per contest. contests.mjs owns the doc write;
-// end_now additionally ends every live session in THIS contest's scope (same
-// paginated sweep as the legacy endpoint).
-async function adminContestExamTime(req) {
-  requireAdmin(req);
-  const body = parseBody(req);
-  requireFields(body, ["slug"]);
-  const { contest, field, now } = await applyContestExamTime(String(body.slug), body);
-  let endedCount = 0;
-  if (field === "end_now") {
-    endedCount = await endAllLiveSessions(contest.slug, now);
-  }
-  return { ok: true, start_at: contest.start_at, end_at: contest.end_at, server_now: now, ended_count: endedCount };
-}
+// The seven admin contest-lifecycle route bodies (adminListContests /
+// adminCreateContest / adminUpdateContest / adminContestStatus /
+// adminContestRegenerate / adminContestSetCode / adminContestExamTime) + their
+// owned helpers (instantiateTemplatePayload / requirePublishedProblems /
+// enforceContestProblemsEditRules) moved VERBATIM to the makeAdminContestsRoutes(ctx)
+// factory in routes/adminContests.mjs (decomp B4); destructured at module scope
+// above so the dispatch lines stay byte-identical (canaryIsolation). Thin admin
+// glue over src/contests.mjs (validation + slug/access-code minting live there);
+// the resident endAllLiveSessions sweep is passed by reference for the end_now path.
 
 // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
 
