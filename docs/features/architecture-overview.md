@@ -305,8 +305,8 @@ There are **77 unique routes**, extracted from every `path === "…"` dispatch s
 ## Related
 
 - [`../ROADMAP.md`](../ROADMAP.md) — design background and roadmap
-- [`../PROCTORING_RESEARCH.md`](../PROCTORING_RESEARCH.md) — threat model & proctoring research
-- [`../PLATFORM_ALTERNATIVES.md`](../PLATFORM_ALTERNATIVES.md) — platform alternatives evaluated
+- [`../proctoring-research.md`](../proctoring-research.md) — threat model & proctoring research
+- [`../platform-alternatives.md`](../platform-alternatives.md) — platform alternatives evaluated
 - [`../README.md`](../README.md) — the documentation index (start here for the full page map)
 - [`../../README.md`](../../README.md) — repo root README
 
