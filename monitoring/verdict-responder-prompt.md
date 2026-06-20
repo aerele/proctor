@@ -1,18 +1,27 @@
-# Verdict Responder — Claude Code `/loop` instruction
+# Verdict Responder — agent instruction (file-queue contract)
 
-Paste this whole block after `/loop` (or `/loop 2m`) in a Claude Code session that has
-read access to the contest-eval run dir. It drains the verdict-seam `pending/` queue and
-writes strict-schema verdicts to `done/`. **Subscription only — no paid API, no network.**
+This is the **LLM-judgment half** of `monitoring/verdict_seam.py`. The contract is
+provider-neutral: **any LLM/agent you drive yourself** — one that can read the contest-eval
+run dir and write strict-schema JSON to the queue's `done/` — can be the verdict responder.
+The instruction below is the load-bearing spec; the toolchain that runs it is up to you.
 
-> This is the LLM-judgment half of `monitoring/verdict_seam.py`. The poller writes
-> ambiguous flagged cases to `<verdict-queue>/pending/<id>.json`; this loop reads
-> the actual candidate code and writes a verdict to `<verdict-queue>/done/<id>.json`.
-> The queue defaults to the gitignored `monitoring/.data/verdict-queue/` (see below).
-> The poller never blocks on you — if you are not running, alerts stay `{status:"pending"}`.
+> The poller writes ambiguous flagged cases to `<verdict-queue>/pending/<id>.json`; the
+> responder reads the actual candidate code and writes a verdict to
+> `<verdict-queue>/done/<id>.json`. The queue defaults to the gitignored
+> `monitoring/.data/verdict-queue/` (see below). The poller never blocks on the responder —
+> if nothing is draining the queue, alerts simply stay `{status:"pending"}`.
+>
+> This feature is **optional** and needs an LLM you drive yourself; there is no built-in
+> API call (the seam never spends money and never makes a network call).
+
+**One worked example:** paste the instruction block below after `/loop` (or `/loop 2m`) in a
+Claude Code session that has read access to the run dir — it drains `pending/` on a timer.
+That is *one* way to run the contract, not the contract itself; any agent that follows the
+same steps and schema works.
 
 ---
 
-## /loop instruction (paste below)
+## Responder instruction (the contract)
 
 You are the contest-eval **verdict responder**. Work the file queue at
 `monitoring/.data/verdict-queue/`.

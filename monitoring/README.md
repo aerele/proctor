@@ -3,8 +3,8 @@
 A standalone poller that watches a live HackerRank contest, runs the deterministic
 contest-eval cheating analysis each cycle, and POSTs integrity **alerts** to the
 proctor backend (`/api/alerts`). Ambiguous flags are routed through a file-queue
-**LLM verdict seam** (subscription only, no paid API) that a human-driven Claude Code
-`/loop` resolves.
+**LLM verdict seam** (optional; no paid API, no network) that any LLM/agent you drive
+yourself resolves — a Claude Code `/loop` is one worked example.
 
 This is the contest-eval *source* half of the shared proctor↔contest-eval alert feed.
 The proctor side already validates and stores these alerts (`backend/src/handler.mjs`).
@@ -22,7 +22,7 @@ The proctor side already validates and stores these alerts (`backend/src/handler
 | `run-demo.sh` | one-command offline end-to-end demo (poller → ingest → admin read), self-cleaning. |
 | `alerts.py` | builds Alert objects per the shared contract; mirrors backend required-field validation; stable idempotent ids. |
 | `verdict_seam.py` | swappable file-queue LLM seam (`VerdictSeam.request()` / `.poll()`); never blocks the poller. |
-| `verdict-responder-prompt.md` | ready-to-paste Claude Code `/loop` instruction that drains `pending/` → writes strict-schema verdicts to `done/`. |
+| `verdict-responder-prompt.md` | provider-neutral responder contract (drain `pending/` → write strict-schema verdicts to `done/`), with a ready-to-paste Claude Code `/loop` worked example. |
 | `validate_fixtures.py` | proves the analysis reproduces the committed `clone_analysis.json` and the poller runs end-to-end offline. |
 
 ## Why a parameterized copy (wrapper-over-fork, logged)
@@ -119,15 +119,18 @@ The 429-safe code fetch (per `contest-eval/METHOD-handoff.md`): detect HTTP 429 
 **never store a failed fetch**, ~1.2s between fetches, 8s back-off on 429, hardest-accepted-first,
 accumulate on `window.__code` + `localStorage` (survives navigation, survives tool-timeout).
 
-## Verdict seam (LLM judgment, subscription only)
+## Verdict seam (LLM judgment, optional)
 
 Ambiguous alerts (`web_paste`, single-hard `recurring_pair`, MED `peer_copy_cluster`) are
 written to `<verdict-queue>/pending/<id>.json` (the queue defaults to the gitignored
-`monitoring/.data/verdict-queue/`; override with `--verdict-queue`). Run the `/loop` in
-`verdict-responder-prompt.md`; it reads the actual code, applies the difficulty-weighting +
-Java-template rules, and writes `done/<id>.json` (`status ∈ {real, false_positive, inconclusive}`).
-The poller reads `done/` each cycle and attaches the verdict. If no verdict appears within
-`--verdict-max-cycles`, the verdict stays `{status:"pending"}` — **the poller never blocks**.
+`monitoring/.data/verdict-queue/`; override with `--verdict-queue`). This step is optional and
+needs an LLM you drive yourself: any agent that can read the run dir and write the strict
+`done/<id>.json` schema (`status ∈ {real, false_positive, inconclusive}`) qualifies — see the
+contract in `verdict-responder-prompt.md`, which also ships a Claude Code `/loop` worked example.
+The responder reads the actual code, applies the difficulty-weighting + Java-template rules, and
+writes `done/<id>.json`. The poller reads `done/` each cycle and attaches the verdict. If no
+verdict appears within `--verdict-max-cycles`, the verdict stays `{status:"pending"}` —
+**the poller never blocks**.
 
 The seam interface (`request` / `poll`) is swappable: a future C3 transport can plug in without
 touching `poller.py`. (C3 is intentionally **not** built here.)

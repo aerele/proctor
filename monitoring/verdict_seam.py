@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""verdict_seam — file-queue LLM judgment seam (subscription only, NO paid API).
+"""verdict_seam — file-queue LLM judgment seam (optional; NO paid API, NO network).
 
 Ambiguous flagged cases are written as scoped requests to
   <verdict-queue>/pending/<id>.json
-A human-driven Claude Code /loop (see verdict-responder-prompt.md) drains pending/,
-reads the actual candidate code/evidence, and writes a strict-schema verdict to
+Any LLM/agent you drive yourself (see verdict-responder-prompt.md for the contract,
+plus a Claude Code /loop worked example) drains pending/, reads the actual candidate
+code/evidence, and writes a strict-schema verdict to
   <verdict-queue>/done/<id>.json
 (the queue dir defaults to the gitignored monitoring/.data/verdict-queue/).
 
