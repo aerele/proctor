@@ -2,24 +2,29 @@
 //
 // Make "every admin/invigilator route checks its credential BEFORE it touches
 // data" a CI fact rather than a convention. We text-scan backend/src/routes/*.mjs
-// and, for every EXPORTED-from-the-factory route function whose name starts with
-// `admin` or `invigilator`, assert its `require<Guard>(req...)` call is the first
-// real statement — modulo a single sanctioned auth-context preamble line that
-// RESOLVES the credential's scope (e.g. `const contest = await
+// AND the admin/sweep routes still RESIDENT in src/handler.mjs (the data-lifecycle
+// cluster — contest-selection / selection-done / export / purge / retention-sweep
+// — not yet moved into a routes/ module), and for every route function whose name
+// starts with `admin` or `invigilator`, assert its `require<Guard>(req...)` call is
+// the first real statement — modulo a single sanctioned auth-context preamble line
+// that RESOLVES the credential's scope (e.g. `const contest = await
 // invigilatorContestOf(req)`, whose only job is to fetch the contest the guard
 // then authenticates against). A route that read or mutated Firestore before its
 // guard would push the guard past statement #2 (or omit it) and fail here.
 //
 // This is the routes/ analogue of the canary/scoping/env guards: a cheap,
 // self-describing assertion that turns the decomposition into a measurable
-// security property and keeps future route moves honest.
+// security property and keeps future route moves honest. Scanning handler.mjs too
+// closes the gap where a future edit to a resident route could silently drop its
+// guard without any CI catching it (the routes only become routes/*.mjs at B9+).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROUTES_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "routes");
+const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+const ROUTES_DIR = join(SRC_DIR, "routes");
 
 // A route function is admin/invigilator-guarded iff its name starts with one of
 // these. (Public/session/exec routes authenticate by the unguessable session
@@ -68,13 +73,26 @@ function statementLines(body) {
 }
 
 test("routes auth-lint: every admin/invigilator route opens with its require* guard", () => {
-  const files = readdirSync(ROUTES_DIR).filter((name) => name.endsWith(".mjs"));
-  assert.ok(files.length >= 1, `no route modules found under src/routes — found: ${files.join(", ")}`);
+  const routeFiles = readdirSync(ROUTES_DIR).filter((name) => name.endsWith(".mjs"));
+  assert.ok(routeFiles.length >= 1, `no route modules found under src/routes — found: ${routeFiles.join(", ")}`);
+
+  // Scan every routes/*.mjs PLUS handler.mjs, where the data-lifecycle admin/sweep
+  // routes (contest-selection / selection-done / export / purge / retention-sweep)
+  // are still resident until the B9+ decomp moves them into a routes/ module. The
+  // same name-prefix + require*-first invariant applies to both locations.
+  const sources = [
+    ...routeFiles.map((file) => ({ label: `routes/${file}`, source: readFileSync(join(ROUTES_DIR, file), "utf8") })),
+    { label: "handler.mjs", source: readFileSync(join(SRC_DIR, "handler.mjs"), "utf8") }
+  ];
 
   let checked = 0;
+  // Of the routes we check, how many are the resident handler.mjs ones — a floor
+  // assertion below pins this so the handler scan can't silently match zero (e.g.
+  // if a route were renamed off the admin*/invigilator* prefix).
+  let checkedInHandler = 0;
   const offenders = [];
-  for (const file of files) {
-    const source = readFileSync(join(ROUTES_DIR, file), "utf8");
+  for (const { label, source } of sources) {
+    const file = label;
     for (const fn of extractFunctions(source)) {
       // Only request handlers: name-prefixed AND taking a `req` parameter.
       const isGuardedName = GUARDED_PREFIXES.some((prefix) => fn.name.startsWith(prefix));
@@ -87,6 +105,7 @@ test("routes auth-lint: every admin/invigilator route opens with its require* gu
       // scope resolver". Keep this allowlist tight and self-describing.
       if (/ContestOf$|ContestSlug$/.test(fn.name)) continue;
       checked += 1;
+      if (file === "handler.mjs") checkedInHandler += 1;
 
       const lines = statementLines(fn.body);
       let idx = 0;
@@ -99,6 +118,12 @@ test("routes auth-lint: every admin/invigilator route opens with its require* gu
   }
 
   assert.ok(checked >= 7, `expected to check at least the 7 invigilator routes; checked ${checked}`);
+  assert.ok(
+    checkedInHandler >= 5,
+    "expected to also cover the 5 resident handler.mjs data-lifecycle routes " +
+    "(contest-selection / selection-done / export / purge / retention-sweep); " +
+    `checked ${checkedInHandler} in handler.mjs`
+  );
   assert.deepEqual(
     offenders, [],
     "Some admin/invigilator route does not authenticate FIRST. Put its " +
