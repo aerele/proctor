@@ -31,10 +31,11 @@ the fullest single-page tour, then jump to the area you need below.
 | Page | What it covers |
 |---|---|
 | [`DEPLOY.md`](DEPLOY.md) | From-scratch GCP build + deploy runbook: isolated project, backend/frontend/(optional) video-worker deploy scripts, the env vars the scripts do **not** set (Judge0, invigilator, retention-sweep, `EXEC_*`), retention lifecycle + daily sweep, redeploy (merge vs wipe), and a verify-the-deploy smoke test. |
-| [`EXAM-DAY-OPS.md`](EXAM-DAY-OPS.md) | The one-page, action-ordered exam-day runbook: BEFORE setup → AT START → DURING → AFTER, plus an "if X then do Y" table for the test-day team. |
+| [`EXAM-DAY-OPS.md`](EXAM-DAY-OPS.md) | The one-page, action-ordered exam-day runbook **for the platform operator/admin**: BEFORE setup → AT START → DURING → AFTER, plus an "if X then do Y" table, cited against the live routes/UI. |
+| [`CONDUCTOR-GUIDE.md`](CONDUCTOR-GUIDE.md) | The same exam day for a **non-technical on-site conductor** (e.g. a college contact running the test): plain-language read-aloud scripts, "call support" framing, and the three things that come up — no route names. Hand this to the room staff; keep `EXAM-DAY-OPS.md` for the operator. |
 
-Deeper, narrated versions of both live under Feature guides as
-[`features/deploy-runbook.md`](features/deploy-runbook.md) and
+Deeper, narrated versions of the deploy + operator runbooks live under Feature
+guides as [`features/deploy-runbook.md`](features/deploy-runbook.md) and
 [`features/exam-day-ops-runbook.md`](features/exam-day-ops-runbook.md).
 
 ## Feature guides
@@ -83,7 +84,7 @@ Per-area, code-verified deep dives under [`features/`](features/).
 
 | Page | What it covers |
 |---|---|
-| [`features/architecture-overview.md`](features/architecture-overview.md) | The fullest single-page tour: the three path-routed frontend surfaces, the partially-decomposed `handler.mjs` backend, the 20+ Firestore collections + GCS evidence prefixes, the `person_id` identity model, the shared Alert contract, the not-deployed video-worker, and the ~81-route HTTP inventory. **Read this first.** |
+| [`features/architecture-overview.md`](features/architecture-overview.md) | The fullest single-page tour: the three path-routed frontend surfaces, the decomposed `handler.mjs` backend (thin dispatch table + `routes/*.mjs` factories), the 21 Firestore collections + GCS evidence prefixes, the `person_id` identity model, the shared Alert contract, the optional not-deployed video-worker, and the 77-route HTTP inventory. **Read this first.** |
 | [`features/alert-taxonomy.md`](features/alert-taxonomy.md) | The shared Alert JSON contract (required fields, idempotent merge on `id`), the proctor alert catalog + admin alert-settings defaults, per-type Share-with-invigilator (default OFF), the optional contest-eval alert types, the `x-api-key` ingest (closed-by-default, batch ≤ 500), and the enforcement-violation lock-ladder flow. |
 
 ### Background research (pre-build)
@@ -94,6 +95,21 @@ shipped surfaces:
 - [`PROCTORING_RESEARCH.md`](PROCTORING_RESEARCH.md) — threat model + browser-proctoring research.
 - [`PLATFORM_ALTERNATIVES.md`](PLATFORM_ALTERNATIVES.md) — platform alternatives evaluated.
 - [`ROADMAP.md`](ROADMAP.md) — design background and roadmap.
+
+### Design history — specs & plans (`superpowers/`)
+
+The [`superpowers/`](superpowers/) tree keeps the original **design specs**
+([`superpowers/specs/`](superpowers/specs/)) and **implementation plans**
+([`superpowers/plans/`](superpowers/plans/)) for each slice the platform was built
+in (the S1–S7 exam-shell / roster / invigilator / authoring / time-control /
+attendance / IP-report waves, the F8–F12 product-vision and identity-lifecycle
+work, the architecture-decomposition pass, and the candidate-evaluation engine).
+They are **historical design records**, not current operator docs — they describe
+intent and trade-offs at the time of building and may name routes/files that have
+since moved or merged. For current behavior, use the feature guides above. Paths,
+hostnames, the GCP project id, and owner-name references in this tree have been
+de-identified (the live `aerele-proctor-demo-*` localStorage keys are kept verbatim
+so the specs still match the frontend code).
 
 ---
 
