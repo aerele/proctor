@@ -38,17 +38,17 @@ function contest(overrides: Partial<ContestSummary>): ContestSummary {
 
 describe("derived contest URLs (vision §2.7 — URLs derive from the slug)", () => {
   it("builds the candidate portal URL from origin + slug", () => {
-    expect(candidateUrlFor("https://exam.aerele.in", "kec-r1")).toBe("https://exam.aerele.in/?contest=kec-r1");
+    expect(candidateUrlFor("https://exam.example.com", "kec-r1")).toBe("https://exam.example.com/?contest=kec-r1");
   });
 
   it("builds the invigilator URL with slug + key, URL-encoded", () => {
-    expect(invigilatorUrlFor("https://exam.aerele.in", "kec-r1", "k7Jq+x"))
-      .toBe("https://exam.aerele.in/invigilator?contest=kec-r1&key=k7Jq%2Bx");
+    expect(invigilatorUrlFor("https://exam.example.com", "kec-r1", "k7Jq+x"))
+      .toBe("https://exam.example.com/invigilator?contest=kec-r1&key=k7Jq%2Bx");
   });
 
   it("invigilator URL without a key omits the key param", () => {
-    expect(invigilatorUrlFor("https://exam.aerele.in", "no-key", null))
-      .toBe("https://exam.aerele.in/invigilator?contest=no-key");
+    expect(invigilatorUrlFor("https://exam.example.com", "no-key", null))
+      .toBe("https://exam.example.com/invigilator?contest=no-key");
   });
 });
 
