@@ -1,3 +1,43 @@
+// backend/src/handler.mjs — the proctor-api Cloud Run HTTP handler.
+//
+// COMPOSITION ROOT. This file is now a thin-ish composition root: imports →
+// loadConfig() env destructure → non-env constants → the factory-composition
+// block (each domain instantiated once at module scope) → the verbatim `api`
+// dispatch table → the `corsOrigin` export → a small tail of still-resident
+// route bodies (the data-lifecycle selection / export / purge / retention-sweep
+// cluster, deliberately resident pending a future routes/dataLifecycle.mjs step).
+//
+// DECOMPOSITION CONVENTIONS (the decomp B-ladder — read before moving any route):
+//   1. Each route domain lives in src/routes/<domain>.mjs as a factory
+//      make<Domain>Routes(ctx) (domain/infra modules: flat src/*.mjs / lib/*.mjs).
+//      Dependency direction is ONE-WAY: handler.mjs → routes/* → src domain
+//      modules → lib/*. Never route→route; never a domain module importing a route.
+//   2. Route BODIES move VERBATIM into the factory; ctx supplies every dependency.
+//      env consts arrive BY VALUE (reproducing capture-at-?buster-load), the
+//      Firestore client as a GETTER (getFirestore — so the fake-Firestore test
+//      swap propagates; never capture `firestore` by value), and helper fns BY
+//      REFERENCE (single-source, never forked).
+//   3. handler.mjs instantiates each factory at module scope and DESTRUCTURES the
+//      returns into the EXACT names the dispatch table already uses, so the `api`
+//      dispatch table stays BYTE-IDENTICAL (canaryIsolation text-scans it).
+//   4. A shared helper consumed by MORE THAN ONE factory is single-sourced: it is
+//      RETURNED by its owning factory (or kept resident, hoisted) and passed BY
+//      REFERENCE into every other ctx. When a consumer factory is instantiated
+//      EARLIER than the owner, the helper stays RESIDENT here (a const factory
+//      return would land in the consumer's temporal dead zone).
+//   5. Any moved test seam (__set*ForTest / rate-limit checkers) is RETURNED by
+//      the factory and RE-EXPORTED from handler.mjs so the handler.mjs?<buster>
+//      test imports still resolve. `api` + `corsOrigin` are a cross-service
+//      contract (src/eval-server.mjs re-wraps the same `api`) — names/signatures
+//      never change.
+//   6. The four CI guards bracket every step and MUST stay green: canaryIsolation
+//      (byte-identical dispatch), scopingLint (contest_slug filters go through the
+//      scopedQuery chokepoint or are pinned in RAW_FILTER_ALLOWLIST in the SAME
+//      diff), routesAuthLint (every exported admin*/invigilator* route opens with
+//      its require* guard), envLint (process.env only in handler.mjs + config.mjs).
+// See docs/superpowers/plans/2026-06-11-architecture-decomposition.md for the
+// full design + the B-ladder history.
+
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";

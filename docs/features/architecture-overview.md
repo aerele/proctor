@@ -126,11 +126,11 @@ What an invigilator can do, with backing routes (route bodies live in `backend/s
 
 ---
 
-## 6. Backend (one Cloud Run handler, partially decomposed)
+## 6. Backend (one Cloud Run handler, decomposed into route + domain factories)
 
-The backend is a **single Cloud Run HTTP handler**, `backend/src/handler.mjs` (~303 KB). It holds the **dispatch table** (a flat list of `if (method && path === "...") return ...` lines) and **most route bodies**. Dispatch lines start at `handler.mjs` ~321; any unmatched path → `404`. CORS allows `GET,POST,OPTIONS` (`PUBLIC_APP_ORIGIN`, default `*`).
+The backend is a **single Cloud Run HTTP handler**, `backend/src/handler.mjs`, now a **thin-ish composition root** (~2.3k LOC, down from ~5.6k): imports → `loadConfig()` env destructure → non-env constants → the **factory-composition block** (each domain instantiated once at module scope) → the **dispatch table** (a flat list of `if (method && path === "...") return ...` lines) → the `corsOrigin` export → a small tail of still-resident route bodies. Any unmatched path → `404`. CORS allows `GET,POST,OPTIONS` (`PUBLIC_APP_ORIGIN`, default `*`).
 
-**Decomposition is PARTIAL and PAUSED** (B0/B1, behavior-preserving). What has been split out of the god-file so far, and is wired back via factories/injection at handler module scope:
+**Decomposition is behavior-preserving and substantially complete** (the decomp B-ladder, B0–B14). Route bodies were moved VERBATIM into `make<Domain>Routes(ctx)` factories; `handler.mjs` instantiates each factory and destructures the returns into the EXACT names the dispatch table uses, so the dispatch table stays byte-identical (canaryIsolation). The conventions are documented in the `handler.mjs` top-of-file comment and the decomposition plan. What is split out, wired back via factories/injection at handler module scope:
 
 | Module | Owns |
 |---|---|
@@ -138,9 +138,17 @@ The backend is a **single Cloud Run HTTP handler**, `backend/src/handler.mjs` (~
 | `lib/auth.mjs` | `makeAuth(ctx)` factory → `requireAdmin`, `requireInvigilator(For)`, `requireApiKey`, `requireSweepAuth`, `adminActor`. |
 | `lib/clients.mjs` | Firestore/Storage/Judge0 singletons + test-injection seams; `bucket()`, signed-URL helpers. |
 | `lib/http.mjs`, `lib/sanitize.mjs`, `lib/sessionStore.mjs` | HTTP helpers, input sanitizers/normalizers, session-doc store. |
-| `routes/invigilator.mjs` | The 7 invigilator route bodies (factory `makeInvigilatorRoutes(ctx)`). |
+| `proctorAlerts.mjs`, `enforcement.mjs` | The alert-raising + fullscreen-enforcement DOMAIN factories shared across the telemetry / gate / start-resume route groups. |
+| `routes/invigilator.mjs` | The 7 invigilator route bodies. |
+| `routes/adminTemplates.mjs`, `routes/adminProblems.mjs`, `routes/adminContests.mjs` | Admin template / problem-bank / contest-lifecycle CRUD. |
+| `routes/adminStats.mjs`, `routes/adminPeople.mjs`, `routes/results.mjs`, `routes/review.mjs` | Admin stats dashboard, People tab, Results trio, multi-reviewer recording review. |
+| `routes/submissionEvents.mjs`, `routes/alerts.mjs`, `routes/evaluation.mjs` | Poller submission markers, alert routes, candidate-evaluation routes. |
+| `routes/sessionGates.mjs`, `routes/sessionTelemetry.mjs`, `routes/exec.mjs`, `routes/public.mjs` | Candidate session gates, telemetry (upload/events/heartbeat), code-exec, public config + roster login. |
+| `routes/session.mjs` | Candidate session-lifecycle (start / resume / validate-end / end) + the live-slot lock machinery (decomp B13). Owns raw-where #1. |
+| `routes/adminSessions.mjs` | Admin session-management (sessions / recordings / drill-down / detail / events / ip-report / attendance / session-action / session-details) (decomp B14). Owns raw-where #2/#3/#4. |
+| `routes/healthCheck.mjs` | The admin health-check (real-auth canary) route. |
 
-**Feature modules** (pre-existing decomposition, imported by `handler.mjs`): `execQueue.mjs`, `problems.mjs`, `contests.mjs`, `identity.mjs`, `templates.mjs`, `contestProblems.mjs`, `scoreboard.mjs`, `people.mjs`, `ipReport.mjs`, `dataLifecycle.mjs`, `judge0Adapter.mjs`. The remaining route bodies and the whole dispatch table still live in `handler.mjs`.
+**Feature/domain modules** (imported by `handler.mjs`): `execQueue.mjs`, `problems.mjs`, `contests.mjs` (the `scopedQuery` contest-scope chokepoint), `identity.mjs`, `templates.mjs`, `contestProblems.mjs`, `scoreboard.mjs`, `people.mjs`, `ipReport.mjs`, `dataLifecycle.mjs`, `judge0Adapter.mjs`. **Still resident in `handler.mjs`:** the data-lifecycle selection / export / purge / retention-sweep route cluster (deliberately resident pending a future `routes/dataLifecycle.mjs` step) + a few cross-factory helpers kept single-source (`personContestForSession`, `inAdminEndGrace`, `isAlreadyExists`, `contestScopeOf`, `normalizeRooms`, `normalizeRoomFilter`, `distinctRooms`, `isStaleSession`, `personContestForFilter`).
 
 **Auth model** (all timing-safe via `safeEqual`, all closed-by-default when the secret is unset):
 
