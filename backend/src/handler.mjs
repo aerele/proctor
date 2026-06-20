@@ -9,6 +9,7 @@ import { makeSessionStore } from "./lib/sessionStore.mjs";
 import { makeInvigilatorRoutes } from "./routes/invigilator.mjs";
 import { makeEvaluation } from "./evaluation.mjs";
 import { makeProctorAlerts } from "./proctorAlerts.mjs";
+import { makeEnforcement, sanitizeExemptions, intOrZero } from "./enforcement.mjs";
 import { makeEvaluationRoutes } from "./routes/evaluation.mjs";
 import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
 import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
@@ -324,6 +325,42 @@ const {
   normalizeVerdict,
   alertRef
 } = proctorAlerts;
+
+// Factory seam (decomp B10a): the fullscreen-enforcement DOMAIN — shared by
+// telemetry (recordEvents/heartbeat), the session-gate routes, and start/resume
+// config snapshots. ctx closes over the session-doc ref, the proctorAlerts raisers
+// (alertTypeConfig + upsertProctorAlert) BY REFERENCE, the resident
+// personContestForSession resolver (hoisted fn, by reference), the template config
+// normalizers, the http/iso helpers, and the ENFORCEMENT_LOCK_REASON non-env const
+// BY VALUE. Instantiated AFTER makeProctorAlerts so it can receive that factory's
+// alert raisers; the pure cycle-break helpers sanitizeExemptions + intOrZero are
+// STANDALONE imports from enforcement.mjs (available at module scope above, fed
+// into makeProctorAlerts) so there is no proctorAlerts⇄enforcement reference cycle.
+// The returns are destructured into the SAME names the resident telemetry /
+// heartbeat / start-resume / gate-route code already calls, so every call site
+// stays byte-identical and the dispatch table is untouched (canaryIsolation). This
+// is a pure same-file→module lift; NO routes move at B10a.
+const enforcement = makeEnforcement({
+  sessionRef,
+  alertTypeConfig,
+  upsertProctorAlert,
+  personContestForSession,
+  normalizeTemplateEnforcement,
+  normalizeTemplateCameraRecording,
+  normalizeTemplateScreenMarkers,
+  httpError,
+  isoOrNow,
+  enforcementLockReason: ENFORCEMENT_LOCK_REASON
+});
+const {
+  applyEnforcementViolation,
+  reconcileFullscreenEnforcement,
+  reconcileEnforcementCountdown,
+  requireExamStarted,
+  enforcementConfigFor,
+  cameraRecordingConfigFor,
+  screenMarkersConfigFor
+} = enforcement;
 
 // Factory seam (decomp B1, A2): the invigilator route domain. ctx closes over
 // THIS instance's live-client getter, the auth guard from makeAuth, the neutral
@@ -4389,133 +4426,14 @@ async function sessionEnforcementViolation(req) {
   return { ok: true, locked: true, locked_reason: ENFORCEMENT_LOCK_REASON, mode: "block" };
 }
 
-// The single consequence of a tripped enforcement ladder — shared by the
-// candidate's self-report (sessionEnforcementViolation) and the SERVER-SIDE
-// reconciliation paths (recordEvents exit counting + heartbeat countdown).
-// The alert is admin-configurable DISPLAY; disabling it never disables the
-// block-mode lock (policy lives in enforcement_mode). Deduped per minute so a
-// violate→unlock→violate sequence stays visible as distinct alerts — and so
-// the honest client's report and the server's own derivation collapse into one.
-async function applyEnforcementViolation(session, { phase, exitCount, enforcement, alertSettings, derived = false }) {
-  const now = new Date().toISOString();
-  const alertConfig = alertTypeConfig(alertSettings, "fullscreen_enforcement", "critical");
-  if (alertConfig.enabled) {
-    await upsertProctorAlert(session, {
-      type: "fullscreen_enforcement",
-      severity: alertConfig.severity,
-      timestamp: now,
-      title: "Fullscreen enforcement triggered",
-      detail: phase === "exit_limit"
-        ? `Exceeded the fullscreen exit limit (${exitCount} exits; limit ${enforcement.fullscreen_exit_limit})`
-        : `Did not re-enter fullscreen within ${enforcement.fullscreen_reentry_seconds}s`,
-      dedupe: now.slice(0, 16),
-      data: { phase, exit_count: exitCount, mode: enforcement.mode, ...(derived ? { derived: "server" } : {}) }
-    });
-  }
-
-  if (enforcement.mode === "alert_first") {
-    return { locked: false };
-  }
-
-  await sessionRef(session.session_id).update({
-    status: "locked",
-    locked_at: now,
-    locked_reason: ENFORCEMENT_LOCK_REASON,
-    updated_at: now
-  });
-  return { locked: true };
-}
-
-// ---- F5.3 wave-2 review fix: SERVER-SIDE enforcement reconciliation ---------
-//
-// The candidate's enforcement-violation POST is only the FAST PATH: a client
-// that blocks that single URL (or clears the localStorage ladder state) used to
-// neutralize the hard block with zero server-side signal. The server now
-// derives the same violations from evidence it already receives:
-//   - recordEvents counts unexpected fullscreen_exit events per session
-//     (fullscreen_exit_count) and tracks the open exit (fullscreen_out_since,
-//     cleared by fullscreen_enter) → exceeding the exit limit escalates here;
-//   - recordHeartbeat closes the countdown: an out-of-fullscreen span older
-//     than reentry + grace escalates even when no further events arrive. The
-//     heartbeat's `fullscreen` field is corrective truth — `true` clears a
-//     stale out_since (lost enter event), `false` starts the clock when the
-//     exit event itself was lost.
-// Exempt sessions are skipped entirely; alert_first mode alerts without
-// locking (policy parity with the self-report path).
-const ENFORCEMENT_COUNTDOWN_GRACE_SECONDS = 15;
-
-async function reconcileFullscreenEnforcement(session, events, alertSettings) {
-  if (sanitizeExemptions(session.enforcement_exemptions).fullscreen === true) return;
-  if (session.status !== "active") return;
-
-  let unexpectedExits = 0;
-  let outSince = session.fullscreen_out_since || null;
-  let sawFullscreenEvent = false;
-  for (const event of events) {
-    if (event.type === "fullscreen_exit") {
-      if (event.detail?.expected === true) continue;
-      unexpectedExits += 1;
-      if (!outSince) outSince = isoOrNow(event.timestamp);
-      sawFullscreenEvent = true;
-    } else if (event.type === "fullscreen_enter") {
-      outSince = null;
-      sawFullscreenEvent = true;
-    }
-  }
-  if (!sawFullscreenEvent) return;
-
-  const newCount = intOrZero(session.fullscreen_exit_count) + unexpectedExits;
-  await sessionRef(session.session_id).update({
-    fullscreen_exit_count: newCount,
-    fullscreen_out_since: outSince,
-    updated_at: new Date().toISOString()
-  });
-  if (!unexpectedExits) return;
-
-  // Same config-source rule as the self-report path — the session's person
-  // contest, or the normalized defaults for an orphaned session.
-  const contest = await personContestForSession(session);
-  const enforcement = enforcementConfigFor(contest);
-  if (newCount > enforcement.fullscreen_exit_limit) {
-    await applyEnforcementViolation(session, {
-      phase: "exit_limit", exitCount: newCount, enforcement, alertSettings, derived: true
-    });
-  }
-}
-
-// Heartbeat-side countdown reconciliation. Returns "locked" when this call
-// locked the session (so the heartbeat response reports the new status and the
-// recorder self-stops on THIS interval), null otherwise. Takes the RESOLVED
-// enforcement config (wave-4: contest-sourced for person sessions; the caller
-// already resolved the session's config source).
-async function reconcileEnforcementCountdown(session, body, enforcement, alertSettings) {
-  if (sanitizeExemptions(session.enforcement_exemptions).fullscreen === true) return null;
-  if (session.status && session.status !== "active") return null;
-  const now = new Date().toISOString();
-  const outSince = session.fullscreen_out_since || null;
-
-  if (body.fullscreen === true) {
-    // Corrective truth: back in fullscreen — clear a stale open exit.
-    if (outSince) await sessionRef(session.session_id).update({ fullscreen_out_since: null, updated_at: now });
-    return null;
-  }
-  if (body.fullscreen === false && !outSince) {
-    // The exit event itself was lost — start the clock from heartbeat truth.
-    await sessionRef(session.session_id).update({ fullscreen_out_since: now, updated_at: now });
-    return null;
-  }
-  if (!outSince) return null;
-
-  const deadlineMs = Date.parse(outSince)
-    + (enforcement.fullscreen_reentry_seconds + ENFORCEMENT_COUNTDOWN_GRACE_SECONDS) * 1000;
-  if (!Number.isFinite(deadlineMs) || Date.now() <= deadlineMs) return null;
-  const { locked } = await applyEnforcementViolation(session, {
-    phase: "countdown_expired",
-    exitCount: intOrZero(session.fullscreen_exit_count),
-    enforcement, alertSettings, derived: true
-  });
-  return locked ? "locked" : null;
-}
+// applyEnforcementViolation (the single consequence of a tripped enforcement
+// ladder) + the SERVER-SIDE reconciliation pair (reconcileFullscreenEnforcement /
+// reconcileEnforcementCountdown, with ENFORCEMENT_COUNTDOWN_GRACE_SECONDS) moved
+// to the makeEnforcement(ctx) factory in src/enforcement.mjs (decomp B10a);
+// destructured at module scope above and consumed by the resident
+// sessionEnforcementViolation route + telemetry (recordEvents/heartbeat). The
+// proctorAlerts raisers they call (alertTypeConfig/upsertProctorAlert) arrive in
+// the factory ctx by reference (single source).
 
 // POST /api/session/unlock-gate — candidate-side release of an ENFORCEMENT
 // lock using the room's dedicated UNLOCK code (gate.unlock_otp, minted via
@@ -4568,21 +4486,9 @@ async function sessionUnlockGate(req) {
   throw httpError(403, "invalid_code");
 }
 
-// S3 gate enforcement for code execution: with the gate enabled, Run/Submit are
-// blocked until the session was released (OTP / room open / admin turning the
-// gate off). Deliberately NOT inside requireWritableSession — evidence writes
-// (events, uploads, heartbeats) must keep flowing while the candidate waits.
-async function requireExamStarted(session) {
-  // S3 nit: once a session has been released (exam_started_at stamped) the gate
-  // can never reject it — short-circuit BEFORE any contest read.
-  // A person-contest session is gated by ITS contest's room_gate_enabled (S-I
-  // snapshot field); an orphaned session (no current contest) is never gated.
-  if (session.exam_started_at) return;
-  const contest = await personContestForSession(session);
-  if (Boolean(contest?.room_gate_enabled)) {
-    throw httpError(403, "exam_not_started");
-  }
-}
+// requireExamStarted (the S3 exec gate enforcement check) moved to the
+// makeEnforcement(ctx) factory in src/enforcement.mjs (decomp B10a); destructured
+// at module scope above and consumed by the resident exec routes.
 
 // invigilatorRoom moved VERBATIM to the makeInvigilatorRoutes(ctx) factory in
 // routes/invigilator.mjs (decomp B1); destructured at module scope so its
@@ -4646,45 +4552,12 @@ async function adminSaveAlertSettings(req) {
 // safeEqual moved to lib/sanitize.mjs (decomp B0); imported at the top.
 
 // ---- contest-owned enforcement/camera/screen-markers (S-I §1.4 snapshot) ----
-// A session bound to a person contest serves the CONTEST's snapshot-copied
-// enforcement/camera_recording/screen_markers fields. `contest` is the resolved
-// person contest, or null for an orphaned session doc that no longer resolves to
-// a current contest — in which case the template normalizers produce the
-// NORMALIZED DEFAULTS (their NaN guards keep a corrupt contest doc from ever
-// stranding candidates either).
-function enforcementConfigFor(contest) {
-  return normalizeTemplateEnforcement(contest?.enforcement);
-}
-
-function cameraRecordingConfigFor(contest) {
-  return normalizeTemplateCameraRecording(contest?.camera_recording);
-}
-
-function screenMarkersConfigFor(contest) {
-  return normalizeTemplateScreenMarkers(contest?.screen_markers);
-}
-
-// Per-session enforcement exemptions (F5.5): ONLY the known keys, ONLY real
-// booleans — everything else is dropped so client/admin payloads can never
-// stash arbitrary data on the session doc.
-const ENFORCEMENT_EXEMPTION_KEYS = ["fullscreen", "switch_away"];
-
-function sanitizeExemptions(input) {
-  const out = {};
-  if (!input || typeof input !== "object" || Array.isArray(input)) return out;
-  for (const key of ENFORCEMENT_EXEMPTION_KEYS) {
-    if (typeof input[key] === "boolean") out[key] = input[key];
-  }
-  return out;
-}
-
-// NaN-guarded attempt counter read (room-gate + unlock-gate cap pattern): a
-// corrupt stored value reads as 0 — the cap can then re-accumulate, but a
-// legitimate candidate is never spuriously locked out by bad data.
-function intOrZero(value) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
-}
+// enforcementConfigFor / cameraRecordingConfigFor / screenMarkersConfigFor +
+// ENFORCEMENT_EXEMPTION_KEYS / sanitizeExemptions / intOrZero moved to
+// src/enforcement.mjs (decomp B10a). The three config readers come back through
+// makeEnforcement(ctx) (destructured at module scope above); sanitizeExemptions +
+// intOrZero are STANDALONE pure exports imported at the top (the cycle-break with
+// proctorAlerts) — single source either way.
 
 // isHttpUrl moved to lib/http.mjs; normalizeUsername/sanitizeSegment/
 // sanitizeObject/sanitizeEditorDetail/getClientIp/normalizeIp/hashPasscode/
