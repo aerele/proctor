@@ -84,16 +84,16 @@ recommendation** you can defend in a review.
 
 > Replace these placeholders with your own captures, or use the synthetic-data
 > screenshots already under [`docs/assets/`](docs/assets/) (all use fabricated
-> personas such as "Asha Rao / TEC001 / Test Engineering College" — no real
-> candidate data).
+> personas — no real candidate data). The primary set lives under
+> [`docs/assets/harness/`](docs/assets/harness/).
 
-| Candidate workspace | Admin live monitoring |
+| Admin live monitoring | Ranked results + integrity |
 |---|---|
-| ![Candidate Monaco workspace](docs/assets/e2e/candidate/05-workspace.png) | ![Admin live stats](docs/assets/e2e/admin-review/01-live-stats.png) |
+| ![Admin live stats](docs/assets/harness/admin-review/01-live-stats.png) | ![Ranked results with integrity](docs/assets/harness/admin-review/07-results-ranked-table.png) |
 
-| Ranked results + integrity | Recording review |
+| Recording review | Hire-recommendation report |
 |---|---|
-| ![Ranked results with integrity](docs/assets/e2e/admin-review/07a-results-ranked-table.png) | ![Recording review timeline](docs/assets/e2e/retest/03-timeline-alert-jump.png) |
+| ![Recording review dashboard](docs/assets/harness/admin-review/03-review-dashboard.png) | ![Evaluation recommendation report](docs/assets/harness/evaluation/01-recommendation-report.png) |
 
 _A short demo video / GIF is a recommended addition before a public launch._
 
@@ -116,7 +116,7 @@ _A short demo video / GIF is a recommended addition before a public launch._
                                              ▼
                             ┌──────────────────────────────┐        ┌────────────┐
                             │ proctor-api (Cloud Run)       │◀──────▶│ Firestore  │
-                            │  • src/handler.mjs (~70 rts) │ sessions, contests,
+                            │  • src/handler.mjs (74 rts)  │ sessions, contests,
                             │  • Judge0 adapter (Run/Submit)│ problems, roster,
                             │  • shared /api/alerts ingest  │ persons, alerts,
                             └───┬───────────▲────────┬──────┘ reviews, evaluations…
@@ -144,7 +144,8 @@ _A short demo video / GIF is a recommended addition before a public launch._
   Monaco workspace, `/admin` console, `/invigilator` portal. Runs fully offline in
   `VITE_DEMO_MODE`. → [`frontend/README.md`](frontend/README.md)
 - **proctor-api** (`backend/`) — one Node ESM Cloud Run handler
-  (`src/handler.mjs`, ~70 routes) for the candidate exam lifecycle, the admin
+  (`src/handler.mjs`, 74 `/api/*` routes; route bodies decomposed into
+  `src/routes/*.mjs` factories) for the candidate exam lifecycle, the admin
   console, the invigilator portal, the Judge0 Run/Submit adapter, and the shared
   `/api/alerts` ingest. State lives in **Firestore** + **GCS**.
   → [`backend/README.md`](backend/README.md)
@@ -273,7 +274,7 @@ to the exact frontend URL in production.
 
 | Path | What lives here |
 |---|---|
-| `frontend/` | The React app — `src/App.tsx` (candidate + admin), `src/InvigilatorApp.tsx`, `src/RecordingReview.tsx`, `src/useProctorRecorder.ts`, `src/api.ts` (incl. the demo shim), and per-area folders (`admin/`, `coding/`, `shell/`, `roster/`, `results/`, `people/`, `problems/`, `invigilator/`). |
+| `frontend/` | The React app — `src/App.tsx` (a ~26-line pathname router), `src/candidate/` (candidate surface), `src/admin/` (admin console + `AdminApp.tsx`), `src/InvigilatorApp.tsx`, `src/RecordingReview.tsx`, `src/useProctorRecorder.ts`, `src/api.ts` (incl. the demo shim), and per-area folders (`coding/`, `shell/`, `roster/`, `results/`, `people/`, `problems/`, `markers/`, `attendance/`, `ui/`). |
 | `backend/` | The HTTP handler `src/handler.mjs` plus split-out modules (`config.mjs`, `lib/*.mjs`, `routes/*.mjs`, the `evaluation*.mjs` engine), `Dockerfile` + `Dockerfile.eval`, the deploy script, the Firestore index, and the mocked-GCP test suite. |
 | `video-worker/` | Optional Cloud Run chunk-merge service (`src/server.mjs`). |
 | `monitoring/` | Optional Python contest-eval poller (`poller.py`), analysis core, alert builder, CDP driver, verdict seam, tests, and deep READMEs. |
@@ -318,9 +319,14 @@ usage. Test with 20–30 devices before a real drive.
 
 ## HTTP API reference
 
-All routes are dispatched from the `api` handler in `backend/src/handler.mjs`
-(~70 routes). Auth is timing-safe (`safeEqual`) and **closed-by-default** when the
-secret is unset:
+This is the **canonical route reference** for the project (the
+[architecture overview](docs/features/architecture-overview.md#11-full-http-route-inventory-77-routes)
+links here rather than duplicating it). **77 routes total**: **74** `/api/*`
+routes dispatched from the `api` handler in `backend/src/handler.mjs` (route bodies
+decomposed into `backend/src/routes/*.mjs` factories), plus the **3** `/eval-ui/*`
+pages served by the separate proctor-eval entrypoint `backend/src/eval-server.mjs`
+(listed under Evaluation below). Auth is timing-safe (`safeEqual`) and
+**closed-by-default** when the secret is unset:
 
 - **admin** = `x-admin-password` vs `ADMIN_PASSWORD`
 - **invig** = `x-invigilator-password` vs the contest's `invigilator_key` OR
@@ -338,7 +344,6 @@ errors return a generic `500` with no internal detail. CORS allows
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/api/exam-config` | none | Public sanitized exam config for a contest/slug. |
-| GET | `/api/candidate-route` | none | Probe whether a legacy settings doc is configured (router fail-open). |
 | POST | `/api/access-code` | none | Resolve a typed 6-char access code → contest slug. |
 | POST | `/api/roster/lookup` | none (rate-limited) | Verify a candidate's roster unique ID (person-mode may return a college picker). |
 | POST | `/api/session/start` | time-window gate | Register/start a session, or idempotently replay an owned `session_id`. Serves `problems[]` + `submissions_summary` + `submit_budget`. |
@@ -362,9 +367,8 @@ errors return a generic `500` with no internal detail. CORS allows
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET/POST | `/api/admin/settings` | Read/save schedule + contest URL (legacy single-contest settings). |
 | GET/POST | `/api/admin/contests` | List / create contests (create may use `template_slug`). |
-| POST | `/api/admin/contest-update` · `contest-status` · `contest-regenerate` · `contest-exam-time` | Update fields / status / regenerate codes / set exam time. |
+| POST | `/api/admin/contest-update` · `contest-status` · `contest-regenerate` · `contest-set-code` · `contest-exam-time` | Update fields / status / regenerate codes / set a custom access code / set exam time. |
 | GET | `/api/admin/templates` · `/api/admin/template` | List / read templates. |
 | POST | `/api/admin/templates` · `template-update` · `template-archive` · `template-clone` · `template-delete` | Template CRUD. |
 | GET | `/api/admin/problems` · `/api/admin/problem` | List / read problems (with hidden tests). |
@@ -380,7 +384,8 @@ errors return a generic `500` with no internal detail. CORS allows
 | GET | `/api/admin/submission-events` | Submission timeline markers for a session. |
 | GET | `/api/admin/stats` | Counts by status (live/locked/pending/finished/disconnected) + rooms. |
 | GET | `/api/admin/ip-report` · `attendance` | IP clustering drill-down / roster taken–not-taken. |
-| POST | `/api/admin/exam-time` | Live end-time control (absolute / extend / force-end-now). |
+| POST | `/api/admin/health-check` | Pre-test pre-flight canary: stands up an ephemeral namespaced contest+session and probes signing / chunk upload / recordings read / telemetry write / bundle hash-gate / Judge0 reachability with real auth, then tears it down (`light` skips metered Judge0; `full` adds 2 submissions). |
+| POST | `/api/admin/contest-exam-time` | Live end-time control for the scoped contest (absolute / extend / force-end-now). |
 | POST | `/api/alerts` | Ingest one alert or a batch (`{alerts:[…]}`, idempotent on `alert.id`). |
 | GET | `/api/admin/alerts` | List alerts newest-first with filters + `download_url` from `video_key`. |
 | POST | `/api/admin/alert-action` | `archive`/`unarchive` a set of alert ids. |
@@ -391,7 +396,7 @@ errors return a generic `500` with no internal detail. CORS allows
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/admin/contest-results` | Per-contest scoreboard (rank / per-problem / integrity). |
-| POST | `/api/admin/contest-selection` · `contest-selection-done` · `contest-adopt` | Bulk-select shortlist / finalize / adopt into person model. |
+| POST | `/api/admin/contest-selection` · `contest-selection-done` | Bulk-select shortlist / finalize the selection snapshot. |
 | GET | `/api/admin/people` · `/api/admin/person` | People directory (capped fan-out) / one person's cross-round scorecard. |
 | POST | `/api/admin/contest-export` · `contest-purge` · `retention-sweep` | Export zip / triple-gated purge → tombstone / scheduled retention sweep. |
 | POST/GET | `/api/admin/review-roster` · `review-next` · `review-verdict` · `review-mine` · `reviews` | Multi-reviewer recording-review queue (set roster / serve next / verdict / mine / list). |
