@@ -45,6 +45,14 @@ import { buildCollegeResolutions } from "./roster/personRoster";
 import type { ApiError } from "./api";
 import { candidateIdOf } from "./identity";
 import { isCompleteOtp, normalizeOtpInput } from "./invigilator/gateLogic";
+import { Field } from "./ui/Field";
+import { FilterSelect } from "./ui/FilterSelect";
+import { StatusPill } from "./ui/StatusPill";
+import { SeverityPill } from "./ui/SeverityPill";
+import { StatCard } from "./ui/StatCard";
+import { Metric } from "./ui/Metric";
+import { ActionTooltip } from "./ui/ActionTooltip";
+import { Shell } from "./ui/Shell";
 
 // S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
 // start/resume response (the contest's problems[] → public view; see
@@ -5222,56 +5230,6 @@ function RoomFilter({ rooms, value, onChange }: { rooms: string[]; value: string
   );
 }
 
-function StatCard({ label, value, tone, icon, onClick }: { label: string; value: number; tone: "accent" | "danger" | "warning" | "muted" | "ink"; icon: React.ReactNode; onClick?: () => void }) {
-  const toneStyles: Record<typeof tone, string> = {
-    accent: "border-accent/30 bg-accent/5 text-accent",
-    danger: "border-danger/30 bg-danger/5 text-danger",
-    warning: "border-warning/40 bg-warning/5 text-warning",
-    muted: "border-line bg-white text-muted",
-    ink: "border-ink/20 bg-ink/5 text-ink"
-  };
-  const inner = (
-    <>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase tracking-wide">{label}</span>
-        {icon}
-      </div>
-      <p className="mt-3 text-3xl font-semibold text-ink">{value}</p>
-    </>
-  );
-  // A2: clickable cards become buttons (cursor-pointer + hover ring); plain cards
-  // keep the existing div. Tone styles are identical in both branches.
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        className={`focus-ring block w-full cursor-pointer rounded-lg border p-5 text-left shadow-subtle transition hover:ring-2 hover:ring-ink/20 ${toneStyles[tone]}`}
-      >
-        {inner}
-      </button>
-    );
-  }
-  return <div className={`rounded-lg border p-5 shadow-subtle ${toneStyles[tone]}`}>{inner}</div>;
-}
-
-// F6.4: design-system hover tooltip (CSS-only, shows on hover AND keyboard
-// focus). Every action button is wrapped in one so the plain-language
-// explanation from SESSION_ACTION_INFO / ALERT_ACTION_INFO is one hover away.
-function ActionTooltip({ tip, children }: { tip: string; children: React.ReactNode }) {
-  return (
-    <span className="group relative inline-flex">
-      {children}
-      <span
-        role="tooltip"
-        className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-60 -translate-x-1/2 rounded-md bg-ink px-3 py-2 text-xs font-normal leading-5 text-white opacity-0 shadow-subtle transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100"
-      >
-        {tip}
-      </span>
-    </span>
-  );
-}
-
 // F6.4: visually separated, labeled cluster of action buttons (session actions
 // vs alert actions on an alert row).
 function ActionGroup({ label, children }: { label: string; children: React.ReactNode }) {
@@ -5413,16 +5371,6 @@ function AdminTab({ active, onClick, icon, label, badge }: { active: boolean; on
       {badge ? <span className={`rounded-full px-1.5 py-0.5 text-xs font-semibold leading-none ${active ? "bg-danger/10 text-danger" : "bg-ink/10 text-ink"}`}>{badge}</span> : null}
     </button>
   );
-}
-
-const severityStyles: Record<AlertSeverity, string> = {
-  critical: "border-danger/30 bg-danger/10 text-danger",
-  warning: "border-warning/30 bg-warning/10 text-warning",
-  info: "border-accent/30 bg-accent/10 text-accent"
-};
-
-function SeverityPill({ severity }: { severity: AlertSeverity }) {
-  return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${severityStyles[severity]}`}>{severity}</span>;
 }
 
 function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
@@ -5745,19 +5693,6 @@ function BulkActionButtons({ usernames, actions, noActionsNote, onAction }: { us
   );
 }
 
-function FilterSelect({ label, value, options, onChange }: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
-  return (
-    <label className="block">
-      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
-      <select className="focus-ring mt-1 h-10 w-44 rounded-md border border-line bg-white px-3 text-sm" value={value} onChange={(event) => onChange(event.target.value)}>
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
@@ -5898,35 +5833,6 @@ function AlertField({ label, value, mono = false }: { label: string; value: stri
 // results) widens the container the SAME way the exam workspace does but KEEPS
 // the page header — those data-dense screens (the recording player + the ranked
 // results table) waste the side gutters at max-w-6xl.
-function Shell({ children, padTop = false, variant = "page" }: { children: React.ReactNode; padTop?: boolean | "alert"; variant?: "page" | "exam" | "wide" }) {
-  const pad = padTop === "alert" ? "pt-40" : padTop ? "pt-14" : "";
-  // The width cap: exam/wide get the roomy max-w-screen-2xl (calmer than full
-  // bleed on ultrawide monitors, but ~2.5× the side room of max-w-6xl); exam
-  // ALSO reserves bottom clearance for the fixed CameraDock.
-  const containerWidth = variant === "exam" ? "max-w-screen-2xl pb-48" : variant === "wide" ? "max-w-screen-2xl" : "max-w-6xl";
-  return (
-    <main className={`min-h-screen bg-paper px-4 py-5 text-ink md:px-8 ${pad}`}>
-      {/* UX-H2: the exam variant reserves bottom clearance (pb-48) so the
-          fixed bottom-right CameraDock never covers end-of-page content
-          (run results / verdict) once the candidate scrolls to the bottom. */}
-      <div className={`mx-auto ${containerWidth}`}>
-        {variant === "exam" ? null : (
-          <header className="mb-5 flex items-center justify-between border-b border-line pb-4">
-            <div className="flex items-center gap-3">
-              <img src="/aerele-logo.png" alt="Aerele" className="h-9 w-9 rounded-md" />
-              <div>
-                <p className="text-sm font-semibold">Aerele Proctor</p>
-                <p className="text-xs text-muted">Evidence collection for coding assessments</p>
-              </div>
-            </div>
-          </header>
-        )}
-        {children}
-      </div>
-    </main>
-  );
-}
-
 function isoToLocalInput(value?: string) {
   if (!value) return "";
   const date = new Date(value);
@@ -5938,17 +5844,6 @@ function isoToLocalInput(value?: string) {
 function localInputToIso(value: string) {
   if (!value) return "";
   return new Date(value).toISOString();
-}
-
-function Field({ label, value, onChange, type = "text", disabled = false, inputMode }: { label: string; value: string; onChange: (value: string) => void; type?: string; disabled?: boolean; inputMode?: React.ComponentProps<"input">["inputMode"] }) {
-  // F12.1: spread the autofill-suppression set so Chrome's email/address popup
-  // (which drops fullscreen) can never fire on focus. See shell/autofill.ts.
-  return (
-    <label className="block">
-      <span className="text-xs font-medium uppercase tracking-wide text-muted">{label}</span>
-      <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm disabled:bg-neutral-100" type={type} inputMode={inputMode} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} {...autofillSuppressionProps(label)} />
-    </label>
-  );
 }
 
 // S2 — roster identity gate (form stage, before the details form). Three
@@ -6071,20 +5966,6 @@ function RoomField({ rooms, value, onChange }: { rooms: string[]; value: string;
       ) : null}
     </label>
   );
-}
-
-function StatusPill({ status }: { status: SessionStatus }) {
-  const styles: Record<SessionStatus, string> = {
-    idle: "border-line bg-white text-muted",
-    starting: "border-warning/30 bg-warning/10 text-warning",
-    recording: "border-accent/30 bg-accent/10 text-accent",
-    ending: "border-warning/30 bg-warning/10 text-warning",
-    // Tier-1: the end-of-test drain wait — same warning styling as "ending".
-    ending_draining: "border-warning/30 bg-warning/10 text-warning",
-    ended: "border-accent/30 bg-accent/10 text-accent",
-    error: "border-danger/30 bg-danger/10 text-danger"
-  };
-  return <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase ${styles[status]}`}>{status}</span>;
 }
 
 function CameraSelfView({ videoRef, mediaCapture, cameraRecorded }: { videoRef: React.Ref<HTMLVideoElement>; mediaCapture: MediaCaptureState; cameraRecorded: boolean }) {
@@ -6438,15 +6319,6 @@ function EndRetryPanel({ error, busy, onRetry }: { error: string; busy: boolean;
           <RefreshCw size={16} className={busy ? "animate-spin" : undefined} /> {busy ? "Submitting…" : "Retry submitting"}
         </button>
       </div>
-    </div>
-  );
-}
-
-function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 border-b border-line pb-2 last:border-0 last:pb-0">
-      <span className="flex items-center gap-2 text-muted">{icon}{label}</span>
-      <span className="font-medium">{value}</span>
     </div>
   );
 }
