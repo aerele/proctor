@@ -221,7 +221,7 @@ All dispatched in `backend/src/handler.mjs` (lines 394-400), implemented in `bac
 | `POST /api/invigilator/unlock` | `invigilatorUnlock` | Release one student's enforcement lock |
 | `POST /api/invigilator/exempt` | `invigilatorExempt` | Toggle a per-student enforcement exemption |
 
-> Decomposition note: the route bodies and room-gate helpers moved verbatim into `routes/invigilator.mjs` (decomp B1, behavior-preserving), but the dispatch table itself still lives in `handler.mjs`, and that refactor is paused/partial.
+> Decomposition note: the invigilator route bodies and room-gate helpers live in `backend/src/routes/invigilator.mjs` (`makeInvigilatorRoutes(ctx)`, behavior-preserving); the central dispatch table that routes to them lives in `backend/src/handler.mjs`. This is the platform-wide pattern — `handler.mjs` is the composition root + dispatch table, route bodies are in the `routes/*.mjs` factories.
 
 ### Auth / config
 

@@ -38,11 +38,13 @@ backend routes. A developer should start here:
 | Backend violation/unlock routes | `backend/src/handler.mjs` |
 | Invigilator unlock / unlock-code / exempt | `backend/src/routes/invigilator.mjs` |
 
-> Decomposition note: the backend was partially split into `lib/*.mjs`,
-> `routes/invigilator.mjs`, and `config.mjs` (B0/B1, behaviour-preserving), but
-> that refactor is **paused/partial** — the dispatch table and most session-route
-> bodies (including the two `/api/session/...` enforcement routes) still live in
-> `backend/src/handler.mjs`.
+> Decomposition note: the backend has been decomposed (behaviour-preserving).
+> `backend/src/handler.mjs` is the composition root that owns the central dispatch
+> table; the session/enforcement route bodies live in `routes/session.mjs` +
+> `routes/sessionGates.mjs`, and the shared fullscreen-enforcement domain logic
+> lives in `backend/src/enforcement.mjs`. Shared helpers are in `lib/*.mjs` +
+> `config.mjs`. The `/api/session/...` enforcement routes are cited by their HTTP
+> path, which is stable regardless of which module holds the body.
 
 ### Backing routes
 

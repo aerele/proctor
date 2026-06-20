@@ -20,7 +20,7 @@ All three flows live in one collapsible **Data lifecycle** section at the bottom
 | Sweep auth | `backend/src/lib/auth.mjs` (`requireSweepAuth`) | x-api-key **or** admin-password gate |
 | GCS lifecycle rules | `backend/gcs-lifecycle.json` | Prefix-scoped age-based deletion (applied by `backend/deploy-gcp.sh`) |
 
-> **Decomposition note.** The backend was partially split into `lib/*.mjs` + `config.mjs` (sweep auth now lives in `lib/auth.mjs`), but that refactor is **paused/partial** — the dispatch table and the export/purge/sweep route bodies still live in `backend/src/handler.mjs`.
+> **Decomposition note.** The backend has been decomposed: `backend/src/handler.mjs` is now the composition root that owns the central dispatch table, with most route bodies moved into `backend/src/routes/*.mjs` factory modules (and shared helpers into `lib/*.mjs` + `config.mjs` — sweep auth lives in `lib/auth.mjs`). The data-lifecycle export/purge/retention-sweep route bodies are among the few **deliberately still resident in `handler.mjs`** (pending a future `routes/dataLifecycle.mjs` step).
 
 Backing routes (all `POST`, all admin-authenticated except as noted):
 

@@ -15,7 +15,7 @@ The **Contests** and **Templates** tabs are where an admin defines and runs an e
 | Global contest scope picker, `?contest=` routing, access-code landing | `frontend/src/App.tsx` (`ContestScopePicker`, `AccessCodeLanding`) | `backend/src/contests.mjs` (`resolveAccessCode`) |
 | Live-reference / live-save guards | `frontend/src/admin/saveGuard.ts`, `frontend/src/admin/ProblemBank.tsx` | `backend/src/handler.mjs` (`enforceContestProblemsEditRules`, `adminSaveProblem`, `adminDeleteProblem`), `backend/src/contestProblems.mjs` (`findProblemReferences`) |
 
-> **Decomposition note (unverified beyond what is named here).** The backend was partially split into `lib/*.mjs`, `routes/invigilator.mjs` and `config.mjs` (B0/B1, behavior-preserving), but that refactor is **paused/partial** — the request dispatch table and most contest/template route bodies still live in `backend/src/handler.mjs`.
+> **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central request dispatch table; the contest and template route bodies live in `backend/src/routes/adminContests.mjs` and `backend/src/routes/adminTemplates.mjs` (with the domain logic in `backend/src/contests.mjs` + `backend/src/templates.mjs`), and shared helpers in `lib/*.mjs` + `config.mjs`. Routes are cited by HTTP path, which is stable regardless of which module holds the body.
 
 ---
 

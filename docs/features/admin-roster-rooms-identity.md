@@ -194,7 +194,7 @@ Name/roll/email are taken from the roster (the source of truth), never re-typed 
 | Person-roster client logic | `evaluatePersonRosterUpload`, `buildCollegeResolutions` | `frontend/src/roster/personRoster.ts` |
 | Identity core | `personIdOf`, `identityNorm`, `PERSON_ID_SEPARATOR` | `backend/src/identity.mjs` |
 
-> **Decomposition note.** The backend has been *partially* split into `lib/*.mjs` + `routes/invigilator.mjs` + `config.mjs` (behavior-preserving), but that refactor is paused/partial — the route dispatch table and most route bodies still live in `backend/src/handler.mjs`, which is where the roster/rooms routes above are found.
+> **Decomposition note.** The backend has been decomposed (behavior-preserving). `backend/src/handler.mjs` owns the central dispatch table; the route bodies live in `backend/src/routes/*.mjs` factory modules — the candidate roster lookup (`POST /api/roster/lookup`) in `routes/public.mjs`, the admin roster read/upload (`GET/POST /api/admin/roster`) in `routes/adminSessions.mjs` — and the identity pipeline in `backend/src/identity.mjs`. Routes above are cited by HTTP path, which is stable regardless of which module holds the body.
 
 ---
 
