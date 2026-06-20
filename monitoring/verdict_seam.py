@@ -2,10 +2,11 @@
 """verdict_seam — file-queue LLM judgment seam (subscription only, NO paid API).
 
 Ambiguous flagged cases are written as scoped requests to
-  night-run/verdict-queue/pending/<id>.json
+  <verdict-queue>/pending/<id>.json
 A human-driven Claude Code /loop (see verdict-responder-prompt.md) drains pending/,
 reads the actual candidate code/evidence, and writes a strict-schema verdict to
-  night-run/verdict-queue/done/<id>.json
+  <verdict-queue>/done/<id>.json
+(the queue dir defaults to the gitignored monitoring/.data/verdict-queue/).
 
 The poller reads done/ on each cycle. If a verdict is absent after N cycles, the
 verdict stays {status: 'pending'} and the alert is NEVER blocked — the dashboard
@@ -43,7 +44,8 @@ class VerdictSeam:
     """File-queue implementation of the swappable verdict transport."""
 
     def __init__(self, queue_dir, max_cycles=8):
-        """queue_dir = .../night-run/verdict-queue ; max_cycles = give-up budget."""
+        """queue_dir = the verdict-queue dir (default monitoring/.data/verdict-queue,
+        gitignored) ; max_cycles = give-up budget."""
         self.root = Path(queue_dir)
         self.pending = self.root / "pending"
         self.done = self.root / "done"

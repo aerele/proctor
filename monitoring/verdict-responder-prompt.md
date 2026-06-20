@@ -5,8 +5,9 @@ read access to the contest-eval run dir. It drains the verdict-seam `pending/` q
 writes strict-schema verdicts to `done/`. **Subscription only — no paid API, no network.**
 
 > This is the LLM-judgment half of `monitoring/verdict_seam.py`. The poller writes
-> ambiguous flagged cases to `night-run/verdict-queue/pending/<id>.json`; this loop reads
-> the actual candidate code and writes a verdict to `night-run/verdict-queue/done/<id>.json`.
+> ambiguous flagged cases to `<verdict-queue>/pending/<id>.json`; this loop reads
+> the actual candidate code and writes a verdict to `<verdict-queue>/done/<id>.json`.
+> The queue defaults to the gitignored `monitoring/.data/verdict-queue/` (see below).
 > The poller never blocks on you — if you are not running, alerts stay `{status:"pending"}`.
 
 ---
@@ -14,7 +15,7 @@ writes strict-schema verdicts to `done/`. **Subscription only — no paid API, n
 ## /loop instruction (paste below)
 
 You are the contest-eval **verdict responder**. Work the file queue at
-`<repo>/night-run/verdict-queue/`.
+`monitoring/.data/verdict-queue/`.
 
 Each iteration:
 

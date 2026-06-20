@@ -4,14 +4,13 @@ End-to-end runbook to build both container images and deploy the Aerele Proctor
 platform to Google Cloud Platform (Cloud Run + Cloud Storage + Firestore + Cloud
 Build + Artifact Registry) from scratch.
 
-**Standard of truth:** every command and behavior below is verified against the
+This runbook is self-contained: every command and behavior below tracks the
 actual repo — `backend/deploy-gcp.sh`, `frontend/deploy-gcp.sh`,
 `video-worker/deploy-gcp.sh`, `backend/src/config.mjs`, `backend/src/handler.mjs`,
 `backend/src/lib/clients.mjs`, `backend/src/lib/auth.mjs`,
 `backend/src/routes/healthCheck.mjs`, `frontend/src/api.ts`, `.env.deploy.example`,
-`backend/gcs-lifecycle.json`, `backend/gcs-cors.json`, `README.md`, and
-`night-run/GCP-SETUP-INSTRUCTIONS.md` / `night-run/RESUME-ANCHOR.md`. Anything not
-directly verifiable in code or an existing screenshot is marked **(unverified)**.
+`backend/gcs-lifecycle.json`, and `backend/gcs-cors.json`. For current deployed
+revisions, run `gcloud run services list`.
 
 > **The committed deploy scripts now reproduce the COMPLETE live config.** This is
 > the most important recent change to internalize:
@@ -40,9 +39,9 @@ directly verifiable in code or an existing screenshot is marked **(unverified)**
 
 ## 0. Prerequisites and project isolation
 
-The canonical from-scratch GCP bootstrap (project create → billing → enable APIs →
-deployer SA → key → handoff env file) is **`night-run/GCP-SETUP-INSTRUCTIONS.md`**.
-Run that first if the project does not yet exist. Summary of its hard rules:
+The from-scratch GCP bootstrap (project create → billing → enable APIs →
+deployer SA → key → handoff env file) is described below. Run it first if the
+project does not yet exist. The hard rules:
 
 - `gcloud` installed and authenticated as a user who can create projects and link
   billing.
@@ -59,13 +58,13 @@ The APIs the platform needs (also enabled idempotently by the deploy scripts):
 `run`, `cloudbuild`, `artifactregistry`, `firestore`, `storage`, `iamcredentials`
 (the setup doc additionally enables `cloudresourcemanager`).
 
-### Dev project facts (current live stack)
+### Project facts
 
 | Fact | Value |
 | --- | --- |
-| Project | `${PROJECT_ID}` |
-| Region | `asia-south1` |
-| Deployer SA | `proctor-deployer@${PROJECT_ID}.iam.gserviceaccount.com` |
+| Project | `your-gcp-project-id` |
+| Region | `asia-south1` (example region) |
+| Deployer SA | `proctor-deployer@your-gcp-project-id.iam.gserviceaccount.com` |
 | SA key + GCP env | `monitoring/.data/gcp-dev.env` (gitignored: `GCP_PROJECT_ID` / `GCP_REGION` / `GOOGLE_APPLICATION_CREDENTIALS`) |
 | gcloud binaries | `~/google-cloud-sdk/bin` |
 
@@ -76,11 +75,6 @@ source monitoring/.data/gcp-dev.env
 gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
 gcloud config set project "$GCP_PROJECT_ID"
 ```
-
-> **Standing rule (`RESUME-ANCHOR.md` §4):** **NO `git push` EVER** until the operator
-> runs a PII history scrub (verdict-queue PII in history). Local commits only —
-> **deploy does not require push**. Deploy itself is authorized (the
-> `proctor-deployer` SA); deploy only when testing requires it.
 
 ---
 
@@ -126,10 +120,10 @@ are the **required** secrets the full-mode pre-flight gate enforces.)
 | Var | Why |
 | --- | --- |
 | `INVIGILATOR_PASSWORD` | Backend invigilator auth (`requireInvigilator` → 401 when wrong/unset). Also baked as a frontend hash by `frontend/deploy-gcp.sh`. **Required** (full-mode gate). |
-| `JUDGE0_API_KEY` | RapidAPI key for live Run/Submit. The script defaults `JUDGE0_MODE=rapidapi`, `JUDGE0_BASE_URL=https://judge0-ce.p.rapidapi.com`, `JUDGE0_RAPIDAPI_HOST=judge0-ce.p.rapidapi.com`. The dev secret lives in gitignored `monitoring/.data/judge0.env` (`RESUME-ANCHOR.md` §5). **Required** (full-mode gate). |
+| `JUDGE0_API_KEY` | RapidAPI key for live Run/Submit. The script defaults `JUDGE0_MODE=rapidapi`, `JUDGE0_BASE_URL=https://judge0-ce.p.rapidapi.com`, `JUDGE0_RAPIDAPI_HOST=judge0-ce.p.rapidapi.com`. Keep the key in a gitignored env file (e.g. `monitoring/.data/judge0.env`). **Required** (full-mode gate). |
 | `EXEC_SUBMIT_COOLDOWN_SECONDS` | ≈ `20` for a real exam (default `20`). Passed through only when set. |
 | `EXEC_MAX_SUBMISSIONS_PER_SESSION` | ≈ `200` for a real exam (default `50`). Passed through only when set. |
-| `EXEC_RUN_CONCURRENCY` / `EXEC_SUBMIT_CONCURRENCY` / `EXEC_POLL_CONCURRENCY` / `EXEC_MAX_QUEUE` | Generous lane concurrency for capacity (defaults `2`/`4`/`16`/`200`; capacity decision in `RESUME-ANCHOR.md` §3). Passed through only when set. |
+| `EXEC_RUN_CONCURRENCY` / `EXEC_SUBMIT_CONCURRENCY` / `EXEC_POLL_CONCURRENCY` / `EXEC_MAX_QUEUE` | Generous lane concurrency for capacity (defaults `2`/`4`/`16`/`200`). Passed through only when set. |
 
 ---
 
@@ -313,8 +307,8 @@ gcloud scheduler jobs create http proctor-retention-sweep \
 ```
 
 > Watch for a Firestore composite-index prompt the first time a big export/purge
-> runs (`RESUME-ANCHOR.md` §5). **(Cloud Scheduler API enablement / job creation is
-> not exercised by the repo scripts — unverified against this GCP project.)**
+> runs. **(Cloud Scheduler API enablement / job creation is not exercised by the
+> repo scripts.)**
 
 ---
 
@@ -381,10 +375,44 @@ from its Dockerfile). Env set by the script: `SOURCE_BUCKET`, `DEST_BUCKET`,
 > **CAVEAT (`video-worker/README.md`, untested vs real GCP):** if
 > `DEST_BUCKET` ≠ `EVIDENCE_BUCKET`, the backend signs the alert `video_key`
 > against the evidence bucket and the deep-link can 404. **The video-worker is NOT
-> deployed on the dev stack** — `RESUME-ANCHOR.md` notes the alert→recording
-> deep-link currently has no merged video; admin recording review plays raw chunks
-> directly (the player builds a playlist from `screen/chunk-*.webm`). **(unverified
-> against a real GCP run.)**
+> deployed on the dev stack** — the alert→recording deep-link currently has no
+> merged video; admin recording review plays raw chunks directly (the player
+> builds a playlist from `screen/chunk-*.webm`). **(unverified against a real GCP
+> run.)**
+
+---
+
+## 4.5 (Optional) Deploy the eval service (`proctor-eval`)
+
+`proctor-eval` is the **same `backend/` source as `proctor-api`, a different
+entrypoint** — it is built from `backend/Dockerfile.eval` (functions-framework
+`--target=evalApi`) and runs as its OWN Cloud Run service so the evaluation
+engine can be redeployed without touching the live exam path (see
+`backend/src/eval-server.mjs`). It **shares the SAME env + signer-key secret** as
+`proctor-api` (separation is at the deploy boundary, not the data boundary).
+
+Build + deploy it like the backend, but with the eval Dockerfile, the eval
+service name, and the eval image tag:
+
+```bash
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/eval:latest"
+gcloud builds submit backend --config=- <<'YAML'   # or: --tag with Dockerfile.eval
+# build backend/ using Dockerfile.eval, push to ${IMAGE}
+YAML
+# Set the COMPLETE env + signer mount, exactly as proctor-api does — the eval
+# service reads the same vars (JUDGE0_*, EVIDENCE_BUCKET, collections, SIGNER_KEY_FILE…).
+gcloud run deploy proctor-eval \
+  --image "$IMAGE" --region "$REGION" --allow-unauthenticated --port 8080 \
+  --set-env-vars="<the SAME complete env map proctor-api uses>" \
+  --set-secrets="/secrets/signer-key.json=proctor-signer-key:latest"
+```
+
+> **Same env-replacement hazard as the backend (see [§Deploy modes](#deploy-modes-full-vs-image-only)):**
+> `gcloud run deploy --set-env-vars` REPLACES the whole env map. A `proctor-eval`
+> deploy MUST carry the **complete** env + signer mount (it shares all of
+> proctor-api's vars), or it ships a half-configured eval service. For routine
+> code-only redeploys, omit `--set-env-vars` / `--set-secrets` so Cloud Run
+> **preserves** the existing config — the `image-only` discipline applies here too.
 
 ---
 
@@ -633,20 +661,18 @@ What changed, and is now the standing practice:
 
 ---
 
-## Live dev stack reference (`RESUME-ANCHOR.md` §0/§5)
+## Live stack reference
 
-> Revision names are **point-in-time** — they roll forward on every deploy. Verify
-> the current revisions and traffic split with
-> `gcloud run revisions list --service proctor-api --region "$REGION"` rather than
-> trusting the values below.
+> Revision names and service URLs are **point-in-time** — they roll forward on
+> every deploy. Verify the current revisions and traffic split with
+> `gcloud run revisions list --service proctor-api --region "$REGION"` (and
+> `gcloud run services list` for URLs) rather than hard-coding values.
 
 | | |
 | --- | --- |
-| Project / region | `${PROJECT_ID}` / `asia-south1` |
-| Backend rev | `proctor-api-…` (point-in-time; `…-00006-pjr` at first deploy, later `…-00030-sit`) |
-| Frontend rev | `proctor-web-…` (point-in-time) |
-| Web URL | `<cloud-run-url>` (also `<cloud-run-url>`) |
-| API URL | `<cloud-run-url>` (also `<cloud-run-url>`) |
+| Project / region | `your-gcp-project-id` / `asia-south1` (example region) |
+| Backend service | `proctor-api` (revision names are point-in-time) |
+| Frontend service | `proctor-web` (revision names are point-in-time) |
 | API root `/` | Returns **404 by design** — all routes are `/api/*`. |
 | min-instances | `0` for testing; set `1` for a real exam (cold-start avoidance). |
 
@@ -682,13 +708,9 @@ curl -s -o /dev/null -w '%{http_code}\n' "$API_URL/"
 #    -> 404
 ```
 
-Expected: `200`, a JSON exam-config body, `401`, `404`. The live dev-stack smoke
-(`RESUME-ANCHOR.md` §0) also confirmed the Wave-6/7 admin routes
-`/api/admin/{people,contest-results,contest-export,retention-sweep}` all return 401
-unauthenticated.
+Expected: `200`, a JSON exam-config body, `401`, `404`. The Wave-6/7 admin routes
+`/api/admin/{people,contest-results,contest-export,retention-sweep}` should all
+return 401 unauthenticated.
 
 > For a real exam, also drive the deployed stack in a browser as Admin /
-> Candidate / Invigilator and confirm the happy path. Screenshot evidence from the
-> persona E2E pass lives under `night-run/evidence/` (e.g.
-> `deployed-in-exam-capture-verified.png`, the `s1-*` / `s2-verify-*` / `s3-verify-*`
-> / `wave2-*` series) and `night-run/evidence/e2e/`.
+> Candidate / Invigilator and confirm the happy path.

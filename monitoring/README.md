@@ -89,7 +89,7 @@ auto ≤10-solver hard derivation.
 
 ```bash
 # offline (no browser, no HR network) — validation / replay
-python3 poller.py --fixtures <your-contest-eval-data-dir>/MCET-06-26/386521-slot1 \
+python3 poller.py --fixtures <your-contest-eval-data-dir>/386521-slot1 \
   --contest-id 386521 --slug coding-contest-mcet-june-2026 --once --no-post
 
 # live loop, posting to the backend
@@ -122,7 +122,8 @@ accumulate on `window.__code` + `localStorage` (survives navigation, survives to
 ## Verdict seam (LLM judgment, subscription only)
 
 Ambiguous alerts (`web_paste`, single-hard `recurring_pair`, MED `peer_copy_cluster`) are
-written to `night-run/verdict-queue/pending/<id>.json`. Run the `/loop` in
+written to `<verdict-queue>/pending/<id>.json` (the queue defaults to the gitignored
+`monitoring/.data/verdict-queue/`; override with `--verdict-queue`). Run the `/loop` in
 `verdict-responder-prompt.md`; it reads the actual code, applies the difficulty-weighting +
 Java-template rules, and writes `done/<id>.json` (`status ∈ {real, false_positive, inconclusive}`).
 The poller reads `done/` each cycle and attaches the verdict. If no verdict appears within
@@ -146,7 +147,8 @@ Live acquisition was confirmed once read-only against `:9222` (leaderboard total
 ## PII / git hygiene (HARD constraints)
 
 - `monitoring/.data/` (live alerts carry candidate usernames + code) is **gitignored**.
-- `night-run/verdict-queue/` is gitignored.
+- The verdict queue defaults to `monitoring/.data/verdict-queue/` (under that gitignored
+  `.data/` tree); pass `--verdict-queue` to relocate it. It is never committed.
 - The MCET fixtures and any candidate code/meta pulled into this repo are gitignored
   (`monitoring/**/data/raw/`, `code_*.json`, `contest_*_meta.json`).
 - No deploy. The poller only POSTs to whatever `--api-base` you pass.

@@ -22,7 +22,7 @@ Env vars: `SOURCE_BUCKET` (where chunks live; usually the evidence bucket),
 `DEST_BUCKET` (review-video bucket), `WORKER_TOKEN` (auth), `SESSION_COLLECTION`
 (must match the backend), `MAX_USERNAMES_PER_REQUEST`, `PORT`.
 
-> CAVEAT (untested against real GCP, see [`../night-run/MORNING-REVIEW.md`](../night-run/MORNING-REVIEW.md)):
+> CAVEAT (bucket alignment):
 > if `DEST_BUCKET` ≠ `EVIDENCE_BUCKET`, the backend signs alert `video_key`
 > against the evidence bucket and the deep-link can 404. Decide whether to merge
 > into the evidence bucket or teach the backend the review-video bucket.

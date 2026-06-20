@@ -1,9 +1,12 @@
-# frontend/ — student recorder + admin console (React + Vite + TS + Tailwind)
+# frontend/ — student recorder + admin console + invigilator portal (React + Vite + TS + Tailwind)
 
-A single React app (`src/App.tsx`) that splits on the URL path: `/` is the
-**student proctor recorder**, `/admin` is the **admin console** (live stats, Live
-Alerts Console, per-username evidence review, schedule + alert-type settings).
-Built with Vite, TypeScript, and Tailwind; deployed as a static site on Cloud Run
+A single React app (`src/App.tsx`) that splits on the URL path into three
+surfaces: `/` is the **student proctor recorder**, `/admin` is the **admin
+console** (live stats, Live Alerts Console, per-username evidence review, schedule
++ alert-type settings), and `/invigilator` is the **invigilator portal** (a
+room-scoped, name-only live view for floor invigilators — shared alerts, unlock
+codes, and per-room candidate status, gated by the invigilator password). Built
+with Vite, TypeScript, and Tailwind; deployed as a static site on Cloud Run
 behind nginx.
 
 - `src/App.tsx` — both apps. Student: registration → screen-share recording (it

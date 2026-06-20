@@ -7,8 +7,8 @@
 #
 # Offline: no browser, no :9222, no GCP, no Firestore. Uses monitoring/
 # mock_alert_server.py as a stdlib stand-in for the proctor backend's two alert
-# routes (the real backend needs Firestore; see night-run/HOW-TO-RUN.md for the
-# real functions-framework path on a GCP-capable machine).
+# routes (the real backend needs Firestore; see docs/DEPLOY.md for the real
+# functions-framework path on a GCP-capable machine).
 #
 # Idempotent + self-cleaning: kills the background server on exit (any path).
 #
@@ -21,7 +21,9 @@ API_KEY="demo-ingest-key-not-a-secret"
 ADMIN_PW="demo-admin"
 API_BASE="http://127.0.0.1:${PORT}"
 
-FIX_BASE="<your-contest-eval-data-dir>/MCET-06-26"
+# Fixture data lives outside the repo (local-only; not shipped). Point
+# CONTEST_EVAL_DATA at your own contest-eval data dir to run the demo against it.
+FIX_BASE="${CONTEST_EVAL_DATA:-${HERE}/.data/fixtures/contest}"
 SLOT_DIR="${FIX_BASE}/386521-slot1"
 CONTEST_ID="386521"
 SLUG="coding-contest-mcet-june-2026"
