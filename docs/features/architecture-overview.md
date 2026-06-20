@@ -23,7 +23,7 @@ The HackerRank-companion lineage survives only as **legacy code paths** kept for
 
 The frontend is a single React + Vite + TypeScript + Tailwind app. It picks a surface from `window.location.pathname` — there is no router library; the selection is a literal prefix check.
 
-Backing code: `frontend/src/App.tsx` lines 68–71:
+`frontend/src/App.tsx` is now a ~26-line pathname router (post-decomposition): it imports the three surface roots and dispatches on the path, then re-exports `csvField` for a back-compat test import. The surface UI lives under per-area folders (`candidate/`, `admin/`, `invigilator/`, plus shared `ui/`, `shell/`, `coding/`, `roster/`, `results/`, `people/`, `problems/`, `markers/`, `attendance/`):
 
 ```
 if (window.location.pathname.startsWith("/invigilator")) return <InvigilatorApp />;
@@ -33,8 +33,8 @@ return isAdmin ? <AdminApp /> : <CandidateRouter />;
 
 | Path | Surface | Top-level component | What it is |
 |---|---|---|---|
-| `/` | **Candidate** | `CandidateRouter` → recorder + Monaco workspace (`App.tsx`) | Onboarding, screen-share recorder, multi-problem coding workspace. |
-| `/admin` | **Admin console** | `AdminApp` (`App.tsx`) | Contests, Templates, Problem bank, Roster/People, Live stats/Sessions/Alerts/IP/Attendance, Results, Recording review, Data lifecycle. |
+| `/` | **Candidate** | `CandidateRouter` (`frontend/src/candidate/CandidateRouter.tsx`) → `StudentApp` recorder + Monaco workspace | Onboarding, screen-share recorder, multi-problem coding workspace. |
+| `/admin` | **Admin console** | `AdminApp` (`frontend/src/admin/AdminApp.tsx`) | Contests, Templates, Problem bank, Roster/People, Live stats/Sessions/Alerts/IP/Attendance, Results, Recording review, Data lifecycle. |
 | `/invigilator` | **Invigilator portal** | `InvigilatorApp` (`frontend/src/InvigilatorApp.tsx`) | Tokenized, name-only room console for a single room/contest. |
 
 `?contest=<slug>` on any candidate URL routes the candidate into a specific contest; a typed 6-char access code resolves to the same (`/api/access-code`).
@@ -43,9 +43,9 @@ return isAdmin ? <AdminApp /> : <CandidateRouter />;
 
 ## 3. Candidate experience (`/`)
 
-The candidate flow is a gated state machine (`StudentGate = "form" | "pending_approval" | "locked" | "ended" | "running"`, `App.tsx` line 211). As experienced by a candidate, in order:
+The candidate flow is a gated state machine (`StudentGate = "form" | "pending_approval" | "locked" | "ended" | "running"`, `frontend/src/candidate/StudentApp.tsx`). As experienced by a candidate, in order:
 
-1. **Permissions-first onboarding** (F5.1) — before anything else, the app requires the **screen share** to be live and confirmed. The comment at `App.tsx` line 314 marks this "stage 1, before fullscreen". The recorder **refuses anything but Entire Screen** — sharing a tab, window, or browser is rejected and recording will not start (`studentCopy.ts` line 24: *"choose Entire Screen — not a tab, window, or browser. Tab/window sharing is rejected and recording will not start."*). Clipboard permission is requested but is **optional and never blocks onboarding** (FIX-B3 #1, `App.tsx` line 426).
+1. **Permissions-first onboarding** (F5.1) — before anything else, the app requires the **screen share** to be live and confirmed ("stage 1, before fullscreen"). The recorder **refuses anything but Entire Screen** — sharing a tab, window, or browser is rejected and recording will not start (`frontend/src/studentCopy.ts`: *"choose Entire Screen — not a tab, window, or browser. Tab/window sharing is rejected and recording will not start."*). Clipboard permission is requested but is **optional and never blocks onboarding** (FIX-B3 #1).
 2. **Fullscreen-first** — the enforcement shell holds the candidate in fullscreen; exits trigger the enforcement ladder (see §3.1).
 3. **Roster unique-ID identity confirm** — when the contest has a roster, the candidate types their unique ID (label is contest-configured, e.g. "Candidate ID"); the backend re-verifies it (`POST /api/roster/lookup`, then `POST /api/session/start` which re-checks `roster_unique_id`). For **person-mode** contests a `409 college_choices` response presents a college picker (`types.ts` `CollegeChoice`).
 4. **Room start gate** (optional, S3) — if `room_gate_enabled`, the candidate waits at a room-code screen until the invigilator releases a 6-digit code or presses "Start now" (`POST /api/session/room-gate`).
@@ -60,13 +60,13 @@ A browser reload **resumes** the same session verbatim without re-collecting det
 
 ### 3.1 Fullscreen-enforcement ladder (F5.3/F5.5)
 
-Server-validated knobs, defaults from `handler.mjs`:
+Server-validated knobs. The defaults live in `backend/src/templates.mjs` (where `normalizeTemplateEnforcement` allow-lists and defaults the enforcement object on every template/contest); the runtime reads them off the resolved `enforcement` object in `backend/src/enforcement.mjs`:
 
 | Knob | Default | Source |
 |---|---|---|
-| `fullscreen_reentry_seconds` | **20** | `FULLSCREEN_REENTRY_DEFAULT_SECONDS` (`handler.mjs` 6033) |
-| `fullscreen_exit_limit` | **2** | `FULLSCREEN_EXIT_LIMIT_DEFAULT` (`handler.mjs` 6034) |
-| `enforcement_mode` | **`block`** | `resolveEnforcementMode` defaults to `"block"` (`handler.mjs` 6044) |
+| `enforcement.fullscreen_reentry_seconds` | **20** | `FULLSCREEN_REENTRY_DEFAULT_SECONDS` (`templates.mjs`) |
+| `enforcement.fullscreen_exit_limit` | **2** | `FULLSCREEN_EXIT_LIMIT_DEFAULT` (`templates.mjs`) |
+| `enforcement.mode` | **`block`** | `normalizeTemplateEnforcement` defaults the mode to `"block"` (`templates.mjs`); other modes are `alert_first` |
 
 The server decides lock vs alert on `POST /api/session/enforcement-violation`. In `block` mode a violation locks the session (`locked_reason: "fullscreen_enforcement"`); per-session **exemptions** (`fullscreen`, `switch_away`) can be granted by an admin (`session-action "exempt"`) or invigilator, and apply live within one heartbeat. An invigilator can release a single fullscreen lock with an unlock code (`POST /api/session/unlock-gate` + the invigilator unlock routes).
 
@@ -82,7 +82,7 @@ A single password-gated console (`x-admin-password` vs `ADMIN_PASSWORD`, timing-
 
 Navigation (redesigned 2026-06-12) is one header card: six **section tabs** — Live (Live stats/Live alerts/Sessions/IP report), Contest (Contests/Attendance/Results), Evidence (Review/Recordings), Authoring (Problems/Templates), People, Settings — with the **contest scope picker top-right** (it scopes every screen; the selection persists in the tab's URL `?contest=`), a second row for the active section's views, per-section last-view memory, and an open-alert badge on Live (`frontend/src/admin/adminNav.ts`; see [admin-live-monitoring.md](./admin-live-monitoring.md)).
 
-![Admin console — grouped nav with the contest scope picker top-right](../assets/e2e-live/r3-allcontests-legacy-chip.png)
+![Admin console — Live stats with the grouped section nav and the contest scope picker top-right](../assets/harness/admin-review/01-live-stats.png)
 
 Surfaces, each with its backing routes:
 
@@ -97,9 +97,11 @@ Surfaces, each with its backing routes:
 | **Alerts console** | List alerts newest-first with room/severity/source filters, archive/unarchive, video deep-links; per-type alert config. | `GET /api/admin/alerts`, `POST alert-action`, `GET/POST alert-settings` |
 | **IP report** | IP-wise clusters of logged-in users (proxy-detection signal) with drill-down. | `GET /api/admin/ip-report` |
 | **Attendance** | Roster-based taken / not-taken counts. | `GET /api/admin/attendance` |
-| **Exam time** | Live end-time control (absolute, extend delta, or force-end-now); the Live-stats card follows the contest scope — a scoped contest reads/writes its own window via `contest-exam-time`, the legacy schedule only when unscoped (fixed 2026-06-12). | `POST /api/admin/exam-time` (legacy) · `POST /api/admin/contest-exam-time` (scoped) |
-| **Results + People** | Per-contest scoreboard (rank / per-problem / integrity), bulk selection + "selection done"; cross-round person scorecards. | `GET /api/admin/contest-results`, `POST contest-selection`, `contest-selection-done`, `contest-adopt`; `GET /api/admin/people`, `person` |
+| **Exam time** | Live end-time control (absolute, extend delta, or force-end-now); the Live-stats card follows the contest scope and reads/writes the scoped contest's own window. | `POST /api/admin/contest-exam-time` |
+| **Results + People** | Per-contest scoreboard (rank / per-problem / integrity), bulk selection + "selection done"; cross-round person scorecards. | `GET /api/admin/contest-results`, `POST contest-selection`, `contest-selection-done`; `GET /api/admin/people`, `person` |
+| **Evaluation** | Run the deterministic integrity + talent evaluation over a contest's sessions (batched); read scorecards / poll batch status. The Evaluation tab page itself is `/eval-ui`, served by `eval-server.mjs` (see §11). | `POST /api/admin/contest-evaluate`, `GET contest-evaluations`, `contest-evaluate-status` |
 | **Recording review** | Screen + camera chunk playback with an events/alerts/submission timeline; multi-reviewer YES/NO queue. | `GET /api/admin/submission-events`, `session-events`; `review-roster`, `review-next`, `review-verdict`, `review-mine`, `reviews`; component `frontend/src/RecordingReview.tsx` |
+| **Pre-test health check** | Admin pre-flight canary that probes the live stack with real auth (config/signing/Judge0/bundle reachability) before a round. | `POST /api/admin/health-check` |
 | **Data lifecycle** | Export → triple-gated purge → tombstone; retention sweep. | `POST /api/admin/contest-export`, `contest-purge`, `retention-sweep` |
 
 > **Caveat:** the distributed reviewer **queue** (review-roster/claims/verdicts) is still candidate-norm-keyed, so person-mode review-queue serving does not resolve (the recording **player** does). Person-mode submission-timeline markers are also a pending follow-up.
@@ -122,7 +124,7 @@ What an invigilator can do, with backing routes (route bodies live in `backend/s
 | Mint / release a fullscreen **unlock** code | `POST /api/invigilator/unlock-code` |
 | Unlock a specific locked session | `POST /api/invigilator/unlock` |
 
-**Selective alerts (default OFF):** alerts only reach the invigilator dashboard for types the admin explicitly opted in via the per-type `show_to_invigilator` flag. The default for **every** proctor alert type is `show_to_invigilator: false` (`DEFAULT_PROCTOR_ALERT_SETTINGS`, `handler.mjs` 5180–5192) — i.e. nothing is shared with invigilators until an admin checks the box. The portal projection also strips free-text `detail` and `session_id` (`InvigilatorAlert` in `types.ts`).
+**Selective alerts (default OFF):** alerts only reach the invigilator dashboard for types the admin explicitly opted in via the per-type `show_to_invigilator` flag. The default for **every** proctor alert type is `show_to_invigilator: false` (`DEFAULT_PROCTOR_ALERT_SETTINGS` in `backend/src/proctorAlerts.mjs`) — i.e. nothing is shared with invigilators until an admin checks the box. The portal projection also strips free-text `detail` and `session_id` (`InvigilatorAlert` in `types.ts`).
 
 ---
 
@@ -142,13 +144,15 @@ The backend is a **single Cloud Run HTTP handler**, `backend/src/handler.mjs`, n
 | `routes/invigilator.mjs` | The 7 invigilator route bodies. |
 | `routes/adminTemplates.mjs`, `routes/adminProblems.mjs`, `routes/adminContests.mjs` | Admin template / problem-bank / contest-lifecycle CRUD. |
 | `routes/adminStats.mjs`, `routes/adminPeople.mjs`, `routes/results.mjs`, `routes/review.mjs` | Admin stats dashboard, People tab, Results trio, multi-reviewer recording review. |
+| `routes/adminSessions.mjs` | Admin session-management (sessions / recordings / drill-down / detail / events / ip-report / attendance / session-action / session-details). |
 | `routes/submissionEvents.mjs`, `routes/alerts.mjs`, `routes/evaluation.mjs` | Poller submission markers, alert routes, candidate-evaluation routes. |
 | `routes/sessionGates.mjs`, `routes/sessionTelemetry.mjs`, `routes/exec.mjs`, `routes/public.mjs` | Candidate session gates, telemetry (upload/events/heartbeat), code-exec, public config + roster login. |
-| `routes/session.mjs` | Candidate session-lifecycle (start / resume / validate-end / end) + the live-slot lock machinery (decomp B13). Owns raw-where #1. |
-| `routes/adminSessions.mjs` | Admin session-management (sessions / recordings / drill-down / detail / events / ip-report / attendance / session-action / session-details) (decomp B14). Owns raw-where #2/#3/#4. |
-| `routes/healthCheck.mjs` | The admin health-check (real-auth canary) route. |
+| `routes/session.mjs` | Candidate session-lifecycle (start / resume / validate-end / end) + the live-slot lock machinery. |
+| `routes/healthCheck.mjs` | The admin pre-test health-check (real-auth canary) route. |
 
-**Feature/domain modules** (imported by `handler.mjs`): `execQueue.mjs`, `problems.mjs`, `contests.mjs` (the `scopedQuery` contest-scope chokepoint), `identity.mjs`, `templates.mjs`, `contestProblems.mjs`, `scoreboard.mjs`, `people.mjs`, `ipReport.mjs`, `dataLifecycle.mjs`, `judge0Adapter.mjs`. **Still resident in `handler.mjs`:** the data-lifecycle selection / export / purge / retention-sweep route cluster (deliberately resident pending a future `routes/dataLifecycle.mjs` step) + a few cross-factory helpers kept single-source (`personContestForSession`, `inAdminEndGrace`, `isAlreadyExists`, `contestScopeOf`, `normalizeRooms`, `normalizeRoomFilter`, `distinctRooms`, `isStaleSession`, `personContestForFilter`).
+The `backend/src/routes/` directory holds **18** route-factory modules in all (`invigilator`, `public`, `exec`, `session`, `sessionGates`, `sessionTelemetry`, `alerts`, `submissionEvents`, `review`, `results`, `evaluation`, `healthCheck`, `adminContests`, `adminProblems`, `adminTemplates`, `adminStats`, `adminPeople`, `adminSessions`).
+
+**Feature/domain modules** (imported by `handler.mjs`): `execQueue.mjs`, `problems.mjs`, `contests.mjs` (the `scopedQuery` contest-scope chokepoint), `identity.mjs`, `templates.mjs`, `contestProblems.mjs`, `scoreboard.mjs`, `people.mjs`, `ipReport.mjs`, `dataLifecycle.mjs`, `judge0Adapter.mjs`, and the `evaluation*.mjs` engine (`evaluation`, `evaluationClone`, `evaluationMetrics`, `evaluationRecommend`, `evaluationReplay`). **Still resident in `handler.mjs`:** the data-lifecycle selection / export / purge / retention-sweep route cluster (deliberately resident pending a future `routes/dataLifecycle.mjs` step) plus the central **dispatch table** itself (the flat `if (method && path === "…") return …` list every factory's handlers are wired into) and a few cross-factory helpers kept single-source.
 
 **Auth model** (all timing-safe via `safeEqual`, all closed-by-default when the secret is unset):
 
@@ -164,7 +168,7 @@ The backend is a **single Cloud Run HTTP handler**, `backend/src/handler.mjs`, n
 
 ## 7. State — Firestore + GCS
 
-All env-derived collection names come from `config.mjs` `loadConfig()`. There are **20+** Firestore collections, each independently overridable by env (defaults shown):
+All env-derived collection names come from `config.mjs` `loadConfig()`. There are **21** Firestore collections (`config.mjs` defines 21 `*_COLLECTION` keys), each independently overridable by env (defaults shown):
 
 | Config key | Default collection | Holds |
 |---|---|---|
@@ -177,6 +181,7 @@ All env-derived collection names come from `config.mjs` `loadConfig()`. There ar
 | `REVIEW_COLLECTION` | `proctor_reviews` | reviewer verdict records |
 | `REVIEW_CLAIMS_COLLECTION` | `proctor_review_claims` | reviewer claims |
 | `SUBMISSIONS_COLLECTION` | `proctor_submissions` | stored submissions (with hidden-test detail) |
+| `RUN_EVENTS_COLLECTION` | `proctor_run_events` | persisted Judge0 Run events (sample-test runs) |
 | `PROBLEMS_COLLECTION` | `proctor_problems` | the problem bank |
 | `EDITOR_EVENTS_COLLECTION` | `editor-events` | GCS sub-prefix label for editor events |
 | `ROSTER_COLLECTION` | `proctor_roster` | per-contest roster entries |
@@ -187,6 +192,7 @@ All env-derived collection names come from `config.mjs` `loadConfig()`. There ar
 | `ENROLLMENTS_COLLECTION` | `proctor_enrollments` | person × contest rows |
 | `ADMIN_AUDIT_COLLECTION` | `proctor_admin_audit` | admin action audit log |
 | `TEMPLATES_COLLECTION` | `proctor_templates` | contest templates |
+| `EVALUATIONS_COLLECTION` | `proctor_evaluations` | computed integrity + talent scorecards (evaluation engine) |
 
 **Evidence (GCS):** `EVIDENCE_BUCKET` holds video chunks, event JSONL, and manifests, keyed off one persisted `storage_prefix` per session: `contests/<slug>/sessions/<username_norm>/<session_id>/…` (legacy `sessions/<username_norm>/<session_id>/…` when no contest URL). Signed read/write URLs expire after `URL_EXPIRY_SECONDS` (default **900**). Alert `video_key`s are resolved to short-lived signed `download_url`s **at read time, never stored** (`lib/clients.mjs` `resolveSignedReadUrl`).
 
@@ -215,7 +221,7 @@ Person-mode contests use a durable person identity that is **stable across conte
 - A roster upload runs a **locked validation order** (`identity.mjs` 169–177): compulsory college column → college **canonicalization gate** (map-or-confirm new college names) → duplicate `(college_norm, unique_id_norm)` hard-reject → same-uid-different-college allowed-with-warning → blank-id skip.
 - **Enrollment** = a stable `proctor_enrollments` row keyed `{contest_slug}::{person_id}` — the **person × contest** key that carries scores, selection status, and the final snapshot. Sessions/submissions are stamped with `person_id` so a person's results join across rounds (the cross-round scorecard).
 
-Legacy contests use `username_norm` (bare `identityNorm`); a one-time **"Adopt into person model"** (`POST /api/admin/contest-adopt`) backfills `person_id` onto existing sessions/submissions without renaming any frozen key.
+Legacy contests use `username_norm` (bare `identityNorm`); the person-model backfill stamps `person_id` onto existing sessions/submissions without renaming any frozen key.
 
 ---
 
@@ -225,7 +231,7 @@ Both producers — the **proctor** backend (`source:"proctor"`) and the **contes
 
 Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all if the key is unset; `lib/auth.mjs` `requireApiKey`). A bare object or a batch (`{alerts:[…]}`) is accepted.
 
-**Proctor alert types** — every type is **enabled by default**, `show_to_invigilator` **false by default** (`DEFAULT_PROCTOR_ALERT_SETTINGS`, `handler.mjs` 5180):
+**Proctor alert types** — every type is **enabled by default**, `show_to_invigilator` **false by default** (`DEFAULT_PROCTOR_ALERT_SETTINGS` in `backend/src/proctorAlerts.mjs`):
 
 | Type | Default severity |
 |---|---|
@@ -248,9 +254,9 @@ Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all
 
 ---
 
-## 11. Full HTTP route inventory (~81 routes)
+## 11. Full HTTP route inventory (77 routes)
 
-All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes/invigilator.mjs`). Verified by extracting every `path === "/api/..."` dispatch line; **81** routes total. Unmatched path → `404`. Grouped by family:
+There are **77 unique routes**, extracted from every `path === "…"` dispatch site in the backend: **74** `/api/*` routes dispatched from the main handler `backend/src/handler.mjs` (route *bodies* live in the `routes/*.mjs` factories — §6 — but the central dispatch table is in `handler.mjs`), plus **3** `/eval-ui/*` page routes served by the separate proctor-eval entrypoint `backend/src/eval-server.mjs` (NOT `handler.mjs`). The root [`README.md`](../../README.md) HTTP API reference is the canonical, fuller per-route table (method · auth · purpose); this section is the grouped at-a-glance map. Unmatched path → `404`. Grouped by family:
 
 **Candidate session (auth: knowing `session_id`, or time-window gate on start)**
 `POST /api/session/start` · `/api/session/resume` · `/api/upload-url` · `/api/events` · `/api/editor-events` · `/api/review-file` · `/api/heartbeat` · `/api/session/beacon` · `/api/session/validate-end` · `/api/session/end` · `/api/session/room-gate` · `/api/session/enforcement-violation` · `/api/session/unlock-gate`
@@ -259,10 +265,10 @@ All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes
 `POST /api/exec/run` · `/api/exec/submit`
 
 **Public (no auth)**
-`GET /api/exam-config` · `/api/candidate-route` · `POST /api/access-code` · `POST /api/roster/lookup`
+`GET /api/exam-config` · `POST /api/access-code` · `POST /api/roster/lookup`
 
 **Admin — contests & templates** (`x-admin-password`)
-`GET/POST /api/admin/contests` · `contest-update` · `contest-status` · `contest-regenerate` · `contest-set-code` · `contest-exam-time` · `GET /api/admin/templates` · `template` · `POST templates` · `template-update` · `template-archive` · `template-clone` · `template-delete`
+`GET/POST /api/admin/contests` · `contest-update` · `contest-status` · `contest-regenerate` · `contest-set-code` · `contest-exam-time` · `contest-selection` · `contest-selection-done` · `GET /api/admin/templates` · `template` · `POST templates` · `template-update` · `template-archive` · `template-clone` · `template-delete`
 
 **Admin — problems**
 `GET /api/admin/problems` · `problem` · `POST problems` · `problem-delete`
@@ -271,13 +277,16 @@ All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes
 `GET/POST /api/admin/roster` · `GET /api/admin/people` · `person`
 
 **Admin — monitoring & sessions**
-`GET /api/admin/sessions` · `recording-sessions` · `sessions-list` · `session-detail` · `session-events` · `stats` · `ip-report` · `attendance` · `POST session-action` · `session-details` · `exam-time`
+`GET /api/admin/sessions` · `recording-sessions` · `sessions-list` · `session-detail` · `session-details` · `session-events` · `stats` · `ip-report` · `attendance` · `POST session-action`
 
 **Admin — submission events**
 `POST /api/submission-events` · `GET /api/admin/submission-events`
 
-**Admin — results & lifecycle**
-`GET /api/admin/contest-results` · `POST contest-selection` · `contest-selection-done` · `contest-adopt` · `contest-export` · `contest-purge` · `retention-sweep`
+**Admin — results, evaluation & lifecycle**
+`GET /api/admin/contest-results` · `POST contest-export` · `contest-purge` · `retention-sweep` · `POST /api/admin/contest-evaluate` · `GET contest-evaluations` · `contest-evaluate-status`
+
+**Admin — pre-test health check**
+`POST /api/admin/health-check`
 
 **Alerts**
 `POST /api/alerts` (`x-api-key`) · `GET /api/admin/alerts` · `POST alert-action` · `GET/POST alert-settings`
@@ -287,6 +296,9 @@ All routes are dispatched from `handler.mjs` (invigilator bodies live in `routes
 
 **Invigilator** (`x-invigilator-password`)
 `GET /api/invigilator/overview` · `room` · `POST release-code` · `open-room` · `exempt` · `unlock-code` · `unlock`
+
+**Evaluation pages — served by `eval-server.mjs` (proctor-eval), not `handler.mjs`**
+`GET /eval-ui` · `/eval-ui/app.js` · `/eval-ui/recommend.js`
 
 ---
 
