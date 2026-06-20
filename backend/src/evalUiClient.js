@@ -73,6 +73,90 @@ function csvBtn(list, headers, rowsFn) {
     onClick: (e) => { e.stopPropagation(); e.preventDefault(); downloadCsv(csvName(list), headers, rowsFn()); },
   }, "⤓ CSV");
 }
+
+// plain-English explanation for every CSV column (shown by the "ⓘ cols" popover).
+const COL_DESC = {
+  talent_rank: "Rank by integrity-adjusted talent (1 = strongest genuine solver).",
+  raw_rank: "Rank by raw contest score alone (the naive leaderboard position).",
+  name: "Candidate name.",
+  id: "Roll number / candidate ID.",
+  talent_composite: "0–100 talent score: weighted by score, problem hardness, genuine-solve arcs (wrong tries before an accept) and reach. Confirmed copying caps it at 20.",
+  talent_tier: "strong / moderate / weak — the talent band that gates hiring; only 'strong' is recommendable.",
+  integrity: "clean / desk-check (a single weak note) / review (a real concern, held) / confirmed (copying) / limited data.",
+  confidence: "How complete the captured data was for this candidate (high / medium / low).",
+  recommendation: "The eval's bucket: Strong hire / Hire — desk-check / Hold — integrity review / Exclude — integrity / Below the bar.",
+  raw_score: "Total contest score (sum of best-per-problem).",
+  max_score: "Maximum possible contest score.",
+  reason: "One-line rationale for the recommendation.",
+  peers: "For copiers: who they shared identical code with, and on how many problems (p) / hard problems (h).",
+  kind: "'trap' = a high scorer who is NOT a hire; 'missed' = a genuine hire a same-depth score cut would skip.",
+  detail: "Why: confirmed copying / integrity hold / below the bar, or 'clean genuine work' for a missed candidate.",
+  list: "'your_pick' = a name from your pasted shortlist; 'missed_by_you' = recommended by the eval but not on your list.",
+  status: "Whether the matched pick clears the hiring bar or is flagged by the eval.",
+};
+// a "ⓘ cols" button that toggles a popover explaining each column of a CSV.
+function colsBtn(headers) {
+  const pop = el("div", { class: "colpop" });
+  for (const h of headers) pop.append(el("div", { class: "colrow" }, el("b", { text: h }), el("span", { text: COL_DESC[h] || "" })));
+  const btn = el("button", { class: "csvbtn cols", type: "button", title: "What do the CSV columns mean?" }, "ⓘ cols");
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation(); e.preventDefault();
+    const open = pop.classList.contains("show");
+    document.querySelectorAll(".colpop.show").forEach((p) => p.classList.remove("show"));
+    if (!open) pop.classList.add("show");
+  });
+  return el("span", { class: "colswrap" }, btn, pop);
+}
+
+// a clickable ID span: click copies the id to the clipboard + flashes "copied".
+function copyableId(idText, cls) {
+  if (idText == null || idText === "") return null;
+  const span = el("span", { class: (cls || "id") + " copyable", title: "Click to copy" }, String(idText));
+  span.addEventListener("click", (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const flash = () => {
+      const prev = span.textContent;
+      span.textContent = "copied ✓";
+      span.classList.add("copied");
+      setTimeout(() => { span.textContent = prev; span.classList.remove("copied"); }, 1000);
+    };
+    // execCommand fallback — works inside a cross-origin iframe where the async
+    // Clipboard API may be blocked by permissions policy (the parent frame does
+    // not grant clipboard-write).
+    const fallbackCopy = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = String(idText);
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.append(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      } catch (err2) { /* ignore */ }
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(String(idText)).then(flash, () => { fallbackCopy(); flash(); });
+      } else {
+        fallbackCopy();
+        flash();
+      }
+    } catch (err) { fallbackCopy(); flash(); }
+  });
+  return span;
+}
+
+// format an ISO timestamp in the viewer's LOCAL timezone (not UTC).
+function fmtLocal(iso) {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch (e) { return String(iso); }
+}
 // standard per-candidate CSV columns
 const CAND_HEADERS = ["talent_rank", "raw_rank", "name", "id", "talent_composite", "talent_tier", "integrity", "confidence", "recommendation", "raw_score", "max_score", "reason", "peers"];
 function candCsvRow(c) {
@@ -214,7 +298,7 @@ function candidateRow(c, opts) {
     el("div", { class: "who" },
       el("div", null,
         el("span", { class: "name", text: c.name }),
-        c.candidate_id ? el("span", { class: "id", text: c.candidate_id }) : null,
+        copyableId(c.candidate_id, "id"),
       ),
       el("div", { class: "reason", text: c.reason }),
       confNote ? el("div", { class: "conf-note", text: confNote }) : null,
@@ -249,7 +333,7 @@ function candidateRow(c, opts) {
         el("div", { class: "twin-head" },
           el("span", { text: "Identical code shared with " }),
           el("b", { text: pe.peer_name }),
-          pe.peer ? el("span", { class: "twin-id", text: pe.peer }) : null,
+          copyableId(pe.peer, "twin-id"),
         ),
         el("div", { class: "twin-meta", text: bits.join(" · ") }),
       ));
@@ -332,7 +416,7 @@ function filterPill(label, value, count) {
 
 // the header "Evaluate now" control (re-runs the batched evaluator + reloads)
 function buildEvalNow(report) {
-  const status = el("span", { class: "evalstatus", text: report && report.generated_from ? "last run " + String(report.generated_from).replace("T", " ").slice(0, 16) + "Z" : "" });
+  const status = el("span", { class: "evalstatus", text: report && report.generated_from ? "last run " + fmtLocal(report.generated_from) : "" });
   const btn = el("button", { class: "btn-eval", type: "button" }, "Evaluate now");
   btn.addEventListener("click", async () => {
     if (btn.disabled) return;
@@ -380,8 +464,9 @@ function render(report) {
     root.append(el("div", { class: "calib" },
       el("span", { class: "ck", text: "Methodology:" }),
       el("span", null,
-        "this ruleset was calibrated once against a labeled control set (" + cal.control_cohort +
-        "), where every org-selected hire was retained and every confirmed copier excluded. " + cal.note),
+        "this ruleset was calibrated against a labeled control set of genuine and copying candidates so that " +
+        "genuine candidates are virtually never excluded — only conclusive copying excludes; a single shared " +
+        "medium problem is a desk-check note, never a block. Talent and integrity are scored separately."),
     ));
   }
 
@@ -435,6 +520,7 @@ function render(report) {
     filterPill("Strong", "strong_hire", c.strong_hire),
     filterPill("Desk-check", "hire_deskcheck", c.hire_deskcheck),
     csvBtn("recommended-hires", CAND_HEADERS, () => filteredHires.map(candCsvRow)),
+    colsBtn(CAND_HEADERS),
   ];
   root.append(section("Recommended hires", c.hires + " of " + c.participants,
     "Strong genuine problem-solvers, ranked by integrity-adjusted talent. Green = clean record; amber = recommend after a short desk-check (a weak note only — never a blocker). Click a row for the evidence.",
@@ -447,7 +533,7 @@ function render(report) {
       el("p", { class: "h-note", text: "High scorers a leaderboard hire would wrongly pick." }),
     );
     if (nTrap) report.rawScoreTraps.forEach((t) => trapsCard.append(el("div", { class: "mini" },
-      el("div", null, el("span", { class: "m-name", text: t.name }), t.candidate_id ? el("span", { class: "m-id", text: t.candidate_id }) : null,
+      el("div", null, el("span", { class: "m-name", text: t.name }), copyableId(t.candidate_id, "m-id"),
         el("div", { class: "m-why", text: t.why_not })),
       el("div", { class: "m-meta", text: "raw #" + t.raw_rank + " · " + t.total_score }),
     )));
@@ -458,18 +544,19 @@ function render(report) {
       el("p", { class: "h-note", text: "Genuine solvers a same-depth score cut would skip." }),
     );
     if (nMiss) report.missedByRawScore.forEach((m) => missCard.append(el("div", { class: "mini" },
-      el("div", null, el("span", { class: "m-name", text: m.name }), m.candidate_id ? el("span", { class: "m-id", text: m.candidate_id }) : null,
+      el("div", null, el("span", { class: "m-name", text: m.name }), copyableId(m.candidate_id, "m-id"),
         el("div", { class: "m-why good", text: "talent #" + m.talent_rank + ", clean genuine work" })),
       el("div", { class: "m-meta", text: "raw #" + m.raw_rank + " · " + m.total_score }),
     )));
     else missCard.append(el("div", { class: "nodossier", text: "None — the score order already matches merit." }));
 
-    const wrongCsv = csvBtn("leaderboard-would-get-wrong", ["kind", "name", "id", "raw_rank", "raw_score", "talent_rank", "talent_composite", "integrity", "detail"],
+    const wrongHeaders = ["kind", "name", "id", "raw_rank", "raw_score", "talent_rank", "talent_composite", "integrity", "detail"];
+    const wrongCsv = csvBtn("leaderboard-would-get-wrong", wrongHeaders,
       () => [
         ...report.rawScoreTraps.map((t) => ["trap", t.name, t.candidate_id, t.raw_rank, t.total_score, t.talent_rank, t.composite, t.integrity_tier, t.why_not]),
         ...report.missedByRawScore.map((m) => ["missed", m.name, m.candidate_id, m.raw_rank, m.total_score, m.talent_rank, m.composite, m.integrity_tier, "clean genuine work"]),
       ]);
-    root.append(section("What a leaderboard would get wrong", null, null, el("div", { class: "twoup" }, trapsCard, missCard), { controls: [wrongCsv] }));
+    root.append(section("What a leaderboard would get wrong", null, null, el("div", { class: "twoup" }, trapsCard, missCard), { controls: [wrongCsv, colsBtn(wrongHeaders)] }));
   }
 
   // compare to your shortlist
@@ -483,7 +570,7 @@ function render(report) {
     const exCsv = csvBtn("excluded-and-held", CAND_HEADERS, () => report.hold.concat(report.excluded).map(candCsvRow));
     root.append(el("section", null, group("Excluded & held — integrity", report.excluded.length + report.hold.length, el("div", null,
       el("p", { class: "sec-note", text: "Confirmed copying (excluded) and integrity holds (manual review before any offer). Click a row for the conclusive evidence." }),
-      exBody), false, { id: "sec-excluded", controls: [exCsv] })));
+      exBody), false, { id: "sec-excluded", controls: [exCsv, colsBtn(CAND_HEADERS)] })));
   }
 
   // below the bar (collapsible)
@@ -491,7 +578,7 @@ function render(report) {
     const bbBody = el("div", { class: "rows" });
     report.belowBar.forEach((h) => bbBody.append(candidateRow(h, { rankField: "talent_rank" })));
     const bbCsv = csvBtn("below-the-bar", CAND_HEADERS, () => report.belowBar.map(candCsvRow));
-    root.append(el("section", null, group("Below the bar", report.belowBar.length, bbBody, false, { id: "sec-below", controls: [bbCsv] })));
+    root.append(el("section", null, group("Below the bar", report.belowBar.length, bbBody, false, { id: "sec-below", controls: [bbCsv, colsBtn(CAND_HEADERS)] })));
   }
 }
 
@@ -532,21 +619,22 @@ function buildCompare(report) {
       picked.length + " candidate(s) matched · " + concerns.length + " the eval flags · " + missedByYou.length + " recommended candidates not on your list" }));
     if (unmatched.length) out.append(el("p", { class: "cmp-warn", text: unmatched.length + " of your entries matched nobody (check spelling, or use the ID): " + unmatched.join(", ") }));
     if (ambiguous.length) out.append(el("p", { class: "cmp-warn", text: "Matched multiple — refine to an ID: " + ambiguous.join(", ") }));
-    out.append(csvBtn("shortlist-comparison",
-      ["list", "name", "id", "recommendation", "status", "talent_rank", "talent_composite", "integrity"],
-      () => [
+    const cmpHeaders = ["list", "name", "id", "recommendation", "status", "talent_rank", "talent_composite", "integrity"];
+    out.append(el("span", { class: "colswrap-inline" },
+      csvBtn("shortlist-comparison", cmpHeaders, () => [
         ...picked.map((p) => ["your_pick", p.name, p.candidate_id, p.bucket_label, isHireBucket(p.bucket) ? "clears the bar" : "flagged by eval", p.talent_rank, p.composite, p.integrity_tier]),
         ...missedByYou.map((h) => ["missed_by_you", h.name, h.candidate_id, h.bucket_label, "recommended (not on your list)", h.talent_rank, h.composite, h.integrity_tier]),
-      ]));
+      ]),
+      colsBtn(cmpHeaders)));
     const twoup = el("div", { class: "twoup" });
     const cCard = el("div", { class: "card bad" }, el("h3", { text: "Your picks the eval would NOT clear" }));
     if (concerns.length) concerns.forEach((p) => cCard.append(el("div", { class: "mini" },
-      el("div", null, el("span", { class: "m-name", text: p.name }), el("span", { class: "m-id", text: p.candidate_id || "" })),
+      el("div", null, el("span", { class: "m-name", text: p.name }), copyableId(p.candidate_id, "m-id")),
       el("div", { class: "m-why", text: p.bucket_label }))));
     else cCard.append(el("div", { class: "nodossier", text: "None — every matched pick clears the bar." }));
     const mCard = el("div", { class: "card good" }, el("h3", { text: "Strong hires you didn't list" }));
     if (missedByYou.length) missedByYou.slice(0, 12).forEach((h) => mCard.append(el("div", { class: "mini" },
-      el("div", null, el("span", { class: "m-name", text: h.name }), el("span", { class: "m-id", text: h.candidate_id || "" })),
+      el("div", null, el("span", { class: "m-name", text: h.name }), copyableId(h.candidate_id, "m-id")),
       el("div", { class: "m-meta", text: "talent #" + h.talent_rank }))));
     else mCard.append(el("div", { class: "nodossier", text: "None — you listed every recommended hire." }));
     twoup.append(cCard, mCard);
@@ -558,6 +646,12 @@ function buildCompare(report) {
     el("p", { class: "hint", text: "Compares your shortlist against the eval. Stays in your browser — never stored or sent." }), out);
   return el("section", null, group("Compare to your shortlist", "optional", wrap, false));
 }
+
+// close any open column-explainer popover on an outside click
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.closest && e.target.closest(".colswrap")) return;
+  document.querySelectorAll(".colpop.show").forEach((p) => p.classList.remove("show"));
+});
 
 // boot
 load();

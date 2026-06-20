@@ -30,6 +30,30 @@ SERVICE_NAME="${SERVICE_NAME:-proctor-web}"
 REPOSITORY="${REPOSITORY:-proctor}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/web:latest"
 
+# ----- LIVE-TEST SAFETY GATE ------------------------------------------------
+# proctor-web serves the LIVE exam UI. Refuse to deploy while a test is in
+# progress unless explicitly overridden. Runs the live-activity preflight
+# (scripts/deploy-preflight.sh) — see _nightrun/eval-service-deploy.md
+# (DEPLOY SAFETY). An agent deploying this MUST surface the verdict to the user
+# and get an explicit override; "I'll be careful" is not enough.
+#   SKIP_LIVE_CHECK=1      skip the check entirely (CI / known-idle)
+#   DEPLOY_OVERRIDE_LIVE=1 proceed despite a live/uncertain verdict (human override)
+PREFLIGHT="$(cd "$(dirname "$0")" && pwd)/../scripts/deploy-preflight.sh"
+if [ "${SKIP_LIVE_CHECK:-0}" != "1" ] && [ -x "$PREFLIGHT" ]; then
+  echo ">>> Live-activity preflight (proctor-web serves the exam) …"
+  if ! bash "$PREFLIGHT"; then
+    if [ "${DEPLOY_OVERRIDE_LIVE:-0}" = "1" ]; then
+      echo "!!! OVERRIDE: DEPLOY_OVERRIDE_LIVE=1 — proceeding despite a live/uncertain verdict. Staged flow + rollback still apply."
+    else
+      echo "✗ ABORT: a test may be live (see verdict above). proctor-web is the live exam UI."
+      echo "  If you are CERTAIN no test is active: re-run with DEPLOY_OVERRIDE_LIVE=1 (override)"
+      echo "  or SKIP_LIVE_CHECK=1 (skip the check)."
+      exit 3
+    fi
+  fi
+fi
+# ---------------------------------------------------------------------------
+
 # verify_dist_has_hashes <dist_dir> <admin_hash> <invig_hash>
 # Returns 0 only if BOTH hash strings are found somewhere in the built assets.
 # Returns nonzero (and prints a loud error) if EITHER hash is missing — this is

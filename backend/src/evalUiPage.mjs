@@ -236,6 +236,22 @@ export const EVAL_UI_HTML = `<!doctype html>
   .chip.active { outline: 2px solid var(--ink); outline-offset: 1px; }
   .chip.good.active { outline-color: var(--accent); }
   .chip.warn.active { outline-color: var(--warn); }
+
+  /* click-to-copy IDs */
+  .copyable { cursor: pointer; border-bottom: 1px dashed currentColor; }
+  .copyable:hover { color: var(--ink); }
+  .copyable.copied { color: var(--accent) !important; border-bottom-color: transparent; font-weight: 600; }
+
+  /* CSV column-explainer popover */
+  .colswrap { position: relative; display: inline-block; }
+  .colswrap-inline { display: inline-flex; gap: 6px; align-items: center; }
+  .colpop { display: none; position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; width: 330px; max-width: 82vw;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 11px 14px; text-align: left; font-weight: 400; }
+  .colpop.show { display: block; }
+  .colrow { font-size: 12px; line-height: 1.4; padding: 5px 0; border-top: 1px dashed var(--line); }
+  .colrow:first-child { border-top: none; }
+  .colrow b { font-family: ui-monospace, Menlo, monospace; color: var(--ink); margin-right: 6px; }
+  .colrow span { color: var(--muted); }
 </style>
 </head>
 <body>
