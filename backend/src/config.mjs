@@ -10,6 +10,30 @@
 // depends on, so this MUST stay a function — never top-level const reads.
 import { positiveIntOr } from "./lib/http.mjs";
 
+// One-time warn latch for the insecure CORS wildcard fallback. We KEEP the `*`
+// fallback (the deploy script — backend/deploy-gcp.sh:66 — also defaults
+// PUBLIC_APP_ORIGIN to `*` and does NOT require it, so prod can rely on this
+// fallback; tightening it to a non-`*` value would break CORS for any deploy
+// that doesn't explicitly set the origin). But a silent insecure default is the
+// real hazard, so we surface it LOUDLY once: any deploy that means to lock CORS
+// down sets PUBLIC_APP_ORIGIN explicitly and never sees this. (Audit C3: with no
+// cookies + custom-header auth, `*` is not a credential-leak hole — this is
+// defence-in-depth visibility, not a behavior change.)
+let warnedWildcardCorsOrigin = false;
+function resolveCorsOrigin() {
+  const configured = process.env.PUBLIC_APP_ORIGIN;
+  if (configured) return configured;
+  if (!warnedWildcardCorsOrigin) {
+    console.warn(
+      "PUBLIC_APP_ORIGIN is not set; defaulting CORS Access-Control-Allow-Origin to '*' " +
+      "(any web origin can call the public endpoints). Set PUBLIC_APP_ORIGIN to the " +
+      "proctor-web origin to restrict it."
+    );
+    warnedWildcardCorsOrigin = true;
+  }
+  return "*";
+}
+
 export function loadConfig() {
   return {
     // ---- Firestore collection names -------------------------------------------
@@ -77,7 +101,7 @@ export function loadConfig() {
     // (409 eval_in_progress); a staler heartbeat is reclaimable so a crashed run
     // never wedges the button. Default 180s.
     EVAL_LEASE_MS: positiveIntOr(process.env.EVAL_LEASE_MS, 180000),
-    PUBLIC_APP_ORIGIN: process.env.PUBLIC_APP_ORIGIN || "*",
+    PUBLIC_APP_ORIGIN: resolveCorsOrigin(),
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || "",
     // Write-isolation for the proctor-eval service. When set (comma-separated
     // collection names), the Firestore client guard rejects any WRITE to a
