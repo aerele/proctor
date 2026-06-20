@@ -1,7 +1,7 @@
 # OMR screen markers + overlay-occlusion detection (2026-06-12) — DESIGN
 
 > **Status: DESIGN ONLY — nothing built.** Owner spec: `TODO-admin-polish.md` F2 + F2.1;
-> distilled in `PRODUCT-BACKLOG.md` § "Maybe-soon" (task #62). the operator: candidate for the
+> distilled in `PRODUCT-BACKLOG.md` § "Maybe-soon" (task #62). Operator note: candidate for the
 > next stretch goal, **only after the live flow is verified rock-solid**. Feature flag
 > default **OFF** — a deployment with the flag off must behave byte-identically to today.
 
@@ -184,7 +184,7 @@ BL ───── B⅓ ───── B⅔ ───── BR          ← y: 
 - **3 interior**: viewport center, lower-center (≈ status-bar line of the workspace),
   and `STRIP-C` counts as upper-center. Center markers are where Monaco popups can
   legitimately appear — the episode logic absorbs that (§7.4); their contrast/count is
-  the the operator call (Open Question 1).
+  the operator's call (Open Question 1).
 - **Bottom-center caveat**: Chrome's "sharing your screen" pill often parks exactly at
   bottom-center. `B⅓`/`B⅔` are placed at 30/70 % (not 50 %) for this reason, and the
   baseline-calibration step (§7.4) excludes any marker that was never visible.

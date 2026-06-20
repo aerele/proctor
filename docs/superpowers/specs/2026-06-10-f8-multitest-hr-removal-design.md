@@ -1,6 +1,6 @@
 # F8 design — multi-test (named contests) + HackerRank de-dependency
 
-Status: APPROVED-BY-DEFAULT (the operator activated both asks by voice 2026-06-10 ~11:47; decision defaults below sent to him on Telegram for async veto). Research basis: HR-dependency + single-contest inventory sweep (agent report, 2026-06-10).
+Status: APPROVED-BY-DEFAULT (the operator activated both asks by voice 2026-06-10 ~11:47; decision defaults below sent to the operator on Telegram for async veto). Research basis: HR-dependency + single-contest inventory sweep (agent report, 2026-06-10).
 
 ## Key research facts (verified by sweep)
 - `(username_norm, contest_slug)` is the universal join key — sessions, alerts, alert ids, submission-events, live-locks, GCS evidence paths (`contests/{slug}/sessions/{username_norm}/{session_id}/`) are ALREADY contest-scoped. Multi-test needs no session/alert/evidence migration.

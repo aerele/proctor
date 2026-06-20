@@ -8,9 +8,9 @@ Contests become first-class (`proctor_contests`, name → slug, `contest_url` di
 
 ## Decisions
 
-Each decision states the chosen default and why. All are defaults the operator can veto; only §10's questions need his voice.
+Each decision states the chosen default and why. All are defaults the operator can veto; only §10's questions need the operator's voice.
 
-1. **`username_norm` field name frozen; derivation replaced.** New sessions: `username_norm = identityNorm(unique value)` where `identityNorm(v) = sanitizeSegment(normalizeUniqueId(v))` (both functions exist today). Renaming the field would force a dual-write rewrite of sessions/alerts/locks/submission-events/review ids and GCS paths for zero user value. the operator explicitly allows "call it username internally."
+1. **`username_norm` field name frozen; derivation replaced.** New sessions: `username_norm = identityNorm(unique value)` where `identityNorm(v) = sanitizeSegment(normalizeUniqueId(v))` (both functions exist today). Renaming the field would force a dual-write rewrite of sessions/alerts/locks/submission-events/review ids and GCS paths for zero user value. The operator explicitly allows "call it username internally."
 2. **One identity field on session docs: `candidate_id` (display form).** Roster contest: `candidate_id` = roster entry's `unique_id`, server-overridden at start (existing S2 mechanism); the typed `hackerrank_username` and its "session key" exception (handler.mjs:307-311) are deleted for new contests. No-roster contest: `candidate_id` = the single typed value. Unifies F8 decision 7's two concepts into one (ops-lifecycle's amendment, graft adopted).
 3. **Per-contest `identity_mode` field** (`"unique_id"` on all new contests, `"legacy_username"` on the materialized legacy contest) — the derivation switch is data, not control flow: auditable, testable, and structurally incapable of stranding an in-flight exam at deploy. (Graft from ops-lifecycle, both judges.)
 4. **`identity_label` denormalized onto the session doc at start** (legacy rows render as `"Username"` via the dual-read adapter) — exports, restored data, and legacy DTOs render the right label forever even if the contest label changes mid-run. (Graft, both judges.)
@@ -311,7 +311,7 @@ Infra smoke per stage on the dev project (${PROJECT_ID}): catch Firestore compos
 - No automatic selection inference from review verdicts — selection-done stays an explicit click.
 - No multi-window scheduling inside one contest (two timings = two contests).
 
-## OPEN QUESTIONS FOR KARTHI
+## OPEN QUESTIONS FOR THE OPERATOR
 
 1. Duplicate roll numbers in a roster CSV: the design **rejects the whole upload** with the exact row numbers (so the college fixes the file), instead of today's silent-skip or a soft warning — a silently-kept row would pre-fill the wrong student's identity. OK to be that strict with messy college CSVs, or do you want skip-with-blocking-warning instead?
 2. Evidence retention default: you said "3-4 days after selection" — I've set default **4 days**, editable per contest between 1 and 30. Confirm 4, or pick another default?

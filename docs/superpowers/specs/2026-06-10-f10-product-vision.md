@@ -1,6 +1,6 @@
 # Aerele Proctor — Consolidated Product Vision (v1 FINAL, 2026-06-10)
 
-**Status: BUILD TARGET.** This document consolidates the two F10.6 vision drafts (standard-first + usecases-first), applies both judges' grafts, and closes every flagged gap. It amends and supersedes the F9 design (`<repo>/docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md`) **only** where stated in §7; everything F9 froze stays frozen. the operator's 2026-06-10 locked decisions are incorporated verbatim and are non-negotiable.
+**Status: BUILD TARGET.** This document consolidates the two F10.6 vision drafts (standard-first + usecases-first), applies both judges' grafts, and closes every flagged gap. It amends and supersedes the F9 design (`<repo>/docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md`) **only** where stated in §7; everything F9 froze stays frozen. The operator's 2026-06-10 locked decisions are incorporated verbatim and are non-negotiable.
 
 ---
 
@@ -392,7 +392,7 @@ F9's stage spine survives; this section **supersedes F9 §5 where the entity mod
 
 ---
 
-## 9. OPEN QUESTIONS FOR KARTHI (voice-answerable)
+## 9. OPEN QUESTIONS FOR THE OPERATOR (voice-answerable)
 
 1. **Multi-problem timing.** Templates as "named group of questions" makes contests multi-problem — the costliest single build item (candidate workspace switcher + per-problem scoring). Build the full multi-problem workspace in this push (S-I as written), or ship templates first restricted to one problem and add the switcher as the next stage? *(Answer: "full now" / "single-problem first".)*
 2. **Scores survive purge?** Contest purge deletes sessions/submissions, but your cross-round scorecard needs Round 1's numbers after Round 1 is purged. Plan: keep tiny per-person enrollment rows with a frozen final score + selection status through the purge ("light data"), everything heavy still deleted. OK? *(yes/no)*

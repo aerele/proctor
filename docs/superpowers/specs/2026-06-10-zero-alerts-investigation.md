@@ -18,7 +18,7 @@ The last poller run (mcet-aerele-2, 2026-06-05 16:08–17:26 IST) **worked end-t
 - `?source=proctor&include_archived=true`: **0** — even proctor-source alerts are crowded out. Same bug pattern at `handler.mjs:4101-4108` (invigilator stats).
 
 **#2 (dev console shows 0): the poller has only ever POSTed to the OLD prod deployment.**
-`monitoring/.data/session.local` pins `BACKEND_URL=<cloud-run-url>` (prod). The current dev stack (`<cloud-run-url>`, project ${PROJECT_ID}) has exactly **3 alerts, all source=proctor, none contest-eval** (queried dev Firestore directly). No poller run has happened since Jun 5 17:26 (newest `cycle-*.json` under `monitoring/.data/`; `pgrep poller.py` empty). Any look at the dev console necessarily shows zero contest-eval alerts.
+`monitoring/.data/session.local` pins `BACKEND_URL=https://<cloud-run-url>` (prod). The current dev stack (`<cloud-run-url>`, project ${PROJECT_ID}) has exactly **3 alerts, all source=proctor, none contest-eval** (queried dev Firestore directly). No poller run has happened since Jun 5 17:26 (newest `cycle-*.json` under `monitoring/.data/`; `pgrep poller.py` empty). Any look at the dev console necessarily shows zero contest-eval alerts.
 
 **#3 (contributor): `first_attempt_solve` id churn inflates the archived pile.**
 `monitoring/alerts.py:389` — the dedupe tail is the user's sorted problem list (`firstattempt-<p1>-<p2>...`), so every time a user first-attempt-solves one more problem a NEW doc id is minted and the old doc is orphaned. ~390 participants produced 500+ `first_attempt_solve` docs, which is what saturated the 500-doc scan window in #1. (F10 spec already plans "problem_id partitioning of similarity/dedupe keys".)
@@ -46,7 +46,7 @@ The last poller run (mcet-aerele-2, 2026-06-05 16:08–17:26 IST) **worked end-t
 Working today: Chromium IS up on :9222 (verified), `monitoring/test_monitoring.py` passes 110/110, `run-demo.sh` gives an offline e2e. But a live launch requires hand-assembling:
 
 1. **Chrome :9222 with HR-moderator login** — running now, but nothing checks/starts it (cdp.py raises → poller logs "metadata unavailable" forever and writes NOTHING, which itself looks like a zero-alerts run).
-2. **`--api-base`** — must be the CURRENT deployment URL; `session.local` still pins the old prod URL. Dev is `<cloud-run-url>`.
+2. **`--api-base`** — must be the CURRENT deployment URL; `session.local` still pins the old prod URL. Dev is `https://<cloud-run-url>`.
 3. **`--api-key`** — `ALERTS_INGEST_API_KEY` value; not stored anywhere locally (was only in the dead process's argv; session.local says "re-scrape it from ps"). Recoverable via `gcloud run services describe proctor-api --project ${PROJECT_ID} --region asia-south1` with `<service-account-key.json>`.
 4. **`ADMIN_PASSWORD`** for enrichment — resolution order CLI > env > `monitoring/.data/session.local` (enrich.py:88-108); session.local holds the PROD password, wrong for dev.
 5. **`--slug` + `--contest-id`** — per contest, manual.

@@ -1,6 +1,6 @@
 # Own Editor — self-hosted coding-contest platform (design)
 
-**Status:** DRAFT — awaiting the operator's review (he stepped away 2026-06-09; this is the restartable source of truth).
+**Status:** DRAFT — awaiting the operator's review (the operator stepped away 2026-06-09; this is the restartable source of truth).
 **Author:** Ram. **Date:** 2026-06-09.
 **Related:** `RESUME.md`, `TODO-admin-polish.md`, the hiring-round notes (`hiring-round-software-developer-internship-summary-2026-06-06.md`).
 
@@ -19,7 +19,7 @@ We build it in **slices** (architect-style: each slice locked and valid before t
 ## 2. Locked decisions (brainstorm outcomes, 2026-06-09)
 
 1. **Scope:** full platform (auto-judge + leaderboard + problem bank + authoring), built slice-by-slice.
-2. **Execution engine:** **hosted Judge0 API (pay-per-use)** for now, behind a **thin swap-able adapter** in our backend (so we can flip to self-hosted ephemeral Judge0 later with no app changes). Self-host is parked — do NOT build it now. the operator supplies the API key at the build step. Judge0 key lives **server-side only**, never in the client.
+2. **Execution engine:** **hosted Judge0 API (pay-per-use)** for now, behind a **thin swap-able adapter** in our backend (so we can flip to self-hosted ephemeral Judge0 later with no app changes). Self-host is parked — do NOT build it now. The operator supplies the API key at the build step. Judge0 key lives **server-side only**, never in the client.
 3. **Languages (Slice 1):** Python, C/C++, Java, JavaScript (all four).
 4. **Capture depth (Slice 1):** keystrokes (insert/delete), paste, **editor cursor position, selection range**, line changes, focus/blur, run/submit. **OS mouse-movement is DEFERRED** to the analytics slice. (Editor cursor/selection is low-volume + high-signal — the "revisiting / non-linear editing" signal; OS mouse-pointer is the noisy one we skip.) Coalesce rapid cursor moves.
 5. **Candidate identity:** **roster-based** (NOT pure self-asserted) — see §6/§7. Pre-fed compulsory student list + unique-ID confirm + fullscreen-first + room-wise session-start OTP + invigilator ID check.

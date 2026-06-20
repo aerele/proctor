@@ -1243,7 +1243,7 @@ Then drive a headless Chromium (as in the admin-polish review) to the student fl
 
 - [ ] **Step 4: Live smoke (when the operator provides the Judge0 key)** — set `JUDGE0_API_KEY` + `JUDGE0_MODE=rapidapi` on the backend, deploy to a test project, run one real submission per language, confirm verdicts and that captured events land in GCS. (Verify `language_id`s via `GET /languages` first.)
 
-- [ ] **Step 5: Final commit / PR** — per the operator's standing instruction, commit locally and DO NOT push unless he says so.
+- [ ] **Step 5: Final commit / PR** — per the operator's standing instruction, commit locally and DO NOT push unless the operator says so.
 
 ---
 
