@@ -98,7 +98,7 @@ The deploy scripts read their config from the process environment, so in practic
 
 ## 3. Backend deploy script
 
-**Source:** [`backend/deploy-gcp.sh`](../../backend/deploy-gcp.sh) · routes live in `backend/src/handler.mjs` (+ `routes/invigilator.mjs`); env contract in `backend/src/config.mjs`.
+**Source:** [`backend/deploy-gcp.sh`](../../backend/deploy-gcp.sh) · the route dispatch table is in `backend/src/handler.mjs`, route bodies in `backend/src/routes/*.mjs`; env contract in `backend/src/config.mjs`.
 
 Run after sourcing your env:
 
