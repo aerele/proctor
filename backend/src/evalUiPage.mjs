@@ -212,6 +212,30 @@ export const EVAL_UI_HTML = `<!doctype html>
   .for-item { font-size: 13px; padding: 3px 0; display: flex; gap: 8px; align-items: baseline; }
   .for-item .tick { color: var(--accent); font-weight: 700; }
   .reassure { font-size: 12px; color: var(--warn); margin-top: 9px; font-style: italic; line-height: 1.45; }
+
+  /* Evaluate-now control (header) */
+  .evalwrap { display: inline-flex; align-items: center; gap: 8px; }
+  .btn-eval { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 6px 13px; font-size: 12.5px; font-weight: 620; cursor: pointer; width: auto; white-space: nowrap; }
+  .btn-eval:hover { filter: brightness(.96); }
+  .btn-eval:disabled { opacity: .7; cursor: default; }
+  .evalstatus { font-size: 11.5px; color: var(--muted); max-width: 220px; }
+
+  /* section header controls (filter pills + CSV, right-aligned) */
+  .sec-head { flex-wrap: wrap; }
+  .sec-controls { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .sec-controls.inline { margin-left: 10px; display: inline-flex; }
+  .pill { background: var(--panel); border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 3px 11px; font-size: 12px; cursor: pointer; width: auto; }
+  .pill:hover { border-color: var(--muted); color: var(--ink); }
+  .pill.active { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .csvbtn { background: var(--panel); border: 1px solid var(--line); color: #475569; border-radius: 8px; padding: 3px 10px; font-size: 11.5px; font-weight: 600; cursor: pointer; width: auto; white-space: nowrap; }
+  .csvbtn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* clickable summary chips */
+  .chip.clickable { cursor: pointer; }
+  .chip.clickable:hover { border-color: var(--muted); }
+  .chip.active { outline: 2px solid var(--ink); outline-offset: 1px; }
+  .chip.good.active { outline-color: var(--accent); }
+  .chip.warn.active { outline-color: var(--warn); }
 </style>
 </head>
 <body>

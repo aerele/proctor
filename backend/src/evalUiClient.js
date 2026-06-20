@@ -41,6 +41,83 @@ function el(tag, attrs, ...kids) {
 }
 function clear() { root.replaceChildren(); }
 
+// recommended-hires filter: 'all' | 'strong_hire' | 'hire_deskcheck'
+let hireFilter = "all";
+
+// ---- CSV export (client-side; the already-authed admin downloads locally) ----
+function csvCell(v) {
+  const s = v == null ? "" : String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function downloadCsv(name, headers, rows) {
+  const lines = [headers.map(csvCell).join(",")];
+  for (const r of rows) lines.push(r.map(csvCell).join(","));
+  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+function stamp() {
+  try { return new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-"); } catch (e) { return "export"; }
+}
+function csvName(list) {
+  return (CONTEST || "contest") + "-" + list + "-" + stamp() + ".csv";
+}
+// a small "⤓ CSV" button that exports headers+rows when clicked
+function csvBtn(list, headers, rowsFn) {
+  return el("button", {
+    class: "csvbtn", type: "button", title: "Download this list as CSV",
+    onClick: (e) => { e.stopPropagation(); e.preventDefault(); downloadCsv(csvName(list), headers, rowsFn()); },
+  }, "⤓ CSV");
+}
+// standard per-candidate CSV columns
+const CAND_HEADERS = ["talent_rank", "raw_rank", "name", "id", "talent_composite", "talent_tier", "integrity", "confidence", "recommendation", "raw_score", "max_score", "reason", "peers"];
+function candCsvRow(c) {
+  const peers = (c.peer_evidence || []).map((p) => p.peer_name + (p.n_problems ? " (" + p.n_problems + "p" + (p.n_hard ? "/" + p.n_hard + "h" : "") + ")" : "")).join("; ");
+  return [c.talent_rank, c.raw_rank, c.name, c.candidate_id, c.composite, c.talent_tier, c.integrity_tier, c.confidence, c.bucket_label, c.total_score, c.max_total, c.reason, peers];
+}
+
+// ---- resilient "Evaluate now" batch loop (mirrors frontend evalBatchLoop) ----
+const EVAL_BACKOFF = [2000, 5000, 10000];
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+async function runEvaluation(onProgress) {
+  const pw = localStorage.getItem(PW_KEY);
+  if (!pw) { showGate(); return "auth"; }
+  let cursor = "";
+  let retries = 0;
+  for (let guard = 0; guard < 100000; guard++) {
+    let res;
+    try {
+      res = await fetch("/api/admin/contest-evaluate", {
+        method: "POST",
+        headers: { "x-admin-password": pw, "content-type": "application/json" },
+        body: JSON.stringify(cursor ? { contest: CONTEST, limit: 25, cursor } : { contest: CONTEST, limit: 25 }),
+      });
+    } catch (e) {
+      if (retries >= EVAL_BACKOFF.length) throw new Error("network error");
+      await sleep(EVAL_BACKOFF[retries++]);
+      continue;
+    }
+    if (res.status === 401 || res.status === 403) { localStorage.removeItem(PW_KEY); showGate("That password was rejected. Try again."); return "auth"; }
+    if (res.status === 409) { const j = await res.json().catch(() => ({})); throw new Error("A run is already in progress (" + (j.processed || 0) + "/" + (j.total || 0) + ") — try again shortly."); }
+    if (res.status >= 500 || res.status === 429) {
+      if (retries >= EVAL_BACKOFF.length) throw new Error("evaluation service error (" + res.status + ")");
+      await sleep(EVAL_BACKOFF[retries++]);
+      continue;
+    }
+    if (!res.ok) throw new Error("evaluate failed (" + res.status + ")");
+    retries = 0;
+    const j = await res.json();
+    if (onProgress && typeof j.processed === "number") onProgress(j.processed, j.total || 0);
+    if (j.done) return "done";
+    cursor = j.cursor || "";
+  }
+  throw new Error("evaluation did not finish");
+}
+
 // --- integrity tier → human label / css class ---
 const TIER_LABEL = {
   clean: "clean", watch: "desk-check", inconclusive: "limited data",
@@ -211,20 +288,68 @@ function candidateRow(c, opts) {
   return el("details", { class: "row " + tone }, summary, dossier);
 }
 
-function section(title, count, note, body) {
-  const head = el("div", { class: "sec-head" }, el("h2", { text: title }), count != null ? el("span", { class: "count", text: count }) : null);
-  const sec = el("section", null, head);
+// opts: { id, controls: [Node] } — controls render right-aligned in the header
+// (filter pills, CSV button, …).
+function section(title, count, note, body, opts) {
+  opts = opts || {};
+  const head = el("div", { class: "sec-head" },
+    el("h2", { text: title }),
+    count != null ? el("span", { class: "count", text: count }) : null,
+    opts.controls && opts.controls.length ? el("div", { class: "sec-controls" }, ...opts.controls) : null,
+  );
+  const sec = el("section", opts.id ? { id: opts.id } : null, head);
   if (note) sec.append(el("p", { class: "sec-note", text: note }));
   sec.append(body);
   return sec;
 }
 
-function group(title, count, body, open) {
+function group(title, count, body, open, opts) {
+  opts = opts || {};
   const d = el("details", { class: "group" });
+  if (opts.id) d.setAttribute("id", opts.id);
   if (open) d.setAttribute("open", "true");
-  d.append(el("summary", null, el("span", { class: "caret", text: "▶" }), title, el("span", { class: "count", text: "(" + count + ")" })));
+  const summary = el("summary", null, el("span", { class: "caret", text: "▶" }), title, el("span", { class: "count", text: "(" + count + ")" }));
+  if (opts.controls && opts.controls.length) summary.append(el("span", { class: "sec-controls inline" }, ...opts.controls));
+  d.append(summary);
   d.append(body);
   return d;
+}
+
+function scrollToId(id) {
+  const e = document.getElementById(id);
+  if (!e) return;
+  if (e.tagName === "DETAILS") e.open = true;
+  e.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// the recommended-hires filter pill
+function filterPill(label, value, count) {
+  return el("button", {
+    class: "pill" + (hireFilter === value ? " active" : ""), type: "button",
+    onClick: () => { hireFilter = value; render(lastReport); scrollToId("sec-hires"); },
+  }, label + (count != null ? " (" + count + ")" : ""));
+}
+
+// the header "Evaluate now" control (re-runs the batched evaluator + reloads)
+function buildEvalNow(report) {
+  const status = el("span", { class: "evalstatus", text: report && report.generated_from ? "last run " + String(report.generated_from).replace("T", " ").slice(0, 16) + "Z" : "" });
+  const btn = el("button", { class: "btn-eval", type: "button" }, "Evaluate now");
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    status.textContent = "";
+    btn.textContent = "Evaluating…";
+    try {
+      const r = await runEvaluation((p, t) => { btn.textContent = "Evaluating " + p + (t ? " / " + t : "") + "…"; });
+      if (r === "done") { status.textContent = "done"; await load(); return; }
+      if (r === "auth") return;
+    } catch (e) {
+      status.textContent = String((e && e.message) || e);
+      btn.disabled = false;
+      btn.textContent = "Evaluate now";
+    }
+  });
+  return el("span", { class: "evalwrap" }, btn, status);
 }
 
 function render(report) {
@@ -238,6 +363,7 @@ function render(report) {
       el("div", { class: "served", text: "Rendered by the proctor-eval service · integrity-adjusted talent ranking" }),
     ),
     el("div", { class: "topbtns" },
+      buildEvalNow(report),
       el("button", { class: "linkbtn", onClick: load, text: "Refresh" }),
       el("button", { class: "linkbtn", onClick: signOut, text: "Sign out" }),
     ),
@@ -259,13 +385,18 @@ function render(report) {
     ));
   }
 
-  // chips
+  // chips — clickable: hire chips filter the recommended list; the others jump to
+  // their section.
+  const chip = (cls, n, label, onClick, active) =>
+    el("button", { class: "chip " + cls + (onClick ? " clickable" : "") + (active ? " active" : ""), type: "button", onClick },
+      el("b", { text: String(n) }), " " + label);
+  const toggleFilter = (f) => { hireFilter = hireFilter === f ? "all" : f; render(lastReport); scrollToId("sec-hires"); };
   const chips = el("div", { class: "chips" },
-    el("span", { class: "chip good" }, el("b", { text: String(c.strong_hire) }), " strong hire"),
-    el("span", { class: "chip warn" }, el("b", { text: String(c.hire_deskcheck) }), " hire · desk-check"),
-    c.hold_review ? el("span", { class: "chip warn" }, el("b", { text: String(c.hold_review) }), " hold · review") : null,
-    el("span", { class: "chip bad" }, el("b", { text: String(c.exclude_integrity) }), " excluded · integrity"),
-    el("span", { class: "chip" }, el("b", { text: String(c.below_bar) }), " below bar"),
+    chip("good", c.strong_hire, "strong hire", () => toggleFilter("strong_hire"), hireFilter === "strong_hire"),
+    chip("warn", c.hire_deskcheck, "hire · desk-check", () => toggleFilter("hire_deskcheck"), hireFilter === "hire_deskcheck"),
+    c.hold_review ? chip("warn", c.hold_review, "hold · review", () => scrollToId("sec-excluded")) : null,
+    chip("bad", c.exclude_integrity, "excluded · integrity", () => scrollToId("sec-excluded")),
+    chip("", c.below_bar, "below bar", () => scrollToId("sec-below")),
   );
   root.append(chips);
 
@@ -294,13 +425,20 @@ function render(report) {
     ));
   }
 
-  // recommended hires
+  // recommended hires (filterable: All / Strong / Desk-check)
+  const filteredHires = hireFilter === "all" ? report.hires : report.hires.filter((h) => h.bucket === hireFilter);
   const hireBody = el("div", { class: "rows" });
-  if (report.hires.length) report.hires.forEach((h) => hireBody.append(candidateRow(h, { rankField: "talent_rank" })));
-  else hireBody.append(el("div", { class: "nodossier", text: "No candidates cleared the hiring bar on this contest." }));
+  if (filteredHires.length) filteredHires.forEach((h) => hireBody.append(candidateRow(h, { rankField: "talent_rank" })));
+  else hireBody.append(el("div", { class: "nodossier", text: report.hires.length ? "No candidates match this filter." : "No candidates cleared the hiring bar on this contest." }));
+  const hireControls = [
+    filterPill("All", "all", report.hires.length),
+    filterPill("Strong", "strong_hire", c.strong_hire),
+    filterPill("Desk-check", "hire_deskcheck", c.hire_deskcheck),
+    csvBtn("recommended-hires", CAND_HEADERS, () => filteredHires.map(candCsvRow)),
+  ];
   root.append(section("Recommended hires", c.hires + " of " + c.participants,
     "Strong genuine problem-solvers, ranked by integrity-adjusted talent. Green = clean record; amber = recommend after a short desk-check (a weak note only — never a blocker). Click a row for the evidence.",
-    hireBody));
+    hireBody, { id: "sec-hires", controls: hireControls }));
 
   // watch-outs (two-up)
   if (nTrap || nMiss) {
@@ -326,7 +464,12 @@ function render(report) {
     )));
     else missCard.append(el("div", { class: "nodossier", text: "None — the score order already matches merit." }));
 
-    root.append(section("What a leaderboard would get wrong", null, null, el("div", { class: "twoup" }, trapsCard, missCard)));
+    const wrongCsv = csvBtn("leaderboard-would-get-wrong", ["kind", "name", "id", "raw_rank", "raw_score", "talent_rank", "talent_composite", "integrity", "detail"],
+      () => [
+        ...report.rawScoreTraps.map((t) => ["trap", t.name, t.candidate_id, t.raw_rank, t.total_score, t.talent_rank, t.composite, t.integrity_tier, t.why_not]),
+        ...report.missedByRawScore.map((m) => ["missed", m.name, m.candidate_id, m.raw_rank, m.total_score, m.talent_rank, m.composite, m.integrity_tier, "clean genuine work"]),
+      ]);
+    root.append(section("What a leaderboard would get wrong", null, null, el("div", { class: "twoup" }, trapsCard, missCard), { controls: [wrongCsv] }));
   }
 
   // compare to your shortlist
@@ -337,16 +480,18 @@ function render(report) {
     const exBody = el("div", { class: "rows" });
     report.hold.forEach((h) => exBody.append(candidateRow(h)));
     report.excluded.forEach((h) => exBody.append(candidateRow(h)));
+    const exCsv = csvBtn("excluded-and-held", CAND_HEADERS, () => report.hold.concat(report.excluded).map(candCsvRow));
     root.append(el("section", null, group("Excluded & held — integrity", report.excluded.length + report.hold.length, el("div", null,
       el("p", { class: "sec-note", text: "Confirmed copying (excluded) and integrity holds (manual review before any offer). Click a row for the conclusive evidence." }),
-      exBody), false)));
+      exBody), false, { id: "sec-excluded", controls: [exCsv] })));
   }
 
   // below the bar (collapsible)
   if (report.belowBar.length) {
     const bbBody = el("div", { class: "rows" });
     report.belowBar.forEach((h) => bbBody.append(candidateRow(h, { rankField: "talent_rank" })));
-    root.append(el("section", null, group("Below the bar", report.belowBar.length, bbBody, false)));
+    const bbCsv = csvBtn("below-the-bar", CAND_HEADERS, () => report.belowBar.map(candCsvRow));
+    root.append(el("section", null, group("Below the bar", report.belowBar.length, bbBody, false, { id: "sec-below", controls: [bbCsv] })));
   }
 }
 
@@ -387,6 +532,12 @@ function buildCompare(report) {
       picked.length + " candidate(s) matched · " + concerns.length + " the eval flags · " + missedByYou.length + " recommended candidates not on your list" }));
     if (unmatched.length) out.append(el("p", { class: "cmp-warn", text: unmatched.length + " of your entries matched nobody (check spelling, or use the ID): " + unmatched.join(", ") }));
     if (ambiguous.length) out.append(el("p", { class: "cmp-warn", text: "Matched multiple — refine to an ID: " + ambiguous.join(", ") }));
+    out.append(csvBtn("shortlist-comparison",
+      ["list", "name", "id", "recommendation", "status", "talent_rank", "talent_composite", "integrity"],
+      () => [
+        ...picked.map((p) => ["your_pick", p.name, p.candidate_id, p.bucket_label, isHireBucket(p.bucket) ? "clears the bar" : "flagged by eval", p.talent_rank, p.composite, p.integrity_tier]),
+        ...missedByYou.map((h) => ["missed_by_you", h.name, h.candidate_id, h.bucket_label, "recommended (not on your list)", h.talent_rank, h.composite, h.integrity_tier]),
+      ]));
     const twoup = el("div", { class: "twoup" });
     const cCard = el("div", { class: "card bad" }, el("h3", { text: "Your picks the eval would NOT clear" }));
     if (concerns.length) concerns.forEach((p) => cCard.append(el("div", { class: "mini" },
