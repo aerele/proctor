@@ -152,7 +152,7 @@ export function ConsentDisclosurePanel({ retentionDays, cameraRecorded, ownEdito
         </div>
       </div>
       <p className="mt-3 text-sm leading-6 text-muted">
-        Your screen and camera recordings, audio, keystrokes and personal details are permanently deleted <span className="font-medium text-ink">{days} {unit}</span> after this contest&rsquo;s results are finalised. We keep only your roll number, scores and our evaluation.
+        Your screen and camera recordings, audio, keystrokes and personal details are permanently deleted <span className="font-medium text-ink">{days} {unit}</span> after this contest concludes. We keep only your roll number, scores and our evaluation.
       </p>
     </section>
   );

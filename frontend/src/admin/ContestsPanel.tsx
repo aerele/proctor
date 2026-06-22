@@ -727,7 +727,7 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
               <span className="text-xs font-medium uppercase tracking-wide text-muted">Evidence retention (days)</span>
               <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="number" min={1} max={30} placeholder="4" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} />
             </label>
-            <p className="mt-2 text-xs text-muted">Erase recordings, audio, keystrokes &amp; personal details this many days after results are finalised. <span className="font-medium text-ink">Scores and our evaluation are always kept.</span> Blank = default (4). Clamped to 1–30. Candidates see this exact number on the consent screen.</p>
+            <p className="mt-2 text-xs text-muted">Erase recordings, audio, keystrokes &amp; personal details this many days after this contest concludes. <span className="font-medium text-ink">Scores and our evaluation are always kept.</span> Blank = default (4). Clamped to 1–30. Candidates see this exact number on the consent screen.</p>
 
             <div className="mt-3">
               <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={saveRemoteSettings}>
