@@ -59,6 +59,7 @@ const SCOPED_GET_REQUESTS = {
   "/api/admin/attendance": () => adminGet("/api/admin/attendance", { contest_slug: A }),
   "/api/admin/contest-evaluations": () => adminGet("/api/admin/contest-evaluations", { contest: A }),
   "/api/admin/contest-results": () => adminGet("/api/admin/contest-results", { contest: A }),
+  "/api/admin/contest-data-size": () => adminGet("/api/admin/contest-data-size", { contest: A }),
   "/api/admin/ip-report": () => adminGet("/api/admin/ip-report", { contest_slug: A, scope: "all" }),
   "/api/admin/recording-sessions": () => adminGet("/api/admin/recording-sessions", { contest_slug: A }),
   "/api/admin/review-mine": () => adminGet("/api/admin/review-mine", { contest: A, reviewer_name: "Rev" }),

@@ -14,7 +14,7 @@ is unavailable to you, contact the maintainers privately through the repository
 of filing a public issue.
 
 Please include reproduction steps and the affected component (`proctor-api`,
-`proctor-web`, `proctor-eval`, the optional `video-worker`, or the optional
+`proctor-web`, `proctor-eval`, or the optional
 `monitoring/` poller).
 
 We will acknowledge the report and work with you on a fix and disclosure
@@ -29,8 +29,8 @@ other tabs, continuously read the OS clipboard, see a second device, or detect a
 overlay on another monitor — no browser app can without a managed extension or
 endpoint agent. Integrity rests on **human review of recorded evidence** plus a
 live signal feed; treat alerts as triage for review, never as automatic
-disqualification. See the README and `docs/proctoring-research.md` for the full
-threat model.
+disqualification. See the README and `docs/research/proctoring-research.md` for the
+full threat model.
 
 ## Operator security responsibilities
 
@@ -40,7 +40,7 @@ This is self-hosted software. When you deploy it, you are responsible for:
   gitignored (`.env`, `.env.*`, `*.bak`, `*.pem`, service-account keys). Use the
   `*.env.example` templates. Generate strong values
   (`openssl rand -base64 32`) for `ADMIN_PASSWORD`, `ALERTS_INGEST_API_KEY`,
-  `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD`, and `WORKER_TOKEN`.
+  `RETENTION_SWEEP_API_KEY`, and `INVIGILATOR_PASSWORD`.
 - **Closed-by-default ingest.** `POST /api/alerts` and
   `POST /api/admin/retention-sweep` reject every request when their API key is
   unset. Keep them closed until you intend to use them.

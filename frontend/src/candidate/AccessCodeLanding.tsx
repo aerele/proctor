@@ -35,7 +35,7 @@ export function AccessCodeLanding(props: { notice: string }) {
         <p className="text-xs font-semibold uppercase tracking-wide text-accent">Aerele Proctor</p>
         <h1 className="mt-2 text-2xl font-semibold text-ink">Enter your test code</h1>
         <p className="mt-2 text-sm leading-6 text-muted">
-          Type the 6-character code your invigilator gave you.
+          Type the 6-character code you were given for your test.
         </p>
         {props.notice ? (
           <p className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">{props.notice}</p>

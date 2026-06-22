@@ -6,8 +6,7 @@
 > college contact or room supervisor) running the test day with support on call. If
 > you are the **platform operator/admin** setting the round up and watching the
 > live console, use [`EXAM-DAY-OPS.md`](EXAM-DAY-OPS.md) instead (it names the
-> exact admin surfaces and routes). The narrated, route-by-route version is
-> [`features/exam-day-ops-runbook.md`](features/exam-day-ops-runbook.md).
+> exact admin surfaces and routes).
 
 > **TODAY**
 > • The **admin console URL, admin password, and the candidate (test) link** are sent to you **separately by message** — keep them handy. The admin URL and password are for you only; never share them with students.

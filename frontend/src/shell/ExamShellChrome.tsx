@@ -18,7 +18,7 @@ import { PermissionsGate, type PermissionsGateProps } from "./PermissionsGate";
 import type { ExamShellApi } from "./useExamShell";
 import type { ReactNode } from "react";
 
-export function ExamShellChrome({ shell, gate, status, identity, contestName, elapsedSeconds, examReleased, permissionsReady, permissionsGate, ownEditor, remainingLabel, timeUp, actions, hideStageHint }: {
+export function ExamShellChrome({ shell, gate, status, identity, contestName, elapsedSeconds, examReleased, permissionsReady, permissionsGate, ownEditor, remainingLabel, timeUp, actions, hideStageHint, takeHome = false, proctorPhone = "" }: {
   shell: ExamShellApi;
   gate: ShellGate;
   status: SessionStatus;
@@ -39,6 +39,11 @@ export function ExamShellChrome({ shell, gate, status, identity, contestName, el
   actions?: ReactNode;
   /** W1: the exam view suppresses the stage hint — zero distraction. */
   hideStageHint?: boolean;
+  // #135 take-home (§5a / A10): routes the FullscreenGate's fullscreen-blocked
+  // error to the proctor phone for remote candidates. Optional with falsy
+  // defaults — in-venue chrome is unchanged.
+  takeHome?: boolean;
+  proctorPhone?: string;
 }) {
   const headerMode = shellHeaderMode(shell.barHidden, gate);
   // While an anomaly episode is active the AnomalyPanel owns fullscreen
@@ -78,7 +83,7 @@ export function ExamShellChrome({ shell, gate, status, identity, contestName, el
         </p>
       ) : null}
       {permGateVisible ? <PermissionsGate {...permissionsGate} /> : null}
-      {gateVisible ? <FullscreenGate onEnter={shell.enterFullscreen} /> : null}
+      {gateVisible ? <FullscreenGate onEnter={shell.enterFullscreen} takeHome={takeHome} proctorPhone={proctorPhone} /> : null}
     </>
   );
 }

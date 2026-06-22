@@ -35,12 +35,15 @@
 //      scopedQuery chokepoint or are pinned in RAW_FILTER_ALLOWLIST in the SAME
 //      diff), routesAuthLint (every exported admin*/invigilator* route opens with
 //      its require* guard), envLint (process.env only in handler.mjs + config.mjs).
-// See docs/superpowers/plans/2026-06-11-architecture-decomposition.md for the
+// See docs/design-history/plans/2026-06-11-architecture-decomposition.md for the
 // full design + the B-ladder history.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
+import { makeJudge0Limiter } from "./judge0Limiter.mjs";
+import { makeTelemetryLimiter } from "./lib/telemetryLimiter.mjs";
+import { makeTtlCache } from "./lib/ttlCache.mjs";
 import { bucket, signingBucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
 import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
 import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
@@ -69,20 +72,40 @@ import { makeAdminSessionsRoutes } from "./routes/adminSessions.mjs";
 import { makeHealthCheckRoutes } from "./routes/healthCheck.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
+import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, invalidateContestDocCache, listContests, regenerateContestSecret, resetContestDocCacheForTest, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, normalizeUniqueId, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
 import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people.mjs";
 import { buildIpReport } from "./ipReport.mjs";
-import { buildExportBundle, evaluatePurgeGate, exportObjectPath, selectExpiredEvidence, selectExpiredExports } from "./dataLifecycle.mjs";
+import { buildExportBundle, evaluatePurgeGate, exportObjectPath, selectExpiredEvidence, selectExpiredExports, retentionDaysOf, retentionAnchorMs, CONSENT_VERSION } from "./dataLifecycle.mjs";
 
 // The mutable GCP client singletons + their judge0/bucket/jsonl/signed-url
 // machinery now live in lib/clients.mjs (decomp B0). Re-export the test seams
 // so the handler's public surface (and the test destructure off it) is
 // unchanged. handler.mjs configures clients with env values just below.
-export { __setClientsForTest, __setJudge0AdapterForTest } from "./lib/clients.mjs";
+export { __setJudge0AdapterForTest } from "./lib/clients.mjs";
+import { __setClientsForTest as __rawSetClientsForTest } from "./lib/clients.mjs";
+// v1.1 G3 (#5): a Firestore client SWAP (test-only) means a different database,
+// so any in-process read cache (contest doc / alert settings) is stale by
+// definition — clear it. Production never calls this; zero impact there. The
+// wrapper is hoisted (function declaration) so it can reference the caches
+// created later at module scope. Re-exported under the original name so the test
+// destructure (`const { __setClientsForTest } = handler`) is unchanged.
+export function __setClientsForTest(arg) {
+  // Clear the contest-doc cache through contests.mjs's `store` (not the local
+  // `contestCache`): a prior cache-busted handler import may have re-run
+  // configureContestStore and made store.cache a DIFFERENT instance than this
+  // module's contestCache, so clearing the local one would miss the cache that
+  // actually serves reads. resetContestDocCacheForTest() always targets the
+  // active store.cache. The alert-settings cache is closure-local per handler
+  // instance (no shared singleton), so the local clear is correct for it.
+  resetContestDocCacheForTest();
+  contestCache?.clear();
+  alertSettingsCache?.clear();
+  return __rawSetClientsForTest(arg);
+}
 
 // The per-session exec rate-limiter clock + its __setExecClockForTest seam moved
 // to the makeExecRoutes(ctx) factory in routes/exec.mjs (decomp B12b); the factory
@@ -117,7 +140,13 @@ const {
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
   PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
-  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS, EVAL_WRITE_ALLOWLIST
+  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS, EVAL_WRITE_ALLOWLIST,
+  // v1.1 G3 infra hardening
+  MAX_REQUEST_BODY_BYTES, MAX_UPLOAD_CHUNK_BYTES,
+  CONTEST_CACHE_TTL_MS, ALERT_SETTINGS_CACHE_TTL_MS,
+  JUDGE0_LIMITER_ENABLED, JUDGE0_LIMITER_COLLECTION, JUDGE0_LIMITER_CAPACITY,
+  JUDGE0_LIMITER_REFILL_PER_SEC, JUDGE0_LIMITER_SHARDS,
+  TELEMETRY_LIMITER_ENABLED
 } = loadConfig();
 
 // ---- Non-env code constants (kept local to the handler) ---------------------
@@ -193,6 +222,62 @@ const execQueue = makeExecQueue({
   maxQueue: EXEC_MAX_QUEUE
   // pollMaxQueue stays at its generous default (1000).
 });
+
+// v1.1 G3 — a 429 builder shared by the distributed Judge0 limiter and the
+// telemetry limiter (same shape as exec.mjs's rateLimited: a 429 carrying the
+// machine-readable retry hint the api() catch forwards). Defined here so the
+// limiters that are built BEFORE makeExecRoutes don't depend on its return value.
+function makeRateLimited(retryAfterSeconds) {
+  const error = httpError(429, "rate_limited");
+  error.retry_after_seconds = retryAfterSeconds;
+  return error;
+}
+
+// v1.1 G3 (#3 — the #132 Judge0-429 root-cause fix): a Firestore-backed SHARDED
+// token bucket caps GLOBAL Judge0 submit throughput across ALL Cloud Run
+// instances (the per-instance execQueue lanes can't — 20 instances × the lane
+// cap is the structural cause of the live 429 storm). No new infra, scales to
+// zero. Scale ceiling documented in docs/JUDGE0-RATE-LIMITER.md.
+const judge0Limiter = makeJudge0Limiter({
+  getFirestore,
+  collection: JUDGE0_LIMITER_COLLECTION,
+  enabled: JUDGE0_LIMITER_ENABLED,
+  capacity: JUDGE0_LIMITER_CAPACITY,
+  refillPerSec: JUDGE0_LIMITER_REFILL_PER_SEC,
+  shards: JUDGE0_LIMITER_SHARDS,
+  rateLimited: makeRateLimited
+});
+export const { __setClockForTest: __setJudge0LimiterClockForTest } = judge0Limiter;
+
+// v1.1 G3 (#4): per-session per-endpoint candidate-telemetry rate limiter. Tuned
+// to NEVER throttle real candidate data (lib/telemetryLimiter.mjs), only a
+// scripted flood. Disabled → a no-op check (so a deploy can bypass it).
+const telemetryLimiter = TELEMETRY_LIMITER_ENABLED
+  ? makeTelemetryLimiter({ rateLimited: makeRateLimited })
+  : { check: () => {}, peek: () => Infinity, __setClockForTest: () => {} };
+export const { __setClockForTest: __setTelemetryLimiterClockForTest } = telemetryLimiter;
+
+// v1.1 G3 (#5): hot-path TTL caches for the config docs read on EVERY heartbeat/
+// events/beacon (the contest doc + the alert-settings doc). Writes invalidate
+// explicitly (correct invalidation); a TTL bound self-heals any missed
+// invalidation within the TTL. A 0 TTL disables (always read fresh).
+const contestCache = CONTEST_CACHE_TTL_MS > 0 ? makeTtlCache({ ttlMs: CONTEST_CACHE_TTL_MS }) : null;
+const alertSettingsCache = ALERT_SETTINGS_CACHE_TTL_MS > 0 ? makeTtlCache({ ttlMs: ALERT_SETTINGS_CACHE_TTL_MS }) : null;
+export function __setHotCacheClocksForTest(fn) {
+  contestCache?.__setClockForTest(fn);
+  alertSettingsCache?.__setClockForTest(fn);
+}
+// Invalidation hook for the alert-settings cache: the settings write path
+// (routes/alerts.mjs) calls this so a settings edit is visible immediately on
+// the writing instance (the TTL bounds cross-instance staleness). The contest
+// doc invalidation goes through contests.mjs's invalidateContestDocCache (the
+// single owner of store.cache), not a handler-local helper.
+function invalidateAlertSettingsCache() { alertSettingsCache?.clear(); }
+// TEST-ONLY seam: re-export the contest-doc cache invalidate/reset so a test's
+// direct contest-doc seed (the stand-in for createContest/updateContest, which
+// invalidate in prod) can keep the cache transparent. Prod code never imports
+// these from the handler.
+export { invalidateContestDocCache, resetContestDocCacheForTest };
 // (PUBLIC_APP_ORIGIN, ADMIN_PASSWORD, INVIGILATOR_PASSWORD, ROOM_GATES_COLLECTION,
 // GATE_ATTEMPT_LIMIT, ALERTS_INGEST_API_KEY, RETENTION_SWEEP_API_KEY,
 // URL_EXPIRY_SECONDS come from config — see the loadConfig() destructure above.)
@@ -294,7 +379,9 @@ configureContestStore({
   // Wave-4 fix: createContest probes these for ORPHANED data carrying a
   // candidate slug (historic contest_slug values from earlier exam runs) and
   // walks to the next suffix instead of adopting the slug.
-  dataCollections: [SESSION_COLLECTION, SUBMISSIONS_COLLECTION, ALERTS_COLLECTION]
+  dataCollections: [SESSION_COLLECTION, SUBMISSIONS_COLLECTION, ALERTS_COLLECTION],
+  // v1.1 G3 (#5): the hot-path contest-doc read cache (null when disabled).
+  cache: contestCache
 });
 
 // S-C: the identity core (proctor_colleges / proctor_persons /
@@ -365,7 +452,9 @@ const proctorAlerts = makeProctorAlerts({
   intOrZero,
   settingsCollection: SETTINGS_COLLECTION,
   alertsCollection: ALERTS_COLLECTION,
-  alertSettingsId: ALERT_SETTINGS_ID
+  alertSettingsId: ALERT_SETTINGS_ID,
+  // v1.1 G3 (#5): the hot-path alert-settings read cache (null when disabled).
+  alertSettingsCache
 });
 const {
   SURE_SHOT_EVENT_TYPES,
@@ -461,7 +550,9 @@ const alertRoutes = makeAlertRoutes({
   sessionCollection: SESSION_COLLECTION,
   sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
   settingsCollection: SETTINGS_COLLECTION,
-  alertSettingsId: ALERT_SETTINGS_ID
+  alertSettingsId: ALERT_SETTINGS_ID,
+  // v1.1 G3 (#5): invalidate the alert-settings read cache on a settings write.
+  invalidateAlertSettingsCache
 });
 const {
   ingestAlerts, adminAlerts, adminAlertAction, adminGetAlertSettings, adminSaveAlertSettings
@@ -587,7 +678,11 @@ const sessionTelemetryRoutes = makeSessionTelemetryRoutes({
   uploadChunkKinds: UPLOAD_CHUNK_KINDS,
   urlExpirySeconds: URL_EXPIRY_SECONDS,
   editorEventsIngestLimit: EDITOR_EVENTS_INGEST_LIMIT,
-  editorEventsCollection: EDITOR_EVENTS_COLLECTION
+  editorEventsCollection: EDITOR_EVENTS_COLLECTION,
+  // v1.1 G3 (#4): per-session telemetry rate-limit check (by reference) +
+  // (#7) the signed-URL per-chunk size cap (by value, HD headroom).
+  telemetryCheck: (endpoint, sessionId) => telemetryLimiter.check(endpoint, sessionId),
+  maxUploadChunkBytes: MAX_UPLOAD_CHUNK_BYTES
 });
 const {
   createUploadUrl, recordEvents, ingestEditorEvents, recordReviewFile, recordHeartbeat, recordBeacon
@@ -623,6 +718,8 @@ const execRoutes = makeExecRoutes({
   scoreSubmission,
   judge0,
   execQueue,
+  // v1.1 G3 (#3): the distributed Judge0 submit limiter gate, by reference.
+  judge0SubmitGate: (key, fn) => judge0Limiter.gate(key, fn),
   randomUUID,
   contestsCollection: CONTESTS_COLLECTION,
   runEventsCollection: RUN_EVENTS_COLLECTION,
@@ -672,16 +769,27 @@ const publicRoutes = makePublicRoutes({
   rateLimited,
   enforcementConfigFor,
   cameraRecordingConfigFor,
+  // v1.1 triple-review #7: the preflight-block report endpoint writes a contest-
+  // scoped JSONL record (session-less) and sanitizes the verdict payload.
+  putJsonl,
+  sanitizeObject,
   settingsCollection: SETTINGS_COLLECTION,
   rosterMetaId: ROSTER_META_ID,
   rosterCollection: ROSTER_COLLECTION,
   rosterLimit: ROSTER_LIMIT,
   rosterCellMax: ROSTER_CELL_MAX,
   rosterColumnsLimit: ROSTER_COLUMNS_LIMIT,
-  rosterMappableFields: ROSTER_MAPPABLE_FIELDS
+  rosterMappableFields: ROSTER_MAPPABLE_FIELDS,
+  // v1.1 G1: serve the authoritative consent-text version in exam-config so the
+  // candidate app never hard-codes it (by value).
+  consentVersion: CONSENT_VERSION,
+  // v1.1 triple-review #5 (privacy-truthfulness): serve the per-contest
+  // retention window so the candidate disclosure shows the REAL number of days
+  // (not the hard-coded 4-day default) for 7/14/30-day contests.
+  retentionDaysOf
 });
 const {
-  publicExamConfig, publicAccessCode, rosterLookup, adminGetRoster, adminSaveRoster,
+  publicExamConfig, publicAccessCode, publicPreflightReport, rosterLookup, adminGetRoster, adminSaveRoster,
   getRosterMeta, findRosterEntry
 } = publicRoutes;
 // Re-export the rate-limiter test seams so handler.mjs?<buster> imports still
@@ -689,7 +797,9 @@ const {
 // constraint #3 preserves the contract).
 export const {
   __setAccessCodeClockForTest, __setRosterLookupClockForTest,
-  __resetRosterLookupRateLimitForTest, checkRosterLookupRateLimit
+  __resetRosterLookupRateLimitForTest, checkRosterLookupRateLimit,
+  // v1.1 triple-review #7: preflight-report rate-limit clock seam.
+  __setPreflightReportClockForTest
 } = publicRoutes;
 
 // Factory seam (decomp B13): the candidate SESSION-LIFECYCLE routes (start /
@@ -753,7 +863,10 @@ const sessionRoutes = makeSessionRoutes({
   liveLockCollection: LIVE_LOCK_COLLECTION,
   submissionsCollection: SUBMISSIONS_COLLECTION,
   uploadConfig,
-  execMaxSubmissionsPerSession: EXEC_MAX_SUBMISSIONS_PER_SESSION
+  execMaxSubmissionsPerSession: EXEC_MAX_SUBMISSIONS_PER_SESSION,
+  // v1.1 G1: the authoritative consent-text version, stamped on the session at
+  // start so a re-entry on a newer T&C version is detectable (by value).
+  consentVersion: CONSENT_VERSION
 });
 const {
   startSession, resumeSession, validateEndSession, endSession,
@@ -971,34 +1084,30 @@ const {
 
 // Factory seam (decomp B5): the poller-sourced submission-time markers route
 // domain. ctx closes over THIS instance's live-client getter, the env-captured
-// submission-events collection name, the http transport helpers, and the
-// username normalizer. The two routes keep their DIFFERENT auth guards: the
-// poller ingest uses requireApiKey (the x-api-key mechanism, like alerts
-// ingest); the admin recording-review read is auth-first with requireAdmin
-// (routesAuthLint). The returned route handlers are destructured into the SAME
-// names the dispatch table uses, so the dispatch lines stay byte-identical
-// (canaryIsolation). The submission-events helpers it owns (submissionEventsDocId
-// / submissionEventsRef / normalizeSubmissionEvent / mergeSubmissionEvents) come
-// back too — currently used only by these routes.
+// submission-events collection name and the username normalizer. The HackerRank
+// poller ingest was removed; the one remaining route (the admin recording-review
+// read) is auth-first with requireAdmin (routesAuthLint). The returned route
+// handler is destructured into the SAME name the dispatch table uses, so the
+// dispatch line stays byte-identical (canaryIsolation). The submission-events
+// helpers it owns (submissionEventsDocId / submissionEventsRef /
+// mergeSubmissionEvents) come back too — currently used only by this route.
 const submissionEventsRoutes = makeSubmissionEventsRoutes({
   getFirestore,
-  requireApiKey,
   requireAdmin,
-  parseBody,
   badRequest,
-  httpError,
   normalizeUsername,
   // The contest_slug-filter chokepoint, for the native-submission fallback scope.
   scopedQuery,
   submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION,
   // FALLBACK store for proctor-native contests: the in-app submissions the exam
-  // app writes (proctor_submission_events is the HackerRank-poller mirror only).
+  // app writes (proctor_submission_events is the legacy HackerRank-poller mirror,
+  // now read-only and no longer written).
   submissionsCollection: SUBMISSIONS_COLLECTION,
   // RUN events (execRun → SAMPLE tests): merged into the recording-review
   // timeline as distinct kind:"run" events alongside the submits.
   runEventsCollection: RUN_EVENTS_COLLECTION
 });
-const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
+const { adminSubmissionEvents } = submissionEventsRoutes;
 
 // Factory seam (decomp B6): the admin live-counts dashboard route domain. ctx
 // closes over THIS instance's live-client getter, the auth guard from makeAuth,
@@ -1225,6 +1334,29 @@ export const api = async (req, res) => {
       return;
     }
 
+    // v1.1 G3 (#9): explicit request body-size cap. Reject an oversized body with
+    // a 413 BEFORE it is parsed into memory on a low-mem instance (the platform
+    // default is the only guard otherwise, and row/field caps apply only AFTER
+    // parse). We check the declared Content-Length first (cheap, covers the
+    // honest client + most floods) and, if the runtime already buffered a string
+    // body, its actual byte length too (covers a lying/absent header).
+    const declaredLen = Number(req.get?.("content-length") || req.headers?.["content-length"] || 0);
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_REQUEST_BODY_BYTES) {
+      return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+    }
+    if (typeof req.body === "string" && Buffer.byteLength(req.body, "utf8") > MAX_REQUEST_BODY_BYTES) {
+      return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+    }
+    // v1.1 triple-review #8: the functions-framework parses a JSON body into an
+    // OBJECT before api() runs, leaving the raw bytes in req.rawBody — so the
+    // string check above NEVER fires for normal JSON, and a chunked or
+    // spoofed-small Content-Length slips past the numeric check. Cap on the
+    // actual buffered byte length too (this is the real post-buffer guard; a true
+    // pre-parse cap must live at the framework/proxy layer, see docs/DEPLOY.md).
+    if (Buffer.isBuffer(req.rawBody) && req.rawBody.length > MAX_REQUEST_BODY_BYTES) {
+      return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+    }
+
     const path = req.path || new URL(req.url, "http://localhost").pathname;
     if (req.method === "POST" && path === "/api/session/start") return send(res, 200, await startSession(req));
     if (req.method === "POST" && path === "/api/session/resume") return send(res, 200, await resumeSession(req));
@@ -1235,6 +1367,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
     if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig(req));
     if (req.method === "POST" && path === "/api/access-code") return send(res, 200, await publicAccessCode(req));
+    // v1.1 triple-review #7: session-less preflight-block report sink.
+    if (req.method === "POST" && path === "/api/preflight-report") return send(res, 200, await publicPreflightReport(req));
     if (req.method === "POST" && path === "/api/roster/lookup") return send(res, 200, await rosterLookup(req));
     if (req.method === "GET" && path === "/api/admin/roster") return send(res, 200, await adminGetRoster(req));
     if (req.method === "POST" && path === "/api/admin/roster") return send(res, 200, await adminSaveRoster(req));
@@ -1269,12 +1403,12 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
     if (req.method === "GET" && path === "/api/admin/session-detail") return send(res, 200, await adminSessionDetail(req));
     if (req.method === "GET" && path === "/api/admin/session-events") return send(res, 200, await adminSessionEvents(req));
-    if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
     if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));
     if (req.method === "GET" && path === "/api/admin/attendance") return send(res, 200, await adminAttendance(req));
     if (req.method === "GET" && path === "/api/admin/contest-results") return send(res, 200, await adminContestResults(req));
+    if (req.method === "GET" && path === "/api/admin/contest-data-size") return send(res, 200, await adminContestDataSize(req));
     if (req.method === "POST" && path === "/api/admin/contest-evaluate") return send(res, 200, await adminContestEvaluate(req));
     if (req.method === "GET" && path === "/api/admin/contest-evaluations") return send(res, 200, await adminContestEvaluations(req));
     if (req.method === "GET" && path === "/api/admin/contest-evaluate-status") return send(res, 200, await adminContestEvaluateStatus(req));
@@ -1467,7 +1601,7 @@ function inAdminEndGrace(session) {
 // glue over src/contests.mjs (validation + slug/access-code minting live there);
 // the resident endAllLiveSessions sweep is passed by reference for the end_now path.
 
-// ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
+// ---- S2 roster store (spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md)
 // The roster store helpers (rosterMetaRef / getRosterMeta / rosterEntryId) +
 // the roster CRUD routes (adminSaveRoster / adminGetRoster + resolvePersonContestParam)
 // + the public config / access-code / roster-lookup routes + their two per-IP
@@ -1541,15 +1675,16 @@ async function contestScopeOf(slugRaw) {
 // factories + the resident selection cluster reuse them) and are passed BY REFERENCE
 // into makeAdminSessionsRoutes.
 
-// ---- Submission-time markers (poller-sourced) -----------------------------
-// The two submission-events route bodies (ingestSubmissionEvents [requireApiKey
-// poller ingest] / adminSubmissionEvents [requireAdmin recording-review read,
-// scoped GET]) + their owned helpers (submissionEventsDocId / submissionEventsRef
-// / normalizeSubmissionEvent / mergeSubmissionEvents, with the
-// SUBMISSION_EVENTS_INGEST_LIMIT cap) moved VERBATIM to the
+// ---- Submission-time markers ----------------------------------------------
+// The admin submission-events route body (adminSubmissionEvents [requireAdmin
+// recording-review read, scoped GET]) + its owned helpers (submissionEventsDocId
+// / submissionEventsRef / mergeSubmissionEvents) live in the
 // makeSubmissionEventsRoutes(ctx) factory in routes/submissionEvents.mjs (decomp
-// B5); destructured at module scope above so the dispatch lines stay
-// byte-identical (canaryIsolation). Each route keeps its DIFFERENT auth guard.
+// B5); destructured at module scope above so the dispatch line stays
+// byte-identical (canaryIsolation). The HackerRank poller ingest
+// (ingestSubmissionEvents, POST /api/submission-events) was removed with the
+// poller; adminSubmissionEvents still reads any legacy poller-mirror docs, then
+// falls back to the proctor's own in-app submissions.
 
 // Phase 2 (2.4 / Epic 6.4 / 4.4): the admin live-counts dashboard route
 // (adminStats, GET /api/admin/stats — by-status session counts + derived
@@ -1829,6 +1964,7 @@ async function adminContestExport(req) {
     last_export_at: exportedAt,
     updated_at: exportedAt
   }, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   await writeAudit({
     action: "contest_export",
@@ -1838,6 +1974,95 @@ async function adminContestExport(req) {
   }, adminActor(req, body), exportedAt);
 
   return { ok: true, gcs_key: gcsKey, signed_url: signedUrl, counts: bundle.manifest.counts, exported_at: exportedAt };
+}
+
+// GET /api/admin/contest-data-size?contest=<slug> — G1 (v1.1, design §2.6).
+// READ-ONLY: sums the contest's stored evidence objects in GCS and returns a
+// per-kind byte breakdown so the admin can see how much heavy data a contest is
+// holding before deciding to export/purge it. Async by nature (a whole-prefix
+// bucket listing — slow for a large contest; the admin UI shows a spinner), so
+// there is no extra batching here. ADMIN-ONLY. STRICTLY scoped to the ONE
+// contest's evidence prefix `contests/<slug>/` — it never lists another
+// contest's objects (the canary isolation suite pins this).
+//
+// Object kinds are derived from the storage layout
+// `contests/<slug>/sessions/<user>/<session>/<kind>/...`: the segment right
+// after the per-session prefix names the kind (screen / camera / events /
+// editor-events → `editorEvents` for the UI / review), with a bare
+// `manifest.json` mapped to `manifests` and anything else to `other`. The
+// frontend renders by_kind GENERICALLY (any key, byte values), so adding a kind
+// here never needs a frontend change.
+async function adminContestDataSize(req) {
+  requireAdmin(req);
+  const contest = await personContestForFilter(req.query?.contest ?? req.query?.contest_slug);
+  if (!contest) return badRequest("contest must name a person-mode contest");
+
+  // SCOPE: the one contest's evidence subtree ONLY. exports/ lives under a
+  // sibling top-level prefix, so this listing can never include export zips.
+  const prefix = `contests/${contest.slug}/`;
+
+  const byKind = {};
+  let totalBytes = 0;
+  let totalObjects = 0;
+  const tally = (file) => {
+    const name = file?.name || "";
+    // Belt-and-braces: the listing is already prefix-scoped, but never count an
+    // object that doesn't actually sit under THIS contest's prefix.
+    if (!name.startsWith(prefix)) return;
+    const size = Number(file?.metadata?.size) || 0;
+    totalBytes += size;
+    totalObjects += 1;
+    const kind = evidenceKindOf(name, prefix);
+    byKind[kind] = (byKind[kind] || 0) + size;
+  };
+
+  // v1.1 triple-review #10: page MANUALLY (autoPaginate:false) and aggregate each
+  // page in place, so the biggest contests never auto-paginate the whole subtree
+  // into one in-memory array (a self-inflicted OOM/latency risk). maxResults caps
+  // each page; the loop follows getFiles' nextQuery until the listing is drained.
+  let query = { prefix, autoPaginate: false, maxResults: 1000 };
+  // Hard ceiling on page iterations as a runaway guard (1000 pages × 1000 = 1M
+  // objects — far beyond any real contest; we'd stop tallying rather than spin).
+  for (let page = 0; page < 1000 && query; page++) {
+    const [files, nextQuery] = await bucket().getFiles(query);
+    for (const file of files || []) tally(file);
+    query = nextQuery || null;
+  }
+
+  return {
+    contest: contest.slug,
+    evidence_bytes: totalBytes,
+    evidence_objects: totalObjects,
+    by_kind: byKind,
+    computed_at: new Date().toISOString()
+  };
+}
+
+// Classify one evidence object key into a UI-facing kind, from the storage
+// layout contests/<slug>/sessions/<user>/<session>/<kind>/<file>. The kind is
+// the path segment right after the per-session prefix; a bare per-session
+// manifest.json has no kind segment → "manifests". Keys outside the
+// sessions/ subtree (or otherwise unrecognized) fall to "other".
+function evidenceKindOf(name, contestPrefix) {
+  const rel = name.slice(contestPrefix.length); // sessions/<user>/<session>/...
+  const segs = rel.split("/");
+  // sessions/<user>/<session>/<rest...> — the kind lives at segs[3].
+  if (segs[0] !== "sessions" || segs.length < 4) return "other";
+  const tailFirst = segs[3];
+  if (segs.length === 4) {
+    // A file sitting DIRECTLY under the session prefix (e.g. manifest.json).
+    return tailFirst === "manifest.json" ? "manifests" : "other";
+  }
+  switch (tailFirst) {
+    case "screen": return "screen";
+    case "camera": return "camera";
+    case "events": return "events";
+    // EDITOR_EVENTS_COLLECTION sub-prefix label (default "editor-events") — the
+    // demo + UI breakdown name this kind `editorEvents`.
+    case EDITOR_EVENTS_COLLECTION: return "editorEvents";
+    case "review": return "review";
+    default: return "other";
+  }
 }
 
 // POST /api/admin/contest-purge {contest, confirm, slug, include_evidence} —
@@ -1899,7 +2124,10 @@ async function adminContestPurge(req) {
         total_score: row.total,
         per_problem: perProblem,
         integrity: { alerts_by_severity: row.integrity.alerts_by_severity, review_verdict: row.integrity.review_verdict },
-        unique_id: row.candidate_id, name: row.name, session_status: ""
+        // v1.1 G1 (erasure keeps roll#/scores/eval): persist roll_number into the
+        // purge-survivor snapshot alongside unique_id/name so it survives even a
+        // full DB purge (sessions + roster_entries carry it but both get deleted).
+        unique_id: row.candidate_id, name: row.name, roll_number: row.roll_number || "", session_status: ""
       });
     }
     await stampSelectionDone(contest, snapshotByPerson, adminActor(req, body));
@@ -1922,6 +2150,7 @@ async function adminContestPurge(req) {
     evidence_prefixes: evidencePrefixes,
     updated_at: now
   }, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   // Evidence: if include_evidence, delete the GCS objects NOW via per-session
   // storage_prefix iteration (the only legacy-correct path; exports/ excluded).
@@ -1963,6 +2192,7 @@ async function adminContestPurge(req) {
     tombstone.evidence_prefixes = null;
   }
   await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set(tombstone, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   await writeAudit({
     action: "contest_purge_done",
@@ -2083,6 +2313,7 @@ async function adminRetentionSweep(req) {
           last_export_at: null,
           updated_at: now
         }, { merge: true }).catch(() => {});
+        invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
       }
     }
   }
@@ -2123,7 +2354,18 @@ async function sweepContestEvidence(contest, actor) {
   const now = new Date().toISOString();
   const patch = { evidence_prefixes: null, updated_at: now };
   if (stampable) patch.evidence_purged_at = now;
+  // v1.1 G1: back-fill retention_started_at the FIRST time the sweep acts on an
+  // exam_end-anchored contest that was due via the DERIVED end_at anchor (no
+  // explicit stamp yet — e.g. natural window expiry, no admin action). This
+  // records when the clock effectively started in the audit trail and pins the
+  // anchor so a later end_at edit can't move it. Only when the contest is due
+  // (it is — selectExpiredEvidence chose it) and not already stamped.
+  if (!contest.retention_started_at && contest.retention_anchor !== "selection_done") {
+    const anchorMs = retentionAnchorMs(contest);
+    if (Number.isFinite(anchorMs)) patch.retention_started_at = new Date(anchorMs).toISOString();
+  }
   await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set(patch, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   await writeAudit({
     action: "evidence_sweep",

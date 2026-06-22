@@ -1,9 +1,9 @@
 // backend/test/personIdentity.test.mjs — S-C slice 2: person-mode identity
 // derivation at session start + dual-norm contest-pinned resume.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.4 (identity
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.4 (identity
 //          chain: username_norm = person_id; server-side college resolution;
 //          picker ONLY on genuine ambiguity; no-roster person_id:null), §2.10
-//        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//        docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          D2 (one identity field candidate_id), D4 (identity_label denorm),
 //          D6 (H1 live-lock unchanged), D8 (dual-norm contest-pinned resume)
 // THE CANARY: the legacy start path must produce IDENTICAL session docs —
@@ -290,6 +290,75 @@ test("no-roster person contest: person_id null, username_norm = identityNorm(can
   const badEmail = await call(startReq({ contest: contest.slug, candidate_id: "G3", name: "Gee", email: "gee@nowhere", consent_accepted: true }));
   assert.equal(badEmail.statusCode, 400);
   assert.match(badEmail.body.error, /email/i);
+});
+
+// ---- v1.1 triple-review #6: structured consent record ----------------------
+// The rich consent record (right_to_consent / viewed_terms / viewed_privacy /
+// accepted_at / context) must be SERVER-ENFORCED and PERSISTED, not dropped.
+
+const FULL_CONSENT = {
+  accepted: true,
+  right_to_consent: true,
+  viewed_terms: true,
+  viewed_privacy: true,
+  consent_version: "v1.1",
+  accepted_at: "2026-06-22T10:00:00.000Z",
+  context: "at_college"
+};
+
+test("structured consent: a COMPLETE record is sanitized + PERSISTED on the session doc", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("Consent Persist");
+  const res = await call(startReq({
+    contest: contest.slug, candidate_id: "C 1", name: "Cee", email: "cee@x.com",
+    consent_accepted: true, consent: FULL_CONSENT
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  const session = firestore._collections.get("pi_sessions").get(res.body.session_id);
+  assert.ok(session.consent, "the structured consent record must be persisted on the session");
+  assert.equal(session.consent.accepted, true);
+  assert.equal(session.consent.right_to_consent, true);
+  assert.equal(session.consent.viewed_terms, true);
+  assert.equal(session.consent.viewed_privacy, true);
+  assert.equal(session.consent.consent_version, "v1.1");
+  assert.equal(session.consent.accepted_at, "2026-06-22T10:00:00.000Z");
+  assert.equal(session.consent.context, "at_college");
+});
+
+test("structured consent: an arbitrary extra key is STRIPPED (allowlist sanitize)", async () => {
+  const { firestore } = freshClients();
+  const contest = await createOpenContest("Consent Sanitize");
+  const res = await call(startReq({
+    contest: contest.slug, candidate_id: "C 2", name: "Cee", email: "cee@x.com",
+    consent_accepted: true,
+    consent: { ...FULL_CONSENT, is_admin: true, evil: { drop: "me" }, right_to_consent: "yes" /* non-bool → false */ }
+  }));
+  // right_to_consent was a non-boolean → coerced to false → gate REJECTS it.
+  assert.equal(res.statusCode, 400, JSON.stringify(res.body));
+  assert.equal(firestore._collections.get("pi_sessions").size, 0, "a rejected start writes no session");
+});
+
+test("structured consent: each missing gate boolean is REJECTED (viewed_terms / viewed_privacy / right_to_consent)", async () => {
+  freshClients();
+  const contest = await createOpenContest("Consent Gate");
+  for (const drop of ["right_to_consent", "viewed_terms", "viewed_privacy"]) {
+    const res = await call(startReq({
+      contest: contest.slug, candidate_id: `C-${drop}`, name: "Cee", email: "cee@x.com",
+      consent_accepted: true,
+      consent: { ...FULL_CONSENT, [drop]: false }
+    }));
+    assert.equal(res.statusCode, 400, `missing ${drop} must reject; got ${res.statusCode} ${JSON.stringify(res.body)}`);
+  }
+});
+
+test("structured consent: a transitional FLAT-only client (no consent object) still starts", async () => {
+  freshClients();
+  const contest = await createOpenContest("Consent Flat");
+  const res = await call(startReq({
+    contest: contest.slug, candidate_id: "C Flat", name: "Cee", email: "cee@x.com",
+    consent_accepted: true // no structured consent — legacy/transitional shape
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
 });
 
 // 2026-06-18 exam-eve: NO-ROSTER duplicate-login / re-login is the live-exam

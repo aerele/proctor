@@ -145,8 +145,8 @@ function latestLiveSessionFor(username: string, sessions: JoinableSession[]): Jo
  * Lock/End while the candidate is live on a newer session (F6 review). When
  * the direct join is ended and no live session exists, the ended doc is kept
  * so the row shows the truthful "SESSION — ENDED" context (archive-only).
- * Null = no session to act on (e.g. contest-eval signal for a candidate who
- * never started).
+ * Null = no session to act on (e.g. a session-less alert for a candidate who
+ * never started a proctored session).
  */
 export function sessionForAlert(alert: JoinableAlert, sessions: JoinableSession[]): JoinableSession | null {
   const username = alert.username_norm || candidateIdOf(alert);

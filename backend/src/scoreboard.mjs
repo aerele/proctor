@@ -207,6 +207,11 @@ export function buildResultsRows({
     // identity: live person doc → snapshot copy → person_id components last.
     const uniqueId = String(person?.unique_id ?? snapshot?.unique_id ?? "");
     const name = String(person?.name ?? snapshot?.name ?? "");
+    // v1.1 G1 (erasure keeps roll#): roll_number survives the evidence purge via
+    // the same live-doc → snapshot-copy fallback as name/unique_id — the person
+    // doc is KEPT at purge, so this is normally the live value; the snapshot copy
+    // is the belt-and-braces fallback for a fully-tombstoned read.
+    const rollNumber = String(person?.roll_number ?? snapshot?.roll_number ?? "");
     const collegeNorm = String(enrollment.college_norm || person?.college_norm || "");
     const collegeName = collegeNorm ? collegeNameOf(collegeNorm) : "";
 
@@ -246,6 +251,7 @@ export function buildResultsRows({
       person_id: personId,
       candidate_id: uniqueId,
       name,
+      roll_number: rollNumber,
       college_norm: collegeNorm,
       college: collegeName,
       display_id: multiCollege && collegeName ? `${uniqueId} · ${collegeName}` : uniqueId,

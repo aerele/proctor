@@ -1,10 +1,10 @@
 // backend/test/contestLifecycle.test.mjs — Wave7-G data-lifecycle ENDPOINTS
 // (S-G/S-H). The handler-level integration over in-memory Firestore + GCS fakes.
 //
-// Specs: docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+// Specs: docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          §3.1 (export), §3.2 (triple-gated purge + tombstone), §3.4 (sweep),
 //          Decision 12 (gates), Decision 14 (scheduler key auth).
-//        docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.9
+//        docs/design-history/specs/2026-06-10-f10-product-vision.md §2.9
 //          (purge retains enrollments + final_snapshot), §2.16, §10.4 (zip
 //          retention).
 //
@@ -140,6 +140,18 @@ function freshClients() {
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
   return { firestore, storage };
+}
+
+// Clock-relative export-zip fixture: the retention sweep compares each zip's
+// created_at against the REAL wall-clock now (handler.mjs: `new Date()`) with a
+// 10-day window (EXPORT_RETENTION_DAYS), so a hardcoded calendar date rots —
+// once the wall clock passes it, a once-"fresh" zip silently becomes stale.
+// Build the timestamp + matching gcs-key path relative to now instead.
+// `daysAgo > 10` ⇒ stale (deleted); `daysAgo < 10` ⇒ fresh (kept).
+function exportZipFixture(slug, daysAgo) {
+  const createdIso = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+  const key = `exports/${slug}/${createdIso.replace(/[:.]/g, "-")}.zip`;
+  return { key, createdIso };
 }
 
 const COL = "kec";
@@ -460,16 +472,19 @@ test("retention-sweep: purges DUE evidence (selection_done + retention elapsed),
 test("retention-sweep: deletes export zips older than 10 days, keeps fresh ones", async () => {
   const { firestore, storage } = freshClients();
   seedContest(firestore, storage, "kec-r1");
-  // stale zip (created 2026-05-01) + fresh zip (created 2026-06-11)
-  storage._saved.set("exports/kec-r1/2026-05-01T00-00-00-000Z.zip", { body: "old", created: "2026-05-01T00:00:00.000Z" });
-  storage._saved.set("exports/kec-r1/2026-06-11T00-00-00-000Z.zip", { body: "new", created: "2026-06-11T00:00:00.000Z" });
+  // Clock-relative so the test never rots: stale zip (11 days old, past the
+  // 10-day window) + fresh zip (1 day old, well within it).
+  const stale = exportZipFixture("kec-r1", 11);
+  const fresh = exportZipFixture("kec-r1", 1);
+  storage._saved.set(stale.key, { body: "old", created: stale.createdIso });
+  storage._saved.set(fresh.key, { body: "new", created: fresh.createdIso });
 
   const res = await call(makeReq({ method: "POST", path: "/api/admin/retention-sweep",
     headers: { "x-api-key": "cl-sweep-key" }, body: {} }));
   assert.equal(res.statusCode, 200);
   assert.ok(res.body.exports_deleted >= 1, "at least the stale zip deleted");
-  assert.equal(storage._saved.has("exports/kec-r1/2026-05-01T00-00-00-000Z.zip"), false, "stale zip deleted");
-  assert.equal(storage._saved.has("exports/kec-r1/2026-06-11T00-00-00-000Z.zip"), true, "fresh zip kept");
+  assert.equal(storage._saved.has(stale.key), false, "stale zip deleted");
+  assert.equal(storage._saved.has(fresh.key), true, "fresh zip kept");
 });
 
 test("retention-sweep: clears last_export/last_export_at when it deletes the zip a contest's stamp points at (stamp never outlives its artifact)", async () => {
@@ -496,19 +511,21 @@ test("retention-sweep: clears last_export/last_export_at when it deletes the zip
 test("retention-sweep: leaves last_export intact when the stamped zip is still within retention", async () => {
   const { firestore, storage } = freshClients();
   seedContest(firestore, storage, "kec-r1");
-  const freshKey = "exports/kec-r1/2026-06-11T00-00-00-000Z.zip";
-  storage._saved.set(freshKey, { body: "new", created: "2026-06-11T00:00:00.000Z" });
+  // Clock-relative fresh zip (1 day old) so the stamp stays within retention
+  // regardless of the wall clock — no calendar date to rot against.
+  const fresh = exportZipFixture("kec-r1", 1);
+  storage._saved.set(fresh.key, { body: "new", created: fresh.createdIso });
   firestore.collection("cl_contests").doc("kec-r1").set({
-    last_export_at: "2026-06-11T00:00:00.000Z",
-    last_export: { at: "2026-06-11T00:00:00.000Z", gcs_key: freshKey, counts: { sessions: 1 } }
+    last_export_at: fresh.createdIso,
+    last_export: { at: fresh.createdIso, gcs_key: fresh.key, counts: { sessions: 1 } }
   }, { merge: true });
 
   await call(makeReq({ method: "POST", path: "/api/admin/retention-sweep",
     headers: { "x-api-key": "cl-sweep-key" }, body: {} }));
   const contest = firestore._collections.get("cl_contests").get("kec-r1");
-  assert.equal(contest.last_export_at, "2026-06-11T00:00:00.000Z", "fresh export stamp untouched");
+  assert.equal(contest.last_export_at, fresh.createdIso, "fresh export stamp untouched");
   assert.ok(contest.last_export, "fresh last_export untouched");
-  assert.equal(storage._saved.has(freshKey), true, "fresh zip kept");
+  assert.equal(storage._saved.has(fresh.key), true, "fresh zip kept");
 });
 
 test("retention-sweep: admin password also authorizes (manual trigger)", async () => {

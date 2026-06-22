@@ -210,14 +210,18 @@ function startReq(extra = {}) {
 // THE session start/resume key set. Any new key appearing here with the flag
 // OFF is a regression of the byte-identical invariant; with the flag ON exactly
 // "screen_markers" may be added.
+// Take-home: the start/resume response always carries start_at / take_home /
+// proctor_contact_phone (falsy-defaulted off take-home), so they belong in the
+// byte-identical baseline — kept in sorted position (the asserts .sort() this).
 const START_RESPONSE_KEYS_TODAY = [
   "blocked_by_session_id", "camera_chunk_count", "camera_chunk_index_hwm",
   "candidate_id", "chunk_count", "contest_slug", "created_at",
   "end_at", "enforcement", "enforcement_exemptions", "hackerrank_username",
   "heartbeat_interval_seconds", "identity_label", "locked_reason", "name",
-  "problem", "problems", "room", "room_gate_enabled", "screen_chunk_index_hwm",
-  "server_now", "session_id", "start_ip", "status", "storage_prefix",
-  "submissions_summary", "submit_budget", "upload_config"
+  "problem", "problems", "proctor_contact_phone", "room", "room_gate_enabled",
+  "screen_chunk_index_hwm", "server_now", "session_id", "start_at", "start_ip",
+  "status", "storage_prefix", "submissions_summary", "submit_budget",
+  "take_home", "upload_config"
 ];
 
 // ---- 1: THE byte-identical-when-off invariant on start/resume ---------------

@@ -1,5 +1,5 @@
 // S-D: pure logic for the Contests tab + the global contest selector.
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md
 //   §2.7  — URLs are DERIVED from the slug: candidate /?contest={slug},
 //           invigilator /invigilator?contest={slug}&key={invigilator_key}
 //   §5 A1 — selector scopes every tab; URL-param per-tab so two browser tabs

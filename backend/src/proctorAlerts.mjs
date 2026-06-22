@@ -57,8 +57,14 @@ export function makeProctorAlerts(ctx) {
     // env-captured collection names / settings id (by value at handler load)
     settingsCollection,
     alertsCollection,
-    alertSettingsId
+    alertSettingsId,
+    // v1.1 G3 (#5): optional hot-path read cache for the alert-settings doc
+    // (read on every heartbeat/events/beacon/room-gate). A single shared key.
+    // Null when disabled → every read hits Firestore (prior behavior). The
+    // alert-settings WRITE path (routes/alerts.mjs) invalidates it.
+    alertSettingsCache = null
   } = ctx;
+  const ALERT_SETTINGS_CACHE_KEY = "proctor_alert_settings";
 
   // ---- Sure-shot proctor alerts (Phase 2, 2.3 / Epic 4) ---------------------
 
@@ -115,7 +121,11 @@ export function makeProctorAlerts(ctx) {
     disconnected: { enabled: true, severity: "warning", show_to_invigilator: false }
   };
 
-  const ALERT_SOURCES = ["proctor", "contest-eval"];
+  // The HackerRank contest-eval poller was removed (proctor moved to its own
+  // in-app contest platform). `proctor` is now the ONLY accepted alert source;
+  // normalizeAlert rejects any other source (incl. the old "contest-eval") at
+  // ingest with a 400.
+  const ALERT_SOURCES = ["proctor"];
   const ALERT_SEVERITIES = ["critical", "warning", "info"];
   const ALERT_VERDICT_STATUSES = ["pending", "real", "false_positive", "inconclusive"];
   const ALERT_REQUIRED_FIELDS = ["source", "type", "severity", "timestamp", "hackerrank_username", "title"];
@@ -125,9 +135,19 @@ export function makeProctorAlerts(ctx) {
   // once per request and thread the result into the sure-shot upsert sites so a
   // single request never re-reads it.
   async function getAlertSettings() {
+    // v1.1 G3 (#5): read through the TTL cache. The merged result is cached (it
+    // is a pure function of the stored doc); a settings write invalidates the
+    // cache, and the TTL bounds cross-instance staleness. Caches the MERGED
+    // object so the per-request merge is also skipped on a hit.
+    if (alertSettingsCache) {
+      const hit = alertSettingsCache.get(ALERT_SETTINGS_CACHE_KEY);
+      if (hit !== undefined) return hit;
+    }
     const doc = await getFirestore().collection(settingsCollection).doc(alertSettingsId).get();
     const stored = doc.exists ? (doc.data()?.proctor || {}) : {};
-    return mergeAlertSettings(stored);
+    const merged = mergeAlertSettings(stored);
+    if (alertSettingsCache) alertSettingsCache.set(ALERT_SETTINGS_CACHE_KEY, merged);
+    return merged;
   }
 
   function mergeAlertSettings(stored) {
@@ -362,12 +382,15 @@ export function makeProctorAlerts(ctx) {
     return item;
   }
 
-  // Deep-link target for a sure-shot alert: the merged review video the worker
-  // wrote back onto the session doc (merged_video_key) once a merge succeeded.
-  // B4: if no merged video exists yet, return null rather than a `…/screen/`
-  // FOLDER prefix — a folder prefix signs a nonexistent object and renders a
-  // broken link. With null, the console simply hides the link until the merge
-  // runs and merged_video_key is populated.
+  // Deep-link target for a sure-shot alert: a merged review video object key, if
+  // one was ever written onto the session doc as `merged_video_key`. There is no
+  // longer a producer for this field (the optional merge worker was dropped in
+  // favor of admin chunk-based playback), so in practice this resolves to null
+  // and the console hides the deep-link. Kept as a defensive read so a future
+  // merged-video producer can populate `merged_video_key` and have deep-links
+  // light up with no further wiring.
+  // B4: never return a `…/screen/` FOLDER prefix — a folder prefix signs a
+  // nonexistent object and renders a broken link. null cleanly hides the link.
   function sureShotVideoKey(session) {
     return session.merged_video_key || null;
   }

@@ -9,6 +9,7 @@ import {
   accessCodeReady,
   candidateFormMode,
   candidateFormReady,
+  consentGateReady,
   contestParamOf,
   contestUrlFor,
   isCandidateEmailValid,
@@ -117,6 +118,30 @@ describe("rosterLookupErrorMessage", () => {
   it("anything else -> generic try-again copy", () => {
     expect(rosterLookupErrorMessage(500, undefined)).toMatch(/could not check/i);
   });
+
+  // #135 take-home (§5a): with the take-home opts, the invigilator tail is
+  // replaced by the proctor-phone tail; without them the copy is byte-identical.
+  it("take-home opts route the 429/404 tail to the proctor phone (not invigilator)", () => {
+    const opts = { takeHome: true, phone: "+91 98765 43210" };
+    const rl = rosterLookupErrorMessage(429, "rate_limited", 17, opts);
+    expect(rl).toMatch(/call your proctor at \+91 98765 43210/i);
+    expect(rl).not.toMatch(/invigilator/i);
+    const nf = rosterLookupErrorMessage(404, "not_on_roster", undefined, opts);
+    expect(nf).toMatch(/call your proctor at \+91 98765 43210/i);
+    expect(nf).not.toMatch(/invigilator/i);
+  });
+
+  it("take-home with no phone falls back to 'the number provided'", () => {
+    expect(rosterLookupErrorMessage(404, "not_on_roster", undefined, { takeHome: true }))
+      .toMatch(/call your proctor at the number provided/i);
+  });
+
+  it("absent opts is byte-identical to the in-venue copy (D3)", () => {
+    expect(rosterLookupErrorMessage(429, "rate_limited", 17))
+      .toBe(rosterLookupErrorMessage(429, "rate_limited", 17, undefined));
+    expect(rosterLookupErrorMessage(404, "not_on_roster"))
+      .toBe(rosterLookupErrorMessage(404, "not_on_roster", undefined, { takeHome: false }));
+  });
 });
 
 describe("contestUrlFor", () => {
@@ -141,6 +166,10 @@ describe("candidateFormReady", () => {
     email: "a@x.com",
     room: "Lab 1",
     consent_accepted: true,
+    // G1 (v1.1): the full consent gate is satisfied in the baseline fixture.
+    viewed_terms: true,
+    viewed_privacy: true,
+    right_to_consent: true,
     roster_unique_id: "21 CS 001"
   };
 
@@ -166,6 +195,36 @@ describe("candidateFormReady", () => {
     const minimal = { ...full, candidate_id: "", name: "", roll_number: "", email: "" };
     expect(candidateFormReady("person_roster", minimal)).toBe(true);
     expect(candidateFormReady("person_roster", { ...minimal, email: "not-an-email" })).toBe(true);
+  });
+
+  // G1 (v1.1): the full consent gate is required in BOTH modes. An otherwise
+  // complete form is NOT ready until both pages are viewed AND right-to-consent
+  // AND consent are ticked.
+  it("G1: an unviewed Terms or Privacy page blocks the button in both modes", () => {
+    const rosterMin = { ...full, candidate_id: "", name: "", roll_number: "", email: "" };
+    expect(candidateFormReady("person_roster", { ...rosterMin, viewed_terms: false })).toBe(false);
+    expect(candidateFormReady("person_roster", { ...rosterMin, viewed_privacy: false })).toBe(false);
+    const open = { ...full, roll_number: "", roster_unique_id: "" };
+    expect(candidateFormReady("person_open", { ...open, viewed_terms: false })).toBe(false);
+    expect(candidateFormReady("person_open", { ...open, viewed_privacy: false })).toBe(false);
+  });
+
+  it("G1: right-to-consent and consent must both be ticked", () => {
+    const open = { ...full, roll_number: "", roster_unique_id: "" };
+    expect(candidateFormReady("person_open", { ...open, right_to_consent: false })).toBe(false);
+    expect(candidateFormReady("person_open", { ...open, consent_accepted: false })).toBe(false);
+    expect(candidateFormReady("person_open", open)).toBe(true);
+  });
+});
+
+describe("consentGateReady (G1)", () => {
+  const ok = { viewed_terms: true, viewed_privacy: true, right_to_consent: true, consent_accepted: true };
+  it("requires all four booleans", () => {
+    expect(consentGateReady(ok)).toBe(true);
+    expect(consentGateReady({ ...ok, viewed_terms: false })).toBe(false);
+    expect(consentGateReady({ ...ok, viewed_privacy: false })).toBe(false);
+    expect(consentGateReady({ ...ok, right_to_consent: false })).toBe(false);
+    expect(consentGateReady({ ...ok, consent_accepted: false })).toBe(false);
   });
 });
 

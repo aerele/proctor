@@ -9,7 +9,11 @@
 
 import { useEffect, useRef, useState } from "react";
 
-export function FullscreenGate({ onEnter }: { onEnter: () => Promise<void> }) {
+// #135 take-home (§5a / A10): for remote candidates the fullscreen-blocked
+// error routes to the proctor phone instead of "call an invigilator". Props are
+// optional with falsy defaults — an in-venue (non-remote) gate is unchanged and
+// the message stays byte-identical to today (D3).
+export function FullscreenGate({ onEnter, takeHome = false, proctorPhone = "" }: { onEnter: () => Promise<void>; takeHome?: boolean; proctorPhone?: string }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -59,7 +63,13 @@ export function FullscreenGate({ onEnter }: { onEnter: () => Promise<void> }) {
       await onEnter();
     } catch {
       // Browser policy/permission rejection — inline retry, never an auto-loop.
-      setError("Your browser blocked fullscreen. Click the button again to retry — if it keeps failing, call an invigilator.");
+      // Remote (take-home): route to the proctor phone instead of "call an
+      // invigilator"; in-venue copy stays byte-identical to today (D3).
+      setError(
+        takeHome
+          ? `Your browser blocked fullscreen. Click the button again to retry — if it keeps failing, call your proctor at ${proctorPhone || "the number provided"}.`
+          : "Your browser blocked fullscreen. Click the button again to retry — if it keeps failing, call an invigilator."
+      );
     } finally {
       setBusy(false);
     }

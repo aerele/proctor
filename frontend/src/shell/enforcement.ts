@@ -46,9 +46,19 @@ export type EnforcementConfig = {
   // re-enter-fullscreen requirement and the exit-limit/countdown escalation are
   // UNCHANGED. Absent (older backend / never set) = the full two-step recovery.
   simplifiedFullscreenRecovery?: boolean;
+  // #135 take-home: SOFT pre-T0 mode (driven by the take-home WaitingRoom hold,
+  // NOT examGateActive). While true, a fullscreen exit is RECORDED as an event
+  // and shows a gentle "back to fullscreen" nudge, but it never consumes the
+  // exit limit and never reports a violation — the real escalation ladder only
+  // starts once the exam opens (softMode flips false at T0). Absent = off.
+  softMode?: boolean;
 };
 
-export type EnforcementPhase = "idle" | "blocking" | "locking" | "alert_hold";
+// #135: "soft" is the take-home pre-T0 nudge phase. It is EPHEMERAL — never
+// persisted (serialized AS "idle"; never restored), re-derivable from the live
+// fullscreen state on the next exit. This mirrors the "ackOk deliberately not
+// persisted" precedent and kills the cross-T0 stale-overlay bug.
+export type EnforcementPhase = "idle" | "blocking" | "locking" | "alert_hold" | "soft";
 
 export type ViolationPhase = "countdown_expired" | "exit_limit";
 
@@ -173,11 +183,26 @@ export function enforcementReducer(
       && (state.phase === "blocking" || state.phase === "alert_hold")) {
       return tryResolve(state, action.nowMs, action.fullscreen === true, config);
     }
+    // #135 T0 flip: soft mode turned OFF (the exam opened). Drop a lingering
+    // soft nudge to idle so the live ladder starts clean at exitCount=0 — the
+    // pre-T0 soft exits never seed the count.
+    if (!config.softMode && state.phase === "soft") {
+      return noop({ ...state, phase: "idle" });
+    }
     return noop(state);
   }
 
   if (action.kind === "fullscreen_exit") {
     if (!action.recording || action.expected || config.exemptFullscreen) return noop(state);
+    // #135 take-home pre-T0: RECORD the exit + show a gentle nudge, but NEVER
+    // touch exitCount and NEVER report a violation — the exam hasn't started, so
+    // nothing counts against the candidate yet. The real ladder begins at T0.
+    if (config.softMode) {
+      return {
+        state: { ...state, phase: "soft" },
+        effects: [{ kind: "event", type: "fullscreen_exit_soft", detail: { expected: action.expected } }]
+      };
+    }
     if (state.phase === "locking" || state.phase === "alert_hold") return noop(state);
     const exitCount = state.exitCount + 1;
     if (exitCount > config.exitLimit) {
@@ -205,6 +230,9 @@ export function enforcementReducer(
 
   if (action.kind === "fullscreen_change") {
     if (!action.fullscreen) return noop(state); // exits arrive via fullscreen_exit
+    // #135 take-home: re-entering fullscreen clears the soft nudge silently (no
+    // ack event — nothing was held against the candidate pre-T0).
+    if (state.phase === "soft") return noop({ ...state, phase: "idle" });
     if (state.phase !== "blocking" && state.phase !== "alert_hold") return noop(state);
     return tryResolve(state, action.nowMs, true, config);
   }
@@ -260,7 +288,15 @@ export function enforcementRemainingSeconds(state: EnforcementState, nowMs: numb
 // #71: with simplified recovery on there is no typed-ack step, so re-entering
 // fullscreen is the ONLY action — the back-in-fullscreen headline drops the
 // plural "steps" wording (there is nothing left to finish).
+// #135: the optional `opts` carries take-home context ({ takeHome, phone }) so
+// the locked/alert copy can route the candidate to their remote proctor instead
+// of "raise your hand". Absent ⇒ byte-identical in-venue copy (D3).
+export type EnforcementCopyOptions = { takeHome?: boolean; phone?: string };
+
 export function enforcementHeadline(phase: EnforcementPhase, fullscreen: boolean, simplifiedRecovery = false): string {
+  // #135 take-home pre-T0 soft nudge — gentle, never says "exit #N" or implies
+  // the limit (the exam hasn't started).
+  if (phase === "soft") return "You're not in fullscreen";
   if (phase === "locking") return "Test disabled";
   if (!fullscreen) return "You left fullscreen";
   return simplifiedRecovery ? "Return to fullscreen to continue" : "Finish the steps to continue";
@@ -271,8 +307,18 @@ export function enforcementHeadline(phase: EnforcementPhase, fullscreen: boolean
 //
 // #71: simplified recovery has a single action (re-enter fullscreen), so the
 // out-of-fullscreen line points at that one button instead of "BOTH steps".
-export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean, exitCount: number, simplifiedRecovery = false): string {
-  if (phase === "locking") return "Your test is being locked. Raise your hand and call your room proctor.";
+export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean, exitCount: number, simplifiedRecovery = false, opts?: EnforcementCopyOptions): string {
+  // #135 take-home pre-T0 soft nudge — reassure, do NOT name the exit number or
+  // imply the limit (nothing is counted yet).
+  if (phase === "soft") {
+    return "Your exam hasn't started yet. Please return to fullscreen — this was noted but not counted against you.";
+  }
+  if (phase === "locking") {
+    // Remote (take-home): point at the proctor phone instead of "raise your hand".
+    return opts?.takeHome
+      ? `Your test is being locked. Call your proctor at ${opts.phone || "the number provided"}.`
+      : "Your test is being locked. Raise your hand and call your room proctor.";
+  }
   if (fullscreen) {
     return `Fullscreen exit #${exitCount} was recorded. You are back in fullscreen — finish the remaining step below to continue your exam.`;
   }
@@ -288,13 +334,18 @@ export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean,
 //
 // #71: simplified recovery has a single action, so the banner says "Return to
 // fullscreen" instead of "Complete both steps".
-export function alertHoldMessage(violation: ViolationPhase | null, simplifiedRecovery = false): string {
+export function alertHoldMessage(violation: ViolationPhase | null, simplifiedRecovery = false, opts?: EnforcementCopyOptions): string {
   const cause = violation === "exit_limit"
     ? "You exited fullscreen too many times"
     : "Time expired";
+  // Remote (take-home): route to the proctor phone instead of the in-room
+  // invigilator. Absent opts ⇒ byte-identical in-venue copy (D3).
+  const fallback = opts?.takeHome
+    ? `call your proctor at ${opts.phone || "the number provided"}`
+    : "wait for the invigilator";
   const action = simplifiedRecovery
-    ? "Return to fullscreen below to continue, or wait for the invigilator."
-    : "Complete both steps below to continue, or wait for the invigilator.";
+    ? `Return to fullscreen below to continue, or ${fallback}.`
+    : `Complete both steps below to continue, or ${fallback}.`;
   return `${cause} — your proctor has been alerted. ${action}`;
 }
 
@@ -312,7 +363,11 @@ export function enforcementStorageKey(sessionId: string): string {
 
 export function serializeEnforcementState(state: EnforcementState): string {
   return JSON.stringify({
-    phase: state.phase,
+    // #135 (A2): "soft" is EPHEMERAL — it is serialized AS "idle" and never
+    // restored, so a reload (or a cross-T0 persist) never resurrects a stale
+    // pre-T0 nudge. The phase is re-derivable from live fullscreen on the next
+    // exit. Mirrors the "ackOk deliberately not persisted" precedent.
+    phase: state.phase === "soft" ? "idle" : state.phase,
     exitCount: state.exitCount,
     deadlineMs: state.deadlineMs,
     // Wave-2 fix: the unanswered-report bookkeeping survives a reload so the
@@ -324,6 +379,9 @@ export function serializeEnforcementState(state: EnforcementState): string {
   });
 }
 
+// #135 (A2): "soft" is deliberately NOT in the allowlist — a persisted/tampered
+// "soft" phase is never restored (it falls back to initial), reinforcing that
+// the soft nudge is ephemeral and re-derivable on the next live exit.
 const PHASES: EnforcementPhase[] = ["idle", "blocking", "locking", "alert_hold"];
 const VIOLATION_PHASES: ViolationPhase[] = ["countdown_expired", "exit_limit"];
 

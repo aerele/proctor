@@ -7,11 +7,11 @@
 // deletes a contest's heavy data after evaluatePurgeGate() returns ok:true.
 //
 // Specs:
-//   docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//   docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //     §3.1 (export → manifest + per-dataset jsonl), §3.2 (triple-gated purge,
 //     tombstone), §3.4 (retention sweep), Decision 12 (gates), Decision 14
 //     (ONE daily scheduler → sweep endpoint).
-//   docs/superpowers/specs/2026-06-10-f10-product-vision.md
+//   docs/design-history/specs/2026-06-10-f10-product-vision.md
 //     §2.9 (purge-survivor: enrollments + final_snapshot retained),
 //     §2.16 (export carries persons/enrollments/colleges, schema_version:1),
 //     §10.4 (export zips auto-delete after 10 days via the same daily sweep).
@@ -21,6 +21,12 @@
 // this is the read-time fallback the sweep uses so a legacy/synth doc still
 // resolves a window.
 export const DEFAULT_RETENTION_DAYS = 4;
+
+// v1.1 G1 — the authoritative consent-text version. Bump when the T&C / Privacy
+// Policy copy changes materially so a re-entry on a new version is detectable.
+// Single source of truth; served to the candidate app in exam-config and echoed
+// back at session start (the frontend never hard-codes it).
+export const CONSENT_VERSION = "v1.1";
 
 // Vision §10.4: export zips in GCS auto-delete 10 days after creation, owned by
 // the retention-sweep endpoint (selectExpiredExports). A GCS lifecycle rule is a
@@ -150,28 +156,75 @@ export function evaluatePurgeGate({ contest, confirm, typedSlug }) {
 
 // ---- retention sweep selection (PURE, clock seam) ---------------------------
 //
+// v1.1 G1: the retention clock now starts from an AUTOMATIC anchor so erasure
+// ACTUALLY runs (audit #2 — it used to be gated SOLELY on a manual admin
+// "selection done" click, so an admin who never clicked left evidence forever).
+//
+// retentionAnchorMs picks the clock-start instant, in PRECEDENCE order:
+//   1. retention_started_at  — the stamped anchor (back-filled by the sweep the
+//      first time it acts on an exam_end-anchored contest, or set on creation).
+//   2. selection_done_at     — the manual anchor (the DEFAULT semantics: an
+//      anchorless contest waits for this stamp, exactly as pre-v1.1).
+//   3. end_at                — DERIVED fallback ONLY for a contest that has
+//      OPTED IN to the automatic clock via retention_anchor === "exam_end"
+//      (set explicitly on a new take-home contest). The sweep back-fills
+//      retention_started_at the first time it acts, so this derivation is the
+//      bridge that makes erasure self-starting for opted-in contests.
+//
+// SAFETY (v1.1 triple-review #2 — KPR / legacy data-loss): an ABSENT
+// retention_anchor means the OLD selection_done semantics — it NEVER derives
+// from end_at. Every real contest has an end_at, so defaulting the anchor to
+// "exam_end" (the original v1.1 behaviour) would have flipped EVERY historical
+// contest — including the intentionally-preserved KPR live-test data — from
+// never-swept to swept the next time the sweep ran. exam_end is therefore
+// strictly OPT-IN: only a contest doc that explicitly carries
+// retention_anchor === "exam_end" ever resolves an end_at-derived anchor.
+// A contest with retention_anchor === "selection_done" (or absent → same
+// semantics) NEVER falls back to end_at — it waits for the manual stamp. KPR /
+// anchorless legacy contests (no retention_started_at, no selection_done_at,
+// retention_anchor unset or "selection_done") resolve to no anchor → never
+// swept, which is the safety property that protects them.
+export function retentionAnchorMs(contest) {
+  const startedMs = Date.parse(String(contest?.retention_started_at || ""));
+  if (Number.isFinite(startedMs)) return startedMs;
+  // DEFAULT is "selection_done" (the safe, pre-v1.1 semantics). exam_end is
+  // OPT-IN ONLY — an absent anchor must NOT auto-derive from end_at.
+  const anchor = String(contest?.retention_anchor || "selection_done");
+  const selectionMs = Date.parse(String(contest?.selection_done_at || ""));
+  if (anchor !== "exam_end") {
+    // selection_done (explicit OR the absent default): the only anchor is the
+    // manual stamp; no end_at fallback.
+    return Number.isFinite(selectionMs) ? selectionMs : NaN;
+  }
+  // exam_end anchor (explicitly opted in): prefer an explicit selection_done_at
+  // if present (a contest can have both — whichever started first is irrelevant
+  // since both mean the exam is over), else derive from a CLOSED exam window.
+  if (Number.isFinite(selectionMs)) return selectionMs;
+  const endMs = Date.parse(String(contest?.end_at || ""));
+  return Number.isFinite(endMs) ? endMs : NaN;
+}
+
 // selectExpiredEvidence: which contests are DUE for an evidence purge given a
 // caller-supplied `now`. A contest is due when:
-//   - selection_done_at is set (the human "selection done" event started the
-//     clock; absent → NEVER swept), AND
-//   - now is STRICTLY past selection_done_at + retention_days (so a same-instant
-//     sweep never deletes early; exactly-at-threshold waits for the next run),
+//   - a retention anchor resolves (see retentionAnchorMs; absent → NEVER swept),
 //     AND
+//   - now is STRICTLY past anchor + retention_days (so a same-instant sweep
+//     never deletes early; exactly-at-threshold waits for the next run), AND
 //   - evidence_purged_at is unset (idempotent — already-swept contests skip).
 export function selectExpiredEvidence(contests = [], now) {
   const nowMs = Date.parse(String(now));
   if (!Number.isFinite(nowMs)) return [];
   return (Array.isArray(contests) ? contests : []).filter((contest) => {
     if (!contest || contest.evidence_purged_at) return false;
-    const doneMs = Date.parse(String(contest.selection_done_at || ""));
-    if (!Number.isFinite(doneMs)) return false; // no/garbage selection_done_at → never
+    const anchorMs = retentionAnchorMs(contest);
+    if (!Number.isFinite(anchorMs)) return false; // no anchor → never
     const days = retentionDaysOf(contest);
-    const expiresMs = doneMs + days * MS_PER_DAY;
+    const expiresMs = anchorMs + days * MS_PER_DAY;
     return nowMs > expiresMs;
   });
 }
 
-function retentionDaysOf(contest) {
+export function retentionDaysOf(contest) {
   const raw = contest?.evidence_retention_days;
   const num = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(num) || !Number.isInteger(num) || num <= 0) return DEFAULT_RETENTION_DAYS;

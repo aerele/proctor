@@ -1,6 +1,6 @@
 // S6 attendance — pure attendance math + CSV builder, shared by the api.ts demo
 // branch and unit tests. Mirrors the backend adminAttendance semantics EXACTLY
-// (spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md):
+// (spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md):
 // taken = >=1 matching session (any status); in_progress = any non-ended;
 // completed = all ended; blank/off-roster session ids -> unmatched_sessions.
 import { csvField } from "../csvField";

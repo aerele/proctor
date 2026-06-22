@@ -2,7 +2,7 @@
 
 The **Contests** and **Templates** tabs are where an admin defines and runs an exam. A *template* is a reusable blueprint (an ordered problem set plus default settings and rules); a *contest* is one administered round with its own exam window, roster, rooms, links and access code. Templates are authored once and instantiated into as many contests as you need.
 
-> **Product context.** Aerele Proctor is a standalone own-editor exam platform: candidates solve problems inside the platform's own React + Monaco editor with Judge0-backed Run/Submit. (A separate optional `monitoring/` contest-eval poller can additionally watch an externally-hosted HackerRank contest and emit alerts into the same pipeline; that component is documented separately and is not part of the Contests/Templates flow described here.)
+> **Product context.** Aerele Proctor is a standalone own-editor exam platform: candidates solve problems inside the platform's own React + Monaco editor with Judge0-backed Run/Submit. (The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.)
 
 ---
 

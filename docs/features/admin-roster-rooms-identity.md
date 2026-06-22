@@ -2,7 +2,7 @@
 
 How an admin loads the official candidate list, names the rooms, and ties every candidate to a **durable person identity** that survives across contests — and how a candidate confirms that identity at login.
 
-> **Where this sits in the product.** Aerele Proctor is a standalone own-editor exam platform: candidates code in our React + Monaco workspace with Judge0-backed Run/Submit, and identity is established by a roster the admin uploads here. (A separate, optional `monitoring/` contest-eval poller can live-watch an *externally hosted* HackerRank contest and feed cheating alerts into the same alerts pipeline; it is not part of the roster/identity flow documented on this page.)
+> **Where this sits in the product.** Aerele Proctor is a standalone own-editor exam platform: candidates code in our React + Monaco workspace with Judge0-backed Run/Submit, and identity is established by a roster the admin uploads here. (The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.)
 
 ---
 

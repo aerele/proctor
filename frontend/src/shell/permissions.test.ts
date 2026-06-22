@@ -131,6 +131,15 @@ describe("screenShareFailureMessage", () => {
   it("unknown still offers a retry path", () => {
     expect(screenShareFailureMessage("unknown").length).toBeGreaterThan(0);
   });
+  // #135 take-home (A10): the generic-failure tail routes to the proctor phone,
+  // not "call an invigilator", for remote contests; absent opts stays in-venue.
+  it("take-home opts route the generic-failure tail to the proctor phone (not invigilator)", () => {
+    const remote = screenShareFailureMessage("unknown", { takeHome: true, phone: "+91 98765 43210" });
+    expect(remote).toMatch(/call your proctor at \+91 98765 43210/);
+    expect(remote).not.toMatch(/invigilator/i);
+    expect(screenShareFailureMessage("unknown")).toMatch(/call an invigilator/);
+    expect(screenShareFailureMessage("unknown", { takeHome: false })).toBe(screenShareFailureMessage("unknown"));
+  });
 });
 
 // FIX-B3 #1: clipboard primer must never wedge onboarding. A controllable timer

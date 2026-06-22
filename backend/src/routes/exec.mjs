@@ -58,6 +58,11 @@ export function makeExecRoutes(ctx) {
     // engine + queue (by reference / getter)
     judge0,
     execQueue,
+    // v1.1 G3 (#3): distributed Judge0 submit limiter gate (by reference). Caps
+    // GLOBAL submit throughput across instances; composes with the execQueue
+    // lane. gate(key, fn) acquires a shared token then runs fn. A no-op fallback
+    // (fn) => fn() keeps tests/older ctx that don't inject it working unchanged.
+    judge0SubmitGate = (_key, fn) => fn(),
     randomUUID,
     // env-captured collection names / caps / cooldowns (by value at handler load)
     contestsCollection,
@@ -278,7 +283,9 @@ export function makeExecRoutes(ctx) {
       // run lane bounds (and retries) the submit POSTs, the poll lane bounds
       // each status GET — no slot is parked across the inter-poll waits.
       results = await judge0().runBatch(items, {
-        submitGate: (fn) => execQueue.enqueueRun(fn),
+        // v1.1 G3: the distributed limiter acquires a GLOBAL token FIRST (a 429
+        // here never reaches Judge0), then the run lane bounds the submit POST.
+        submitGate: (fn) => judge0SubmitGate(sessionId, () => execQueue.enqueueRun(fn)),
         pollGate: (fn) => execQueue.enqueuePoll(fn)
       });
     } catch (error) {
@@ -369,7 +376,9 @@ export function makeExecRoutes(ctx) {
       // quick sample-run lane) gates the submit POSTs; the shared poll lane
       // bounds each status GET — no slot is parked across inter-poll waits.
       results = await judge0().runBatch(items, {
-        submitGate: (fn) => execQueue.enqueueSubmit(fn),
+        // v1.1 G3: the distributed limiter acquires a GLOBAL token FIRST (a 429
+        // here never reaches Judge0), then the submit lane bounds the submit POST.
+        submitGate: (fn) => judge0SubmitGate(sessionId, () => execQueue.enqueueSubmit(fn)),
         pollGate: (fn) => execQueue.enqueuePoll(fn)
       });
     } catch (error) {
