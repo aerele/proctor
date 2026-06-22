@@ -117,6 +117,30 @@ describe("rosterLookupErrorMessage", () => {
   it("anything else -> generic try-again copy", () => {
     expect(rosterLookupErrorMessage(500, undefined)).toMatch(/could not check/i);
   });
+
+  // #135 take-home (§5a): with the take-home opts, the invigilator tail is
+  // replaced by the proctor-phone tail; without them the copy is byte-identical.
+  it("take-home opts route the 429/404 tail to the proctor phone (not invigilator)", () => {
+    const opts = { takeHome: true, phone: "+91 98765 43210" };
+    const rl = rosterLookupErrorMessage(429, "rate_limited", 17, opts);
+    expect(rl).toMatch(/call your proctor at \+91 98765 43210/i);
+    expect(rl).not.toMatch(/invigilator/i);
+    const nf = rosterLookupErrorMessage(404, "not_on_roster", undefined, opts);
+    expect(nf).toMatch(/call your proctor at \+91 98765 43210/i);
+    expect(nf).not.toMatch(/invigilator/i);
+  });
+
+  it("take-home with no phone falls back to 'the number provided'", () => {
+    expect(rosterLookupErrorMessage(404, "not_on_roster", undefined, { takeHome: true }))
+      .toMatch(/call your proctor at the number provided/i);
+  });
+
+  it("absent opts is byte-identical to the in-venue copy (D3)", () => {
+    expect(rosterLookupErrorMessage(429, "rate_limited", 17))
+      .toBe(rosterLookupErrorMessage(429, "rate_limited", 17, undefined));
+    expect(rosterLookupErrorMessage(404, "not_on_roster"))
+      .toBe(rosterLookupErrorMessage(404, "not_on_roster", undefined, { takeHome: false }));
+  });
 });
 
 describe("contestUrlFor", () => {

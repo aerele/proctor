@@ -69,7 +69,11 @@ type RecorderOptions = {
   // S5: every heartbeat echoes the authoritative exam end time + server clock;
   // the host updates its countdown so a proctor's live time change propagates
   // within one heartbeat interval (no reload).
-  onExamTimeChange?: (info: { endAt: string; serverNow: string }) => void;
+  // #135 take-home: the same heartbeat also carries the official start (T0), the
+  // remote-mode flag, and the proctor phone, so the waiting-room countdown +
+  // phone stay skew-safe and current against the live session. Optional (absent
+  // off take-home / older backend) — the host treats undefineds falsy.
+  onExamTimeChange?: (info: { endAt: string; serverNow: string; startAt?: string; takeHome?: boolean; proctorPhone?: string }) => void;
   // F5.3/F5.5: every heartbeat echoes the enforcement config + this session's
   // exemptions, so an admin/invigilator exemption applies live (no reload).
   onEnforcementChange?: (info: { enforcement?: EnforcementConfigPayload; exemptions?: EnforcementExemptions }) => void;
@@ -895,9 +899,17 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
             message: "IP address changed after the test started."
           });
         }
-        // S5: surface the current exam end time on every heartbeat.
-        if (response.end_at) {
-          options.onExamTimeChange?.({ endAt: response.end_at, serverNow: response.server_now ?? "" });
+        // S5: surface the current exam end time on every heartbeat. #135: also
+        // surface the start (T0) + remote-mode flag + proctor phone, so a take-
+        // home session refreshes them even when no end_at is set.
+        if (response.end_at || response.start_at) {
+          options.onExamTimeChange?.({
+            endAt: response.end_at ?? "",
+            serverNow: response.server_now ?? "",
+            startAt: response.start_at,
+            takeHome: response.take_home,
+            proctorPhone: response.proctor_contact_phone
+          });
         }
         // F5.3/F5.5: surface enforcement config + exemptions on every heartbeat.
         if (response.enforcement || response.enforcement_exemptions) {

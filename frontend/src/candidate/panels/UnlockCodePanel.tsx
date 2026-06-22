@@ -10,7 +10,10 @@ import { isCompleteOtp, normalizeOtpInput } from "../../invigilator/gateLogic";
 // the room's dedicated UNLOCK code (minted on the invigilator portal — wave-2
 // fix: never the start code, which the candidate typed themselves to begin).
 // Admin locks never render this panel (locked_reason gate in the caller).
-export function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; onUnlocked: () => void }) {
+//
+// #135 take-home (§5a rows 13-15): with `takeHome`, the "ask your room proctor"
+// copy routes to the remote proctor phone instead. Absent ⇒ in-venue copy (D3).
+export function UnlockCodePanel({ sessionId, takeHome = false, proctorPhone = "", onUnlocked }: { sessionId: string; takeHome?: boolean; proctorPhone?: string; onUnlocked: () => void }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -25,9 +28,15 @@ export function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; 
     } catch (cause) {
       const apiCode = (cause as ApiError)?.code;
       setMessage(
-        apiCode === "invalid_code" ? "That code is not valid. Ask your room proctor to read it again — the unlock code is NOT the code you started with."
+        apiCode === "invalid_code"
+          ? takeHome
+            ? `That code is not valid. Call your proctor at ${proctorPhone || "the number provided"} and ask them to read it again — the unlock code is NOT the code you started with.`
+            : "That code is not valid. Ask your room proctor to read it again — the unlock code is NOT the code you started with."
           : apiCode === "too_many_attempts" ? "Too many attempts — this session can now only be unlocked by a proctor."
-            : apiCode === "no_unlock_code" ? "Your room proctor hasn't issued an unlock code yet. Ask them to generate one on their console, or to unlock you from there."
+            : apiCode === "no_unlock_code"
+              ? takeHome
+                ? `An unlock code hasn't been issued yet. Call your proctor at ${proctorPhone || "the number provided"} and ask them to generate one on their console, or to unlock you from there.`
+                : "Your room proctor hasn't issued an unlock code yet. Ask them to generate one on their console, or to unlock you from there."
               : apiCode === "not_enforcement_locked" ? "This lock can only be released by a proctor."
                 : cause instanceof Error ? cause.message : String(cause)
       );
@@ -39,7 +48,12 @@ export function UnlockCodePanel({ sessionId, onUnlocked }: { sessionId: string; 
   return (
     <section className="mx-auto mt-5 max-w-xl rounded-lg border border-line bg-panel p-5 text-center shadow-subtle">
       <p className="text-sm font-semibold text-ink">Have the unlock code?</p>
-      <p className="mt-1 text-sm leading-6 text-muted">Your room proctor can read you a 6-digit unlock code (from their proctor console) to unlock this session.</p>
+      <p className="mt-1 text-sm leading-6 text-muted">
+        {takeHome
+          ? <>Your proctor can read you a 6-digit unlock code (from their console) to unlock this session. Call them at{" "}
+              <a className="font-medium text-accent underline" href={`tel:${proctorPhone}`}>{proctorPhone || "the number provided"}</a>.</>
+          : "Your room proctor can read you a 6-digit unlock code (from their proctor console) to unlock this session."}
+      </p>
       <div className="mt-3 flex flex-wrap items-center justify-center gap-3">
         <input
           className="focus-ring h-11 w-44 rounded-md border border-line bg-white px-3 text-center font-mono text-lg tracking-[0.3em]"

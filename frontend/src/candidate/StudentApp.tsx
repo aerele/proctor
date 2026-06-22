@@ -7,14 +7,14 @@
 // its props-driven leaf children were extracted (candidate/panels/*, F2).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Clock, Copy, Lock, MonitorUp, RefreshCw, ShieldCheck, Square } from "lucide-react";
-import { endSession, pollRoomGate, resumeSession, rosterLookup, sendEvents, sendSessionBeacon, startSession, uploadReviewFile, validateEndSession } from "../api";
+import { endSession, fetchContestExamConfig, pollRoomGate, resumeSession, rosterLookup, sendEvents, sendSessionBeacon, startSession, uploadReviewFile, validateEndSession } from "../api";
 import type { ApiError } from "../api";
 import { normalizeCameraRecording } from "../cameraRecording";
 import { clearChunkBuffer } from "../chunkBuffer";
 import { chunkIndexBase, clearChunkContinuity, mergeManifest, readChunkHwm, readStintManifest, writeStintManifest } from "../chunkContinuity";
 import { MultiProblemWorkspace } from "../coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "../coding/problemSwitch";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, sessionElapsedAnchorMs } from "../examTime";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, sessionElapsedAnchorMs, waitingRoomGate } from "../examTime";
 import { candidateIdOf } from "../identity";
 import { normalizeOtpInput } from "../invigilator/gateLogic";
 import { MarkerLayer } from "../markers/MarkerLayer";
@@ -36,18 +36,21 @@ import { StatusPill } from "../ui/StatusPill";
 import { BlockedScreen } from "./panels/BlockedScreen";
 import { CameraDock } from "./panels/CameraDock";
 import { CameraSelfView } from "./panels/CameraSelfView";
+import { ComeBackLaterPanel } from "./panels/ComeBackLaterPanel";
 import { EndRetryPanel } from "./panels/EndRetryPanel";
 import { EndTestPanel } from "./panels/EndTestPanel";
 import { EntryReviewPanel } from "./panels/EntryReviewPanel";
 import { FinishingOverlay } from "./panels/FinishingOverlay";
 import { HealthPanel } from "./panels/HealthPanel";
 import { IdentityCard } from "./panels/IdentityCard";
+import { ProctorHelpLine } from "./panels/ProctorHelpLine";
 import { RecentEventsPanel } from "./panels/RecentEventsPanel";
 import { RoomCodePanel } from "./panels/RoomCodePanel";
 import { RoomField } from "./panels/RoomField";
 import { PreStartRules, RulesPanel, WhatIsRecordedPanel } from "./panels/Rules";
 import { ScreenShareErrorPanel } from "./panels/ScreenShareErrorPanel";
 import { UnlockCodePanel } from "./panels/UnlockCodePanel";
+import { WaitingRoomPanel } from "./panels/WaitingRoomPanel";
 
 const initialForm: StudentForm = {
   candidate_id: "",
@@ -111,6 +114,16 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const [examTimeNotice, setExamTimeNotice] = useState("");
   const examEndAtRef = useRef("");
   const timeUpAnnouncedRef = useRef(false);
+  // #135 take-home: the official exam start (T0), the remote-mode flag, and the
+  // proctor contact phone. examStartAt seeds from the pre-session exam-config and
+  // is refreshed (skew-safe) by every start/resume/heartbeat response; the gate
+  // (waitingRoomActive/tooEarly) is derived from it below. examStartAtRef mirrors
+  // it for the once-built recorder-callback closure, like examEndAtRef.
+  const [examStartAt, setExamStartAt] = useState("");
+  const examStartAtRef = useRef("");
+  const [takeHome, setTakeHome] = useState(false);
+  const [proctorPhone, setProctorPhone] = useState("");
+  const examStartAnnouncedRef = useRef(false);
   const [endRequested, setEndRequested] = useState(false);
   // Recording already stopped but the final end/manifest submit failed — show an
   // inline "Retry submitting" instead of dead-ending in the error state.
@@ -249,6 +262,28 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // coding workspace / contest link stay hidden and the shell stage stays 3.
   const examGateActive = Boolean(sessionConfig?.room_gate_enabled) && !examStarted;
 
+  // #135 take-home: the pre-T0 WAITING ROOM gate (D6, skew-safe via clockSkewMs /
+  // D7). The boundary math is the pure waitingRoomGate() helper; the remaining
+  // gates are the live take-home flag + lifecycle. Recomputed every render — the
+  // 1 s elapsed ticker (active while recording) re-renders the countdown without
+  // a new interval, exactly like examRemainingMs. waitingRoomActive holds the
+  // candidate at the WaitingRoom (recording, fullscreen, soft enforcement) until
+  // T0; tooEarly (>15 min out, pre-session) shows the come-back-later screen.
+  // C-1: soft enforcement is driven by waitingRoomActive, NOT examGateActive
+  // (room_gate_enabled is OFF in remote mode, so examGateActive is always false).
+  const { msUntilStart: waitingRoomStartMs, waitingRoomActive: withinWaitingWindow, tooEarly: beyondWaitingWindow } =
+    waitingRoomGate(examStartAt, Date.now(), clockSkewMs);
+  const waitingRoomActive =
+    takeHome &&
+    status === "recording" &&
+    gate === "running" &&
+    !examGateActive &&
+    withinWaitingWindow;
+  // tooEarly governs the form-stage come-back-later replacement (A5). It is a
+  // pure-time fact (only needs the take-home flag) so it holds before a session
+  // exists, while the candidate is still on the form.
+  const tooEarly = takeHome && beyondWaitingWindow;
+
   // ---- F5.1 stage-1 permission acquisition (all prompts BEFORE fullscreen) --
   // No session exists during setup, so fullscreen-exit/blur from the prompts
   // can never be an anomaly (the reducer only fires while recording) — and the
@@ -385,7 +420,11 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // S1 exam shell: fullscreen truth, 1-5 stage, top-bar vanish/restore.
   // examReleased is the S3 room-gate seam: released once the room code (or an
   // invigilator start-now) admits this session, or when the gate is disabled.
-  const shell = useExamShell({ gate, status, sessionId, examReleased: !examGateActive, permissionsReady, addEvent });
+  // #135 take-home: the WaitingRoom folds into the same stage-3 "not yet
+  // released" seam as the room gate, so the onboarding strip reads "DETAILS"
+  // (waiting), not "IN EXAM", until T0 hands off to W1 (examShell.ts deriveStage).
+  const examReleased = !examGateActive && !waitingRoomActive;
+  const shell = useExamShell({ gate, status, sessionId, examReleased, permissionsReady, addEvent });
   shellTapRef.current = shell.onShellEvent;
 
   // F5.3-6: fullscreen HARD-BLOCK ladder + switch-away debounce. The server's
@@ -402,7 +441,13 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       exemptFullscreen: enforcementExemptions.fullscreen === true,
       // #71: heartbeat-delivered (enforcementPayload refreshes each interval), so
       // an admin flipping the toggle reaches live sessions within ~15s.
-      simplifiedFullscreenRecovery: enforcementPayload?.simplified_fullscreen_recovery ?? false
+      simplifiedFullscreenRecovery: enforcementPayload?.simplified_fullscreen_recovery ?? false,
+      // #135 take-home (C-1): SOFT pre-T0 mode is driven by waitingRoomActive,
+      // NOT examGateActive (room_gate_enabled is OFF remote, so examGateActive is
+      // always false). At T0 waitingRoomActive flips false → the softMode edge
+      // dispatches config_change, the reducer clears any soft nudge, and the real
+      // ladder starts clean at exitCount=0.
+      softMode: waitingRoomActive
     },
     addEvent,
     onLocked: (reason) => {
@@ -418,7 +463,11 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       }
       setStatus("idle");
       setGate("locked");
-      speakWarning("Your test has been locked for leaving fullscreen. Raise your hand and call your room proctor.");
+      // #135 take-home: route the spoken lock warning to the remote proctor phone
+      // instead of "raise your hand" (no invigilator in the room).
+      speakWarning(takeHome
+        ? `Your test has been locked for leaving fullscreen. Call your proctor at ${proctorPhone || "the number provided"}.`
+        : "Your test has been locked for leaving fullscreen. Raise your hand and call your room proctor.");
     },
     // L1 resolved (typed phrase + back in fullscreen): the typed ack is a
     // stronger acknowledgement than the AnomalyPanel button, so restore the
@@ -435,6 +484,13 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const examRemainingMs = status === "recording" || status === "ending" || status === "ending_draining" ? remainingMs(examEndAt, Date.now(), clockSkewMs) : null;
   const examTimeUp = examRemainingMs !== null && examRemainingMs <= 0;
 
+  // W2: page top padding follows which fixed header is rendered — the slim
+  // strip needs a small offset, the big alert banner a larger one, the locked
+  // screen none ("hidden"). Defined before the shell chrome so the persistent
+  // take-home help strip can gate on the strip header mode.
+  const headerMode = shellHeaderMode(shell.barHidden, gate);
+  const shellPadTop: boolean | "alert" = headerMode === "alert" ? "alert" : headerMode === "strip";
+
   // The shared shell chrome — rendered FIRST inside <Shell> on every branch.
   // Kept as a props object so the W1 exam branch can render the same chrome
   // with its extra strip actions + suppressed stage hint.
@@ -445,7 +501,7 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     identity,
     contestName: pinned?.config.contest_name ?? null,
     elapsedSeconds,
-    examReleased: !examGateActive,
+    examReleased,
     permissionsReady,
     permissionsGate: {
       checklist: permissions,
@@ -459,7 +515,20 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     remainingLabel: examRemainingMs !== null ? formatRemaining(examRemainingMs) : null,
     timeUp: examTimeUp
   };
-  const shellChrome = <ExamShellChrome {...shellChromeProps} />;
+  // #135 take-home (D4b / §5b-4): the persistent "Need help? Call your proctor"
+  // strip — rendered with the shell chrome so it shows on BOTH the WaitingRoom
+  // and the in-exam W1 view. Only on the slim strip header (not the red anomaly
+  // banner / locked screen, which carry their own phone CTA), and only for
+  // take-home with a configured number.
+  const proctorHelpChrome = takeHome && proctorPhone && headerMode === "strip"
+    ? <ProctorHelpLine proctorPhone={proctorPhone} className="mb-4 justify-center rounded-md border border-line bg-white/60 px-3 py-2" />
+    : null;
+  const shellChrome = (
+    <>
+      <ExamShellChrome {...shellChromeProps} />
+      {proctorHelpChrome}
+    </>
+  );
 
   // F5.3: the hard-block takeover renders ABOVE everything on every branch
   // (its own visibility rule already yields to the locked/ended screens).
@@ -472,6 +541,8 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       ackOk={enforcement.ackOk}
       fullscreen={shell.fullscreen}
       simplifiedRecovery={enforcementPayload?.simplified_fullscreen_recovery ?? false}
+      takeHome={takeHome}
+      proctorPhone={proctorPhone}
       onAckChange={enforcement.submitAck}
       onEnterFullscreen={shell.enterFullscreen}
     />
@@ -493,14 +564,12 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     />
   );
 
-  // W2: page top padding follows which fixed header is rendered — the slim
-  // strip needs a small offset, the big alert banner a larger one, the locked
-  // screen none ("hidden").
-  const headerMode = shellHeaderMode(shell.barHidden, gate);
-  const shellPadTop: boolean | "alert" = headerMode === "alert" ? "alert" : headerMode === "strip";
-
   const speakIpChangeWarning = () => {
-    const message = "Your IP is changing. Please be attended by our engineer at your institution.";
+    // #135 take-home: a remote candidate has no on-site engineer — reassure and
+    // point at the proctor phone instead of "attended by our engineer".
+    const message = takeHome
+      ? `Your internet connection just changed networks. This is fine — stay in fullscreen and keep working. If the test stops responding, call your proctor at ${proctorPhone || "the number provided"}.`
+      : "Your IP is changing. Please be attended by our engineer at your institution.";
     speakWarning(message);
   };
 
@@ -527,6 +596,13 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     if (session.enforcement) setEnforcementPayload(session.enforcement);
     if (session.enforcement_exemptions) setEnforcementExemptions(session.enforcement_exemptions);
     setLockedReason(session.locked_reason ?? null);
+    // #135 take-home: the runtime contract carries the remote-mode flag, the
+    // proctor phone, and the official start (T0). applyExamStart refreshes the
+    // shared skew off the session server_now, keeping the waiting-room countdown
+    // skew-safe against the live session (not just the pre-session config seed).
+    setTakeHome(Boolean(session.take_home));
+    setProctorPhone(session.proctor_contact_phone || "");
+    applyExamStart(session.start_at, session.server_now);
     setIdentity({
       name: session.name || form.name.trim(),
       candidate_id: candidateIdOf(session) || form.candidate_id.trim(),
@@ -640,8 +716,52 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     if (!pinned) return;
     setExamConfig(pinned.config);
     if (pinned.config.enforcement) setEnforcementPayload((current) => current ?? pinned.config.enforcement ?? null);
+    // #135 take-home: seed the remote-mode flag, proctor phone, and official
+    // start (T0) from the pre-session config so the come-back-later / waiting-room
+    // gate is correct from first render — before any session exists. A4: seed the
+    // shared clock skew from the config server_now via computeClockSkewMs (NOT 0)
+    // so the 15-min boundary uses SERVER time immediately.
+    setTakeHome(Boolean(pinned.config.take_home_enabled));
+    setProctorPhone(pinned.config.proctor_contact_phone || "");
+    setExamStartAt(pinned.config.start_at || "");
+    examStartAtRef.current = pinned.config.start_at || "";
+    setClockSkewMs(computeClockSkewMs(pinned.config.server_now, Date.now()));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // #135 take-home (A4): a periodic exam-config re-fetch (~30s) ONLY on the
+  // take-home pre-session stages (no session yet). It re-stamps server_now (so
+  // the skew stays fresh even if the tab sat open for 20 min) and re-seeds
+  // start_at, which re-evaluates the 15-min boundary — the come-back-later screen
+  // therefore AUTO-ADVANCES into the waiting room when the clock crosses ≤15min.
+  // It stops the moment a session exists (sessionId set): the heartbeat takes
+  // over as the live skew/start channel from then on. Gated on take-home so a
+  // non-remote contest never polls (behavior-preserving).
+  useEffect(() => {
+    if (!pinned || !takeHome || sessionId) return;
+    let cancelled = false;
+    const refetch = async () => {
+      try {
+        const fresh = await fetchContestExamConfig(pinned.slug);
+        if (cancelled) return;
+        setClockSkewMs(computeClockSkewMs(fresh.server_now, Date.now()));
+        if (fresh.start_at) {
+          examStartAtRef.current = fresh.start_at;
+          setExamStartAt(fresh.start_at);
+        }
+        setProctorPhone(fresh.proctor_contact_phone || "");
+        setTakeHome(Boolean(fresh.take_home_enabled));
+      } catch {
+        // Transient fetch failure — keep the last-known skew/start and retry on
+        // the next tick; the candidate stays on the current pre-session screen.
+      }
+    };
+    const timer = window.setInterval(() => void refetch(), 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pinned, takeHome, sessionId]);
 
   useEffect(() => {
     if (status !== "recording") return;
@@ -698,6 +818,24 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, examEndAt, clockSkewMs, sessionId]);
+
+  // #135 take-home (D8): announce "your exam has started" once at the T0
+  // crossing. Purely cosmetic — the WaitingRoom→W1 hand-off is derived
+  // (waitingRoomActive flips false on the next 1 s tick); this only adds the
+  // voice cue at the exact crossing. Mirrors the time-up announce effect.
+  useEffect(() => {
+    if (!takeHome || status !== "recording" || !examStartAt) return;
+    const check = () => {
+      const left = remainingMs(examStartAt, Date.now(), clockSkewMs);
+      if (left === null || left > 0 || examStartAnnouncedRef.current) return;
+      examStartAnnouncedRef.current = true;
+      speakWarning("Your exam has started. Your questions are on the page now.");
+    };
+    check();
+    const timer = window.setInterval(check, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeHome, status, examStartAt, clockSkewMs]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -833,6 +971,19 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     }
   };
 
+  // #135 take-home: apply a server-reported exam START (T0) + clock stamp. The
+  // SAME clockSkewMs is refreshed here (start_at and end_at share one server_now,
+  // so a single skew offset is correct for both); the waiting-room gate then
+  // derives off the fresh start_at. Sibling of applyExamTime — called from the
+  // three sites that call applyExamTime (start/resume/refreshStatus) plus the
+  // heartbeat hook. A missing start_at (non-take-home / older backend) is a noop.
+  const applyExamStart = (startAt?: string, serverNow?: string) => {
+    if (serverNow) setClockSkewMs(computeClockSkewMs(serverNow, Date.now()));
+    if (!startAt) return;
+    examStartAtRef.current = startAt;
+    setExamStartAt(startAt);
+  };
+
   // Bring up the recorder for an active session. Shared by first-start and by
   // "Resume recording" after a reload. F5.1: recording starts IMMEDIATELY from
   // the streams the stage-1 PermissionsGate already acquired — start() only
@@ -949,7 +1100,17 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         if (ipStatus.newlyChanged) speakIpChangeWarning();
       },
       // S5: heartbeat-delivered exam end time → live countdown update.
-      onExamTimeChange: ({ endAt, serverNow }) => applyExamTime(endAt, serverNow),
+      // #135 take-home: the same heartbeat refreshes the start (T0), the remote-
+      // mode flag, and the proctor phone, keeping the waiting-room countdown +
+      // phone skew-safe against the live session. applyExamStart refreshes the
+      // shared skew off server_now even when endAt is empty (take-home may have
+      // no end_at), which applyExamTime's early-return would otherwise skip.
+      onExamTimeChange: ({ endAt, serverNow, startAt, takeHome: th, proctorPhone: ph }) => {
+        applyExamTime(endAt, serverNow);
+        applyExamStart(startAt, serverNow);
+        if (th !== undefined) setTakeHome(Boolean(th));
+        if (ph !== undefined) setProctorPhone(ph || "");
+      },
       // F5.3/F5.5: heartbeat-delivered enforcement config + exemptions — an
       // admin/invigilator exemption applies live within one interval.
       onEnforcementChange: ({ enforcement: config, exemptions }) => {
@@ -970,7 +1131,14 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     // (skew-corrected), not on this stint — a recording restart or a reload
     // resumes the count instead of resetting to 0:00. Pre-F7 backends send no
     // created_at → the anchor degrades to "now" (the old per-stint behavior).
-    const anchor = sessionElapsedAnchorMs(session.created_at, session.server_now, Date.now());
+    // #135 take-home (A7): a take-home session records ~10 min before T0, so
+    // anchoring on created_at would read ~10:00 the instant the exam opens.
+    // Anchor on start_at (T0) instead so the elapsed reads 00:00 at exam open
+    // (sessionElapsedAnchorMs clamps a future anchor to "now" → 00:00 during the
+    // pre-T0 waiting room, then counts up from T0). "Time remaining"
+    // (end_at - now) is already correct and unaffected.
+    const elapsedAnchorIso = session.take_home && session.start_at ? session.start_at : session.created_at;
+    const anchor = sessionElapsedAnchorMs(elapsedAnchorIso, session.server_now, Date.now());
     setRecordingStartedAt(anchor);
     setElapsedSeconds(Math.max(0, Math.floor((Date.now() - anchor) / 1000)));
     // F5 (e2e finding): recording is LIVE again — any prior episode's warning
@@ -1002,6 +1170,12 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     } else {
       message = cause instanceof Error ? cause.message : String(cause);
     }
+    // #135 take-home (§5a): append the remote help tail to the share-error copy
+    // (the recoverable kinds, not the raw fallback) so a stuck remote candidate
+    // has the proctor phone in front of them.
+    if (takeHome && proctorPhone && kind !== "unknown") {
+      message = `${message} Stuck? Call your proctor at ${proctorPhone}.`;
+    }
     setStartError({ kind, message });
     setStatus("idle");
   };
@@ -1027,7 +1201,8 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       }
       setLookupError(
         err?.status !== undefined || err?.code !== undefined
-          ? rosterLookupErrorMessage(err?.status, err?.code, retryAfter)
+          // #135 take-home: route the roster-lookup error tail to the proctor phone.
+          ? rosterLookupErrorMessage(err?.status, err?.code, retryAfter, takeHome ? { takeHome: true, phone: proctorPhone } : undefined)
           : cause instanceof Error ? cause.message : String(cause)
       );
     } finally {
@@ -1120,11 +1295,14 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         setStatus("idle");
         return;
       }
+      // #135 take-home (A10): the roster-not-found tail routes to the proctor
+      // phone instead of "call an invigilator" for remote contests.
+      const callForHelp = takeHome ? `call your proctor at ${proctorPhone || "the number provided"}` : "call an invigilator";
       setError(
         code === "not_on_roster" || code === "roster_id_required"
           ? formMode === "person_roster"
-            ? `Your ${examConfig?.unique_id_label || "ID"} was not found on the list for this test. Check it and try again, or call an invigilator.`
-            : "Your ID was not matched on the student list. Use “Not you? Re-enter ID” to redo the identity step, or call an invigilator."
+            ? `Your ${examConfig?.unique_id_label || "ID"} was not found on the list for this test. Check it and try again, or ${callForHelp}.`
+            : `Your ID was not matched on the student list. Use “Not you? Re-enter ID” to redo the identity step, or ${callForHelp}.`
           : cause instanceof Error ? cause.message : String(cause)
       );
       setStatus("idle");
@@ -1433,7 +1611,10 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           title="Waiting for proctor approval"
           lines={[
             "Another session is already active for your Candidate ID.",
-            "A proctor must approve this device before you can begin — or you can wait for the other session to be unlocked.",
+            // #135 take-home: route approval to the remote proctor phone (§5a).
+            takeHome
+              ? `A proctor must approve this device before you can begin. Call your proctor at ${proctorPhone || "the number provided"} to be approved, or wait for the other session to be released.`
+              : "A proctor must approve this device before you can begin — or you can wait for the other session to be unlocked.",
             "Stay on this page. When the proctor approves you, press Check again to continue."
           ]}
           onRefresh={refreshStatus}
@@ -1453,14 +1634,20 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           tone="danger"
           icon={<Lock size={22} />}
           title={enforcementLock ? "Your test is locked — fullscreen rule" : "Your test is locked"}
+          // #135 take-home: the locked-screen body routes to the proctor phone
+          // (tel link in the UnlockCodePanel below) instead of "raise your hand".
           lines={enforcementLock
             ? [
                 "You did not return to fullscreen in time (or exited fullscreen too many times), so this session locked itself.",
-                "Raise your hand and call your room proctor. They can read you a 6-digit unlock code to enter here, or unlock you from their console."
+                takeHome
+                  ? `Call your proctor at ${proctorPhone || "the number provided"}. They can read you a 6-digit unlock code to enter below, or unlock you from their console.`
+                  : "Raise your hand and call your room proctor. They can read you a 6-digit unlock code to enter here, or unlock you from their console."
               ]
             : [
                 "A proctor has locked this session. You cannot record until it is unlocked.",
-                "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
+                takeHome
+                  ? `Call your proctor at ${proctorPhone || "the number provided"}. When they unlock you, press Check again.`
+                  : "Raise your hand and call a proctor to your room. When they unlock you, press Check again."
               ]}
           onRefresh={refreshStatus}
           error={error}
@@ -1468,6 +1655,8 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         {enforcementLock && sessionId ? (
           <UnlockCodePanel
             sessionId={sessionId}
+            takeHome={takeHome}
+            proctorPhone={proctorPhone}
             onUnlocked={() => {
               setLockedReason(null);
               void refreshStatus();
@@ -1499,14 +1688,63 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // gate === "form" (no session yet) or "running" (active session)
   const isFormStage = gate === "form" && status !== "recording" && status !== "ending" && status !== "ending_draining";
 
+  // #135 take-home (D6 / C-6 / A5): the ">15 min early" screen REPLACES the
+  // registration form (early-return, full-screen) so the candidate never
+  // acquires screen share / starts a recording for a long dead wait. The A4
+  // periodic re-fetch re-evaluates the boundary every ~30s, so this auto-advances
+  // into the waiting room when the clock crosses inside the 15-min window.
+  if (tooEarly && isFormStage) {
+    const startDate = examStartAt ? new Date(examStartAt) : null;
+    // No shellChrome here: this is a terminal "close the tab" screen before any
+    // setup, so the permissions / fullscreen gate overlays must NOT prompt — the
+    // candidate is meant to leave and return ~10 min before T0 (A5).
+    return (
+      <Shell padTop={false}>
+        <ComeBackLaterPanel
+          contestName={pinned?.config.contest_name ?? null}
+          startAtLabel={startDate ? startDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null}
+          startDateLabel={startDate ? startDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }) : null}
+          proctorPhone={proctorPhone}
+        />
+      </Shell>
+    );
+  }
+
+  // #135 take-home (D1 / D9): the WAITING ROOM — recording is live and fullscreen
+  // is held, but the exam hasn't opened (pre-T0, ≤15min). The enforcement overlay
+  // here is the SOFT nudge (softMode: waitingRoomActive). At T0 waitingRoomActive
+  // flips false on the next 1 s tick and the W1 branch below renders
+  // automatically — already fullscreen, already recording, problems revealed, no
+  // re-permission/re-fullscreen prompt (the seamless T0 hand-off, D8).
+  if (waitingRoomActive) {
+    return (
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
+        {enforcementOverlay}
+        {markerLayer}
+        {identity ? <IdentityCard identity={identity} /> : null}
+        <WaitingRoomPanel
+          contestName={pinned?.config.contest_name ?? null}
+          startsInMs={waitingRoomStartMs}
+          startAtLabel={examStartAt ? new Date(examStartAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null}
+          proctorPhone={proctorPhone}
+        />
+        <div className="mx-auto mt-5 max-w-2xl">
+          <CameraSelfView videoRef={attachCameraVideo} mediaCapture={mediaCapture} cameraRecorded={cameraRecordingOn} />
+        </div>
+      </Shell>
+    );
+  }
+
   // W1 — the exam itself: an own-editor session, actively recording, released
   // into the exam. The coding workspace IS the page. Everything else tucks
   // into the slim strip (W2 — proctoring-panel toggle + End test live there),
   // the collapsible proctoring panel, and the floating camera dock. All
   // capture/preview hosts stay MOUNTED — every collapse is CSS-only. Legacy
   // (HackerRank-link) sessions and all waiting/error states keep the classic
-  // proctoring-first layout below.
-  if (hasProblem && status === "recording" && gate === "running" && !examGateActive) {
+  // proctoring-first layout below. #135: !waitingRoomActive keeps the pre-T0
+  // take-home hold on the WaitingRoom branch above until T0.
+  if (hasProblem && status === "recording" && gate === "running" && !examGateActive && !waitingRoomActive) {
     return (
       <Shell padTop={shellPadTop} variant="exam">
         <ExamShellChrome
@@ -1538,6 +1776,9 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             </span>
           }
         />
+        {/* #135 take-home (D4b): the persistent proctor-phone help strip rides
+            the W1 exam view too (gated on take-home + a configured number). */}
+        {proctorHelpChrome}
         {enforcementOverlay}
         {markerLayer}
 
@@ -1604,12 +1845,12 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     <Shell padTop={shellPadTop}>
       {shellChrome}
       {enforcementOverlay}
-      {status === "ending" ? <FinishingOverlay /> : null}
+      {status === "ending" ? <FinishingOverlay proctorPhone={takeHome ? proctorPhone : ""} /> : null}
       {/* Tier-1: the end-of-test drain wait gate — same blocking takeover with
           live remaining segments/MB. awayBeaconActive() returns false for
           ending_draining (it is NOT "recording"), so this long wait never fires
           a spurious tab_hidden/closing beacon. */}
-      {status === "ending_draining" ? <FinishingOverlay draining={{ pendingCount: bufferStatus.pendingCount, pendingBytes: bufferStatus.pendingBytes }} /> : null}
+      {status === "ending_draining" ? <FinishingOverlay draining={{ pendingCount: bufferStatus.pendingCount, pendingBytes: bufferStatus.pendingBytes }} proctorPhone={takeHome ? proctorPhone : ""} /> : null}
       {markerLayer}
       {identity && !isFormStage ? <IdentityCard identity={identity} /> : null}
 

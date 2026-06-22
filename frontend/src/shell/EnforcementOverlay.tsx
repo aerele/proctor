@@ -15,7 +15,7 @@ import { AlertTriangle, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, enforcementHeadline, enforcementSubline, type EnforcementPhase, type ViolationPhase } from "./enforcement";
 
-export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, proctorPhone = "", onAckChange, onEnterFullscreen }: {
+export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, takeHome = false, proctorPhone = "", onAckChange, onEnterFullscreen }: {
   phase: EnforcementPhase;
   /** The violation that tripped the hold — words the alert_hold banner (wave-3). */
   violation: ViolationPhase | null;
@@ -27,13 +27,19 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
    *  hidden; re-entering fullscreen is the only action. Lands live via the
    *  heartbeat-delivered enforcement config. */
   simplifiedRecovery?: boolean;
-  /** #135 take-home: proctor contact number — shown as an optional help tail on
-   *  the calm pre-T0 soft nudge. Empty ⇒ the tail is omitted. */
+  /** #135 take-home: remote mode — routes the locking/alert_hold copy to the
+   *  proctor phone instead of "raise your hand / wait for the invigilator". */
+  takeHome?: boolean;
+  /** #135 take-home: proctor contact number — shown on the calm pre-T0 soft
+   *  nudge tail and threaded into the locking/alert copy. Empty ⇒ tail omitted. */
   proctorPhone?: string;
   /** Called on every keystroke — the hook matches against the exact phrase. */
   onAckChange: (text: string) => void;
   onEnterFullscreen: () => Promise<void>;
 }) {
+  // #135: the remote copy options threaded into the pure copy fns (C-8). Absent
+  // takeHome ⇒ byte-identical in-venue copy (D3).
+  const copyOpts = takeHome ? { takeHome: true, phone: proctorPhone } : undefined;
   const [text, setText] = useState("");
   const [fsError, setFsError] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -135,7 +141,7 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
               {enforcementHeadline(phase, fullscreen, simplifiedRecovery)}
             </h1>
             <p className="mt-1 text-base font-medium text-red-200">
-              {enforcementSubline(phase, fullscreen, exitCount, simplifiedRecovery)}
+              {enforcementSubline(phase, fullscreen, exitCount, simplifiedRecovery, copyOpts)}
             </p>
           </div>
         </div>
@@ -150,7 +156,7 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
             ) : null}
             {phase === "alert_hold" ? (
               <p className="mt-6 rounded-lg border-2 border-red-400 bg-red-800 p-4 text-base font-semibold text-red-100" aria-live="assertive">
-                {alertHoldMessage(violation, simplifiedRecovery)}
+                {alertHoldMessage(violation, simplifiedRecovery, copyOpts)}
               </p>
             ) : null}
 

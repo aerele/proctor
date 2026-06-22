@@ -53,6 +53,54 @@ export function sessionElapsedAnchorMs(
   return Math.min(anchor, clientNowMs);
 }
 
+// #135 take-home: the pre-T0 waiting-room window. Recording starts ~10 min
+// early (D1) and the candidate holds in the waiting room until the official
+// start (T0). The countdown only renders inside this 15-min window (D6); beyond
+// it the candidate is "too early" and sees the come-back-later screen instead.
+export const WAITING_ROOM_WINDOW_MS = 15 * 60 * 1000;
+
+// #135 take-home: the PURE time half of the candidate waiting-room gate. Given
+// the official start (start_at = T0), the local clock, and the server skew,
+// returns the skew-corrected ms until T0 plus the two derived booleans:
+//   waitingRoomActive — inside the 15-min window AND before T0 (show the
+//                       countdown waiting room);
+//   tooEarly          — more than 15 min before T0 (show come-back-later).
+// Both are false once T0 has passed (msUntilStart <= 0 → the exam is open) or
+// when start_at is missing/unparseable (no take-home schedule → no gate). The
+// non-time gates (takeHome flag, status==='recording', gate, examGateActive)
+// stay at the call site (StudentApp) — this is the boundary math only, so the
+// 15-min/skew decision is unit-tested in isolation (T-F1/T-F2).
+export function waitingRoomGate(
+  startAtIso: string | undefined,
+  clientNowMs: number,
+  skewMs: number,
+  windowMs: number = WAITING_ROOM_WINDOW_MS
+): { msUntilStart: number | null; waitingRoomActive: boolean; tooEarly: boolean } {
+  const msUntilStart = remainingMs(startAtIso, clientNowMs, skewMs);
+  if (msUntilStart === null) return { msUntilStart: null, waitingRoomActive: false, tooEarly: false };
+  return {
+    msUntilStart,
+    waitingRoomActive: msUntilStart > 0 && msUntilStart <= windowMs,
+    tooEarly: msUntilStart > windowMs
+  };
+}
+
+// #135 (A9): coarse milestone copy for the waiting-room aria-live region. The
+// per-second mm:ss counter is aria-hidden (a screen reader must NOT hear it tick
+// every second); this returns the bucketed announcement instead, so the live
+// region only changes — and is only re-announced — when a milestone is crossed
+// (10 / 5 / 1 minute, then "exam has started"). null = no announcement yet
+// (e.g. >10 min out, or no schedule). Pure for unit testing.
+export function waitingRoomMilestone(msUntilStart: number | null): string | null {
+  if (msUntilStart === null) return null;
+  if (msUntilStart <= 0) return "Your exam has started.";
+  const minutes = Math.ceil(msUntilStart / 60_000);
+  if (minutes <= 1) return "Exam starts in 1 minute.";
+  if (minutes <= 5) return "Exam starts in 5 minutes.";
+  if (minutes <= 10) return "Exam starts in 10 minutes.";
+  return null;
+}
+
 // D1 — which end_at does a settings save actually persist? Pure rule (demo
 // parity): once the exam-time endpoint has adjusted the end (end_at_updated_at
 // stamp) and the save keeps the SAME start_at (same exam window), the stored

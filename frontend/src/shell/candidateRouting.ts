@@ -46,6 +46,19 @@ export function routeForPinnedOutcome(
 // A-Z plus the digits 2-9 (0 and 1 are never minted — 0/O, 1/I ambiguity).
 const ACCESS_CODE_PATTERN = /^[A-Z2-9]{6}$/;
 
+// #135 take-home (C-8 / §5a): optional remote context threaded into the candidate
+// copy helpers. When `takeHome` is set, the trailing "ask an invigilator" /
+// "check with your invigilator" fallback is replaced by "call your proctor at
+// {phone}" (the remote candidate has no invigilator in the room). Absent ⇒
+// byte-identical in-venue copy (D3). Pure so the wording is vitest-tested.
+export type CandidateCopyOptions = { takeHome?: boolean; phone?: string };
+
+// The remote "call your proctor" tail, or the in-venue invigilator fallback.
+function proctorFallback(opts: CandidateCopyOptions | undefined, invigilatorText: string): string {
+  if (!opts?.takeHome) return invigilatorText;
+  return `call your proctor at ${opts.phone || "the number provided"}`;
+}
+
 /** Uppercase, strip all whitespace, cap at the 6-char box length. */
 export function normalizeAccessCodeInput(raw: string): string {
   return raw.toUpperCase().replace(/\s+/g, "").slice(0, 6);
@@ -76,21 +89,25 @@ export function landingErrorMessage(status?: number, code?: string): string {
  * the candidate gets a plain wait-and-retry message (with the server's
  * retry_after_seconds when present) instead of the raw `rate_limited` string.
  * A 404 is a wrong/unknown id; anything else is a generic try-again.
+ *
+ * #135 take-home (§5a): with `opts.takeHome`, the "ask/call an invigilator"
+ * tail is replaced by "call your proctor at {phone}". Absent ⇒ in-venue copy.
  */
 export function rosterLookupErrorMessage(
   status?: number,
   code?: string,
-  retryAfterSeconds?: number
+  retryAfterSeconds?: number,
+  opts?: CandidateCopyOptions
 ): string {
   if (status === 429 || code === "rate_limited") {
     const secs = Number(retryAfterSeconds);
     const wait = Number.isFinite(secs) && secs > 0
       ? `Wait ${secs} second${secs === 1 ? "" : "s"} and try again`
       : "Wait a minute and try again";
-    return `Too many lookups from this network. ${wait}, or ask an invigilator for help.`;
+    return `Too many lookups from this network. ${wait}, or ${proctorFallback(opts, "ask an invigilator for help")}.`;
   }
   if (status === 404 || code === "not_on_roster" || code === "roster_not_configured") {
-    return "We could not find that ID on the student list. Check it and try again, or call an invigilator.";
+    return `We could not find that ID on the student list. Check it and try again, or ${proctorFallback(opts, "call an invigilator")}.`;
   }
   return "Could not check that ID. Make sure you are online and try again.";
 }
