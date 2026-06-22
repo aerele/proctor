@@ -35,7 +35,7 @@ export function routeForPinnedOutcome(
     return { kind: "landing", notice: "That test link is not recognized. Enter your test code instead." };
   }
   if (outcome.code === "contest_not_open" || outcome.status === 403) {
-    return { kind: "landing", notice: "That test is not open right now. Enter your test code, or check with your invigilator." };
+    return { kind: "landing", notice: "That test is not open right now. Enter your test code, or check with whoever set up your test." };
   }
   // Anything else (network, 5xx) is transient: the link may be perfectly
   // valid, so hold the candidate on a retry screen.
@@ -75,7 +75,7 @@ export function landingErrorMessage(status?: number, code?: string): string {
     return "Too many attempts from this network. Wait a minute, then try again.";
   }
   if (status === 404 || code === "code_not_found") {
-    return "That code was not recognized. Check it against the code your invigilator gave you and try again.";
+    return "That code was not recognized. Check it against the code you were given and try again.";
   }
   if (status === 400 || code === "invalid_code") {
     return "Enter the full 6-character test code (letters and digits only).";

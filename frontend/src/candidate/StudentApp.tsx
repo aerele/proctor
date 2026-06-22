@@ -513,7 +513,12 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     },
     ownEditor: ownEditorCopy,
     remainingLabel: examRemainingMs !== null ? formatRemaining(examRemainingMs) : null,
-    timeUp: examTimeUp
+    timeUp: examTimeUp,
+    // #135 take-home (A10): route the FullscreenGate's fullscreen-blocked error
+    // to the proctor phone for remote candidates; both shell-chrome call sites
+    // spread shellChromeProps so this covers them in one place.
+    takeHome,
+    proctorPhone
   };
   // #135 take-home (D4b / §5b-4): the persistent "Need help? Call your proctor"
   // strip — rendered with the shell chrome so it shows on BOTH the WaitingRoom

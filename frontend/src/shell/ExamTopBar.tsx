@@ -68,7 +68,7 @@ export function ExamTopBar({ stage, identity, contestName, elapsedSeconds, recor
       {/* Liveness — flag chip, countdown, one ticking element per state. */}
       <div className="flex shrink-0 items-center gap-3 px-3">
         {flagCount > 0 ? (
-          <span title="Proctoring events recorded for review — keep going; your invigilator will ask only if needed" className="rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold">⚑ {flagCount}</span>
+          <span title="Proctoring events recorded for review — keep going; a proctor will ask only if needed" className="rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold">⚑ {flagCount}</span>
         ) : null}
         {recording && remainingLabel !== null ? (
           <span className={`flex items-baseline gap-1.5 ${timeUp ? "text-red-400" : ""}`}>
