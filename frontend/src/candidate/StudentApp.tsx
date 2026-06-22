@@ -7,7 +7,7 @@
 // its props-driven leaf children were extracted (candidate/panels/*, F2).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Clock, Copy, Lock, MonitorUp, RefreshCw, ShieldCheck, Square } from "lucide-react";
-import { endSession, fetchContestExamConfig, pollRoomGate, resumeSession, rosterLookup, sendEvents, sendSessionBeacon, startSession, uploadReviewFile, validateEndSession } from "../api";
+import { endSession, fetchContestExamConfig, pollRoomGate, reportPreflightBlock, resumeSession, rosterLookup, sendEvents, sendSessionBeacon, startSession, uploadReviewFile, validateEndSession } from "../api";
 import type { ApiError } from "../api";
 import { normalizeCameraRecording } from "../cameraRecording";
 import { clearChunkBuffer } from "../chunkBuffer";
@@ -1781,14 +1781,24 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       <Shell padTop={false}>
         <BrowserPreflightGate
           onPass={() => setPreflightPassed(true)}
-          onResult={(verdict: PreflightVerdict, probeResults: ProbeResult[]) =>
+          onResult={(verdict: PreflightVerdict, probeResults: ProbeResult[]) => {
             recordSetupEvent("browser_preflight", {
               passed: verdict.passed,
               blocking_failures: verdict.blockingFailures,
               warnings: verdict.warnings,
               results: probeResults.map((r) => ({ capability: r.capability, ok: r.ok, required: r.required }))
-            })
-          }
+            });
+            // v1.1 triple-review #7: a HARD-BLOCK never creates a session, so the
+            // pre-session event buffer above reaches no backend. Fire a best-effort
+            // session-less report so the "who was blocked, on what" G2 signal lands.
+            if (!verdict.passed) {
+              void reportPreflightBlock(pinnedSlug, {
+                passed: verdict.passed,
+                blockingFailures: verdict.blockingFailures,
+                warnings: verdict.warnings
+              });
+            }
+          }}
           takeHome={takeHome}
           proctorPhone={proctorPhone}
         />

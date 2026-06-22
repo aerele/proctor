@@ -26,10 +26,10 @@ process.env.MAX_UPLOAD_CHUNK_BYTES = "12345678";      // a recognizable cap valu
 const handler = await import("../src/handler.mjs?v11infra");
 const { api, __setClientsForTest } = handler;
 
-function makeReq({ method, path, headers = {}, body, query = {} }) {
+function makeReq({ method, path, headers = {}, body, query = {}, rawBody }) {
   const lowerHeaders = {};
   for (const [k, v] of Object.entries(headers)) lowerHeaders[k.toLowerCase()] = v;
-  return { method, path, headers: lowerHeaders, query, body,
+  return { method, path, headers: lowerHeaders, query, body, rawBody,
     get(name) { return lowerHeaders[String(name).toLowerCase()]; } };
 }
 function makeRes() {
@@ -171,6 +171,36 @@ test("G3 #9: an oversized STRING body (lying/absent Content-Length) is also reje
   const res = await call(makeReq({ method: "POST", path: "/api/events", body: big }));
   assert.equal(res.statusCode, 413);
   assert.equal(res.body.error, "payload_too_large");
+});
+
+test("G3 #9 (triple-review #8): an oversized req.rawBody Buffer is rejected with 413 (functions-framework path)", async () => {
+  // The functions-framework parses JSON to an OBJECT (so req.body is not a string)
+  // and leaves the raw bytes in req.rawBody — with a spoofed-small Content-Length
+  // the numeric + string checks both miss. The rawBody Buffer cap must catch it.
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeCapturingStorage() });
+  const res = await call(makeReq({
+    method: "POST", path: "/api/events",
+    headers: { "content-length": "10" }, // LYING small Content-Length
+    body: { session_id: "s1", events: [] }, // already parsed to an object
+    rawBody: Buffer.alloc(2048, 0x78) // 2048 bytes > 1024 cap
+  }));
+  assert.equal(res.statusCode, 413);
+  assert.equal(res.body.error, "payload_too_large");
+  assert.equal(res.body.max_bytes, 1024);
+});
+
+test("G3 #9 (triple-review #8): a small req.rawBody Buffer passes the gate (no false 413)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeCapturingStorage() });
+  seedSession(firestore, "s-raw-ok");
+  const res = await call(makeReq({
+    method: "POST", path: "/api/events",
+    body: { session_id: "s-raw-ok", events: [{ type: "focus", at: "2026-06-10T00:00:00.000Z" }] },
+    rawBody: Buffer.from('{"session_id":"s-raw-ok","events":[]}', "utf8") // tiny
+  }));
+  assert.notEqual(res.statusCode, 413);
+  assert.equal(res.statusCode, 200);
 });
 
 test("G3 #9: a body UNDER the cap passes the size gate (cap doesn't break normal traffic)", async () => {

@@ -4,7 +4,7 @@
 // per-instance execQueue lanes can't bound a 20-instance fleet, so the global
 // submit rate is enforced here on SHARED state.
 //
-// Design (per TAKEHOME-V1.1-DECISIONS §FOLLOW-UP): Firestore sharded token
+// Design (per internal design notes): Firestore sharded token
 // bucket — NO new infra, scales to zero (no idle cost, no VPC connector). Redis/
 // Memorystore is cleaner at very high concurrency but is always-on + needs a VPC
 // connector, contradicting the pay-nothing-between-tests goal. The scale ceiling
@@ -47,7 +47,15 @@ export function makeJudge0Limiter(ctx) {
   // single-shard config still flows).
   const shardCount = Math.max(1, Math.floor(shards) || 1);
   const shardCapacity = Math.max(1, capacity / shardCount);
-  const shardRefillPerSec = Math.max(0.001, refillPerSec / shardCount);
+  // v1.1 triple-review #3 (defense-in-depth): a non-finite or non-positive
+  // global refill (e.g. NaN from a bad JUDGE0_LIMITER_REFILL_PER_SEC env) would
+  // make the per-shard rate NaN, so refillTokens returns NaN, tryConsumeToken's
+  // `NaN >= cost` is always false, and EVERY submit 429s forever (fails CLOSED —
+  // the #132 storm). Config now parses with positiveNumberOr, but guard here too
+  // so a future caller can never re-introduce the footgun: fall back to a safe
+  // 10/sec global rate when refillPerSec isn't a usable positive number.
+  const safeGlobalRefill = Number.isFinite(refillPerSec) && refillPerSec > 0 ? refillPerSec : 10;
+  const shardRefillPerSec = Math.max(0.001, safeGlobalRefill / shardCount);
 
   // Injectable clock so the transaction's refill math is deterministic in tests.
   let _clock = () => Date.now();
@@ -69,9 +77,19 @@ export function makeJudge0Limiter(ctx) {
           capacity: shardCapacity,
           refillPerSec: shardRefillPerSec
         });
-        // Always persist the anchored timestamp so refill stays correct; persist
-        // the decremented token count only when we actually consumed one.
-        tx.set(ref, { tokens: result.tokens, updated_ms: result.updated_ms }, { merge: true });
+        // v1.1 triple-review #11: only WRITE the shard doc when a token is
+        // actually CONSUMED. A DENIED acquire changed nothing (no token taken),
+        // so persisting it was a pure hot-shard write that, under a 429 storm,
+        // hammered the same shard doc the limiter exists to protect. Skipping the
+        // denial write is also CORRECT for refill: the last ALLOWED write already
+        // persisted {tokens, updated_ms} as the anchor, and refillTokens derives
+        // the elapsed-since math from THAT anchor — so the next allowed acquire
+        // refills from the true last-consumed instant either way. (A denial can
+        // only occur after the bucket was drained by allowed writes, so the
+        // anchor always exists by the time any denial happens.)
+        if (result.allowed) {
+          tx.set(ref, { tokens: result.tokens, updated_ms: result.updated_ms }, { merge: true });
+        }
         return result;
       });
       if (!decision.allowed) {

@@ -2,7 +2,7 @@
 //
 // G2 (v1.1 anti-cheat) — browser / codec PREFLIGHT + anti-spoof HARD block.
 //
-// Audit #10 / decision (TAKEHOME-V1.1-DECISIONS §"#10"): "if we can't establish
+// Audit #10 / decision (internal design notes): "if we can't establish
 // the recording set / can't capture screen + keystrokes + cursor, DO NOT let
 // them proceed. Build a browser matrix. Browsers can be SPOOFED → add capability
 // DETECTION that actually TRIES the capture; if not possible → block with 'use

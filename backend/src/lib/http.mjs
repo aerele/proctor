@@ -86,6 +86,17 @@ export function positiveIntOr(raw, fallback) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+// Like positiveIntOr but KEEPS fractional values (e.g. a 0.5/sec refill rate) —
+// for non-count knobs where a fraction is legitimate. Falls back to `fallback`
+// when the value is missing, non-numeric (NaN), <= 0, or infinite. Guards the
+// Judge0 limiter refill rate: a bare Number(env || '10') yields NaN on a typo
+// (e.g. '10x') or 0 on '', either of which makes the per-shard refill NaN/0 so
+// tokens never refill and EVERY submit 429s (fails CLOSED — the #132 storm).
+export function positiveNumberOr(raw, fallback) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export function setCors(res, origin) {
   res.set("access-control-allow-origin", origin);
   res.set("access-control-allow-methods", "GET,POST,OPTIONS");

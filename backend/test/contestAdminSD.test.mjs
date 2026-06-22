@@ -28,7 +28,7 @@ process.env.ADMIN_PASSWORD = "sd-admin-pass";
 process.env.INVIGILATOR_PASSWORD = "sd-invig-pass";
 
 const handler = await import("../src/handler.mjs?sdadmin");
-const { api, __setClientsForTest, __setAccessCodeClockForTest } = handler;
+const { api, __setClientsForTest, __setAccessCodeClockForTest, __setPreflightReportClockForTest } = handler;
 
 // Inline req/res + fakes (convention: copied per test file, NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -133,14 +133,32 @@ const ADMIN_HEADERS = { "x-admin-password": "sd-admin-pass" };
 // Minimal storage fake: GET /api/admin/sessions lists evidence under each
 // session's storage prefix; these tests assert SCOPING, not evidence, so an
 // empty listing suffices.
-function makeFakeStorage() {
-  return { bucket() { return { async getFiles() { return [[]]; } }; } };
+// Captures every saved object so the preflight-report test can assert what was
+// written (key + ndjson body). getFiles still returns [] for the routes that list.
+function makeFakeStorage(saved = []) {
+  return {
+    _saved: saved,
+    bucket() {
+      return {
+        async getFiles() { return [[]]; },
+        file(key) {
+          return {
+            async save(body, opts) { saved.push({ key, body, opts }); },
+            async getSignedUrl() { return [`https://signed.example/${key}`]; }
+          };
+        }
+      };
+    }
+  };
 }
 
 function freshDb() {
   const firestore = makeFakeFirestore();
-  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
   __setAccessCodeClockForTest(null);
+  if (__setPreflightReportClockForTest) __setPreflightReportClockForTest(null);
+  freshDb._storage = storage;
   return firestore;
 }
 
@@ -411,6 +429,80 @@ test("access-code rate limit: successful resolves are REFUNDED — a NAT'd lab h
   __setAccessCodeClockForTest(null);
 });
 
+// ---- POST /api/preflight-report (PUBLIC, session-less, rate limited) ------------
+// v1.1 triple-review #7: the G2 preflight-BLOCK forensic sink.
+
+function preflightReq(body, ip = "203.0.113.50") {
+  return makeReq({
+    method: "POST", path: "/api/preflight-report",
+    headers: { "x-forwarded-for": ip }, body
+  });
+}
+
+test("preflight-report: a BLOCK on an OPEN contest persists a sanitized JSONL record", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Preflight Block" });
+  await openContest(contest.slug);
+  const res = await call(preflightReq({
+    contest: contest.slug,
+    verdict: { passed: false, blockingFailures: ["screen_capture"], warnings: [], extra_evil: { drop: "me" } }
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.recorded, true);
+  // It wrote ONE object under the contest's preflight-blocks prefix.
+  const saved = freshDb._storage._saved.filter((o) => o.key.includes("/preflight-blocks/"));
+  assert.equal(saved.length, 1, "exactly one preflight-block object must be written");
+  assert.ok(saved[0].key.startsWith(`contests/${contest.slug}/preflight-blocks/`), saved[0].key);
+  const record = JSON.parse(saved[0].body.trim());
+  assert.equal(record.type, "browser_preflight_block");
+  assert.equal(record.contest_slug, contest.slug);
+  assert.equal(record.verdict.passed, false);
+  assert.deepEqual(record.verdict.blockingFailures, ["screen_capture"]);
+  assert.ok(record.reported_at);
+});
+
+test("preflight-report: a PASSING verdict is NOT persisted (only blocks have forensic value)", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Preflight Pass" });
+  await openContest(contest.slug);
+  const res = await call(preflightReq({ contest: contest.slug, verdict: { passed: true } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.recorded, false);
+  assert.equal(freshDb._storage._saved.filter((o) => o.key.includes("/preflight-blocks/")).length, 0);
+});
+
+test("preflight-report: an unknown / not-open contest is rejected (never writes)", async () => {
+  freshDb();
+  const draft = await createContest({ name: "Preflight Draft" }); // not opened
+  const unknown = await call(preflightReq({ contest: "does-not-exist", verdict: { passed: false } }));
+  assert.ok(unknown.statusCode === 400 || unknown.statusCode === 404, `got ${unknown.statusCode}`);
+  const notOpen = await call(preflightReq({ contest: draft.slug, verdict: { passed: false } }));
+  assert.ok(notOpen.statusCode === 403, `a not-open contest must 403; got ${notOpen.statusCode}`);
+  // Missing contest → 400.
+  assert.equal((await call(preflightReq({ verdict: { passed: false } }))).statusCode, 400);
+  assert.equal(freshDb._storage._saved.filter((o) => o.key.includes("/preflight-blocks/")).length, 0);
+});
+
+test("preflight-report rate limit: per-IP cap (30/min) inside the window, 429 + retry hint; window resets", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Preflight Rate" });
+  await openContest(contest.slug);
+  let nowMs = 5_000_000;
+  __setPreflightReportClockForTest(() => nowMs);
+  for (let i = 0; i < 30; i++) {
+    assert.equal((await call(preflightReq({ contest: contest.slug, verdict: { passed: false } }, "198.51.100.50"))).statusCode, 200);
+  }
+  const capped = await call(preflightReq({ contest: contest.slug, verdict: { passed: false } }, "198.51.100.50"));
+  assert.equal(capped.statusCode, 429);
+  assert.ok(capped.body.retry_after_seconds >= 1);
+  // A different IP is unaffected.
+  assert.equal((await call(preflightReq({ contest: contest.slug, verdict: { passed: false } }, "198.51.100.51"))).statusCode, 200);
+  // Window expiry resets the capped IP.
+  nowMs += 61_000;
+  assert.equal((await call(preflightReq({ contest: contest.slug, verdict: { passed: false } }, "198.51.100.50"))).statusCode, 200);
+  __setPreflightReportClockForTest(null);
+});
+
 // ---- GET /api/admin/sessions?contest_slug= (review search scoping, vision §5 A1) --
 
 function seedSession(firestore, { id, contestSlug, createdAt }) {
@@ -495,6 +587,34 @@ test("exam-config?contest= serves the contest's OWN config (label, rooms, gate, 
   // candidate app echoes it back at start instead of hard-coding it.
   assert.ok(typeof res.body.consent_version === "string" && res.body.consent_version.length > 0,
     `expected a non-empty consent_version, got ${JSON.stringify(res.body.consent_version)}`);
+});
+
+// v1.1 triple-review #5 (privacy-truthfulness): exam-config MUST serve the
+// per-contest retention window so the candidate disclosure shows the REAL number
+// of days, not the hard-coded 4-day default. A 7-day contest must surface 7.
+test("exam-config surfaces the per-contest retention_days (7-day contest → retention_days:7)", async () => {
+  freshDb();
+  const contest = await createContest({
+    name: "Seven Day",
+    identity_label: "Roll Number",
+    evidence_retention_days: 7
+  });
+  await openContest(contest.slug);
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.retention_days, 7,
+    `a 7-day contest must surface retention_days:7, got ${JSON.stringify(res.body.retention_days)}`);
+});
+
+// A contest with NO explicit retention window falls back to the 4-day default
+// (so the disclosure is still truthful for the common case).
+test("exam-config retention_days falls back to the 4-day default when unset", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Default Retention", identity_label: "Roll Number" });
+  await openContest(contest.slug);
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.retention_days, 4);
 });
 
 // ---- v1.1 G3 (#5): the hot-path contest-doc read cache MUST be transparent ----

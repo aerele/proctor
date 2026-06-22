@@ -216,6 +216,12 @@ export type UploadUrlResponse = {
   upload_url: string;
   storage_key: string;
   expires_in: number;
+  /** v1.1 G3 (#7): the per-chunk size cap the backend bound into the signed URL
+   *  via the x-goog-content-length-range extension header. GCS folds that header
+   *  into X-Goog-SignedHeaders, so the client PUT MUST echo it back verbatim
+   *  ('0,<max_bytes>') or GCS returns 403 SignatureDoesNotMatch. Absent/0 ⇒ no
+   *  cap was bound (legacy backend) and the PUT must NOT send the header. */
+  max_bytes?: number;
 };
 
 // Tier-1 buffer: "ending_draining" is the blocking END-OF-TEST WAIT GATE — End

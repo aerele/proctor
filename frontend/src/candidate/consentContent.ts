@@ -14,7 +14,7 @@
 //
 // The copy is KEYED BY consent_version. The structured consent sent on session
 // start records which version the candidate agreed to (the design contract,
-// V11-G1-PRIVACY-DESIGN §1.2). When the wording changes MATERIALLY, add a new
+// per internal design notes). When the wording changes MATERIALLY, add a new
 // version entry below and bump CONSENT_VERSION — the new text then applies to
 // every NEW session, while already-consented sessions keep the version they
 // saw (resume never re-prompts).
@@ -27,8 +27,8 @@
 //                    number shown on your screen"; in-venue, "ask your
 //                    invigilator". Empty-safe.
 //
-// Content draft source: _nightrun/V11-G1-TC-PRIVACY-DRAFTS-2026-06-22.md.
-// PENDING Karthi's final okay — placeholders in [SQUARE BRACKETS] are factual
+// Content draft source: internal design notes (privacy/T&C drafts).
+// PENDING final okay — placeholders in [SQUARE BRACKETS] are factual
 // items he must fill (organisation legal name, jurisdiction, grievance contact,
 // dates). They render verbatim so a missed placeholder is impossible to miss.
 
@@ -118,7 +118,7 @@ You confirm that you are the person identified by the roll number / identifier y
 
 ## 7. Your data
 
-How your data is collected, used, kept, and deleted is described in the **Privacy Policy**, which forms part of these Terms. In short: proctoring data (recordings, audio, camera, keystroke and activity logs) is **deleted after a short retention window of {N} days** after the selection decision for this contest. Only your **roll number / identifier, your scores, and the evaluation result** are kept after that.
+How your data is collected, used, kept, and deleted is described in the **Privacy Policy**, which forms part of these Terms. In short: proctoring data (recordings, audio, camera, keystroke and activity logs) is **deleted after a short retention window of {N} days** once this contest concludes. Only your **roll number / identifier, your scores, and the evaluation result** are kept after that.
 
 ## 8. Availability and fairness
 
@@ -175,7 +175,7 @@ We collect proctoring data **only with your consent**, which you give by checkin
 
 ## 4. How long we keep it — and what gets deleted
 
-**Proctoring data is short-lived.** Recordings, camera video, microphone audio, screen segments, keystroke and activity events, and your other personal proctoring data are **automatically erased {N} days** after the Organisation marks the selection decision for your contest. The exact window is configured per contest.
+**Proctoring data is short-lived.** Recordings, camera video, microphone audio, screen segments, keystroke and activity events, and your other personal proctoring data are **automatically erased {N} days** after this contest concludes. The exact window — and when that {N}-day clock starts — is configured per contest. Only your roll number / identifier, your scores, and the evaluation result are kept after that.
 
 **After the retention window, only this is kept:**
 

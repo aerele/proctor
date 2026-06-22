@@ -596,17 +596,29 @@ export async function getUploadUrl(params: {
   });
 }
 
-export async function uploadBlob(uploadUrl: string, blob: Blob): Promise<void> {
+export async function uploadBlob(uploadUrl: string, blob: Blob, maxBytes?: number): Promise<void> {
   if (demoMode || uploadUrl.startsWith("demo://")) {
     await wait(80);
     return;
   }
 
+  // v1.1 G3 (#7): when the backend bound a per-chunk size cap into the signed
+  // WRITE URL (maxBytes>0), it signed the x-goog-content-length-range extension
+  // header, which GCS folds into X-Goog-SignedHeaders. The signature ONLY matches
+  // if this PUT sends that EXACT header — omit it and every chunk PUT 403s
+  // (SignatureDoesNotMatch) and no recording is ever stored. The value must be
+  // the same string the backend signed: `0,<max_bytes>`. When no cap was bound
+  // (legacy backend, max_bytes absent/0) we must NOT send the header.
+  const headers: Record<string, string> = {
+    "content-type": blob.type || "application/octet-stream"
+  };
+  if (typeof maxBytes === "number" && maxBytes > 0) {
+    headers["x-goog-content-length-range"] = `0,${maxBytes}`;
+  }
+
   const response = await fetch(uploadUrl, {
     method: "PUT",
-    headers: {
-      "content-type": blob.type || "application/octet-stream"
-    },
+    headers,
     body: blob
   });
 
@@ -4047,10 +4059,36 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
       camera_recording: demoCameraRecording(),
       start_at: contest.start_at,
       end_at: contest.end_at,
-      server_now: demoNowIso()
+      server_now: demoNowIso(),
+      // v1.1 triple-review #5: mirror the backend's per-contest retention window
+      // so the demo consent disclosure shows the real number, not the 4-default.
+      retention_days:
+        typeof contest.evidence_retention_days === "number" && contest.evidence_retention_days > 0
+          ? contest.evidence_retention_days
+          : 4
     };
   }
   return request<ContestExamConfig>(`/api/exam-config?contest=${encodeURIComponent(slug)}`, { method: "GET" });
+}
+
+// v1.1 triple-review #7 (G2 anti-cheat forensics): report a preflight HARD-BLOCK
+// to the backend. A blocked candidate never creates a session, so this is the
+// ONLY channel that gets the "who was blocked, on what capability" signal to the
+// server. BEST-EFFORT: a failure here must NEVER affect the candidate's UI (they
+// are already blocked) — all errors are swallowed. No-op in demo mode.
+export async function reportPreflightBlock(
+  contestSlug: string,
+  verdict: { passed: boolean; blockingFailures?: string[]; warnings?: string[] }
+): Promise<void> {
+  if (demoMode || !contestSlug) return;
+  try {
+    await request<{ ok: boolean }>("/api/preflight-report", {
+      method: "POST",
+      body: JSON.stringify({ contest: contestSlug, verdict })
+    });
+  } catch {
+    // swallow — the block is already enforced client-side; telemetry is best-effort.
+  }
 }
 
 // ---- S-D / FIX-B2 (#58): templates — the create-from-template picker AND the

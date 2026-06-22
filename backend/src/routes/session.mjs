@@ -100,6 +100,27 @@ export function makeSessionRoutes(ctx) {
     consentVersion = ""
   } = ctx;
 
+// v1.1 triple-review #6 (G1 audit trail): sanitize the frontend's structured
+// consent record into a server-trusted shape persisted on the session doc. PURE
+// + allowlisted: only the known fields, coerced to safe primitives — a candidate
+// can't smuggle arbitrary keys onto the session via the consent object. Returns
+// null when no structured consent was supplied (transitional/legacy client).
+function sanitizeConsentRecord(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const acceptedAt = typeof raw.accepted_at === "string" ? raw.accepted_at.slice(0, 64) : "";
+  const context = typeof raw.context === "string" ? raw.context.slice(0, 64) : "";
+  const version = typeof raw.consent_version === "string" ? raw.consent_version.slice(0, 64) : "";
+  return {
+    accepted: raw.accepted === true,
+    right_to_consent: raw.right_to_consent === true,
+    viewed_terms: raw.viewed_terms === true,
+    viewed_privacy: raw.viewed_privacy === true,
+    consent_version: version,
+    accepted_at: acceptedAt,
+    context
+  };
+}
+
 async function startSession(req) {
   const body = parseBody(req);
   // Every start now REQUIRES a resolvable person contest (the candidate app
@@ -207,6 +228,23 @@ async function startPersonSession(req, body, contest) {
   if (body.consent_accepted !== true) {
     return badRequest("Consent is required");
   }
+  // v1.1 triple-review #6 (G1 audit trail): when the candidate app sends the
+  // structured consent record (it always does now), SERVER-ENFORCE the full
+  // gate — the candidate must have VIEWED both pages and confirmed right-to-
+  // consent, not merely ticked the box. A transitional/legacy client that sends
+  // only the flat consent_accepted is still accepted (no structured record to
+  // enforce). The sanitized record is persisted below for the audit trail.
+  const consentRecord = sanitizeConsentRecord(body.consent);
+  if (consentRecord) {
+    if (
+      consentRecord.accepted !== true ||
+      consentRecord.right_to_consent !== true ||
+      consentRecord.viewed_terms !== true ||
+      consentRecord.viewed_privacy !== true
+    ) {
+      return badRequest("Consent is incomplete: you must view the Terms and Privacy pages and confirm your right to consent");
+    }
+  }
   validateContestWindow(contest);
 
   const meta = await getContestRosterMeta(contest);
@@ -310,6 +348,12 @@ async function startPersonSession(req, body, contest) {
     consent_accepted: true,
     // v1.1 G1: the consent-text version in force when this candidate accepted.
     consent_version: consentVersion,
+    // v1.1 triple-review #6 (G1 audit trail): persist the SANITIZED structured
+    // consent record (right_to_consent / viewed_terms / viewed_privacy /
+    // accepted_at / context / candidate-reported version) — the auditable proof
+    // of WHAT the candidate agreed to and that they viewed both pages. Absent on
+    // a transitional client that sent only the flat flag.
+    ...(consentRecord ? { consent: consentRecord } : {}),
     status,
     blocked_by_session_id: blockedBy,
     created_at: now,
