@@ -222,9 +222,16 @@ test("evaluatePurgeGate: already-tombstoned contest → no-op (idempotent re-pur
 
 // ---- selectExpiredEvidence (retention sweep selection, clock seam) ---------
 
-function contestAt(slug, { selectionDoneAt = null, retentionDays = 4, evidencePurgedAt = null } = {}) {
+// v1.1 triple-review #2 (KPR data-loss): every fixture now carries a PAST
+// end_at by default — exactly like a real contest — so the "never swept" cases
+// genuinely prove the protection holds WITH an end_at present (the old fixtures
+// omitted end_at, masking the regression where a bare end_at triggered a sweep).
+// No retention_anchor is set, so these exercise the safe DEFAULT (selection_done)
+// semantics: an absent anchor must NEVER derive from end_at.
+function contestAt(slug, { selectionDoneAt = null, retentionDays = 4, evidencePurgedAt = null, endAt = "2026-01-01T00:00:00.000Z" } = {}) {
   return {
     slug,
+    end_at: endAt,
     selection_done_at: selectionDoneAt,
     evidence_retention_days: retentionDays,
     evidence_purged_at: evidencePurgedAt
@@ -261,9 +268,11 @@ test("selectExpiredEvidence: exactly at the threshold is NOT yet due (strict <)"
   assert.equal(due.length, 0);
 });
 
-test("selectExpiredEvidence: no selection_done_at → never swept", () => {
+test("selectExpiredEvidence: no selection_done_at → never swept (EVEN with a past end_at)", () => {
+  // The fixture carries a past end_at (contestAt default) and no retention_anchor,
+  // so this is the exact KPR/historical shape: it must STILL be never-swept.
   const due = selectExpiredEvidence(
-    [contestAt("kec-r4", { selectionDoneAt: null, retentionDays: 4 })],
+    [contestAt("kec-r4", { selectionDoneAt: null, retentionDays: 4, endAt: "2025-01-01T00:00:00.000Z" })],
     NOW
   );
   assert.equal(due.length, 0);

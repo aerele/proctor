@@ -6,7 +6,7 @@
 // bypass-proof way to detect DevTools from a web page. Every technique here is a
 // HEURISTIC and every one is EVADABLE (undocked/detached DevTools, remote
 // debugging, a patched console, disabling the timing check, etc.). The decision
-// (TAKEHOME-V1.1-DECISIONS §P1) acknowledges this: "Honest answer: no 100%
+// (internal design notes) acknowledges this: "Honest answer: no 100%
 // reliable API; heuristics exist … all evadable. Implement best-effort + log."
 //
 // So the contract is: on a POSITIVE signal we LOG it (telemetry) and WARN the

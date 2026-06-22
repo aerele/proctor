@@ -234,3 +234,49 @@ test("contest-data-size: an unknown or missing contest is a 400 (never lists the
   const unknown = await call(adminGet({ contest: "does-not-exist" }));
   assert.equal(unknown.statusCode, 400, JSON.stringify(unknown.body));
 });
+
+// ---- 6: v1.1 triple-review #10 — MANUAL pagination (no whole-subtree OOM) ----
+// A PAGING GCS fake that hands back the listing one page at a time via nextQuery
+// (mirroring @google-cloud/storage's getFiles(autoPaginate:false) contract). The
+// route must follow nextQuery and aggregate EVERY page, never relying on the
+// library auto-paginating the entire subtree into one in-memory array.
+function makePagingStorage(objects /* Map<name,size> */, pageSize = 2) {
+  const all = [...objects.entries()].map(([name, size]) => ({ name, metadata: { size } }));
+  let pageRequests = 0;
+  const storage = {
+    get _pageRequests() { return pageRequests; },
+    bucket() {
+      return {
+        async getFiles(query = {}) {
+          pageRequests += 1;
+          const prefix = query.prefix || "";
+          const matching = all.filter((f) => f.name.startsWith(prefix));
+          const start = Number(query.pageToken || 0);
+          const slice = matching.slice(start, start + pageSize);
+          const nextStart = start + pageSize;
+          const nextQuery = nextStart < matching.length ? { ...query, pageToken: nextStart } : null;
+          return [slice, nextQuery];
+        },
+        file() { throw new Error("contest-data-size must only LIST, never touch individual files"); }
+      };
+    }
+  };
+  return storage;
+}
+
+test("contest-data-size: aggregates across MULTIPLE pages (manual pagination, no OOM auto-paginate)", async () => {
+  const firestore = makeFakeFirestore();
+  seedContest(firestore, SLUG);
+  const storage = makePagingStorage(seedObjects(), 2); // tiny pages → forces multi-page
+  __setClientsForTest({ firestore, storage });
+  const res = await call(adminGet({ contest: SLUG }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  // Same totals as the single-page test — proving every page was aggregated.
+  assert.equal(res.body.evidence_objects, 8);
+  assert.equal(res.body.evidence_bytes, 2500 + 400 + 50 + 70 + 11 + 5);
+  assert.deepEqual(res.body.by_kind, {
+    screen: 2500, camera: 400, events: 50, editorEvents: 70, review: 11, manifests: 5
+  });
+  // It actually PAGED (more than one getFiles call) — i.e. it followed nextQuery.
+  assert.ok(storage._pageRequests > 1, `expected multiple page requests, got ${storage._pageRequests}`);
+});

@@ -245,6 +245,43 @@ test("judge0Limiter: a refilled token lets the next submit through", async () =>
   assert.equal(await lim.gate("s1", submit), "ok");
 });
 
+test("judge0Limiter: a DENIED acquire does NOT write the shard doc (no hot-shard hammering)", async () => {
+  // v1.1 triple-review #11: under a 429 storm the limiter must not keep writing
+  // the same shard doc on every rejected acquire. Instrument the fake's tx.set.
+  let now = 0;
+  const fs = makeFakeFirestore();
+  let setCalls = 0;
+  const origRunTx = fs.runTransaction.bind(fs);
+  fs.runTransaction = async (fn) => origRunTx(async (tx) => {
+    const wrapped = { get: tx.get, set: (r, v, o) => { setCalls += 1; return tx.set(r, v, o); } };
+    return fn(wrapped);
+  });
+  const lim = makeLimiter(fs);
+  lim.__setClockForTest(() => now);
+  // Drain the 4-token bucket: 4 ALLOWED acquires → 4 writes.
+  for (let i = 0; i < 4; i++) await lim.gate("s1", async () => "ok");
+  assert.equal(setCalls, 4, "each allowed acquire writes once");
+  const writesAfterDrain = setCalls;
+  // Now hammer 20 DENIED acquires — none must write.
+  for (let i = 0; i < 20; i++) {
+    await assert.rejects(() => lim.gate("s1", async () => "ok"), (e) => e.statusCode === 429);
+  }
+  assert.equal(setCalls, writesAfterDrain, "a denied acquire must NOT write the shard doc");
+});
+
+test("judge0Limiter: skipping the denial write does NOT break refill correctness", async () => {
+  // After a storm of denials, a real refill over time must STILL admit a submit —
+  // proving the last-allowed-write anchor is sufficient (no lost updated_ms).
+  let now = 0;
+  const fs = makeFakeFirestore();
+  const lim = makeLimiter(fs); // capacity 4, refill 1/s, 1 shard
+  lim.__setClockForTest(() => now);
+  for (let i = 0; i < 4; i++) await lim.gate("s1", async () => "ok"); // drain
+  for (let i = 0; i < 10; i++) await assert.rejects(() => lim.gate("s1", async () => "ok")); // deny storm
+  now += 1000; // 1s @ 1/s → +1 token, anchored off the last ALLOWED write
+  assert.equal(await lim.gate("s1", async () => "ok"), "ok", "refill must work despite skipped denial writes");
+});
+
 test("judge0Limiter: disabled → pure pass-through, no Firestore touched", async () => {
   const fs = makeFakeFirestore();
   const lim = makeLimiter(fs, { enabled: false });
@@ -266,6 +303,46 @@ test("judge0Limiter: FAILS OPEN on a Firestore error (never walls off a live exa
   assert.equal(ran, 1);
 });
 
+// ---- v1.1 triple-review #3: refill-rate NaN footgun -------------------------
+
+test("config: a non-numeric JUDGE0_LIMITER_REFILL_PER_SEC falls back to 10, NOT NaN", async () => {
+  const { loadConfig } = await import("../src/config.mjs");
+  const prev = process.env.JUDGE0_LIMITER_REFILL_PER_SEC;
+  try {
+    process.env.JUDGE0_LIMITER_REFILL_PER_SEC = "10x"; // a typo → Number()=NaN
+    const cfg = loadConfig();
+    assert.equal(cfg.JUDGE0_LIMITER_REFILL_PER_SEC, 10, "a bad env must fall back to the safe default, never NaN");
+    assert.ok(Number.isFinite(cfg.JUDGE0_LIMITER_REFILL_PER_SEC));
+    // Empty string also must not yield 0 (which would never refill either).
+    process.env.JUDGE0_LIMITER_REFILL_PER_SEC = "";
+    assert.equal(loadConfig().JUDGE0_LIMITER_REFILL_PER_SEC, 10);
+    // A legitimate fraction is PRESERVED (not floored to 0/1).
+    process.env.JUDGE0_LIMITER_REFILL_PER_SEC = "0.5";
+    assert.equal(loadConfig().JUDGE0_LIMITER_REFILL_PER_SEC, 0.5);
+  } finally {
+    if (prev === undefined) delete process.env.JUDGE0_LIMITER_REFILL_PER_SEC;
+    else process.env.JUDGE0_LIMITER_REFILL_PER_SEC = prev;
+  }
+});
+
+test("judge0Limiter: a NaN refillPerSec does NOT fail closed (defense-in-depth)", async () => {
+  // Belt-and-braces: even if a NaN somehow reaches the limiter, it must STILL
+  // admit the burst and not 429 every submit (NaN>=cost is false → fail-closed,
+  // the #132 storm). The internal guard falls back to a safe global rate.
+  let now = 0;
+  const fs = makeFakeFirestore();
+  const lim = makeLimiter(fs, { refillPerSec: NaN });
+  lim.__setClockForTest(() => now);
+  let ran = 0;
+  // capacity 4 on 1 shard → the burst of 4 must all run (tokens start FULL).
+  for (let i = 0; i < 4; i++) assert.equal(await lim.gate("s1", async () => { ran++; return "ok"; }), "ok");
+  assert.equal(ran, 4, "a NaN refill must not make the FIRST submit 429 — the bucket starts full");
+  // And a refill must actually happen over time (not stuck at NaN forever).
+  await assert.rejects(() => lim.gate("s1", async () => "ok")); // 5th drained
+  now += 10_000; // plenty of time at the fallback rate
+  assert.equal(await lim.gate("s1", async () => "ok"), "ok", "the fallback rate must refill tokens, not stay NaN");
+});
+
 // ---- dataLifecycle: retentionAnchorMs auto exam_end anchor + CONSENT_VERSION
 
 test("CONSENT_VERSION is exported as a non-empty version string", () => {
@@ -282,8 +359,9 @@ test("retentionAnchorMs: retention_started_at wins over everything (pinned ancho
   assert.equal(ms, Date.parse("2026-06-10T00:00:00.000Z"));
 });
 
-test("retentionAnchorMs: exam_end anchor DERIVES from end_at when nothing is stamped", () => {
-  const ms = retentionAnchorMs({ end_at: "2026-06-05T00:00:00.000Z" }); // default anchor = exam_end
+test("retentionAnchorMs: exam_end anchor DERIVES from end_at ONLY when explicitly opted in", () => {
+  // OPT-IN: retention_anchor must be explicitly "exam_end" to derive from end_at.
+  const ms = retentionAnchorMs({ retention_anchor: "exam_end", end_at: "2026-06-05T00:00:00.000Z" });
   assert.equal(ms, Date.parse("2026-06-05T00:00:00.000Z"));
 });
 
@@ -303,11 +381,28 @@ test("retentionAnchorMs: a contest with NO anchor fields resolves to NaN (never 
   assert.ok(Number.isNaN(retentionAnchorMs({ retention_anchor: "exam_end" })));
 });
 
-test("selectExpiredEvidence: an exam_end-anchored contest is now self-starting (no manual click needed)", () => {
+// v1.1 triple-review #2 (KPR / legacy data-loss REGRESSION): an ABSENT
+// retention_anchor must mean the OLD selection_done semantics — a past end_at
+// alone must NOT derive an anchor. The original v1.1 code defaulted the anchor
+// to "exam_end", which would have swept every historical/KPR contest (they all
+// have an end_at). This pins the fix: end_at WITHOUT an explicit exam_end opt-in
+// resolves to NaN → never swept.
+test("retentionAnchorMs: REGRESSION — past end_at + NO anchor resolves to NaN (KPR not swept)", () => {
+  // A historical/KPR contest: it HAS a past end_at (every real contest does) but
+  // no retention_anchor and no manual stamp. Must be never-swept.
+  assert.ok(Number.isNaN(retentionAnchorMs({ end_at: "2020-01-01T00:00:00.000Z" })));
+  // selection_done_at still works (the manual anchor is honored by default).
+  assert.equal(
+    retentionAnchorMs({ end_at: "2020-01-01T00:00:00.000Z", selection_done_at: "2026-06-02T00:00:00.000Z" }),
+    Date.parse("2026-06-02T00:00:00.000Z")
+  );
+});
+
+test("selectExpiredEvidence: an EXPLICITLY exam_end-anchored contest is self-starting (no manual click needed)", () => {
   const NOW = "2026-06-20T00:00:00.000Z";
-  // end_at 06-10, default 4-day retention → expires 06-14 < NOW, no selection_done_at.
+  // OPT-IN exam_end: end_at 06-10, 4-day retention → expires 06-14 < NOW, no stamp.
   const due = selectExpiredEvidence(
-    [{ slug: "auto", end_at: "2026-06-10T00:00:00.000Z", evidence_retention_days: 4, evidence_purged_at: null }],
+    [{ slug: "auto", retention_anchor: "exam_end", end_at: "2026-06-10T00:00:00.000Z", evidence_retention_days: 4, evidence_purged_at: null }],
     NOW
   );
   assert.deepEqual(due.map((c) => c.slug), ["auto"]);
@@ -317,6 +412,23 @@ test("selectExpiredEvidence: an exam_end-anchored contest is now self-starting (
     NOW
   );
   assert.equal(held.length, 0);
+});
+
+// v1.1 triple-review #2: the data-loss regression test at the SWEEP level. A
+// contest with a PAST end_at and NO anchor — the exact shape of a KPR/historical
+// contest — must NOT be selected by selectExpiredEvidence.
+test("selectExpiredEvidence: REGRESSION — past end_at + NO anchor is NOT swept (KPR preserve)", () => {
+  const NOW = "2026-06-20T00:00:00.000Z";
+  const due = selectExpiredEvidence(
+    [
+      // KPR/historical: long-past end_at, no anchor, no stamp, never purged.
+      { slug: "kpr-live", end_at: "2026-01-01T00:00:00.000Z", evidence_retention_days: 4, evidence_purged_at: null },
+      // A second one with a default (4) retention and no fields beyond end_at.
+      { slug: "historical", end_at: "2025-06-01T00:00:00.000Z", evidence_purged_at: null }
+    ],
+    NOW
+  );
+  assert.deepEqual(due.map((c) => c.slug), [], "a past end_at without an explicit exam_end anchor must NEVER be swept");
 });
 
 test("DEFAULT_RETENTION_DAYS is 4 (F9 Q2)", () => {

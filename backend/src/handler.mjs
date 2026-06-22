@@ -769,6 +769,10 @@ const publicRoutes = makePublicRoutes({
   rateLimited,
   enforcementConfigFor,
   cameraRecordingConfigFor,
+  // v1.1 triple-review #7: the preflight-block report endpoint writes a contest-
+  // scoped JSONL record (session-less) and sanitizes the verdict payload.
+  putJsonl,
+  sanitizeObject,
   settingsCollection: SETTINGS_COLLECTION,
   rosterMetaId: ROSTER_META_ID,
   rosterCollection: ROSTER_COLLECTION,
@@ -778,10 +782,14 @@ const publicRoutes = makePublicRoutes({
   rosterMappableFields: ROSTER_MAPPABLE_FIELDS,
   // v1.1 G1: serve the authoritative consent-text version in exam-config so the
   // candidate app never hard-codes it (by value).
-  consentVersion: CONSENT_VERSION
+  consentVersion: CONSENT_VERSION,
+  // v1.1 triple-review #5 (privacy-truthfulness): serve the per-contest
+  // retention window so the candidate disclosure shows the REAL number of days
+  // (not the hard-coded 4-day default) for 7/14/30-day contests.
+  retentionDaysOf
 });
 const {
-  publicExamConfig, publicAccessCode, rosterLookup, adminGetRoster, adminSaveRoster,
+  publicExamConfig, publicAccessCode, publicPreflightReport, rosterLookup, adminGetRoster, adminSaveRoster,
   getRosterMeta, findRosterEntry
 } = publicRoutes;
 // Re-export the rate-limiter test seams so handler.mjs?<buster> imports still
@@ -789,7 +797,9 @@ const {
 // constraint #3 preserves the contract).
 export const {
   __setAccessCodeClockForTest, __setRosterLookupClockForTest,
-  __resetRosterLookupRateLimitForTest, checkRosterLookupRateLimit
+  __resetRosterLookupRateLimitForTest, checkRosterLookupRateLimit,
+  // v1.1 triple-review #7: preflight-report rate-limit clock seam.
+  __setPreflightReportClockForTest
 } = publicRoutes;
 
 // Factory seam (decomp B13): the candidate SESSION-LIFECYCLE routes (start /
@@ -1337,6 +1347,15 @@ export const api = async (req, res) => {
     if (typeof req.body === "string" && Buffer.byteLength(req.body, "utf8") > MAX_REQUEST_BODY_BYTES) {
       return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
     }
+    // v1.1 triple-review #8: the functions-framework parses a JSON body into an
+    // OBJECT before api() runs, leaving the raw bytes in req.rawBody — so the
+    // string check above NEVER fires for normal JSON, and a chunked or
+    // spoofed-small Content-Length slips past the numeric check. Cap on the
+    // actual buffered byte length too (this is the real post-buffer guard; a true
+    // pre-parse cap must live at the framework/proxy layer, see docs/DEPLOY.md).
+    if (Buffer.isBuffer(req.rawBody) && req.rawBody.length > MAX_REQUEST_BODY_BYTES) {
+      return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+    }
 
     const path = req.path || new URL(req.url, "http://localhost").pathname;
     if (req.method === "POST" && path === "/api/session/start") return send(res, 200, await startSession(req));
@@ -1348,6 +1367,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/editor-events") return send(res, 200, await ingestEditorEvents(req));
     if (req.method === "GET" && path === "/api/exam-config") return send(res, 200, await publicExamConfig(req));
     if (req.method === "POST" && path === "/api/access-code") return send(res, 200, await publicAccessCode(req));
+    // v1.1 triple-review #7: session-less preflight-block report sink.
+    if (req.method === "POST" && path === "/api/preflight-report") return send(res, 200, await publicPreflightReport(req));
     if (req.method === "POST" && path === "/api/roster/lookup") return send(res, 200, await rosterLookup(req));
     if (req.method === "GET" && path === "/api/admin/roster") return send(res, 200, await adminGetRoster(req));
     if (req.method === "POST" && path === "/api/admin/roster") return send(res, 200, await adminSaveRoster(req));
@@ -1979,21 +2000,33 @@ async function adminContestDataSize(req) {
   // SCOPE: the one contest's evidence subtree ONLY. exports/ lives under a
   // sibling top-level prefix, so this listing can never include export zips.
   const prefix = `contests/${contest.slug}/`;
-  const [files] = await bucket().getFiles({ prefix });
 
   const byKind = {};
   let totalBytes = 0;
   let totalObjects = 0;
-  for (const file of files || []) {
+  const tally = (file) => {
     const name = file?.name || "";
     // Belt-and-braces: the listing is already prefix-scoped, but never count an
     // object that doesn't actually sit under THIS contest's prefix.
-    if (!name.startsWith(prefix)) continue;
+    if (!name.startsWith(prefix)) return;
     const size = Number(file?.metadata?.size) || 0;
     totalBytes += size;
     totalObjects += 1;
     const kind = evidenceKindOf(name, prefix);
     byKind[kind] = (byKind[kind] || 0) + size;
+  };
+
+  // v1.1 triple-review #10: page MANUALLY (autoPaginate:false) and aggregate each
+  // page in place, so the biggest contests never auto-paginate the whole subtree
+  // into one in-memory array (a self-inflicted OOM/latency risk). maxResults caps
+  // each page; the loop follows getFiles' nextQuery until the listing is drained.
+  let query = { prefix, autoPaginate: false, maxResults: 1000 };
+  // Hard ceiling on page iterations as a runaway guard (1000 pages × 1000 = 1M
+  // objects — far beyond any real contest; we'd stop tallying rather than spin).
+  for (let page = 0; page < 1000 && query; page++) {
+    const [files, nextQuery] = await bucket().getFiles(query);
+    for (const file of files || []) tally(file);
+    query = nextQuery || null;
   }
 
   return {

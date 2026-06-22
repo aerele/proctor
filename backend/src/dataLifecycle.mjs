@@ -161,31 +161,44 @@ export function evaluatePurgeGate({ contest, confirm, typedSlug }) {
 // "selection done" click, so an admin who never clicked left evidence forever).
 //
 // retentionAnchorMs picks the clock-start instant, in PRECEDENCE order:
-//   1. retention_started_at  — the stamped anchor (auto-stamped at exam end when
-//      retention_anchor !== "selection_done", or back-filled by the sweep).
-//   2. selection_done_at     — the legacy manual anchor (still honored; the ONLY
-//      anchor when retention_anchor === "selection_done").
-//   3. end_at                — DERIVED fallback for an exam_end-anchored contest
-//      whose window has closed but whose retention_started_at hasn't been stamped
-//      yet (e.g. natural window expiry, no admin action). The sweep back-fills
+//   1. retention_started_at  — the stamped anchor (back-filled by the sweep the
+//      first time it acts on an exam_end-anchored contest, or set on creation).
+//   2. selection_done_at     — the manual anchor (the DEFAULT semantics: an
+//      anchorless contest waits for this stamp, exactly as pre-v1.1).
+//   3. end_at                — DERIVED fallback ONLY for a contest that has
+//      OPTED IN to the automatic clock via retention_anchor === "exam_end"
+//      (set explicitly on a new take-home contest). The sweep back-fills
 //      retention_started_at the first time it acts, so this derivation is the
-//      bridge that makes erasure self-starting.
-// A contest with retention_anchor === "selection_done" NEVER falls back to
-// end_at — it opts into the manual clock explicitly. KPR / anchorless legacy
-// contests (no retention_started_at, no selection_done_at, and either no end_at
-// or retention_anchor "selection_done") resolve to no anchor → never swept,
-// which is the safety property that protects them.
+//      bridge that makes erasure self-starting for opted-in contests.
+//
+// SAFETY (v1.1 triple-review #2 — KPR / legacy data-loss): an ABSENT
+// retention_anchor means the OLD selection_done semantics — it NEVER derives
+// from end_at. Every real contest has an end_at, so defaulting the anchor to
+// "exam_end" (the original v1.1 behaviour) would have flipped EVERY historical
+// contest — including the intentionally-preserved KPR live-test data — from
+// never-swept to swept the next time the sweep ran. exam_end is therefore
+// strictly OPT-IN: only a contest doc that explicitly carries
+// retention_anchor === "exam_end" ever resolves an end_at-derived anchor.
+// A contest with retention_anchor === "selection_done" (or absent → same
+// semantics) NEVER falls back to end_at — it waits for the manual stamp. KPR /
+// anchorless legacy contests (no retention_started_at, no selection_done_at,
+// retention_anchor unset or "selection_done") resolve to no anchor → never
+// swept, which is the safety property that protects them.
 export function retentionAnchorMs(contest) {
   const startedMs = Date.parse(String(contest?.retention_started_at || ""));
   if (Number.isFinite(startedMs)) return startedMs;
-  const anchor = String(contest?.retention_anchor || "exam_end");
+  // DEFAULT is "selection_done" (the safe, pre-v1.1 semantics). exam_end is
+  // OPT-IN ONLY — an absent anchor must NOT auto-derive from end_at.
+  const anchor = String(contest?.retention_anchor || "selection_done");
   const selectionMs = Date.parse(String(contest?.selection_done_at || ""));
-  if (anchor === "selection_done") {
+  if (anchor !== "exam_end") {
+    // selection_done (explicit OR the absent default): the only anchor is the
+    // manual stamp; no end_at fallback.
     return Number.isFinite(selectionMs) ? selectionMs : NaN;
   }
-  // exam_end anchor: prefer an explicit selection_done_at if present (a contest
-  // can have both — whichever started first is irrelevant since both mean the
-  // exam is over), else derive from a CLOSED exam window.
+  // exam_end anchor (explicitly opted in): prefer an explicit selection_done_at
+  // if present (a contest can have both — whichever started first is irrelevant
+  // since both mean the exam is over), else derive from a CLOSED exam window.
   if (Number.isFinite(selectionMs)) return selectionMs;
   const endMs = Date.parse(String(contest?.end_at || ""));
   return Number.isFinite(endMs) ? endMs : NaN;

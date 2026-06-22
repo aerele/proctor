@@ -8,7 +8,7 @@
 // test set just before that import. That is the capture-at-load contract the
 // `?buster` test isolation (and invigilator.test.mjs's per-instance env probes)
 // depends on, so this MUST stay a function — never top-level const reads.
-import { positiveIntOr } from "./lib/http.mjs";
+import { positiveIntOr, positiveNumberOr } from "./lib/http.mjs";
 
 // One-time warn latch for the insecure CORS wildcard fallback. We KEEP the `*`
 // fallback (the deploy script — backend/deploy-gcp.sh:66 — also defaults
@@ -146,7 +146,12 @@ export function loadConfig() {
     JUDGE0_LIMITER_ENABLED: (process.env.JUDGE0_LIMITER_ENABLED || "true").toLowerCase() !== "false",
     JUDGE0_LIMITER_COLLECTION: process.env.JUDGE0_LIMITER_COLLECTION || "proctor_judge0_ratelimit",
     JUDGE0_LIMITER_CAPACITY: positiveIntOr(process.env.JUDGE0_LIMITER_CAPACITY, 40),
-    JUDGE0_LIMITER_REFILL_PER_SEC: Number(process.env.JUDGE0_LIMITER_REFILL_PER_SEC || "10"),
+    // v1.1 triple-review #3: parse with a finite-positive guard. A bare
+    // Number(env || '10') yields NaN on a typo ('10x') or 0 on '', which makes
+    // shardRefillPerSec NaN/0 so tokens never refill and EVERY submit 429s (fails
+    // CLOSED — re-introduces the #132 storm). positiveNumberOr keeps a legit
+    // fraction (e.g. 0.5/sec) but falls back to the safe default on bad input.
+    JUDGE0_LIMITER_REFILL_PER_SEC: positiveNumberOr(process.env.JUDGE0_LIMITER_REFILL_PER_SEC, 10),
     JUDGE0_LIMITER_SHARDS: positiveIntOr(process.env.JUDGE0_LIMITER_SHARDS, 10),
 
     // ---- v1.1 G3 candidate-telemetry rate limit (#4) --------------------------

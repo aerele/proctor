@@ -491,7 +491,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
           chunk_index: index,
           content_type: blob.type || "video/webm"
         });
-        await uploadBlob(fresh.upload_url, blob);
+        // v1.1 G3 (#7): echo the size cap the backend signed into the URL —
+        // without this header the signed PUT 403s and the chunk never stores.
+        await uploadBlob(fresh.upload_url, blob, fresh.max_bytes);
         return fresh;
       },
       {
@@ -762,7 +764,9 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
           chunk_index: record.index,
           content_type: record.contentType || "video/webm"
         });
-        await uploadBlob(fresh.upload_url, record.blob);
+        // v1.1 G3 (#7): echo the signed size cap on the drain path too — same
+        // 403-on-missing-header rule as the live upload above.
+        await uploadBlob(fresh.upload_url, record.blob, fresh.max_bytes);
         manifest.push({
           kind: record.kind,
           index: record.index,
