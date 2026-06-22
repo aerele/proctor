@@ -319,7 +319,7 @@ test("evaluate: mixed-keying fixture → 2 scorecard docs + meta + done", async 
   // The person-keyed scorecard carries the full schema.
   const sc = evalCol.get(`${slug}::${personKey}`);
   assert.equal(sc.schema_version, 1);
-  assert.equal(sc.evaluator_version, "3");
+  assert.equal(sc.evaluator_version, "4");
   assert.equal(sc.contest_slug, slug);
   assert.equal(sc.identity_key, personKey);
   assert.equal(sc.person_id, personKey);
