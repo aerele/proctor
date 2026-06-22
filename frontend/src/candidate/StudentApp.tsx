@@ -48,6 +48,13 @@ import { RecentEventsPanel } from "./panels/RecentEventsPanel";
 import { RoomCodePanel } from "./panels/RoomCodePanel";
 import { RoomField } from "./panels/RoomField";
 import { PreStartRules, RulesPanel, WhatIsRecordedPanel } from "./panels/Rules";
+import { ConsentDocModal, ConsentDisclosurePanel, ConsentGate, type ConsentDocKind } from "./panels/ConsentGate";
+import { consentContentFor, CONSENT_VERSION } from "./consentContent";
+import { buildSessionConsent } from "../identity";
+import { resolveRetentionDays } from "../admin/dataLifecycle";
+import { BrowserPreflightGate } from "./panels/BrowserPreflightGate";
+import { useDevtoolsWatch } from "../shell/useDevtoolsWatch";
+import type { PreflightVerdict, ProbeResult } from "../shell/browserPreflight";
 import { ScreenShareErrorPanel } from "./panels/ScreenShareErrorPanel";
 import { UnlockCodePanel } from "./panels/UnlockCodePanel";
 import { WaitingRoomPanel } from "./panels/WaitingRoomPanel";
@@ -59,6 +66,11 @@ const initialForm: StudentForm = {
   email: "",
   room: "",
   consent_accepted: false,
+  // G1 (v1.1): the consent-gate booleans — start() is blocked until the
+  // candidate has viewed BOTH pages, confirmed right-to-consent, and consented.
+  viewed_terms: false,
+  viewed_privacy: false,
+  right_to_consent: false,
   roster_unique_id: ""
 };
 
@@ -188,6 +200,27 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const cameraRecordingOn = sessionConfig?.upload_config.camera
     ? sessionConfig.upload_config.camera.enabled
     : normalizeCameraRecording(examConfig?.camera_recording).enabled;
+  // G1 (v1.1 privacy & consent): the consent version + retention window served
+  // by the pinned exam-config drive the T&C/Privacy modal content and the
+  // truthful "erased after N days" disclosure. Legacy/missing values fall back
+  // to the build's CONSENT_VERSION and the shared DEFAULT_RETENTION_DAYS.
+  const pinnedConfig = pinned?.config;
+  const consentVersion = pinnedConfig?.consent_version || CONSENT_VERSION;
+  const consentRetentionDays = resolveRetentionDays(pinnedConfig?.retention_days ?? undefined);
+  const consentDocContent = consentContentFor(consentVersion);
+  // Which Terms/Privacy modal is open (null = none). Opening a page also marks
+  // it viewed in the form so the consent checkboxes can unlock.
+  const [openConsentDoc, setOpenConsentDoc] = useState<ConsentDocKind | null>(null);
+  const handleOpenConsentDoc = (kind: ConsentDocKind) => {
+    setOpenConsentDoc(kind);
+    setForm((current) => (kind === "terms" ? { ...current, viewed_terms: true } : { ...current, viewed_privacy: true }));
+  };
+  // G2 (v1.1 anti-cheat): the browser/codec PREFLIGHT gate must pass before the
+  // candidate can reach the registration form (audit #10). It actually attempts
+  // the capture set; a required-capability failure HARD-BLOCKS. Once passed, the
+  // form shows. (Resume paths skip this — a live/resumable session already
+  // established capture, so re-gating a reload would be hostile.)
+  const [preflightPassed, setPreflightPassed] = useState(false);
   const recorderRef = useRef<ReturnType<typeof createProctorRecorder> | null>(null);
   // F1 (e2e finding): manifest items accumulated across EVERY recording stint
   // of this session (each recorder instance only knows its own uploads). The
@@ -296,6 +329,16 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
     else preSessionEventsRef.current = [...preSessionEventsRef.current, event].slice(-50);
   };
+
+  // P1 (v1.1 anti-cheat): best-effort DevTools/Inspect detection while recording.
+  // On a positive heuristic, LOG it (telemetry, via the normal event funnel) and
+  // WARN the candidate to close DevTools (devtoolsOpen drives the banner below).
+  // NOT bypass-proof — see devtoolsDetect.ts. We never block on it.
+  const { devtoolsOpen } = useDevtoolsWatch({
+    enabled: status === "recording",
+    onOpen: () => recordSetupEvent("devtools_opened", { heuristic: "size_delta_or_console", best_effort: true }),
+    onClose: () => recordSetupEvent("devtools_closed", { best_effort: true })
+  });
 
   // OMR P1 (design §5.3): the additive camera_pip event — the camera pop-out
   // is an OS always-on-top window that occludes screen markers in the
@@ -1260,6 +1303,14 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     setStartError(null);
     setStatus("starting");
     let session: SessionStartResponse;
+    // G1 (v1.1): the structured consent record (design §1.2/§2.1) sent on start.
+    // The button is already gated on all four booleans (candidateFormReady); the
+    // server re-enforces. accepted_at is stamped here at the moment of consent.
+    const consent = buildSessionConsent(form, {
+      consentVersion,
+      takeHome,
+      acceptedAt: new Date().toISOString()
+    });
     try {
       session = await startSession(
         {
@@ -1273,7 +1324,10 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         undefined,
         // S-D: a pinned PERSON contest rides the start body (server-side
         // identity resolution); a college pick answers a 409 college_choices.
-        personPinned ? { contest: pinnedSlug, college: collegeChoice || undefined } : undefined
+        // G1: the structured consent always rides (both pinned and legacy).
+        personPinned
+          ? { contest: pinnedSlug, college: collegeChoice || undefined, consent }
+          : { consent }
       );
       setCollegeChoices(null);
       setCollegeChoice("");
@@ -1715,6 +1769,33 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     );
   }
 
+  // G2 (v1.1 anti-cheat): the browser/codec PREFLIGHT gate — runs BEFORE the
+  // registration form, in the form stage only, and only when there is no
+  // resumable session (a reload of a live session already established capture, so
+  // re-gating it would lock out an honest candidate mid-test). A required-
+  // capability failure HARD-BLOCKS inside the gate; passing flips preflightPassed
+  // and reveals the form. No shellChrome: like the come-back-later screen, this
+  // precedes any permission/fullscreen acquisition.
+  if (isFormStage && !preflightPassed && !sessionConfig) {
+    return (
+      <Shell padTop={false}>
+        <BrowserPreflightGate
+          onPass={() => setPreflightPassed(true)}
+          onResult={(verdict: PreflightVerdict, probeResults: ProbeResult[]) =>
+            recordSetupEvent("browser_preflight", {
+              passed: verdict.passed,
+              blocking_failures: verdict.blockingFailures,
+              warnings: verdict.warnings,
+              results: probeResults.map((r) => ({ capability: r.capability, ok: r.ok, required: r.required }))
+            })
+          }
+          takeHome={takeHome}
+          proctorPhone={proctorPhone}
+        />
+      </Shell>
+    );
+  }
+
   // #135 defense-in-depth (spec §4d): a recording session whose start_at is
   // pushed >15 min out mid-wait must HOLD, not fall through to the live exam.
   // "Should be unreachable" via the form-stage guard above (tooEarly && isFormStage),
@@ -1879,6 +1960,17 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     <Shell padTop={shellPadTop}>
       {shellChrome}
       {enforcementOverlay}
+      {/* G1 (v1.1): the in-app Terms / Privacy modal. Rendered at the shell root
+          so it overlays the whole page; opening it already marked the page
+          viewed (handleOpenConsentDoc). */}
+      {openConsentDoc ? (
+        <ConsentDocModal
+          doc={openConsentDoc === "terms" ? consentDocContent.terms : consentDocContent.privacy}
+          lastUpdated={consentDocContent.lastUpdated}
+          opts={{ retentionDays: consentRetentionDays, takeHome, proctorPhone }}
+          onClose={() => setOpenConsentDoc(null)}
+        />
+      ) : null}
       {status === "ending" ? <FinishingOverlay proctorPhone={takeHome ? proctorPhone : ""} /> : null}
       {/* Tier-1: the end-of-test drain wait gate — same blocking takeover with
           live remaining segments/MB. awayBeaconActive() returns false for
@@ -1897,6 +1989,15 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         <div className="mb-5 rounded-lg border border-danger/40 bg-danger/10 p-4">
           <p className="text-sm font-semibold text-danger">Time is up</p>
           <p className="mt-1 text-sm leading-6 text-ink">The exam has ended. Stop working now and end your test from this page — your recording continues until you end it.</p>
+        </div>
+      ) : null}
+      {/* P1 (v1.1 anti-cheat): best-effort DevTools warning. Logged to telemetry
+          already (useDevtoolsWatch onOpen); this only nudges the candidate. We do
+          NOT block — a false positive must never trap an honest candidate. */}
+      {devtoolsOpen && status === "recording" ? (
+        <div className="mb-5 rounded-lg border border-warning/50 bg-warning/10 p-4">
+          <p className="text-sm font-semibold text-warning">Close Developer Tools to continue</p>
+          <p className="mt-1 text-sm leading-6 text-ink">Your browser&rsquo;s developer / inspect tools appear to be open. Close them now — using them during the test is not allowed and this has been recorded for the proctor.</p>
         </div>
       ) : null}
 
@@ -1994,17 +2095,39 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
                     </div>
                   ) : null}
 
-                  <label className="mt-5 flex gap-3 rounded-lg border border-line bg-white/60 p-4 text-sm leading-6 text-muted">
-                    <input
-                      className="mt-1 h-4 w-4 accent-accent"
-                      type="checkbox"
-                      checked={form.consent_accepted}
-                      onChange={(event) => setForm({ ...form, consent_accepted: event.target.checked })}
+                  {/* G1 (v1.1): the DELETED-vs-RETAINED disclosure, then the
+                      consent gate (view both pages → unlock the two boxes). The
+                      single legacy consent checkbox is replaced by this block. */}
+                  <div className="mt-5 space-y-4">
+                    <ConsentDisclosurePanel
+                      retentionDays={consentRetentionDays}
+                      cameraRecorded={cameraRecordingOn}
+                      ownEditor={ownEditorCopy}
                     />
-                    <span>
-                      {studentCopy.consentDisclosure(ownEditorCopy, cameraRecordingOn)}
-                    </span>
-                  </label>
+                    <ConsentGate
+                      state={{
+                        viewedTerms: form.viewed_terms,
+                        viewedPrivacy: form.viewed_privacy,
+                        rightToConsent: form.right_to_consent,
+                        consentAccepted: form.consent_accepted
+                      }}
+                      consentVersion={consentVersion}
+                      retentionDays={consentRetentionDays}
+                      takeHome={takeHome}
+                      proctorPhone={proctorPhone}
+                      consentSentence={studentCopy.consentDisclosure(ownEditorCopy, cameraRecordingOn)}
+                      openDoc={handleOpenConsentDoc}
+                      onChange={(patch) =>
+                        setForm((current) => ({
+                          ...current,
+                          ...(patch.viewedTerms !== undefined ? { viewed_terms: patch.viewedTerms } : {}),
+                          ...(patch.viewedPrivacy !== undefined ? { viewed_privacy: patch.viewedPrivacy } : {}),
+                          ...(patch.rightToConsent !== undefined ? { right_to_consent: patch.rightToConsent } : {}),
+                          ...(patch.consentAccepted !== undefined ? { consent_accepted: patch.consentAccepted } : {})
+                        }))
+                      }
+                    />
+                  </div>
                 </>
               </>
             </>

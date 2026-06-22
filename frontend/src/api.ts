@@ -62,6 +62,8 @@ import type {
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
+  SessionConsent,
+  ContestDataSizeResponse,
   SessionCardDetail,
   SessionCardDetailResponse,
   SessionDetail,
@@ -509,7 +511,8 @@ function demoPersonStart(
 export async function startSession(
   form: StudentForm,
   existingSessionId?: string,
-  opts?: { contest?: string; college?: string }
+  // G1 (v1.1): `consent` carries the structured consent record (design §2.1).
+  opts?: { contest?: string; college?: string; consent?: SessionConsent }
 ): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(250);
@@ -528,7 +531,7 @@ export async function startSession(
   return request<SessionStartResponse>("/api/session/start", {
     method: "POST",
     body: JSON.stringify({
-      ...sessionStartPayload(form, existingSessionId),
+      ...sessionStartPayload(form, existingSessionId, opts?.consent),
       ...(opts?.contest ? { contest: opts.contest } : {}),
       ...(opts?.college ? { college: opts.college } : {})
     })
@@ -1802,6 +1805,34 @@ export async function runRetentionSweep(password: string): Promise<RetentionSwee
     method: "POST",
     headers: { "x-admin-password": password },
     body: JSON.stringify({})
+  });
+}
+
+// GET /api/admin/contest-data-size?contest=<slug> — G1 (design §2.6). Read-only:
+// sums the contest's stored evidence objects in GCS and returns a per-kind
+// breakdown. Async by nature (a bucket listing); the admin UI shows a spinner
+// until it resolves. Authed by the admin password.
+export async function fetchContestDataSize(password: string, contestSlug: string): Promise<ContestDataSizeResponse> {
+  if (demoMode) {
+    await wait(420);
+    assertDemoAdmin(password);
+    // Deterministic-ish demo figure so the spinner→size flow is visible.
+    const seed = [...contestSlug].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+    const screen = (seed % 9 + 1) * 180 * 1024 * 1024;
+    const camera = (seed % 5 + 1) * 22 * 1024 * 1024;
+    const events = (seed % 7 + 1) * 512 * 1024;
+    const editor = (seed % 4 + 1) * 256 * 1024;
+    return {
+      contest: contestSlug,
+      evidence_bytes: screen + camera + events + editor,
+      evidence_objects: (seed % 40 + 5) * 17,
+      by_kind: { screen, camera, events, editorEvents: editor },
+      computed_at: new Date().toISOString()
+    };
+  }
+  return request(`/api/admin/contest-data-size?contest=${encodeURIComponent(contestSlug)}`, {
+    method: "GET",
+    headers: { "x-admin-password": password }
   });
 }
 

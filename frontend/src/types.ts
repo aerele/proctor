@@ -8,9 +8,32 @@ export type StudentForm = {
   email: string;
   room: string;
   consent_accepted: boolean;
+  // G1 (v1.1 privacy & consent): the structured consent gate. The candidate
+  // must VIEW both pages (viewed_terms/viewed_privacy), confirm right-to-consent
+  // (right_to_consent), and tick consent (consent_accepted) before start can
+  // fire. candidateRouting.candidateFormReady gates the button on all four; the
+  // server re-enforces (design §2.1). These are the booleans backing the gate;
+  // identity.ts assembles them into the wire `consent` object on start.
+  viewed_terms: boolean;
+  viewed_privacy: boolean;
+  right_to_consent: boolean;
   // S2: the roster unique-ID the candidate confirmed ("" when no roster / not
   // yet confirmed). Sent to /api/session/start, which re-verifies it.
   roster_unique_id: string;
+};
+
+// G1 structured consent record sent on session start (design contract §1.2).
+// `context` distinguishes a remote take-home sitting from an on-site one. The
+// frontend ALSO sends the flat consent_accepted mirror for one transitional
+// release so today's backend keeps working unchanged.
+export type SessionConsent = {
+  accepted: boolean;
+  right_to_consent: boolean;
+  viewed_terms: boolean;
+  viewed_privacy: boolean;
+  consent_version: string;
+  accepted_at: string;
+  context: "remote_take_home" | "at_college";
 };
 
 // Lifecycle status of the session as reported by the backend (Phase 2). Distinct
@@ -1219,6 +1242,17 @@ export type ContestPurgeResponse = {
   enrollments_retained?: boolean;
 };
 
+/** GET /api/admin/contest-data-size response (G1, design §2.6). Read-only sum of
+ *  the contest's stored evidence objects in GCS, computed async on demand. */
+export type ContestDataSizeResponse = {
+  contest: string;
+  evidence_bytes: number;
+  evidence_objects: number;
+  /** Per-kind byte breakdown (screen / camera / events / editorEvents / other). */
+  by_kind: Record<string, number>;
+  computed_at: string;
+};
+
 /** POST /api/admin/retention-sweep response (Wave7-G). */
 export type RetentionSweepResponse = {
   ok: boolean;
@@ -1283,6 +1317,15 @@ export type ContestExamConfig = ExamConfig & {
   take_home_enabled?: boolean;
   /** Take-home: proctor contact phone for the pre-session help line (D4). */
   proctor_contact_phone?: string | null;
+  /** G1 (v1.1 privacy & consent): the authoritative consent text version the
+   *  candidate must agree to (design §2.2). Absent on legacy docs ⇒ the frontend
+   *  falls back to its CONSENT_VERSION constant. The consent gate echoes this
+   *  back in the structured consent on session start. */
+  consent_version?: string | null;
+  /** G1: the per-contest evidence-retention window in days (design §2.2). Drives
+   *  the truthful "erased after N days" candidate disclosure and the T&C/Privacy
+   *  interpolation. Absent on legacy docs ⇒ the DEFAULT_RETENTION_DAYS fallback. */
+  retention_days?: number | null;
 };
 
 /** One 409 college_choices option from /api/session/start (person contests). */
