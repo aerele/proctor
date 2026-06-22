@@ -149,7 +149,12 @@ function validateContestWindow(contest) {
   if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || startAt >= endAt) {
     throw httpError(403, "Proctoring schedule is invalid.");
   }
-  if (now < startAt) throw httpError(403, "Proctoring has not started yet.");
+  // Take-home (D1): recording starts ~10 min early; the candidate-side waiting
+  // room holds them until T0. Do NOT 403 before start_at for remote contests —
+  // but KEEP the ended/invalid/unconfigured guards.
+  if (now < startAt && !contest.take_home_enabled) {
+    throw httpError(403, "Proctoring has not started yet.");
+  }
   if (now > endAt) throw httpError(403, "Proctoring has ended.");
 }
 
@@ -435,6 +440,13 @@ async function startResponse(session, contest = null) {
     // the client shows a skew-corrected countdown from the very first response.
     // Person contests read their OWN window (S5 semantics moved per-contest).
     end_at: contest?.end_at || "",
+    // Take-home: the official T0 + remote flag + proctor phone, so the in-session
+    // waiting-room countdown and phone display are skew-safe against server_now.
+    // Optional chaining is orphaned-session safe (contest may be null), matching
+    // the contest?.end_at pattern; all three default falsy off take-home.
+    start_at: contest?.start_at || null,
+    take_home: Boolean(contest?.take_home_enabled),
+    proctor_contact_phone: contest?.proctor_contact_phone || "",
     server_now: new Date().toISOString()
   };
 }

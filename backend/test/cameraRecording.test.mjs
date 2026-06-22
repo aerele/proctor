@@ -181,7 +181,7 @@ const CONTEST_SLUG = "kec-2026";
 // Seed an OPEN, no-roster person contest directly. camera_recording overrides
 // ride straight onto the contest doc (S-I snapshot field) — the same shape the
 // session-bound serve paths read via cameraRecordingConfigFor.
-function seedContest(firestore, { camera_recording } = {}) {
+function seedContest(firestore, { camera_recording, take_home_enabled, proctor_contact_phone } = {}) {
   const doc = {
     slug: CONTEST_SLUG,
     name: CONTEST_SLUG,
@@ -195,6 +195,8 @@ function seedContest(firestore, { camera_recording } = {}) {
     room_gate_enabled: false
   };
   if (camera_recording !== undefined) doc.camera_recording = camera_recording;
+  if (take_home_enabled !== undefined) doc.take_home_enabled = take_home_enabled;
+  if (proctor_contact_phone !== undefined) doc.proctor_contact_phone = proctor_contact_phone;
   firestore.collection(process.env.CONTESTS_COLLECTION).doc(CONTEST_SLUG).set(doc);
 }
 
@@ -242,6 +244,30 @@ test("exam-config: camera_recording defaults to enabled 10fps 640w when the cont
   const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.body.camera_recording, CAMERA_DEFAULTS);
+});
+
+test("T-B1 exam-config: take_home_enabled/proctor_contact_phone default falsy for a legacy contest; window fields still present", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedContest(firestore); // no take-home fields set (legacy doc)
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.take_home_enabled, false);
+  assert.equal(res.body.proctor_contact_phone, "");
+  // The skew anchors + window fields the waiting-room gate seeds off are present.
+  assert.equal(res.body.start_at, "2026-01-01T00:00:00.000Z");
+  assert.equal(res.body.end_at, "2099-01-01T00:00:00.000Z");
+  assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
+});
+
+test("T-B1 exam-config: take_home_enabled/proctor_contact_phone reflect the remote contest's values", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedContest(firestore, { take_home_enabled: true, proctor_contact_phone: "+91 98765 43210" });
+  const res = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: CONTEST_SLUG } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.take_home_enabled, true);
+  assert.equal(res.body.proctor_contact_phone, "+91 98765 43210");
 });
 
 test("exam-config: camera_recording reflects the contest's snapshot value", async () => {

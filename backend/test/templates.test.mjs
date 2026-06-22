@@ -6,6 +6,7 @@
 // always-available day-before lab-check template (vision S6/J1.5).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 // Env BEFORE import; unique ?templates cache-buster for a fresh handler instance.
 process.env.EVIDENCE_BUCKET = "tp-bucket";
@@ -209,13 +210,43 @@ test("normalizeTemplateEnforcement: simplified_fullscreen_recovery — default f
   assert.deepEqual(full, { mode: "alert_first", fullscreen_reentry_seconds: 33, fullscreen_exit_limit: 4, simplified_fullscreen_recovery: true });
 });
 
+test("T-B6 intAtLeastOr is removed — both enforcement clamps go through clampIntOr now (A3)", async () => {
+  // After swapping the two enforcement lines to clampIntOr, intAtLeastOr was its
+  // own only caller's last user and is deleted. Assert it no longer exists in
+  // the source (its removal is the contract), and that the kept helpers remain.
+  const source = await readFile(new URL("../src/templates.mjs", import.meta.url), "utf8");
+  assert.ok(!/intAtLeastOr/.test(source), "intAtLeastOr must be fully removed from templates.mjs");
+  assert.ok(/function boundedIntOr\(/.test(source), "boundedIntOr is kept");
+  assert.ok(/function clampIntOr\(/.test(source), "clampIntOr is kept");
+});
+
+test("T-B4 normalizeTemplateEnforcement: reentry clamps 5–300, exit-limit clamps 1–10 (incl. the 0→1 edge)", () => {
+  const enf = (overrides) => normalizeTemplateEnforcement({ mode: "block", ...overrides });
+  // fullscreen_exit_limit: out-of-range CLAMPS to the nearest bound; the
+  // degenerate 0 lifts to the floor 1 (C-4); in-range/absent untouched.
+  assert.equal(enf({ fullscreen_exit_limit: 0 }).fullscreen_exit_limit, 1);
+  assert.equal(enf({ fullscreen_exit_limit: 99 }).fullscreen_exit_limit, 10);
+  assert.equal(enf({ fullscreen_exit_limit: 1 }).fullscreen_exit_limit, 1);
+  assert.equal(enf({ fullscreen_exit_limit: 10 }).fullscreen_exit_limit, 10);
+  assert.equal(enf({}).fullscreen_exit_limit, 2); // absent → default 2
+  // fullscreen_reentry_seconds: clamps to 5–300; absent → default 20.
+  assert.equal(enf({ fullscreen_reentry_seconds: 2 }).fullscreen_reentry_seconds, 5);
+  assert.equal(enf({ fullscreen_reentry_seconds: 999 }).fullscreen_reentry_seconds, 300);
+  assert.equal(enf({ fullscreen_reentry_seconds: 5 }).fullscreen_reentry_seconds, 5);
+  assert.equal(enf({ fullscreen_reentry_seconds: 300 }).fullscreen_reentry_seconds, 300);
+  assert.equal(enf({}).fullscreen_reentry_seconds, 20); // absent → default 20
+  // Non-numeric garbage still falls back to the default (clampIntOr semantics).
+  assert.equal(enf({ fullscreen_reentry_seconds: "soon" }).fullscreen_reentry_seconds, 20);
+  assert.equal(enf({ fullscreen_exit_limit: "lots" }).fullscreen_exit_limit, 2);
+});
+
 test("validateTemplateInput: defaults bounds — garbage falls back, retention clamps, languages validated", () => {
   const r = validateTemplateInput(validTemplate({ defaults: {
     duration_minutes: "soon",            // garbage -> default 120
     identity_label: "  Hall Ticket  ",   // trimmed
     room_gate_enabled: "yes",            // non-boolean -> default true
     camera_recording: { enabled: false, fps: 99, width: 320 }, // fps out of range -> default 10
-    enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 0, fullscreen_exit_limit: 5 },
+    enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 0, fullscreen_exit_limit: 5 }, // 0 below the 5s floor -> clamps to 5
     evidence_retention_days: 99,         // clamps to 30
     languages: ["python", "python", "cpp"]
   } }));
@@ -225,7 +256,7 @@ test("validateTemplateInput: defaults bounds — garbage falls back, retention c
   assert.equal(d.identity_label, "Hall Ticket");
   assert.equal(d.room_gate_enabled, true);
   assert.deepEqual(d.camera_recording, { enabled: false, fps: 10, width: 320 });
-  assert.deepEqual(d.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 20, fullscreen_exit_limit: 5, simplified_fullscreen_recovery: false });
+  assert.deepEqual(d.enforcement, { mode: "alert_first", fullscreen_reentry_seconds: 5, fullscreen_exit_limit: 5, simplified_fullscreen_recovery: false });
   assert.equal(d.evidence_retention_days, 30);
   assert.deepEqual(d.languages, ["python", "cpp"]);
 

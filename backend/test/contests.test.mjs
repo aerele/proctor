@@ -201,6 +201,54 @@ test("create: optional fields are validated and stored", async () => {
   assert.equal(contest.evidence_retention_days, 10);
 });
 
+// ---- take-home: persisted fields (T-B2 create/update round-trip, T-B3 phone) -
+
+test("T-B2 create: take_home defaults falsy; explicit values persist (behavior-preserving)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  // Legacy/default create: both new fields default falsy, byte-identical to today.
+  const plain = (await call(createReq({ name: "Plain" }))).body.contest;
+  assert.equal(plain.take_home_enabled, false);
+  assert.equal(plain.proctor_contact_phone, "");
+  // Explicit remote create persists both.
+  const remote = (await call(createReq({
+    name: "Remote", take_home_enabled: true, proctor_contact_phone: "+91 98765 43210"
+  }))).body.contest;
+  assert.equal(remote.take_home_enabled, true);
+  assert.equal(remote.proctor_contact_phone, "+91 98765 43210");
+});
+
+test("T-B2 update: toggles both; absent-in-body leaves them untouched (spread preserves)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  await call(createReq({ name: "Toggle", take_home_enabled: true, proctor_contact_phone: "+1 555 0100" }));
+  // Toggle both in one update.
+  const off = (await call(updateReq({ slug: "toggle", take_home_enabled: false, proctor_contact_phone: "" }))).body.contest;
+  assert.equal(off.take_home_enabled, false);
+  assert.equal(off.proctor_contact_phone, "");
+  // Re-enable, then an UNRELATED update must leave both untouched (the spread).
+  await call(updateReq({ slug: "toggle", take_home_enabled: true, proctor_contact_phone: "+1 555 0199" }));
+  const renamed = (await call(updateReq({ slug: "toggle", name: "Toggle (renamed)" }))).body.contest;
+  assert.equal(renamed.take_home_enabled, true, "absent take_home_enabled in body is untouched");
+  assert.equal(renamed.proctor_contact_phone, "+1 555 0199", "absent proctor_contact_phone in body is untouched");
+});
+
+test("T-B3 phone validation: >40 chars → 400; null/undefined → \"\"; whitespace trimmed", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  // Over the 40-char cap is a hard 400 (no silent truncation).
+  const over = await call(createReq({ name: "OverCap", proctor_contact_phone: "9".repeat(41) }));
+  assert.equal(over.statusCode, 400);
+  // At the cap is fine; surrounding whitespace is trimmed.
+  const atCap = (await call(createReq({ name: "AtCap", proctor_contact_phone: "  " + "9".repeat(40) + "  " }))).body.contest;
+  assert.equal(atCap.proctor_contact_phone, "9".repeat(40));
+  // null → "".
+  const nullPhone = (await call(createReq({ name: "NullPhone", proctor_contact_phone: null }))).body.contest;
+  assert.equal(nullPhone.proctor_contact_phone, "");
+  // Bad take_home_enabled type → 400.
+  assert.equal((await call(createReq({ name: "BadFlag", take_home_enabled: "yes" }))).statusCode, 400);
+  // Update path enforces the cap too.
+  await call(createReq({ name: "UpdCap" }));
+  assert.equal((await call(updateReq({ slug: "updcap", proctor_contact_phone: "x".repeat(41) }))).statusCode, 400);
+});
+
 test("create: slug collision gets the -2 / -3 suffix", async () => {
   __setClientsForTest({ firestore: makeFakeFirestore() });
   assert.equal((await call(createReq({ name: "Round 1" }))).body.contest.slug, "round-1");

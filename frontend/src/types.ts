@@ -132,6 +132,14 @@ export type SessionStartResponse = {
   // the backend predates S5.
   end_at?: string;
   server_now?: string;
+  // Take-home: the official exam start (T0), the remote-mode flag, and the
+  // proctor contact phone — threaded into the runtime contract so the in-session
+  // waiting-room countdown + phone display are skew-safe against server_now
+  // (not just the pre-session ContestExamConfig fetch). Absent/falsy on a
+  // non-take-home contest (or older backend) — byte-identical to today.
+  start_at?: string;
+  take_home?: boolean;
+  proctor_contact_phone?: string;
   // F1 (e2e finding): server-side chunk-index continuation knowledge — counts
   // of issued upload URLs and the exact per-kind index high-water marks. The
   // recorder resumes its chunk count from max(these, the local sessionStorage
@@ -168,6 +176,13 @@ export type HeartbeatResponse = {
   // S5: current exam end time + server clock — the live update channel.
   end_at?: string;
   server_now?: string;
+  // Take-home: the live channel also refreshes the official start (T0), the
+  // remote-mode flag, and the proctor contact phone, so the in-session countdown
+  // + phone stay skew-safe and current. Absent/falsy off take-home (or older
+  // backend) — byte-identical to today.
+  start_at?: string;
+  take_home?: boolean;
+  proctor_contact_phone?: string;
   // F5.3/F5.5: live enforcement config + this session's exemptions, so an
   // admin/invigilator change applies within one heartbeat interval.
   enforcement?: EnforcementConfigPayload;
@@ -1153,6 +1168,11 @@ export type ContestSummary = {
   /** OMR P1: screen-marker flag snapshot (absent on pre-flag docs = off). */
   screen_markers?: ScreenMarkersConfigPayload;
   enforcement?: EnforcementConfigPayload;
+  /** Take-home: master gate for remote behavior (D3; absent on legacy docs = false). */
+  take_home_enabled?: boolean;
+  /** Take-home: proctor contact phone shown on remote waiting/in-exam/locked
+   *  screens (D4; absent/null on legacy docs). */
+  proctor_contact_phone?: string | null;
   languages?: ProblemLanguage[];
   evidence_retention_days?: number;
   // ---- Data-lifecycle stamps (Wave7-G backend; spread from the contest doc) ----
@@ -1233,6 +1253,10 @@ export type ContestUpdateRequest = {
   /** #71: full enforcement object (updateContest does a full .set(), so the
    *  admin must send EVERY field — existing knobs + simplified_fullscreen_recovery). */
   enforcement?: EnforcementConfigPayload;
+  /** Take-home: master gate for remote behavior (D3). */
+  take_home_enabled?: boolean;
+  /** Take-home: proctor contact phone (D4; null clears it). */
+  proctor_contact_phone?: string | null;
 };
 
 /** Per-contest pre-session config (GET /api/exam-config?contest=). */
@@ -1249,6 +1273,11 @@ export type ContestExamConfig = ExamConfig & {
   start_at: string | null;
   end_at: string | null;
   server_now: string;
+  /** Take-home: master gate for remote behavior (D3; false on legacy docs).
+   *  Seeds the candidate waiting-room gate before a session exists. */
+  take_home_enabled?: boolean;
+  /** Take-home: proctor contact phone for the pre-session help line (D4). */
+  proctor_contact_phone?: string | null;
 };
 
 /** One 409 college_choices option from /api/session/start (person contests). */

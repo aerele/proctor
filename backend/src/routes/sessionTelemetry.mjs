@@ -350,6 +350,13 @@ export function makeSessionTelemetryRoutes(ctx) {
       ip_changed: ipChanged,
       newly_changed: newlyChanged,
       end_at: contest?.end_at || "",
+      // Take-home: the live channel also refreshes the official T0 + remote flag +
+      // proctor phone, so the in-session countdown + phone stay skew-safe and
+      // current. Optional chaining is orphaned-session safe (contest may be null),
+      // matching the contest?.end_at pattern; all three default falsy off take-home.
+      start_at: contest?.start_at || null,
+      take_home: Boolean(contest?.take_home_enabled),
+      proctor_contact_phone: contest?.proctor_contact_phone || "",
       // F5.3/F5.5: the heartbeat is the live channel for enforcement config AND
       // per-session exemptions, so an admin/invigilator exemption (or a settings
       // change) reaches the candidate within one interval — no reload.

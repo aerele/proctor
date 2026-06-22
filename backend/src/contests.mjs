@@ -29,6 +29,7 @@ const RETENTION_DAYS_MIN = 1;
 const RETENTION_DAYS_MAX = 30;
 const CONTESTS_QUERY_LIMIT = 500;
 const SLUG_COLLISION_LIMIT = 50;
+const PROCTOR_CONTACT_PHONE_MAX = 40; // country code + spaces/dashes/parens
 
 // Typed contest access code (vision §10.3): 6 chars, A-Z plus 2-9 (no 0/1 —
 // O/I lookalikes), minted ONCE at create with a bounded collision-retry loop.
@@ -123,6 +124,10 @@ export async function createContest(body) {
   const roomGateEnabled = body?.room_gate_enabled === undefined
     ? false
     : requireBoolean(body.room_gate_enabled, "room_gate_enabled");
+  const takeHomeEnabled = body?.take_home_enabled === undefined
+    ? false
+    : requireBoolean(body.take_home_enabled, "take_home_enabled");
+  const proctorContactPhone = normalizeProctorContactPhone(body?.proctor_contact_phone);
   const rooms = normalizeContestRooms(body?.rooms);
   // W4: an admin-ASSIGNED code is validated + clash-checked exactly like
   // setContestAccessCode; absent/blank -> mint a random one (collision-checked
@@ -164,6 +169,8 @@ export async function createContest(body) {
       enforcement,
       languages,
       room_gate_enabled: roomGateEnabled,
+      take_home_enabled: takeHomeEnabled,
+      proctor_contact_phone: proctorContactPhone,
       rooms,
       created_at: now,
       updated_at: now,
@@ -225,6 +232,8 @@ export async function updateContest(slugRaw, body) {
   if (body?.enforcement !== undefined) patch.enforcement = normalizeTemplateEnforcement(body.enforcement);
   if (body?.languages !== undefined) patch.languages = normalizeContestLanguages(body.languages);
   if (body?.room_gate_enabled !== undefined) patch.room_gate_enabled = requireBoolean(body.room_gate_enabled, "room_gate_enabled");
+  if (body?.take_home_enabled !== undefined) patch.take_home_enabled = requireBoolean(body.take_home_enabled, "take_home_enabled");
+  if (body?.proctor_contact_phone !== undefined) patch.proctor_contact_phone = normalizeProctorContactPhone(body.proctor_contact_phone);
   // S-D: per-contest rooms list (vision §2.12) — sanitize/dedupe rules below.
   if (body?.rooms !== undefined) patch.rooms = normalizeContestRooms(body.rooms);
   if (body?.name !== undefined) {
@@ -506,6 +515,18 @@ function normalizeIdentityLabel(raw) {
 function requireBoolean(value, field) {
   if (typeof value !== "boolean") throw httpError(400, `${field} must be a boolean`);
   return value;
+}
+
+// Take-home contact phone: trimmed free-form (international/landline/whatsapp
+// all vary, so no format enforcement). Empty allowed (banner omits the line).
+// Over cap → hard 400 so the admin notices rather than silently truncating.
+function normalizeProctorContactPhone(raw) {
+  if (raw === undefined || raw === null) return "";
+  const phone = String(raw).trim();
+  if (phone.length > PROCTOR_CONTACT_PHONE_MAX) {
+    throw httpError(400, `proctor_contact_phone: max ${PROCTOR_CONTACT_PHONE_MAX} chars`);
+  }
+  return phone;
 }
 
 // S-I: contests may legitimately hold ZERO problems while draft (the publish

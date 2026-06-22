@@ -41,7 +41,11 @@ const CAMERA_WIDTH_MAX = 1280;
 const SCREEN_MARKERS_DEFAULTS = { enabled: false };
 const ENFORCEMENT_MODES = ["block", "alert_first"];
 const FULLSCREEN_REENTRY_DEFAULT_SECONDS = 20;
+const FULLSCREEN_REENTRY_MIN_SECONDS = 5;
+const FULLSCREEN_REENTRY_MAX_SECONDS = 300;
 const FULLSCREEN_EXIT_LIMIT_DEFAULT = 2;
+const FULLSCREEN_EXIT_LIMIT_MIN = 1;     // C-4: floor 1 (no degenerate 0)
+const FULLSCREEN_EXIT_LIMIT_MAX = 10;
 
 // The always-available day-before lab-check preset (vision S6/J1.5): every
 // machine instantiates a tiny no-roster contest and runs sum-two end-to-end.
@@ -228,8 +232,10 @@ export function normalizeTemplateEnforcement(raw) {
   const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   return {
     mode: ENFORCEMENT_MODES.includes(source.mode) ? source.mode : "block",
-    fullscreen_reentry_seconds: intAtLeastOr(source.fullscreen_reentry_seconds, FULLSCREEN_REENTRY_DEFAULT_SECONDS, 1),
-    fullscreen_exit_limit: intAtLeastOr(source.fullscreen_exit_limit, FULLSCREEN_EXIT_LIMIT_DEFAULT, 0),
+    fullscreen_reentry_seconds: clampIntOr(source.fullscreen_reentry_seconds,
+      FULLSCREEN_REENTRY_DEFAULT_SECONDS, FULLSCREEN_REENTRY_MIN_SECONDS, FULLSCREEN_REENTRY_MAX_SECONDS),
+    fullscreen_exit_limit: clampIntOr(source.fullscreen_exit_limit,
+      FULLSCREEN_EXIT_LIMIT_DEFAULT, FULLSCREEN_EXIT_LIMIT_MIN, FULLSCREEN_EXIT_LIMIT_MAX),
     // #71: admin per-contest toggle that drops ONLY the typed-ack step from the
     // red-screen recovery (the "Enter full screen again" button stays). Default
     // false and any non-boolean → false, so an untouched contest behaves
@@ -270,12 +276,6 @@ export function validateTemplateInput(body) {
 function boundedIntOr(raw, fallback, minimum, maximum) {
   const num = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(num) || !Number.isInteger(num) || num < minimum || num > maximum) return fallback;
-  return num;
-}
-
-function intAtLeastOr(raw, fallback, minimum) {
-  const num = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(num) || !Number.isInteger(num) || num < minimum) return fallback;
   return num;
 }
 

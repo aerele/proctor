@@ -281,6 +281,8 @@ export function makePublicRoutes(ctx) {
       unique_id_label: contest.identity_label || "Candidate ID",
       rooms: normalizeRooms(contest.rooms),
       room_gate_enabled: Boolean(contest.room_gate_enabled),
+      take_home_enabled: Boolean(contest.take_home_enabled),
+      proctor_contact_phone: contest.proctor_contact_phone || "",
       enforcement: enforcementConfigFor(contest),
       camera_recording: cameraRecordingConfigFor(contest)
     };

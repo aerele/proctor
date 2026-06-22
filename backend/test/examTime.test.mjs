@@ -262,6 +262,86 @@ test("POST /api/heartbeat response carries end_at + server_now (the student's li
   assert.ok(Number.isFinite(Date.parse(res.body.server_now)));
 });
 
+// ---- Take-home: pre-T0 start gate (C-2) + start/heartbeat field threading ----
+
+const START_BODY = {
+  candidate_id: "alice", name: "Alice", roll_number: "R1",
+  email: "a@example.com", consent_accepted: true
+};
+
+test("T-B5 take-home: a session starts before start_at (no 403) and carries start_at/take_home/phone", async () => {
+  const { firestore } = freshFakes();
+  // start_at is 5 min in the FUTURE — a non-remote contest would 403 here.
+  const seeded = await seedSettings(firestore, {
+    start_at: isoMinutesFromNow(5),
+    end_at: isoMinutesFromNow(120),
+    take_home_enabled: true,
+    proctor_contact_phone: "+91 98765 43210"
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
+    contest: CONTEST_SLUG, ...START_BODY
+  } }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.start_at, seeded.start_at);
+  assert.equal(res.body.take_home, true);
+  assert.equal(res.body.proctor_contact_phone, "+91 98765 43210");
+});
+
+test("T-B5 non-remote: a session before start_at STILL 403s 'Proctoring has not started yet.' (behavior-preserving)", async () => {
+  const { firestore } = freshFakes();
+  await seedSettings(firestore, { start_at: isoMinutesFromNow(5), end_at: isoMinutesFromNow(120) });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
+    contest: CONTEST_SLUG, ...START_BODY
+  } }));
+  assert.equal(res.statusCode, 403);
+  assert.match(String(res.body.error || ""), /not started yet/);
+});
+
+test("T-B5 take-home: the ended guard still fires (now > end_at → 403)", async () => {
+  const { firestore } = freshFakes();
+  await seedSettings(firestore, {
+    start_at: isoMinutesFromNow(-120),
+    end_at: isoMinutesFromNow(-5), // already ended
+    take_home_enabled: true
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
+    contest: CONTEST_SLUG, ...START_BODY
+  } }));
+  assert.equal(res.statusCode, 403);
+  assert.match(String(res.body.error || ""), /has ended/);
+});
+
+test("T-B5 take-home: a non-take-home default contest carries the falsy fields (byte-identical contract)", async () => {
+  const { firestore } = freshFakes();
+  const seeded = await seedSettings(firestore); // open window, no take-home fields
+  const res = await call(makeReq({ method: "POST", path: "/api/session/start", body: {
+    contest: CONTEST_SLUG, ...START_BODY
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.take_home, false);
+  assert.equal(res.body.proctor_contact_phone, "");
+  assert.equal(res.body.start_at, seeded.start_at);
+});
+
+test("T-B7 heartbeat: response carries start_at/take_home/proctor_contact_phone from the contest", async () => {
+  const { firestore } = freshFakes();
+  const seeded = await seedSettings(firestore, {
+    take_home_enabled: true,
+    proctor_contact_phone: "+1 555 0100"
+  });
+  await firestore.collection(process.env.SESSION_COLLECTION).doc("s1").set({
+    session_id: "s1", status: "active", candidate_id: "alice", username_norm: "alice",
+    contest_slug: CONTEST_SLUG, storage_prefix: `contests/${CONTEST_SLUG}/sessions/alice/s1/`
+  });
+  const res = await call(makeReq({ method: "POST", path: "/api/heartbeat", body: {
+    session_id: "s1", recording_state: "combined:recording;screen:recording", visibility_state: "visible"
+  } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.start_at, seeded.start_at);
+  assert.equal(res.body.take_home, true);
+  assert.equal(res.body.proctor_contact_phone, "+1 555 0100");
+});
+
 // ---- Task 2: per-contest exam-time lives in contestAdminSD; here we only
 // pin that admin/stats surfaces the (contest-scoped) end_at for the card ------
 
