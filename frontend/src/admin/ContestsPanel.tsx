@@ -363,6 +363,18 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
   // sends the FULL enforcement object (updateContest does a full .set(), so a
   // partial would wipe the other knobs).
   const simplifiedRecovery = contest.enforcement?.simplified_fullscreen_recovery === true;
+  // Take-home (remote) mode: master toggle + proctor phone + the two enforcement
+  // knobs (re-entry countdown / exit limit) surfaced for ALL contests. String-backed
+  // number inputs so blank ⇒ backend default (not a coerced 0); mirrors the
+  // simplified-recovery save which sends the WHOLE enforcement object.
+  const [takeHomeEnabled, setTakeHomeEnabled] = useState(contest.take_home_enabled === true);
+  const [proctorPhone, setProctorPhone] = useState(contest.proctor_contact_phone ?? "");
+  const [reentrySeconds, setReentrySeconds] = useState(
+    contest.enforcement?.fullscreen_reentry_seconds === undefined ? "" : String(contest.enforcement.fullscreen_reentry_seconds)
+  );
+  const [exitLimit, setExitLimit] = useState(
+    contest.enforcement?.fullscreen_exit_limit === undefined ? "" : String(contest.enforcement.fullscreen_exit_limit)
+  );
   const [problemRows, setProblemRows] = useState<ProblemRow[]>(() => problemRowsOf(contest));
   const [addProblemId, setAddProblemId] = useState("");
   const [endNowArmed, setEndNowArmed] = useState(false);
@@ -428,6 +440,29 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
         fullscreen_exit_limit: current?.fullscreen_exit_limit ?? 2,
         mode: current?.mode ?? "block",
         simplified_fullscreen_recovery: next
+      }
+    });
+  });
+
+  // Take-home: save the remote-mode toggle + proctor phone + the two enforcement
+  // knobs in one call. Like toggleSimplifiedRecovery, this sends the WHOLE
+  // enforcement object (updateContest .set()s it), preserving mode and
+  // simplified_fullscreen_recovery from the contest's current enforcement. Blank
+  // number inputs fall back to the backend defaults (20s / 2); the backend clamps
+  // re-entry to 5–300 and exit limit to 1–10.
+  const saveRemoteSettings = () => runMutation(async () => {
+    const current = contest.enforcement;
+    const reentry = reentrySeconds.trim() === "" ? 20 : Number(reentrySeconds);
+    const exit = exitLimit.trim() === "" ? 2 : Number(exitLimit);
+    await updateContestApi(password, {
+      slug: contest.slug,
+      take_home_enabled: takeHomeEnabled,
+      proctor_contact_phone: proctorPhone.trim() || null,
+      enforcement: {
+        fullscreen_reentry_seconds: reentry,
+        fullscreen_exit_limit: exit,
+        mode: current?.mode ?? "block",
+        simplified_fullscreen_recovery: current?.simplified_fullscreen_recovery === true
       }
     });
   });
@@ -635,6 +670,54 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
               </span>
             </label>
             <p className="mt-2 text-xs text-muted">Takes effect on in-progress sessions within ~15 seconds via the candidate heartbeat — no reload needed.</p>
+          </div>
+
+          {/* Take-at-home (remote) mode: master toggle + proctor phone (gated on
+              the toggle) + the re-entry/exit-limit knobs (shown for ALL contests). */}
+          <div className="mb-4 rounded-md border border-line bg-white/60 p-4">
+            <h3 className="text-sm font-semibold text-ink">Take-at-home (remote)</h3>
+            <label className="mt-2 flex items-start gap-3 text-sm leading-6 text-muted">
+              <input className="mt-1 h-4 w-4 accent-accent" type="checkbox" checked={takeHomeEnabled} onChange={(event) => setTakeHomeEnabled(event.target.checked)} />
+              <span><span className="font-medium text-ink">Remote (take-at-home) contest</span> — candidates sit the test without an invigilator in the room. Shows a pre-start waiting room and the proctor contact number on the waiting, in-exam, and locked screens.</span>
+            </label>
+
+            {/* A1: remote candidates can only reach the waiting room while the
+                contest is Open — surface the operational precondition on the card. */}
+            <p className="mt-2 rounded-md border border-line bg-white px-3 py-2 text-xs text-muted">
+              Remote candidates can only reach the waiting room while this contest is set to <span className="font-medium text-ink">Open</span>. Set it Open ~15 minutes before the start time so candidates can land in the waiting room before the test begins.
+            </p>
+
+            {/* A11: the whole waiting-room UX is meaningless without a start time. */}
+            {takeHomeEnabled && !contest.start_at ? (
+              <p className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                This contest has no start time set. Remote mode needs a start time for the waiting-room countdown — set the start time in the Exam window above before opening it to candidates.
+              </p>
+            ) : null}
+
+            {takeHomeEnabled ? (
+              <label className="mt-3 block max-w-xs">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Proctor contact phone</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" value={proctorPhone} placeholder="+91 98765 43210" onChange={(event) => setProctorPhone(event.target.value)} />
+              </label>
+            ) : null}
+
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Re-entry countdown (seconds)</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="number" min={5} max={300} placeholder="20" value={reentrySeconds} onChange={(event) => setReentrySeconds(event.target.value)} />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Full-screen exit limit</span>
+                <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="number" min={1} max={10} placeholder="2" value={exitLimit} onChange={(event) => setExitLimit(event.target.value)} />
+              </label>
+            </div>
+            <p className="mt-2 text-xs text-muted">The countdown is how long the red exit screen waits before locking; the exit limit is how many full-screen exits are allowed before the session auto-locks. Blank = defaults (20s / 2). Clamped to 5–300s and 1–10. Takes effect on in-progress sessions within ~15s via the heartbeat.</p>
+
+            <div className="mt-3">
+              <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={saveRemoteSettings}>
+                Save remote settings
+              </button>
+            </div>
           </div>
 
           {/* Roster — REUSE of the S-C section, scoped to this contest. */}

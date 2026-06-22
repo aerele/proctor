@@ -3849,6 +3849,10 @@ export async function updateContestApi(password: string, body: ContestUpdateRequ
       // #71: carry the enforcement object through the demo update so the
       // ContestsPanel simplified-recovery toggle reflects after save in demo mode.
       ...(patch.enforcement !== undefined ? { enforcement: patch.enforcement } : {}),
+      // Take-home (A-2): carry the remote-mode fields through the demo update so the
+      // ContestsPanel take-at-home card reflects after save in demo mode.
+      ...(patch.take_home_enabled !== undefined ? { take_home_enabled: patch.take_home_enabled } : {}),
+      ...(patch.proctor_contact_phone !== undefined ? { proctor_contact_phone: patch.proctor_contact_phone || null } : {}),
       ...(patch.problems !== undefined
         ? { problems: patch.problems.map((entry, order) => ({ problem_id: entry.problem_id, points: entry.points ?? null, order })) }
         : {})
