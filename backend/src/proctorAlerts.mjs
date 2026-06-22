@@ -115,7 +115,11 @@ export function makeProctorAlerts(ctx) {
     disconnected: { enabled: true, severity: "warning", show_to_invigilator: false }
   };
 
-  const ALERT_SOURCES = ["proctor", "contest-eval"];
+  // The HackerRank contest-eval poller was removed (proctor moved to its own
+  // in-app contest platform). `proctor` is now the ONLY accepted alert source;
+  // normalizeAlert rejects any other source (incl. the old "contest-eval") at
+  // ingest with a 400.
+  const ALERT_SOURCES = ["proctor"];
   const ALERT_SEVERITIES = ["critical", "warning", "info"];
   const ALERT_VERDICT_STATUSES = ["pending", "real", "false_positive", "inconclusive"];
   const ALERT_REQUIRED_FIELDS = ["source", "type", "severity", "timestamp", "hackerrank_username", "title"];

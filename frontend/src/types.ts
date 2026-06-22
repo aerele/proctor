@@ -533,7 +533,11 @@ export type SessionActionResponse = {
 // source, type, severity, timestamp, hackerrank_username, title.
 export type AlertSeverity = "critical" | "warning" | "info";
 
-export type AlertSource = "proctor" | "contest-eval";
+// HR-poller removal: "proctor" is the ONLY alert source now — the contest-eval
+// poller was removed when proctor moved to its own in-app contest platform.
+// (Legacy stored alerts may still carry source:"contest-eval"; the console
+// displays whatever string is stored, but no new contest-eval alerts are ingested.)
+export type AlertSource = "proctor";
 
 export type AlertVerdictStatus = "pending" | "real" | "false_positive" | "inconclusive";
 
@@ -550,8 +554,9 @@ export type Alert = {
   /**
    * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected | fullscreen_enforcement
    *   (legacy, no longer raised but may still appear in stored data: invalid_share_surface)
-   * contest-eval: peer_copy_cluster | recurring_pair | web_paste | first_attempt_solve | tough_first_attempt
-   *   (legacy alias, no longer emitted: fast_solve)
+   * Legacy contest-eval types (peer_copy_cluster | recurring_pair | web_paste |
+   *   first_attempt_solve | tough_first_attempt | fast_solve) are no longer
+   *   ingested — the HackerRank poller was removed — but may persist in old docs.
    */
   type: string;
   severity: AlertSeverity;

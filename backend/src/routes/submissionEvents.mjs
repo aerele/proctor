@@ -1,18 +1,18 @@
-// backend/src/routes/submissionEvents.mjs — the poller-sourced submission-time
-// markers route domain as a FACTORY (decomp B5, plan §A2/§A8).
+// backend/src/routes/submissionEvents.mjs — the submission-time markers route
+// domain as a FACTORY (decomp B5, plan §A2/§A8).
 // makeSubmissionEventsRoutes(ctx) closes over the handler-built ctx (per ?buster
-// instance) and returns the two submission-events route handlers + the helpers
-// it OWNS (submissionEventsDocId / submissionEventsRef / normalizeSubmissionEvent
-// / mergeSubmissionEvents, with the SUBMISSION_EVENTS_INGEST_LIMIT cap).
+// instance) and returns the admin submission-events route handler + the helpers
+// it OWNS (submissionEventsDocId / submissionEventsRef / mergeSubmissionEvents).
 // handler.mjs instantiates this at module scope and destructures the route
-// handlers into the SAME names the dispatch table calls, so the dispatch lines
-// stay byte-identical (canaryIsolation text-scans them).
+// handler into the SAME name the dispatch table calls, so the dispatch line
+// stays byte-identical (canaryIsolation text-scans it).
 //
-// EACH ROUTE KEEPS ITS OWN AUTH GUARD — they are deliberately DIFFERENT:
-//   ingestSubmissionEvents (POST /api/submission-events) is the poller ingest,
-//     authenticated with requireApiKey (the SAME x-api-key mechanism as the
-//     alerts ingest) — NOT an admin/invigilator credential, so routesAuthLint
-//     (which only checks admin*/invigilator*-named handlers) leaves it alone.
+// The HackerRank contest-eval poller ingest (POST /api/submission-events,
+// ingestSubmissionEvents) was REMOVED when proctor moved to its own in-app
+// contest platform. proctor_submission_events is therefore no longer written;
+// adminSubmissionEvents still READS any legacy docs it holds, then falls back to
+// the proctor's own in-app submissions (proctor_submissions). The remaining
+// route keeps its auth guard:
 //   adminSubmissionEvents (GET /api/admin/submission-events) is the admin
 //     recording-review read, auth-first with requireAdmin (routesAuthLint pins
 //     this); it is a SCOPED GET in canaryIsolation's SCOPED_GET_REQUESTS.
@@ -34,11 +34,8 @@
 export function makeSubmissionEventsRoutes(ctx) {
   const {
     getFirestore,
-    requireApiKey,
     requireAdmin,
-    parseBody,
     badRequest,
-    httpError,
     normalizeUsername,
     // The ONE contest_slug-filter chokepoint (src/contests.mjs scopedQuery) —
     // the native-submission fallback scopes through it, so no raw contest_slug
@@ -62,16 +59,15 @@ export function makeSubmissionEventsRoutes(ctx) {
   // a pathological user from streaming thousands of docs into one timeline).
   const SUBMISSION_EVENTS_FALLBACK_LIMIT = 2000;
 
-  // ---- Submission-time markers (poller-sourced) -----------------------------
+  // ---- Submission-time markers (legacy poller-sourced READ) -----------------
   //
-  // The contest-eval poller POSTs every code submission a student made (valid =
-  // Accepted, invalid = a terminal failure; transient Processing/Queued are
-  // skipped poller-side). They are stored as ONE doc per (username_norm,
-  // contest_slug) holding a merged, de-duped-by-submission_id events array so a
-  // re-post is idempotent. The admin recording-review timeline reads them back to
-  // overlay GREEN (valid) / RED (invalid) markers at each submission's real time.
-
-  const SUBMISSION_EVENTS_INGEST_LIMIT = 5000;
+  // The HackerRank contest-eval poller (which POSTed these via the now-removed
+  // POST /api/submission-events ingest) is gone. The proctor_submission_events
+  // collection is therefore no longer written to; any docs it still holds are
+  // legacy. adminSubmissionEvents below still READS them so historical contests
+  // keep their timeline, then falls back to the proctor's own in-app submissions
+  // (proctor_submissions) for proctor-native contests — the only path that gets
+  // populated now.
 
   // Deterministic doc id for a (username_norm, contest_slug) submission-events doc.
   function submissionEventsDocId(usernameNorm, contestSlug) {
@@ -80,50 +76,6 @@ export function makeSubmissionEventsRoutes(ctx) {
 
   function submissionEventsRef(usernameNorm, contestSlug) {
     return getFirestore().collection(submissionEventsCollection).doc(submissionEventsDocId(usernameNorm, contestSlug));
-  }
-
-  // Validate + normalize one inbound submission event. submission_id is coerced to
-  // a string so it is a stable de-dupe key whether the poller sends an int or str.
-  function normalizeSubmissionEvent(event, index) {
-    if (!event || typeof event !== "object" || Array.isArray(event)) {
-      throw httpError(400, `events[${index}] must be an object`);
-    }
-    // S-C (F9 §1.2): candidate_id accepted as an alias FOREVER (lazy poller fleet).
-    if ((event.hackerrank_username === undefined || event.hackerrank_username === null || event.hackerrank_username === "")
-        && event.candidate_id !== undefined && event.candidate_id !== null && event.candidate_id !== "") {
-      event = { ...event, hackerrank_username: event.candidate_id };
-    }
-    for (const field of ["hackerrank_username", "submission_id", "submitted_at"]) {
-      const value = event[field];
-      if (value === undefined || value === null || value === "") {
-        throw httpError(400, `events[${index}].${field} is required`);
-      }
-    }
-    if (Number.isNaN(Date.parse(event.submitted_at))) {
-      throw httpError(400, `events[${index}].submitted_at must be a valid ISO 8601 date`);
-    }
-    const item = {
-      submission_id: String(event.submission_id),
-      hackerrank_username: String(event.hackerrank_username),
-      valid: event.valid === true,
-      submitted_at: new Date(event.submitted_at).toISOString()
-    };
-    if (event.contest_slug) item.contest_slug = String(event.contest_slug);
-    if (event.challenge_slug) item.challenge_slug = String(event.challenge_slug);
-    if (event.challenge_name) item.challenge_name = String(event.challenge_name);
-    if (event.lang) item.lang = String(event.lang);
-    if (event.status) item.status = String(event.status);
-    // OPTIONAL score fields — uniform with the native-submission mapping so the
-    // recording-review timeline renders the same result+score shape from either
-    // source. Today's poller fleet does not send them; threaded through only when
-    // present + numeric so the poller path is unchanged when they are absent.
-    for (const field of ["passed_count", "total", "score", "max_points"]) {
-      const n = Number(event[field]);
-      if (event[field] !== undefined && event[field] !== null && event[field] !== "" && Number.isFinite(n)) {
-        item[field] = n;
-      }
-    }
-    return item;
   }
 
   // Merge new events into an existing array, de-duping by submission_id (a later
@@ -138,49 +90,6 @@ export function makeSubmissionEventsRoutes(ctx) {
     return [...byId.values()].sort((a, b) =>
       String(a.submitted_at || "").localeCompare(String(b.submitted_at || ""))
     );
-  }
-
-  // POST /api/submission-events — poller ingest, authenticated with the SAME
-  // x-api-key mechanism as the alerts ingest. Groups the inbound events by
-  // (username_norm, contest_slug) and upserts each group's doc with the merged,
-  // de-duped array. Returns { ok, stored } = the count of events accepted.
-  async function ingestSubmissionEvents(req) {
-    requireApiKey(req);
-    const body = parseBody(req);
-    const rawEvents = Array.isArray(body?.events) ? body.events : [];
-    if (!rawEvents.length) return badRequest("No events provided");
-    if (rawEvents.length > SUBMISSION_EVENTS_INGEST_LIMIT) {
-      return badRequest(`Too many events in one request (max ${SUBMISSION_EVENTS_INGEST_LIMIT})`);
-    }
-
-    const normalized = rawEvents.map((event, index) => normalizeSubmissionEvent(event, index));
-
-    // Group by the doc key so each (username_norm, contest_slug) doc is read +
-    // upserted exactly once even when a batch spans many users.
-    const groups = new Map();
-    for (const event of normalized) {
-      const usernameNorm = normalizeUsername(event.hackerrank_username);
-      const contestSlug = event.contest_slug || "";
-      const key = submissionEventsDocId(usernameNorm, contestSlug);
-      if (!groups.has(key)) groups.set(key, { usernameNorm, contestSlug, events: [] });
-      groups.get(key).events.push(event);
-    }
-
-    const now = new Date().toISOString();
-    await Promise.all([...groups.values()].map(async ({ usernameNorm, contestSlug, events }) => {
-      const ref = submissionEventsRef(usernameNorm, contestSlug);
-      const doc = await ref.get();
-      const existing = doc.exists ? (doc.data()?.events || []) : [];
-      const merged = mergeSubmissionEvents(existing, events);
-      await ref.set({
-        username_norm: usernameNorm,
-        contest_slug: contestSlug,
-        events: merged,
-        updated_at: now
-      }, { merge: true });
-    }));
-
-    return { ok: true, stored: normalized.length };
   }
 
   // Map ONE native proctor_submissions doc into the SubmissionEvent shape the
@@ -372,16 +281,15 @@ export function makeSubmissionEventsRoutes(ctx) {
   }
 
   return {
-    // route handlers — names match the dispatch table exactly so handler.mjs's
-    // dispatch lines stay byte-identical (canaryIsolation). adminSubmissionEvents
-    // is auth-first (routesAuthLint); ingestSubmissionEvents uses requireApiKey.
-    ingestSubmissionEvents,
+    // route handler — name matches the dispatch table exactly so handler.mjs's
+    // dispatch line stays byte-identical (canaryIsolation). adminSubmissionEvents
+    // is auth-first (routesAuthLint). The poller ingest (ingestSubmissionEvents)
+    // was removed with the HackerRank poller.
     adminSubmissionEvents,
-    // submission-events helpers it owns (currently used only by these routes;
-    // kept single-source here in case future resident code needs them via ctx)
+    // submission-events helpers it owns (currently used only by this route; kept
+    // single-source here in case future resident code needs them via ctx)
     submissionEventsDocId,
     submissionEventsRef,
-    normalizeSubmissionEvent,
     mergeSubmissionEvents,
     // native-submission fallback helpers (exported for the mapper/fallback tests)
     nativeSubmissionToEvent,

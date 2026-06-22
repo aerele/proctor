@@ -126,11 +126,11 @@ _A short demo video / GIF is a recommended addition before a public launch._
         (shared contract)       │            │        │ signed video_key
                                 │            │        ▼       ┌────────────┐
    ┌────────────────────────────┴──┐  ┌──────┴─────┐ ┌────────┴───────────┐│ GCS        │
-   │ monitoring/ (OPTIONAL Python  │  │ Judge0      │ │ proctor-eval        ││ evidence   │
-   │  contest-eval poller)         │  │ (RapidAPI)  │ │ (separate Cloud Run)││ (chunks +  │
-   │  • externally-hosted HR only  │  │ Run/Submit  │ │ • /eval-ui pages    ││ manifests) │
-   │  • POSTs source:contest-eval  │  └─────────────┘ │ • evaluation engine │└────────────┘
-   │    alerts to /api/alerts      │                  │   (calibrated)      │
+   │ monitoring/ (Python tab-away  │  │ Judge0      │ │ proctor-eval        ││ evidence   │
+   │  detector)                    │  │ (RapidAPI)  │ │ (separate Cloud Run)││ (chunks +  │
+   │  • image-recog on recordings  │  │ Run/Submit  │ │ • /eval-ui pages    ││ manifests) │
+   │  • POSTs source:proctor       │  └─────────────┘ │ • evaluation engine │└────────────┘
+   │    tab_away alerts to /api/…  │                  │   (calibrated)      │
    └───────────────────────────────┘                  └─────────────────────┘
 ```
 
@@ -152,15 +152,16 @@ _A short demo video / GIF is a recommended addition before a public launch._
   evaluation/calibration logic can be redeployed without ever touching the
   test-taking service. Separation is at the **deploy** boundary, not the data
   boundary — it shares the same Firestore + GCS + config.
-- **monitoring** (`monitoring/`) — **optional** standalone Python contest-eval
-  poller for **externally-hosted HackerRank** contests; emits the same `Alert`
-  contract into `/api/alerts`. Not part of the candidate experience.
-  → [`monitoring/README.md`](monitoring/README.md)
+- **monitoring** (`monitoring/`) — the local image-recognition **tab-away
+  detector** (`tab_away_detector.py`) that flags a candidate navigating away from
+  the assessment and POSTs a `source:"proctor"` `tab_away` alert into
+  `/api/alerts`. (The old HackerRank contest-eval poller that lived here was
+  removed.) → [`monitoring/tab-away-README.md`](monitoring/tab-away-README.md)
 
 **How they connect.** Every producer — the recorder, the enforcement ladder, and
-(optionally) the contest-eval poller — emits the **same shared `Alert` JSON
-contract**, and they all land in one Firestore collection the admin console reads.
-Evidence is stored under one contest-foldered GCS prefix every component agrees on.
+the tab-away detector — emits the **same shared `Alert` JSON contract**, and they
+all land in one Firestore collection the admin console reads. Evidence is stored
+under one contest-foldered GCS prefix every component agrees on.
 
 ## Tech stack
 
@@ -170,7 +171,7 @@ Evidence is stored under one contest-foldered GCS prefix every component agrees 
 | **Backend** | Node.js 22 (ESM), Google Cloud Functions Framework, `@google-cloud/firestore`, `@google-cloud/storage`. Deployed on Cloud Run. |
 | **Code execution** | Judge0 CE — managed via RapidAPI by default, or self-hosted. |
 | **Data** | Firestore (sessions, contests, problems, roster/persons, alerts, reviews, evaluations…) + Google Cloud Storage (screen/camera chunks, JSONL event logs, manifests). |
-| **Optional monitoring poller** | Python 3 + Chrome DevTools Protocol. |
+| **Tab-away detector** | Python 3 + numpy/Pillow (or OpenCV) image recognition. |
 | **Cloud** | Google Cloud: Cloud Run, Cloud Storage, Firestore, Artifact Registry, Cloud Build, (optional) Cloud Scheduler + Secret Manager. |
 
 ## Quickstart
@@ -266,7 +267,7 @@ to the exact frontend URL in production.
 |---|---|
 | `frontend/` | The React app — `src/App.tsx` (a ~26-line pathname router), `src/candidate/` (candidate surface), `src/admin/` (admin console + `AdminApp.tsx`), `src/InvigilatorApp.tsx`, `src/RecordingReview.tsx`, `src/useProctorRecorder.ts`, `src/api.ts` (incl. the demo shim), and per-area folders (`coding/`, `shell/`, `roster/`, `results/`, `people/`, `problems/`, `markers/`, `attendance/`, `ui/`). |
 | `backend/` | The HTTP handler `src/handler.mjs` plus split-out modules (`config.mjs`, `lib/*.mjs`, `routes/*.mjs`, the `evaluation*.mjs` engine), `Dockerfile` + `Dockerfile.eval`, the deploy script, the Firestore index, and the mocked-GCP test suite. |
-| `monitoring/` | Optional Python contest-eval poller (`poller.py`), analysis core, alert builder, CDP driver, verdict seam, tests, and deep READMEs. |
+| `monitoring/` | The local image-recognition **tab-away detector** (`tab_away_detector.py`) + its self-test and README. (The old HackerRank contest-eval poller that lived here was removed.) |
 | `docs/` | Per-area feature guides (`features/`), the deploy + exam-day runbooks, and the background research. |
 | `scripts/` | Operational helpers (e.g. `deploy-preflight.sh`). |
 | `*.env.example` · `.env.deploy.example` | Configuration templates (placeholders only). |
@@ -277,8 +278,7 @@ to the exact frontend URL in production.
 cd backend  && npm test            # backend handler suite (mocked Firestore/Storage)
 cd frontend && npx vitest run      # frontend unit suite
 cd frontend && npm run build       # frontend production build
-python3 monitoring/test_monitoring.py   # optional poller core (set CONTEST_EVAL_DATA for the fixture-backed cases)
-bash monitoring/run-demo.sh             # optional poller → ingest → read (needs a local contest-eval fixture set; see monitoring/README.md)
+python3 monitoring/test_tab_away.py     # tab-away detector self-test (synthetic clip; no real sample needed)
 ```
 
 ## Contributing & local development
@@ -423,7 +423,7 @@ label is "Candidate ID"):
 ```jsonc
 {
   "id": "<source>:<type>:<username_norm>:<contest_slug>:<dedupe>", // stable + idempotent
-  "source": "proctor | contest-eval",
+  "source": "proctor", // the only accepted source (the contest-eval poller was removed)
   "type":   "<see alert taxonomy below>",
   "severity": "critical | warning | info",
   "timestamp": "<ISO 8601>",
@@ -466,19 +466,8 @@ every type.
 > The recorder **refuses** any non-`monitor` share surface (it throws before
 > recording starts), so an "invalid share surface" can never fire as a live event.
 
-### Contest-eval alerts — OPTIONAL poller (`monitoring/alert-config.json`)
-
-`source:"contest-eval"`, built in `monitoring/alerts.py`. Only relevant when the
-optional poller runs against an externally-hosted HackerRank contest. `enabled`
-gates production; a non-null `severity` overrides the dynamic severity:
-
-| Type | Default severity | Meaning |
-|---|---|---|
-| `peer_copy_cluster` | dynamic critical (HARD) / warning (MED) | >1 distinct user with identical (skeleton) code on one MED/HARD problem |
-| `recurring_pair` | dynamic critical if 2+ shared / warning if single-hard | a pair sharing identical code; the most conclusive signal |
-| `web_paste` | warning | strong web/editorial provenance in fetched accepted code (Java `class Solution` FP suppressed) |
-| `first_attempt_solve` | info | ACCEPTED on first attempt, **normal** problem — a corroborator, never a standalone flag |
-| `tough_first_attempt` | critical | first-attempt solve on a **tough** problem (operator-marked or data-derived hard) — the real flag |
+The legacy `source:"contest-eval"` poller alert types were removed with the
+HackerRank poller; `proctor` is the only alert source now.
 
 ## License
 

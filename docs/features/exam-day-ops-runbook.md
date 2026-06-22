@@ -1,6 +1,6 @@
 # Exam-Day Operations Runbook (1-page, F11.3)
 
-**Purpose.** A single page the test-day team works from: how an admin sets up a round, what a candidate sees, how an invigilator runs a room, and exactly what to do when a candidate gets locked. Aerele Proctor is a **standalone own-editor exam platform** — candidates code, Run, and Submit entirely inside our React + Monaco workspace against a live Judge0 backend; there is no HackerRank in the candidate path. (A separate, optional contest-eval monitoring poller for *externally-hosted* HackerRank contests still exists — see [contest-eval-monitoring.md](contest-eval-monitoring.md) — but it is not part of this own-editor flow.)
+**Purpose.** A single page the test-day team works from: how an admin sets up a round, what a candidate sees, how an invigilator runs a room, and exactly what to do when a candidate gets locked. Aerele Proctor is a **standalone own-editor exam platform** — candidates code, Run, and Submit entirely inside our React + Monaco workspace against a live Judge0 backend; there is no HackerRank in the candidate path. (The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.)
 
 Code-truth note: the backend has been **decomposed** — `backend/src/handler.mjs` is now the composition root that owns the request **dispatch table**, while route bodies live in 18 `backend/src/routes/*.mjs` factory modules (plus `lib/*.mjs`, `config.mjs`, and the feature/domain modules). The frontend is likewise split: `frontend/src/App.tsx` is a tiny pathname router, and the surface UI lives under `candidate/`, `admin/`, `invigilator/`, `shell/`, etc. Routes below are cited by their HTTP path, which is stable regardless of where the body lives.
 
@@ -108,7 +108,7 @@ All under the admin console (`frontend/src/admin/`); details in [admin-live-moni
 | **Sessions** | All-docs session list (matches the stat-card counts; reaches zero-chunk 2nd-device sessions). Click a row → session card with status-valid actions. | on demand | `GET /api/admin/sessions-list`, `/api/admin/session-detail` |
 | **Invigilator portal** | Per-room view (see §3). | 5s | `GET /api/invigilator/room` |
 
-The alert feed is shared: candidate proctoring alerts **and** (if running) the contest-eval poller's cheating alerts land in the same `/api/admin/alerts` pipeline — see [alert-taxonomy.md](alert-taxonomy.md).
+The alert feed carries candidate proctoring alerts, which land in the `/api/admin/alerts` pipeline — see [alert-taxonomy.md](alert-taxonomy.md). (`proctor` is the only alert source now; the legacy HackerRank contest-eval poller that used to feed this pipeline was removed.)
 
 ---
 
@@ -157,4 +157,4 @@ with flag counts, and a per-row evidence drawer. See
 - [invigilator-portal.md](invigilator-portal.md)
 - [admin-contests-templates.md](admin-contests-templates.md) · [admin-roster-rooms-identity.md](admin-roster-rooms-identity.md) · [admin-problems-stubs-autocomplete.md](admin-problems-stubs-autocomplete.md)
 - [admin-live-monitoring.md](admin-live-monitoring.md) · [admin-recording-review.md](admin-recording-review.md) · [admin-results-people.md](admin-results-people.md) · [admin-data-lifecycle.md](admin-data-lifecycle.md)
-- [alert-taxonomy.md](alert-taxonomy.md) · [contest-eval-monitoring.md](contest-eval-monitoring.md)
+- [alert-taxonomy.md](alert-taxonomy.md)
