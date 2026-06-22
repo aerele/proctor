@@ -163,7 +163,13 @@ export function screenStatusFromErrorKind(kind: RecorderStartErrorKind): Permiss
 
 // Gate copy for a failed screen share — setup-stage wording (no session, no
 // recording yet), unlike App.tsx's handleStartFailure copy.
-export function screenShareFailureMessage(kind: RecorderStartErrorKind): string {
+// #135 take-home (A10): the generic-failure tail routes to the proctor phone
+// instead of "call an invigilator" for remote contests (no invigilator in the
+// room). Absent opts ⇒ byte-identical in-venue copy (D3).
+export function screenShareFailureMessage(
+  kind: RecorderStartErrorKind,
+  opts?: { takeHome?: boolean; phone?: string }
+): string {
   if (kind === "invalid_surface") {
     return "You shared a tab or window. Share your ENTIRE screen — press the button again and pick the whole screen.";
   }
@@ -173,5 +179,8 @@ export function screenShareFailureMessage(kind: RecorderStartErrorKind): string 
   if (kind === "unsupported") {
     return "This browser cannot share your screen. Open this page in the latest Chrome or Edge on a laptop or desktop.";
   }
-  return "Screen share failed. Try again — if it keeps failing, call an invigilator.";
+  const callForHelp = opts?.takeHome
+    ? `call your proctor at ${opts.phone || "the number provided"}`
+    : "call an invigilator";
+  return `Screen share failed. Try again — if it keeps failing, ${callForHelp}.`;
 }

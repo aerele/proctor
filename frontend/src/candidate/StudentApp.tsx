@@ -328,7 +328,7 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     } catch (cause) {
       const kind = classifyStartError(cause);
       setPermissions((c) => ({ ...c, screen: screenStatusFromErrorKind(kind) }));
-      setScreenSetupMessage(screenShareFailureMessage(kind));
+      setScreenSetupMessage(screenShareFailureMessage(kind, { takeHome, phone: proctorPhone }));
       recordSetupEvent("setup_screen_share_failed", { kind, message: cause instanceof Error ? cause.message : String(cause) });
     }
   };
