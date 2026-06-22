@@ -132,11 +132,6 @@ _A short demo video / GIF is a recommended addition before a public launch._
    │  • POSTs source:contest-eval  │  └─────────────┘ │ • evaluation engine │└────────────┘
    │    alerts to /api/alerts      │                  │   (calibrated)      │
    └───────────────────────────────┘                  └─────────────────────┘
-                                                       ┌─────────────────────┐
-                                                       │ video-worker/        │
-                                                       │ (OPTIONAL chunk merge│
-                                                       │  service)            │
-                                                       └─────────────────────┘
 ```
 
 **The services**
@@ -157,9 +152,6 @@ _A short demo video / GIF is a recommended addition before a public launch._
   evaluation/calibration logic can be redeployed without ever touching the
   test-taking service. Separation is at the **deploy** boundary, not the data
   boundary — it shares the same Firestore + GCS + config.
-- **video-worker** (`video-worker/`) — **optional** Cloud Run service that merges
-  per-session screen chunks into one review video. Not required to run an exam.
-  → [`video-worker/README.md`](video-worker/README.md)
 - **monitoring** (`monitoring/`) — **optional** standalone Python contest-eval
   poller for **externally-hosted HackerRank** contests; emits the same `Alert`
   contract into `/api/alerts`. Not part of the candidate experience.
@@ -178,7 +170,6 @@ Evidence is stored under one contest-foldered GCS prefix every component agrees 
 | **Backend** | Node.js 22 (ESM), Google Cloud Functions Framework, `@google-cloud/firestore`, `@google-cloud/storage`. Deployed on Cloud Run. |
 | **Code execution** | Judge0 CE — managed via RapidAPI by default, or self-hosted. |
 | **Data** | Firestore (sessions, contests, problems, roster/persons, alerts, reviews, evaluations…) + Google Cloud Storage (screen/camera chunks, JSONL event logs, manifests). |
-| **Optional video-worker** | Node.js 22 + `ffmpeg`/`ffprobe` on Cloud Run. |
 | **Optional monitoring poller** | Python 3 + Chrome DevTools Protocol. |
 | **Cloud** | Google Cloud: Cloud Run, Cloud Storage, Firestore, Artifact Registry, Cloud Build, (optional) Cloud Scheduler + Secret Manager. |
 
@@ -215,7 +206,6 @@ $EDITOR .env.deploy.local          # PROJECT_ID, REGION, ADMIN_PASSWORD, buckets
 # 2. Deploy, from the repo root, in order:
 backend/deploy-gcp.sh              # proctor-api
 frontend/deploy-gcp.sh             # proctor-web  (the ONLY sanctioned frontend deploy)
-video-worker/deploy-gcp.sh         # optional
 ```
 
 > **Always deploy the frontend through `frontend/deploy-gcp.sh`.** Ad-hoc
@@ -239,9 +229,8 @@ the public Judge0 CE on RapidAPI:
 
 To self-host Judge0 instead: set `JUDGE0_MODE=selfhosted`, point `JUDGE0_BASE_URL`
 at your instance, and use `JUDGE0_AUTH_TOKEN`. See the per-service env templates:
-[`backend/.env.example`](backend/.env.example),
-[`frontend/.env.example`](frontend/.env.example),
-[`video-worker/.env.example`](video-worker/.env.example).
+[`backend/.env.example`](backend/.env.example) and
+[`frontend/.env.example`](frontend/.env.example).
 
 ## Documentation
 
@@ -264,7 +253,6 @@ canonical list:
 |---|---|---|
 | **proctor-api / proctor-eval** | [`backend/.env.example`](backend/.env.example) | `ADMIN_PASSWORD`, `EVIDENCE_BUCKET`, `JUDGE0_*`, `ALERTS_INGEST_API_KEY`, `INVIGILATOR_PASSWORD`, `RETENTION_SWEEP_API_KEY`, the `EXEC_*` tuning, Firestore collection names. |
 | **proctor-web** | [`frontend/.env.example`](frontend/.env.example) | `VITE_API_BASE_URL`, `VITE_DEMO_MODE`, `VITE_EVAL_API_URL`, and the deploy-baked `VITE_*_PASSWORD_HASH` values. |
-| **video-worker** | [`video-worker/.env.example`](video-worker/.env.example) | `WORKER_TOKEN`, `SOURCE_BUCKET`, `DEST_BUCKET`. |
 | **deployment** | [`.env.deploy.example`](.env.deploy.example) | The full Google Cloud deploy template consumed by the `deploy-gcp.sh` scripts. |
 
 Secrets are **closed by default**: `POST /api/alerts` and the retention-sweep
@@ -278,10 +266,9 @@ to the exact frontend URL in production.
 |---|---|
 | `frontend/` | The React app — `src/App.tsx` (a ~26-line pathname router), `src/candidate/` (candidate surface), `src/admin/` (admin console + `AdminApp.tsx`), `src/InvigilatorApp.tsx`, `src/RecordingReview.tsx`, `src/useProctorRecorder.ts`, `src/api.ts` (incl. the demo shim), and per-area folders (`coding/`, `shell/`, `roster/`, `results/`, `people/`, `problems/`, `markers/`, `attendance/`, `ui/`). |
 | `backend/` | The HTTP handler `src/handler.mjs` plus split-out modules (`config.mjs`, `lib/*.mjs`, `routes/*.mjs`, the `evaluation*.mjs` engine), `Dockerfile` + `Dockerfile.eval`, the deploy script, the Firestore index, and the mocked-GCP test suite. |
-| `video-worker/` | Optional Cloud Run chunk-merge service (`src/server.mjs`). |
 | `monitoring/` | Optional Python contest-eval poller (`poller.py`), analysis core, alert builder, CDP driver, verdict seam, tests, and deep READMEs. |
 | `docs/` | Per-area feature guides (`features/`), the deploy + exam-day runbooks, and the background research. |
-| `scripts/` | Operational helpers (e.g. `merge-gcs-videos.mjs`, `deploy-preflight.sh`). |
+| `scripts/` | Operational helpers (e.g. `deploy-preflight.sh`). |
 | `*.env.example` · `.env.deploy.example` | Configuration templates (placeholders only). |
 
 ## Tests

@@ -6,7 +6,7 @@ Build + Artifact Registry) from scratch.
 
 This runbook is self-contained: every command and behavior below tracks the
 actual repo — `backend/deploy-gcp.sh`, `frontend/deploy-gcp.sh`,
-`video-worker/deploy-gcp.sh`, `backend/src/config.mjs`, `backend/src/handler.mjs`,
+`backend/src/config.mjs`, `backend/src/handler.mjs`,
 `backend/src/lib/clients.mjs`, `backend/src/lib/auth.mjs`,
 `backend/src/routes/healthCheck.mjs`, `frontend/src/api.ts`, `.env.deploy.example`,
 `backend/gcs-lifecycle.json`, and `backend/gcs-cors.json`. For current deployed
@@ -99,14 +99,9 @@ Fields in `.env.deploy.example` (verified):
 | `ALERTS_COLLECTION` | Firestore alerts collection. Default `proctor_alerts`. |
 | `PUBLIC_APP_ORIGIN` | CORS origin. Start `*`; tighten to the frontend URL later (§5). |
 | `EVIDENCE_BUCKET` | Globally-unique GCS bucket for evidence. |
-| `SOURCE_BUCKET` | Video-worker source — usually equal to `EVIDENCE_BUCKET`. |
-| `DEST_BUCKET` | Merged-review-video bucket (video-worker only). |
 | `BACKEND_SERVICE_NAME` | `proctor-api`. |
 | `FRONTEND_SERVICE_NAME` | `proctor-web`. |
-| `VIDEO_WORKER_SERVICE_NAME` | `proctor-video-worker`. |
 | `API_URL` | Backend Cloud Run URL — fill AFTER the backend deploy (§2). |
-| `WORKER_TOKEN` | Protects the video-worker `/merge` endpoint. `openssl rand -base64 32`. |
-| `MAX_USERNAMES_PER_REQUEST` | Local merge-helper batch cap. Default `25`. |
 
 ### Read by the backend but NOT yet in `.env.deploy.example`
 
@@ -358,31 +353,7 @@ also unlocks it — `InvigilatorApp.tsx` accepts the admin hash as a fallback.
 
 ---
 
-## 4. (Optional) Deploy the video-worker
-
-```bash
-SERVICE_NAME="$VIDEO_WORKER_SERVICE_NAME" ./video-worker/deploy-gcp.sh
-```
-
-`video-worker/deploy-gcp.sh` (verified): creates `DEST_BUCKET` + applies
-`backend/gcs-lifecycle.json`; grants the runtime SA `storage.objectViewer` on
-`SOURCE_BUCKET`, `storage.objectAdmin` on `DEST_BUCKET`, and project
-`datastore.user` (the worker writes `merged_video_key` back to the session doc);
-deploys with `1Gi`, `--concurrency 1`, **`--timeout 3600s`** (ffmpeg/ffprobe come
-from its Dockerfile). Env set by the script: `SOURCE_BUCKET`, `DEST_BUCKET`,
-`SESSION_COLLECTION`, `MAX_USERNAMES_PER_REQUEST`, `WORKER_TOKEN`.
-
-> **CAVEAT (`video-worker/README.md`, untested vs real GCP):** if
-> `DEST_BUCKET` ≠ `EVIDENCE_BUCKET`, the backend signs the alert `video_key`
-> against the evidence bucket and the deep-link can 404. **The video-worker is NOT
-> deployed on the dev stack** — the alert→recording deep-link currently has no
-> merged video; admin recording review plays raw chunks directly (the player
-> builds a playlist from `screen/chunk-*.webm`). **(unverified against a real GCP
-> run.)**
-
----
-
-## 4.5 (Optional) Deploy the eval service (`proctor-eval`)
+## 4. (Optional) Deploy the eval service (`proctor-eval`)
 
 `proctor-eval` is the **same `backend/` source as `proctor-api`, a different
 entrypoint** — it is built from `backend/Dockerfile.eval` (functions-framework

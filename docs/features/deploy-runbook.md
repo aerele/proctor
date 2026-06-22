@@ -1,6 +1,6 @@
 # Deploy / Build Runbook — GCP end-to-end (F11.1)
 
-This page is the operator's runbook for standing up the Aerele Proctor platform on Google Cloud from nothing: an isolated GCP project, the backend API, the candidate/admin frontend, the optional video-merge worker, and the daily retention sweep. It documents what the deploy scripts in this repo actually do — and, just as importantly, the env keys and steps they do **not** yet wire up (flagged so you set them by hand before a real exam).
+This page is the operator's runbook for standing up the Aerele Proctor platform on Google Cloud from nothing: an isolated GCP project, the backend API, the candidate/admin frontend, and the daily retention sweep. It documents what the deploy scripts in this repo actually do — and, just as importantly, the env keys and steps they do **not** yet wire up (flagged so you set them by hand before a real exam).
 
 > **Product orientation.** Proctor is now a **standalone own-editor exam platform**: candidates do everything inside our own React + Monaco editor with Judge0-backed Run/Submit. (HackerRank was dropped from the candidate path in F8.2.) A separate, **optional** contest-eval monitoring poller under `monitoring/` still exists — it live-watches an externally-hosted HackerRank contest and emits cheating alerts into the same `POST /api/alerts` pipeline — but it is not part of this primary-stack deploy and is not covered here.
 
@@ -10,8 +10,7 @@ Components deployed by this runbook:
 | --- | --- | --- |
 | Backend API | `proctor-api` | `backend/deploy-gcp.sh` |
 | Frontend (candidate + admin + invigilator SPA) | `proctor-web` | `frontend/deploy-gcp.sh` |
-| Video merge/review worker (optional) | `proctor-video-worker` | `video-worker/deploy-gcp.sh` |
-| Daily retention sweep | (Cloud Scheduler job → backend) | **manual — see §6** |
+| Daily retention sweep | (Cloud Scheduler job → backend) | **manual — see §5** |
 
 ---
 
@@ -79,20 +78,15 @@ The deploy scripts read their config from the process environment, so in practic
 | `ALERTS_INGEST_API_KEY` | **Yes** | Shared secret for `POST /api/alerts` (`x-api-key`). Closed-by-default: unset ⇒ every ingest rejected. | backend |
 | `RETENTION_SWEEP_API_KEY` | Required for the daily sweep job | `x-api-key` for `POST /api/admin/retention-sweep`. Closed-by-default: unset ⇒ key-auth rejected (admin password still triggers a manual sweep). | backend |
 | `ALERTS_COLLECTION` | Optional | Firestore collection for alerts; defaults `proctor_alerts`. | backend |
-| `PUBLIC_APP_ORIGIN` | Optional | CORS origin the backend accepts; defaults `*`. Tighten after frontend deploy (see §8 "lock CORS"). | backend |
-| `EVIDENCE_BUCKET` | **Yes** | Evidence/recordings bucket (globally unique). Created if missing; lifecycle + CORS applied. | backend (also worker's `SOURCE_BUCKET`) |
-| `SOURCE_BUCKET` | Worker only | Where screen chunks live; usually the same as `EVIDENCE_BUCKET`. | video worker |
-| `DEST_BUCKET` | Worker only | Merged/review-video bucket (globally unique). Created if missing. | video worker |
+| `PUBLIC_APP_ORIGIN` | Optional | CORS origin the backend accepts; defaults `*`. Tighten after frontend deploy (see §7 "lock CORS"). | backend |
+| `EVIDENCE_BUCKET` | **Yes** | Evidence/recordings bucket (globally unique). Created if missing; lifecycle + CORS applied. | backend |
 | `BACKEND_SERVICE_NAME` | Yes (default `proctor-api`) | Cloud Run service id, not a URL. | backend (as `SERVICE_NAME`) |
 | `FRONTEND_SERVICE_NAME` | Yes (default `proctor-web`) | Cloud Run service id. | frontend (as `SERVICE_NAME`) |
-| `VIDEO_WORKER_SERVICE_NAME` | Worker only (default `proctor-video-worker`) | Cloud Run service id. | video worker (as `SERVICE_NAME`) |
 | `API_URL` | **Yes, before frontend deploy** | Backend Cloud Run URL printed by `backend/deploy-gcp.sh`. | frontend |
-| `WORKER_TOKEN` | Worker only | Protects the worker `/merge` endpoint. | video worker |
-| `MAX_USERNAMES_PER_REQUEST` | Optional | Local helper cap for the merge script; default 25. | merge helper |
 
 **Judge0 (Run/Submit) keys.** The backend's `config.mjs` reads `JUDGE0_BASE_URL` (default `https://judge0-ce.p.rapidapi.com`), `JUDGE0_MODE` (default `rapidapi`), `JUDGE0_RAPIDAPI_HOST`, `JUDGE0_API_KEY` (the RapidAPI key), and `JUDGE0_AUTH_TOKEN`. The **full** backend deploy now sets `JUDGE0_MODE`/`JUDGE0_BASE_URL`/`JUDGE0_RAPIDAPI_HOST` (defaulted) and `JUDGE0_API_KEY` (required — pre-flight gate); `JUDGE0_AUTH_TOKEN` passes through only when set. These are **not** in `.env.deploy.example`; the dev stack keeps the RapidAPI key in a gitignored `monitoring/.data/judge0.env` (per the resume anchor).
 
-> Naming note: the example uses `BACKEND_SERVICE_NAME` / `FRONTEND_SERVICE_NAME` / `VIDEO_WORKER_SERVICE_NAME`, but each `deploy-gcp.sh` actually reads `SERVICE_NAME`. Either export `SERVICE_NAME` per script, or rely on each script's built-in default (`proctor-api` / `proctor-web` / `proctor-video-worker`).
+> Naming note: the example uses `BACKEND_SERVICE_NAME` / `FRONTEND_SERVICE_NAME`, but each `deploy-gcp.sh` actually reads `SERVICE_NAME`. Either export `SERVICE_NAME` per script, or rely on each script's built-in default (`proctor-api` / `proctor-web`).
 
 ---
 
@@ -149,7 +143,7 @@ The **standard** production cut is staged: build → deploy a **no-traffic tagge
 | `--allow-unauthenticated` | on | Public API; auth is app-level (admin password / invigilator token). |
 | `--port` | `8080` | |
 | `--memory` / `--cpu` | `256Mi` / `1` | |
-| `--min-instances` | **`0`** | Default off for testing. **Set `1` for a real exam** (see §8). |
+| `--min-instances` | **`0`** | Default off for testing. **Set `1` for a real exam** (see §7). |
 | `--max-instances` | `20` | |
 | `--concurrency` | `100` | |
 | `--timeout` | **`120s`** | `/api/exec/*` requests block while the Judge0 adapter polls (up to ~90s); a 30s timeout killed them mid-poll. |
@@ -244,30 +238,7 @@ The split is load-bearing (Wave-7 review finding): export zips are the recovery 
 
 ---
 
-## 6. Optional video-merge worker
-
-**Source:** [`video-worker/deploy-gcp.sh`](../../video-worker/deploy-gcp.sh) · worker code `video-worker/src/server.mjs`; the backend deep-links to its output via the session doc's `merged_video_key` field.
-
-The worker is **optional**. It stitches a session's 30-second screen chunks into one playable review video, remuxes with `ffmpeg`, and writes `merged_video_key` (+ `merged_at`) back onto the session doc — which is what the admin recording-review player and "sure-shot" alert deep-links point to.
-
-```bash
-source .env.deploy.local   # needs SOURCE_BUCKET, DEST_BUCKET, WORKER_TOKEN
-bash video-worker/deploy-gcp.sh
-```
-
-It creates `DEST_BUCKET` if missing, applies the **same** `backend/gcs-lifecycle.json` to it, grants the runtime SA `objectViewer` on `SOURCE_BUCKET` + `objectAdmin` on `DEST_BUCKET` + `datastore.user` (to write `merged_video_key`), then builds and deploys with: `--memory 1Gi`, `--cpu 1`, `--min-instances 0`, `--max-instances 2`, `--concurrency 1`, **`--timeout 3600s`** (long merges). Env set: `SOURCE_BUCKET`, `DEST_BUCKET`, `SESSION_COLLECTION`, `MAX_USERNAMES_PER_REQUEST=25`, `WORKER_TOKEN`. The `/merge` endpoint is `x-worker-token`/bearer-authenticated.
-
-### The cross-bucket `video_key` 404 caveat
-
-Documented in [`video-worker/README.md`](../../video-worker/README.md) and reflected in the backend's alert video-key resolver (`sureShotVideoKey` in `backend/src/proctorAlerts.mjs` returns `session.merged_video_key || null`):
-
-> If `DEST_BUCKET` ≠ `EVIDENCE_BUCKET`, the backend signs the alert `video_key` **against the evidence bucket**, so a deep-link to a merged video that actually lives in the review-video bucket can **404**.
-
-The README marks this **untested against real GCP**. The safe operating choice today is to merge into the **same bucket** as the evidence (set `DEST_BUCKET = EVIDENCE_BUCKET = SOURCE_BUCKET`); the alternative is teaching the backend the review-video bucket. Note `.env.deploy.example` defaults `SOURCE_BUCKET` to the same value as `EVIDENCE_BUCKET` but `DEST_BUCKET` to a **separate** review-video bucket — so the out-of-the-box config is exactly the cross-bucket case that can 404. Adjust deliberately.
-
----
-
-## 7. `EXEC_*` exam tuning
+## 6. `EXEC_*` exam tuning
 
 The candidate Run/Submit limits are **deploy-time env knobs (not code)**, read by `backend/src/config.mjs`. None are set by `backend/deploy-gcp.sh`, so they fall back to these defaults unless you pass them:
 
@@ -288,7 +259,7 @@ For a real ~700-candidate exam the project's capacity work settled on roughly `E
 
 ---
 
-## 8. Real-exam standing rules
+## 7. Real-exam standing rules
 
 - **Stage every cut + pre-flight before you flip traffic.** Deploy as a no-traffic tagged revision, run the admin pre-flight health-check (`POST /api/admin/health-check`, light) + smoke on the tag URL, then `update-traffic` to it — keeping the prior revision at 0% for instant rollback. Run pre-flight **again** right before the exam opens. See [`docs/DEPLOY.md`](../DEPLOY.md) (§Staged zero-downtime deploy, §Admin pre-flight health check).
 - **`min-instances = 1` for a real exam.** Both backend and frontend scripts default `--min-instances 0` (fine for testing — scale-to-zero). For an exam, set the backend to `1` so the first candidate doesn't eat a cold start. Apply with `gcloud run services update "$BACKEND_SERVICE_NAME" --region "$REGION" --min-instances=1`.
@@ -327,9 +298,7 @@ bash backend/deploy-gcp.sh          # DEPLOY_MODE=full (default); image-only for
 $EDITOR .env.deploy.local   # set API_URL=...
 source .env.deploy.local
 bash frontend/deploy-gcp.sh
-# 4. (optional) video worker
-bash video-worker/deploy-gcp.sh
-# 5. pre-flight + go-live: run POST /api/admin/health-check (light) → green;
+# 4. pre-flight + go-live: run POST /api/admin/health-check (light) → green;
 #    for prod, stage as --no-traffic --tag, verify on the tag URL, then update-traffic;
 #    set min-instances=1, lock CORS, create the scheduler sweep job (§5).
 # NEVER git push.

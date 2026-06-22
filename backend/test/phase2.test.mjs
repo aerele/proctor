@@ -497,8 +497,9 @@ async function startedSession(firestore, storage, { mergedVideoKey } = {}) {
   seedSettings(firestore);
   const res = await start(firestore, storage);
   const sessionId = res.body.session_id;
-  // B4: simulate the video-worker having written merged_video_key back onto the
-  // session doc after a successful merge, so sure-shot alerts get a deep-link.
+  // B4: simulate a merged_video_key having been written onto the session doc
+  // (e.g. by a future merged-video producer), so sure-shot alerts get a deep-link.
+  // The resolver (sureShotVideoKey) is producer-agnostic — it just reads the field.
   if (mergedVideoKey !== null) {
     const store = firestore._collections.get(process.env.SESSION_COLLECTION);
     const existing = store.get(sessionId);

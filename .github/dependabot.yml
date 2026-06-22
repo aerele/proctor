@@ -42,18 +42,6 @@ updates:
           - "minor"
           - "patch"
 
-  # Video worker
-  - package-ecosystem: "npm"
-    directory: "/video-worker"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    groups:
-      video-worker-minor-patch:
-        update-types:
-          - "minor"
-          - "patch"
-
   # GitHub Actions workflows (.github/workflows/*.yml)
   - package-ecosystem: "github-actions"
     directory: "/"
