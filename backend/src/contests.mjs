@@ -3,9 +3,9 @@
 // contest-scoped read goes through.
 //
 // Specs:
-//   docs/superpowers/specs/2026-06-10-f10-product-vision.md  §2.7 (doc shape),
+//   docs/design-history/specs/2026-06-10-f10-product-vision.md  §2.7 (doc shape),
 //     §7 row S-B (identity_mode enum), §10.3 (typed access code)
-//   docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//   docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //     §2.1 (F9 contest doc, frozen), §2.3 (no-bleed mechanisms), §3 (lifecycle
 //     placeholders)
 import { randomBytes, randomInt } from "node:crypto";

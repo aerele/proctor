@@ -80,7 +80,7 @@ export function makePublicRoutes(ctx) {
     consentVersion = ""
   } = ctx;
 
-  // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
+  // ---- S2 roster store (spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md)
 
   function rosterMetaRef() {
     return getFirestore().collection(settingsCollection).doc(rosterMetaId);

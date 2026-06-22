@@ -8,7 +8,7 @@
 // code-level SEED preset shadowed by a same-slug Firestore doc, and a store
 // configured by handler.mjs with a Firestore GETTER so test fakes propagate.
 //
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md §1.1/§2
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md §1.1/§2
 import { isValidProblemId, SUPPORTED_LANGUAGES } from "./problems.mjs";
 
 export const TEMPLATE_BOUNDS = {

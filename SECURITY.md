@@ -29,8 +29,8 @@ other tabs, continuously read the OS clipboard, see a second device, or detect a
 overlay on another monitor — no browser app can without a managed extension or
 endpoint agent. Integrity rests on **human review of recorded evidence** plus a
 live signal feed; treat alerts as triage for review, never as automatic
-disqualification. See the README and `docs/proctoring-research.md` for the full
-threat model.
+disqualification. See the README and `docs/research/proctoring-research.md` for the
+full threat model.
 
 ## Operator security responsibilities
 

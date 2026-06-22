@@ -3,7 +3,7 @@ I have everything I need. Composing the spec now.
 # S-I Build Spec — Templates + Multi-Problem (Aerele Proctor)
 
 **Date:** 2026-06-10 · **Status:** BUILD-READY (read-only design output; no code touched)
-**Sources:** F10 vision `docs/superpowers/specs/2026-06-10-f10-product-vision.md` §2.5, §2.6, §2.7, §2.11, §5 (C6/A4/A6/S4/S6), §7 S-I row, §10.1 (**FULL multi-problem confirmed by the operator**); F9 design §2.1–2.4; existing code: `backend/src/problems.mjs`, `backend/src/handler.mjs` (start/resume `startResponse`+`activeProblemPublic` :439–489, exec limiter :740–825, `execRun`/`execSubmit` :826–980, `ingestEditorEvents` :982–1013, problem CRUD :1354–1419), `backend/src/execQueue.mjs`, `frontend/src/coding/CodingWorkspace.tsx`, `frontend/src/App.tsx` (workspace mount :1520–1530, admin tabs :1675, settings `problem_id` field :2748), `frontend/src/api.ts` (demo store, exec fns :2686–2715, `demoActiveProblem` :3151).
+**Sources:** F10 vision `docs/design-history/specs/2026-06-10-f10-product-vision.md` §2.5, §2.6, §2.7, §2.11, §5 (C6/A4/A6/S4/S6), §7 S-I row, §10.1 (**FULL multi-problem confirmed by the operator**); F9 design §2.1–2.4; existing code: `backend/src/problems.mjs`, `backend/src/handler.mjs` (start/resume `startResponse`+`activeProblemPublic` :439–489, exec limiter :740–825, `execRun`/`execSubmit` :826–980, `ingestEditorEvents` :982–1013, problem CRUD :1354–1419), `backend/src/execQueue.mjs`, `frontend/src/coding/CodingWorkspace.tsx`, `frontend/src/App.tsx` (workspace mount :1520–1530, admin tabs :1675, settings `problem_id` field :2748), `frontend/src/api.ts` (demo store, exec fns :2686–2715, `demoActiveProblem` :3151).
 
 ## 0. Preconditions & boundaries
 

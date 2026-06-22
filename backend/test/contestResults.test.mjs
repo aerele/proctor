@@ -1,9 +1,9 @@
 // backend/test/contestResults.test.mjs — S-J: the Results-tab endpoints.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md
 //          §2.14 (Results tab: rank/per-problem/integrity/selection/CSV),
 //          §2.9 (Enrollment selection + final_snapshot + purge-survivor),
 //          §2.13 (multi-college projection rule), §7 row S-J.
-//        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//        docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          (scopedQuery no-bleed invariant — the canary lives here too).
 // Covers: GET /api/admin/contest-results rollup correctness (rank, per-problem
 // best, integrity column, selection_status), CONTEST-SCOPE no-bleed (a second

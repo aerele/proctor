@@ -2,7 +2,7 @@
 
 **Status:** READY for tonight's build (STRETCH item 1 of the 2026-06-09 night run). SPEC ONLY — the implementation plan is written separately, after verifying integration points against landed Slice 1 code.
 **Author:** architect subagent. **Date:** 2026-06-09.
-**Parent design:** `docs/superpowers/specs/2026-06-09-own-editor-design.md` (§6 fullscreen-first anti-proxy, §8 unique top bar + onboarding progress).
+**Parent design:** `docs/design-history/specs/2026-06-09-own-editor-design.md` (§6 fullscreen-first anti-proxy, §8 unique top bar + onboarding progress).
 **Guardrails:** `night-run/MORNING-NOTES.md` — scope LOCKED to: fullscreen-first onboarding, unique top bar that disappears on any anomaly, 1–5 color-coded onboarding progress readable at a distance. The fullscreen-exit "type-the-sentence" challenge / blocking escalation, OMR markers, and signed-QR are DEFERRED — not designed here.
 
 ---

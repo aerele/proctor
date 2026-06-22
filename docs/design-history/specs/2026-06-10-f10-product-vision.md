@@ -1,6 +1,6 @@
 # Aerele Proctor — Consolidated Product Vision (v1 FINAL, 2026-06-10)
 
-**Status: BUILD TARGET.** This document consolidates the two F10.6 vision drafts (standard-first + usecases-first), applies both judges' grafts, and closes every flagged gap. It amends and supersedes the F9 design (`<repo>/docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md`) **only** where stated in §7; everything F9 froze stays frozen. The operator's 2026-06-10 locked decisions are incorporated verbatim and are non-negotiable.
+**Status: BUILD TARGET.** This document consolidates the two F10.6 vision drafts (standard-first + usecases-first), applies both judges' grafts, and closes every flagged gap. It amends and supersedes the F9 design (`<repo>/docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md`) **only** where stated in §7; everything F9 froze stays frozen. The operator's 2026-06-10 locked decisions are incorporated verbatim and are non-negotiable.
 
 ---
 

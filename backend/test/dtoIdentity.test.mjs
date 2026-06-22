@@ -1,11 +1,11 @@
 // backend/test/dtoIdentity.test.mjs — S-C slice 3: candidateOf across DTOs,
 // submissions denorm, ingest candidate_id aliases, per-contest review-state
 // ids, per-contest attendance.
-// Specs: docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+// Specs: docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          §1.2 (candidateOf dual-read adapter; ingest accepts both field names
 //          forever), D7 (submissions denorm on NEW docs at submit time),
 //          D17 ({norm}::{reviewerKey}::{slug} review ids; slugless = legacy)
-//        docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.11, §7 S-C
+//        docs/design-history/specs/2026-06-10-f10-product-vision.md §2.11, §7 S-C
 import { test } from "node:test";
 import assert from "node:assert/strict";
 

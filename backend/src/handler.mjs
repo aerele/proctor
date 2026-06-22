@@ -35,7 +35,7 @@
 //      scopedQuery chokepoint or are pinned in RAW_FILTER_ALLOWLIST in the SAME
 //      diff), routesAuthLint (every exported admin*/invigilator* route opens with
 //      its require* guard), envLint (process.env only in handler.mjs + config.mjs).
-// See docs/superpowers/plans/2026-06-11-architecture-decomposition.md for the
+// See docs/design-history/plans/2026-06-11-architecture-decomposition.md for the
 // full design + the B-ladder history.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
@@ -1580,7 +1580,7 @@ function inAdminEndGrace(session) {
 // glue over src/contests.mjs (validation + slug/access-code minting live there);
 // the resident endAllLiveSessions sweep is passed by reference for the end_now path.
 
-// ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
+// ---- S2 roster store (spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md)
 // The roster store helpers (rosterMetaRef / getRosterMeta / rosterEntryId) +
 // the roster CRUD routes (adminSaveRoster / adminGetRoster + resolvePersonContestParam)
 // + the public config / access-code / roster-lookup routes + their two per-IP

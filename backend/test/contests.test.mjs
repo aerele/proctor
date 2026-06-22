@@ -1,6 +1,6 @@
 // backend/test/contests.test.mjs — S-B: contests collection, SHIPS DARK.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§7 row 2/§10.3
-//        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md §2/§6
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7/§7 row 2/§10.3
+//        docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md §2/§6
 // Covers: proctor_contests CRUD (create/list/update/status via admin endpoints),
 // slugify + collision -2 suffix, access-code mint + collision retry, server-side
 // validation, resolveContest and the scopedQuery chokepoint.

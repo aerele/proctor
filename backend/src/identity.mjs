@@ -2,14 +2,14 @@
 // S-C — THE identity core (vision §7 row 3, AMENDED person layer).
 //
 // Specs:
-//   docs/superpowers/specs/2026-06-10-f10-product-vision.md
+//   docs/design-history/specs/2026-06-10-f10-product-vision.md
 //     §2.2 College + the canonicalization gate (LOCKED — the only enforceable
 //       moment to stop spelling drift from forking every person in a drive)
 //     §2.3 Person — durable (college, unique_id) identity, the multi-round spine
 //     §2.4 identity chain (username_norm = person_id under identity_mode:"person")
 //     §2.8 roster upload validation ORDER (LOCKED)
 //     §2.9 Enrollment — stable person × contest row
-//   docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//   docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //     D5 (duplicate hard-reject on final-norm form), D16 (proctor_admin_audit),
 //     D17 (roster meta = roster_meta::{slug}; entry id SCHEME unchanged:
 //     v{version}:{idnorm} — under person mode the idnorm IS the person_id, so

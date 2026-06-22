@@ -1,5 +1,5 @@
 // backend/test/results.test.mjs — S-J §2.14 the Results-tab rollup, PURE half.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md
 //          §2.14 (Results tab: rank/per-problem/integrity column/selection),
 //          §2.13 (multi-college projection rule), §2.9 (Enrollment selection +
 //          final_snapshot), §3.3 (best-per-problem rollup + tie-break)

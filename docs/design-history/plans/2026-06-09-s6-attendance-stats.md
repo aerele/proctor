@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** READY (paired with `docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md`).
+**Status:** READY (paired with `docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md`).
 
 **Goal:** Admin "Attendance" tab — taken / not-taken counts (in-progress vs completed split) + the absentee list with CSV download, computed by joining the S2 roster against session docs' `roster_unique_id`.
 
@@ -58,7 +58,7 @@ Create `backend/test/attendance.test.mjs` with EXACTLY this content (req/res + F
 
 ```javascript
 // backend/test/attendance.test.mjs — S6: roster-based attendance stats.
-// Spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md
+// Spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -365,7 +365,7 @@ and insert immediately AFTER it:
 and insert immediately AFTER it:
 ```javascript
 
-// ---- S6 attendance (spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md)
+// ---- S6 attendance (spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md)
 
 // GET /api/admin/attendance?contest_slug=<optional> — roster-based attendance:
 // taken / not-taken counts + the absentee list. "Taken" = the roster student has
@@ -573,7 +573,7 @@ Create `frontend/src/attendance/computeAttendance.ts`:
 ```typescript
 // S6 attendance — pure attendance math + CSV builder, shared by the api.ts demo
 // branch and unit tests. Mirrors the backend adminAttendance semantics EXACTLY
-// (spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md):
+// (spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md):
 // taken = >=1 matching session (any status); in_progress = any non-ended;
 // completed = all ended; blank/off-roster session ids -> unmatched_sessions.
 
@@ -744,7 +744,7 @@ and insert immediately BEFORE it:
 ```typescript
 // ---- S6 attendance stats ----------------------------------------------------
 // GET /api/admin/attendance — roster-based taken / not-taken / absentees.
-// Spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md.
+// Spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md.
 // `null` on 404 so the Attendance tab can show "not deployed yet" (same degrade
 // as fetchSessionsList / fetchRosterStatus). The demo branch joins the demo
 // roster against the REAL demo session store via the SAME pure computeAttendance

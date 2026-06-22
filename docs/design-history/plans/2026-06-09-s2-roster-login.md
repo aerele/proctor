@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** READY (paired with `docs/superpowers/specs/2026-06-09-s2-roster-login-design.md`).
+**Status:** READY (paired with `docs/design-history/specs/2026-06-09-s2-roster-login-design.md`).
 
 **Goal:** Admin uploads a flexible-column student roster with a designated unique-ID column; when a roster is configured, student login requires a unique-ID-confirm roster match (server-enforced) with roster-sourced fields prefilled + locked; room becomes an admin-fed dropdown (+ "Other").
 
@@ -364,7 +364,7 @@ and insert immediately AFTER it:
 
 **(c) Helpers + handlers** — insert this whole block immediately AFTER the closing `}` of `adminSaveSettings` (before the `mapWithConcurrency` comment):
 ```javascript
-// ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
+// ---- S2 roster store (spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md)
 
 function rosterMetaRef() {
   return firestore.collection(SETTINGS_COLLECTION).doc(ROSTER_META_ID);
@@ -1350,7 +1350,7 @@ replace with:
 
 ```typescript
 // ---- S2 roster (compulsory roster login) ------------------------------------
-// Spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md
+// Spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md
 
 function demoApiError(status: number, code: string): ApiError {
   const error = new Error(code) as ApiError;

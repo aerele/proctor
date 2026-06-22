@@ -1,5 +1,5 @@
 // backend/test/contestAdminSD.test.mjs — S-D: contest administration plumbing.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7 (derived
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7 (derived
 //        URLs + invigilator_key), §5 rows A2/A3/C1/I1, §7 row S-D, §10.3
 //        (typed access code).
 // Covers: invigilator_key minted at create + regenerate endpoint (access_code

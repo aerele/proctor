@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** READY (paired with `docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md`).
+**Status:** READY (paired with `docs/design-history/specs/2026-06-09-s4-problem-authoring-design.md`).
 
 **Goal:** Problems live in Firestore (`proctor_problems`) and are authored/published/assigned through a new admin "Problems" tab; candidates receive the assigned problem inside the start/resume response and solve it in the existing CodingWorkspace; `getProblem(id)` stays the exec read interface (now async + Firestore-backed, built-in `sum-two` seed as fallback); submissions get a score (`points` × scoring mode).
 
@@ -1903,7 +1903,7 @@ git commit -m "feat(problems): admin Problems tab — author/publish/delete + ac
 ```tsx
 // S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
 // start/resume response (admin assigns settings.problem_id → public view; see
-// docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md). No problem
+// docs/design-history/specs/2026-06-09-s4-problem-authoring-design.md). No problem
 // assigned → the legacy contest_url link flow renders instead.
 ```
 

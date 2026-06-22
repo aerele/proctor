@@ -1,5 +1,5 @@
 // S-D: pure logic for the Contests tab + global contest selector.
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7 (derived
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7 (derived
 // URLs), §5 rows A1-A3, §7 row S-D (per-tab URL scoping), §10.3 (access code).
 import { describe, expect, it } from "vitest";
 import {

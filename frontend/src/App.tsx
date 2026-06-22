@@ -5,7 +5,7 @@ import { TakeHomeGallery } from "./devtools/TakeHomeGallery";
 
 // S4: the contest problem is SERVER-DRIVEN — it arrives as `problem` inside the
 // start/resume response (the contest's problems[] → public view; see
-// docs/superpowers/specs/2026-06-09-s4-problem-authoring-design.md).
+// docs/design-history/specs/2026-06-09-s4-problem-authoring-design.md).
 //
 // Candidate-facing copy is surface-specific (studentCopy.ts): with a problem
 // assigned, no student string may direct the candidate to HackerRank. The copy

@@ -34,10 +34,6 @@ the fullest single-page tour, then jump to the area you need below.
 | [`EXAM-DAY-OPS.md`](EXAM-DAY-OPS.md) | The one-page, action-ordered exam-day runbook **for the platform operator/admin**: BEFORE setup → AT START → DURING → AFTER, plus an "if X then do Y" table, cited against the live routes/UI. |
 | [`CONDUCTOR-GUIDE.md`](CONDUCTOR-GUIDE.md) | The same exam day for a **non-technical on-site conductor** (e.g. a college contact running the test): plain-language read-aloud scripts, "call support" framing, and the three things that come up — no route names. Hand this to the room staff; keep `EXAM-DAY-OPS.md` for the operator. |
 
-Deeper, narrated versions of the deploy + operator runbooks live under Feature
-guides as [`features/deploy-runbook.md`](features/deploy-runbook.md) and
-[`features/exam-day-ops-runbook.md`](features/exam-day-ops-runbook.md).
-
 ## Feature guides
 
 Per-area, code-verified deep dives under [`features/`](features/).
@@ -67,13 +63,6 @@ Per-area, code-verified deep dives under [`features/`](features/).
 |---|---|
 | [`features/invigilator-portal.md`](features/invigilator-portal.md) | The tokenized, name-only per-room portal: key/password auth, room picker + console, clickable status filters, the start-code gate, the separate enforcement-unlock namespace, per-student unlock + exemption toggles, selective alerts (default all OFF), and least-privilege scope. |
 
-### Runbooks (narrated)
-
-| Page | What it covers |
-|---|---|
-| [`features/deploy-runbook.md`](features/deploy-runbook.md) | The narrated GCP deploy runbook (companion to [`DEPLOY.md`](DEPLOY.md)): project bootstrap, the `.env.deploy.local` key table, exact Cloud Run params per service, Wave-7 retention split + scheduler sweep, `EXEC_*` tuning, and the real-exam standing rules. |
-| [`features/exam-day-ops-runbook.md`](features/exam-day-ops-runbook.md) | The narrated exam-day runbook (companion to [`EXAM-DAY-OPS.md`](EXAM-DAY-OPS.md)): admin setup order, candidate flow, invigilator live-ops, the L1/L2 lock-and-unlock ladder, live time control, monitoring surfaces, and post-exam Results/People/Recording/Lifecycle. |
-
 ## Reference
 
 | Page | What it covers |
@@ -81,21 +70,24 @@ Per-area, code-verified deep dives under [`features/`](features/).
 | [`features/architecture-overview.md`](features/architecture-overview.md) | The fullest single-page tour: the three path-routed frontend surfaces, the decomposed `handler.mjs` backend (thin dispatch table + `routes/*.mjs` factories), the 21 Firestore collections + GCS evidence prefixes, the `person_id` identity model, the shared Alert contract, and the 76-route HTTP inventory. **Read this first.** |
 | [`features/alert-taxonomy.md`](features/alert-taxonomy.md) | The shared Alert JSON contract (required fields, idempotent merge on `id`), the proctor alert catalog + admin alert-settings defaults, per-type Share-with-invigilator (default OFF), the `x-api-key` ingest (closed-by-default, batch ≤ 500), and the enforcement-violation lock-ladder flow. |
 | [`features/http-api-reference.md`](features/http-api-reference.md) | The canonical per-route table (method · auth · purpose) for all 76 routes — candidate/public, admin, evaluation, and invigilator — plus the shared Alert JSON contract. |
+| [`JUDGE0-RATE-LIMITER.md`](JUDGE0-RATE-LIMITER.md) | The Firestore-backed sharded token-bucket limiter that absorbs Judge0 429s under load (`backend/src/judge0Limiter.mjs` + `lib/tokenBucket.mjs`), its `JUDGE0_LIMITER_*` config, and the documented scale ceiling. |
 
-### Background research (pre-build)
+> **Roadmap.** What is built, in-flight, and planned lives in the single tracked
+> [`../ROADMAP.md`](../ROADMAP.md) at the repo root — the one source of truth.
+
+### Background research (pre-build, archival)
 
 These predate the current build and capture the design rationale rather than the
-shipped surfaces:
+shipped surfaces — kept as a historical record, not current operator docs:
 
-- [`proctoring-research.md`](proctoring-research.md) — threat model + browser-proctoring research.
-- [`platform-alternatives.md`](platform-alternatives.md) — platform alternatives evaluated.
-- [`ROADMAP.md`](ROADMAP.md) — design background and roadmap.
+- [`research/proctoring-research.md`](research/proctoring-research.md) — threat model + browser-proctoring research.
+- [`research/platform-alternatives.md`](research/platform-alternatives.md) — platform alternatives evaluated (the abandoned embeddable-iframe era).
 
-### Design history — specs & plans (`superpowers/`)
+### Design history — specs & plans (`design-history/`)
 
-The [`superpowers/`](superpowers/) tree keeps the original **design specs**
-([`superpowers/specs/`](superpowers/specs/)) and **implementation plans**
-([`superpowers/plans/`](superpowers/plans/)) for each slice the platform was built
+The [`design-history/`](design-history/) tree keeps the original **design specs**
+([`design-history/specs/`](design-history/specs/)) and **implementation plans**
+([`design-history/plans/`](design-history/plans/)) for each slice the platform was built
 in (the S1–S7 exam-shell / roster / invigilator / authoring / time-control /
 attendance / IP-report waves, the F8–F12 product-vision and identity-lifecycle
 work, the architecture-decomposition pass, and the candidate-evaluation engine).

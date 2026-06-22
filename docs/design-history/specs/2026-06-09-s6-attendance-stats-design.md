@@ -2,9 +2,9 @@
 
 **Status:** READY — night-run stretch item 6 (see `night-run/MORNING-NOTES.md` §Scope).
 **Author:** Ram. **Date:** 2026-06-09.
-**Parent design:** `docs/superpowers/specs/2026-06-09-own-editor-design.md` §8 ("Attendance stats (from the roster): taken / not-taken / absentees list").
-**Depends on:** S2 — `docs/superpowers/specs/2026-06-09-s2-roster-login-design.md` (roster store + `roster_unique_id` on sessions). **S6 must NOT be built until S2's backend (Tasks 1–3 of its plan) has landed** — the plan gates on this.
-**Plan:** `docs/superpowers/plans/2026-06-09-s6-attendance-stats.md`.
+**Parent design:** `docs/design-history/specs/2026-06-09-own-editor-design.md` §8 ("Attendance stats (from the roster): taken / not-taken / absentees list").
+**Depends on:** S2 — `docs/design-history/specs/2026-06-09-s2-roster-login-design.md` (roster store + `roster_unique_id` on sessions). **S6 must NOT be built until S2's backend (Tasks 1–3 of its plan) has landed** — the plan gates on this.
+**Plan:** `docs/design-history/plans/2026-06-09-s6-attendance-stats.md`.
 
 ---
 

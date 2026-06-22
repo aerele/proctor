@@ -1,6 +1,6 @@
 # F9.5-8 CONSOLIDATED DESIGN — Identity, Multi-Contest, Data Lifecycle (Aerele Proctor)
 
-Status: BUILD-READY. Base = the **migration-risk** design (highest-scored by both judges, 8.5/8.5), with grafts from the data-model and ops-lifecycle designs as recommended by both judges, and all judge-flagged gaps resolved. Amends the committed F8 spec (`docs/superpowers/specs/2026-06-10-f8-multitest-hr-removal-design.md`) where noted. Code references are `backend/src/handler.mjs` @ HEAD.
+Status: BUILD-READY. Base = the **migration-risk** design (highest-scored by both judges, 8.5/8.5), with grafts from the data-model and ops-lifecycle designs as recommended by both judges, and all judge-flagged gaps resolved. Amends the committed F8 spec (`docs/design-history/specs/2026-06-10-f8-multitest-hr-removal-design.md`) where noted. Code references are `backend/src/handler.mjs` @ HEAD.
 
 ## Summary
 

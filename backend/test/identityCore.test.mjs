@@ -1,8 +1,8 @@
 // backend/test/identityCore.test.mjs — S-C slice 1: the identity core.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md
 //          §2.2 (College + canonicalization gate), §2.3 (Person), §2.8 (roster
 //          validation order, LOCKED), §2.9 (Enrollment), §7 row S-C
-//        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//        docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          D5 (dup hard-reject), D16 (proctor_admin_audit), D17 (roster_meta::{slug})
 // Covers: proctor_colleges/persons/enrollments shapes, the per-contest roster
 // upload pipeline (college column compulsory, canonicalization gate,

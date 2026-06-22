@@ -1,5 +1,5 @@
 // backend/test/templates.test.mjs — S-I §1.1/§2: proctor_templates.
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md
 // Pure module tests (validateTemplateInput / normalizeProblemEntries / seed)
 // + admin CRUD endpoint tests (list merge/shadow, create slug rules, update
 // no-re-slug, archive, clone deep-copy). The system-check preset is the

@@ -1,7 +1,7 @@
 // Wave7-H: PURE-logic tests for the admin Data-lifecycle section helpers.
 // The suite has no jsdom render harness, so the triple-gate enable logic and the
 // retention-countdown formatting are extracted into pure functions tested here.
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.16 (export →
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.16 (export →
 // triple-gated purge → tombstone), §2.9 (purge-survivor), §10.4 (export zips).
 import { describe, expect, it } from "vitest";
 import {

@@ -1531,7 +1531,7 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
 
 // ---- S6 attendance stats ----------------------------------------------------
 // GET /api/admin/attendance — roster-based taken / not-taken / absentees.
-// Spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md.
+// Spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md.
 // `null` on 404 so the Attendance tab can show "not deployed yet" (same degrade
 // as fetchSessionsList / fetchRosterStatus). The demo branch joins the demo
 // roster against the REAL demo session store via the SAME pure computeAttendance
@@ -3306,7 +3306,7 @@ function maskPasscode(value = "") {
 }
 
 // ---- S2 roster (compulsory roster login) ------------------------------------
-// Spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md
+// Spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md
 
 function demoApiError(status: number, code: string, body?: Record<string, unknown>): ApiError {
   const error = new Error(code) as ApiError;
@@ -3646,7 +3646,7 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
 }
 
 // ---- S-D: contests administration (Contests tab + selector + routing) -------
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5/§10.3.
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7/§5/§10.3.
 // Demo parity: a localStorage contests store seeded with one OPEN demo contest
 // whose access code is the fixed "DEMO42" (plus the lifecycle-state demo
 // contests added below).

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** READY (paired with `docs/superpowers/specs/2026-06-09-s3-invigilator-portal-design.md`).
+**Status:** READY (paired with `docs/design-history/specs/2026-06-09-s3-invigilator-portal-design.md`).
 
 **Goal:** A room invigilator opens `/invigilator`, unlocks with the invigilator password, picks their room, and can: release/re-display/regenerate a 6-digit room start code, press "Start now — allow all", watch room stats (live/disconnected/locked/pending/finished/started), and read their room's open alerts. Candidates (recording already running) wait at a room-code screen that releases on a correct code or auto-advances when the room opens. Run/Submit are server-blocked until release. **No signed-QR anything.**
 

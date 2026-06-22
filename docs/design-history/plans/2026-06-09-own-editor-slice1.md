@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** DRAFT — awaiting the operator's review (paired with the design doc `docs/superpowers/specs/2026-06-09-own-editor-design.md`, §4 = Slice 1).
+**Status:** DRAFT — awaiting the operator's review (paired with the design doc `docs/design-history/specs/2026-06-09-own-editor-design.md`, §4 = Slice 1).
 
 **Goal:** A candidate, inside the existing same-origin proctored page, solves one config-driven problem in our Monaco editor, Runs it against sample tests and Submits against hidden tests (verdict via a hosted-Judge0 adapter), while every keystroke/cursor/selection/paste/focus/run/submit event is captured — all tied to the existing proctor `session_id`.
 

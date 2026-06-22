@@ -1100,7 +1100,7 @@ export type PublicProblem = {
 };
 
 // ---- S-I §1: templates + contest problems[] (backend shipped; UI = next wave)
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md
 
 /** One ordered problem reference on a contest or template. points null = use
  * the bank problem's points at serve time; else an int override 0..1000. */
@@ -1167,7 +1167,7 @@ export type ProblemSubmissionSummary = {
 };
 
 // ---- S-D: contest administration (Contests tab + selector + routing) --------
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5 A1-A3
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7/§5 A1-A3
 
 export type ContestStatus = "draft" | "open" | "archived";
 

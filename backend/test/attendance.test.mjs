@@ -1,5 +1,5 @@
 // backend/test/attendance.test.mjs — S6: roster-based attendance stats.
-// Spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md
+// Spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md
 import { test } from "node:test";
 import assert from "node:assert/strict";
 

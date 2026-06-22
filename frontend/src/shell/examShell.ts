@@ -6,7 +6,7 @@
 // Everything here is vitest-tested; the React hook (useExamShell.ts) and the
 // shell components stay thin.
 //
-// Design: docs/superpowers/specs/2026-06-09-s1-exam-shell-design.md
+// Design: docs/design-history/specs/2026-06-09-s1-exam-shell-design.md
 
 import type { ProctorEvent, SessionStatus } from "../types";
 
