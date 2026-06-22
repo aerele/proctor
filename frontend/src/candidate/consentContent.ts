@@ -198,7 +198,7 @@ Candidates **cannot** see each other's recordings, scores, or results. Your data
 
 ## 6. Where your data is stored
 
-Proctoring evidence is stored in the Organisation's own cloud storage and database, with access restricted to the Organisation. **[Storage region / country — Karthi to fill if disclosure is desired.]**
+Proctoring evidence is stored in the Organisation's own cloud storage and database, with access restricted to the Organisation. It is hosted in **India (Google Cloud, Mumbai region)**.
 
 ## 7. Your rights
 
