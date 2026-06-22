@@ -491,6 +491,83 @@ test("exam-config?contest= serves the contest's OWN config (label, rooms, gate, 
   assert.equal(res.body.start_at, "2026-06-12T03:00:00.000Z");
   assert.equal(res.body.end_at, "2026-06-12T06:00:00.000Z");
   assert.ok(res.body.server_now);
+  // v1.1 G1: exam-config serves the authoritative consent-text version so the
+  // candidate app echoes it back at start instead of hard-coding it.
+  assert.ok(typeof res.body.consent_version === "string" && res.body.consent_version.length > 0,
+    `expected a non-empty consent_version, got ${JSON.stringify(res.body.consent_version)}`);
+});
+
+// ---- v1.1 G3 (#5): the hot-path contest-doc read cache MUST be transparent ----
+// These pin the D3 invariant the cache must never break: a config edit is visible
+// on the very next read (write-through invalidation), and an out-of-band direct
+// write self-heals within the TTL.
+
+test("G3 cache: a contest config edit is visible on the NEXT read (write-through invalidation)", async () => {
+  freshDb();
+  const contest = await createContest({
+    name: "Cache WT",
+    enforcement: { mode: "block", fullscreen_reentry_seconds: 20 }
+  });
+  await openContest(contest.slug);
+  // First read populates the cache with mode:block / 20.
+  const before = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(before.body.enforcement.mode, "block");
+  assert.equal(before.body.enforcement.fullscreen_reentry_seconds, 20);
+  // A real admin edit through updateContest MUST invalidate the cache.
+  const upd = await call(makeReq({
+    method: "POST", path: "/api/admin/contest-update", headers: ADMIN_HEADERS,
+    body: { slug: contest.slug, enforcement: { mode: "alert_first", fullscreen_reentry_seconds: 45 } }
+  }));
+  assert.equal(upd.statusCode, 200, JSON.stringify(upd.body));
+  // The very next read sees the NEW value, not the cached one.
+  const after = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(after.body.enforcement.mode, "alert_first");
+  assert.equal(after.body.enforcement.fullscreen_reentry_seconds, 45);
+});
+
+test("G3 cache: status flip (open->archived) is honored immediately (no stale 'open')", async () => {
+  freshDb();
+  const contest = await createContest({ name: "Cache Status" });
+  await openContest(contest.slug);
+  // Read while open populates the cache.
+  const open = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(open.statusCode, 200);
+  // Archive it (a contest-doc write).
+  await call(makeReq({
+    method: "POST", path: "/api/admin/contest-status", headers: ADMIN_HEADERS,
+    body: { slug: contest.slug, status: "archived" }
+  }));
+  // exam-config requires an OPEN contest → an archived one is 403, not a stale 200.
+  const archived = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(archived.statusCode, 403);
+});
+
+test("G3 cache: an OUT-OF-BAND direct contest-doc write self-heals within the TTL", async () => {
+  const firestore = freshDb();
+  const { __setHotCacheClocksForTest } = handler;
+  let now = 1_000_000;
+  __setHotCacheClocksForTest(() => now);
+  const contest = await createContest({
+    name: "Cache TTL", enforcement: { mode: "block", fullscreen_reentry_seconds: 20 }
+  });
+  await openContest(contest.slug);
+  const first = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(first.body.enforcement.fullscreen_reentry_seconds, 20); // cached
+  // Mutate the doc DIRECTLY (bypassing updateContest's invalidation) — the analog
+  // of a write on another instance. The local cache is now stale.
+  const cur = firestore._collections.get("sd_contests").get(contest.slug);
+  firestore.collection("sd_contests").doc(contest.slug).set({
+    ...cur, enforcement: { ...cur.enforcement, mode: "alert_first", fullscreen_reentry_seconds: 45 }
+  });
+  // Within the TTL the stale value may still serve (acceptable, bounded).
+  const stale = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(stale.body.enforcement.fullscreen_reentry_seconds, 20);
+  // Advance past the TTL (default 10s) → the entry expires and the fresh value is read.
+  now += 11_000;
+  const healed = await call(makeReq({ method: "GET", path: "/api/exam-config", query: { contest: contest.slug } }));
+  assert.equal(healed.body.enforcement.mode, "alert_first");
+  assert.equal(healed.body.enforcement.fullscreen_reentry_seconds, 45);
+  __setHotCacheClocksForTest(null); // restore real clock for later tests
 });
 
 test("exam-config?contest=: no roster -> roster_required:false; draft -> 403; unknown -> 400", async () => {

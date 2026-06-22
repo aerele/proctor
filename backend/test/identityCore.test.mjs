@@ -177,6 +177,33 @@ test("identityNorm: golden table (whitespace, case, sanitize collapse, all-dots,
   assert.equal(identityNorm(long), "x".repeat(120)); // sanitizeSegment caps at 120
 });
 
+test("identityNorm: v1.1 G4 non-ASCII folding — accents/full-width fold to the ASCII form", () => {
+  // The whole point: a candidate typing the plain-ASCII form matches a roster
+  // entry stored with diacritics, and vice-versa — all fold to ONE key.
+  assert.equal(identityNorm("José"), "jose");
+  assert.equal(identityNorm("Jose"), "jose");
+  assert.equal(identityNorm("JOSÉ"), "jose");
+  assert.equal(identityNorm("Müller"), "muller");
+  assert.equal(identityNorm("Renée"), "renee");
+  assert.equal(identityNorm("Ångström"), "angstrom");
+  // Full-width (CJK input mode) digits/letters fold to ASCII.
+  assert.equal(identityNorm("ＪＯＳＥ"), "jose");
+  assert.equal(identityNorm("ＡＢＣ123"), "abc123");
+  // ASCII roll numbers are BYTE-FOR-BYTE unchanged (KPR data must not move).
+  assert.equal(identityNorm("21CS001"), "21cs001");
+  assert.equal(identityNorm("21 CS 001"), "21cs001");
+  // José and Jose are now the SAME key — the matching invariant we want.
+  assert.equal(identityNorm("José"), identityNorm("Jose"));
+});
+
+test("identityNorm: undecomposable glyphs still sanitize to '_' (downstream unchanged)", () => {
+  // Ligatures / stroke letters / CJK have no canonical decomposition, so they
+  // pass through the fold unchanged and sanitizeSegment maps them to "_" exactly
+  // as before this change — no behavior regression for those.
+  assert.equal(identityNorm("Łukasz"), "_ukasz");
+  assert.equal(identityNorm("北京"), "__");
+});
+
 test("personIdOf is INJECTIVE: components can never forge the separator (wave-4 fix)", () => {
   // Pre-fix collisions with the old "--" separator: both pairs below derived
   // the SAME person_id, silently aliasing two real people onto one

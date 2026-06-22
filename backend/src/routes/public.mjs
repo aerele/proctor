@@ -74,7 +74,10 @@ export function makePublicRoutes(ctx) {
     rosterLimit,
     rosterCellMax,
     rosterColumnsLimit,
-    rosterMappableFields
+    rosterMappableFields,
+    // v1.1 G1: authoritative consent-text version (by value); served in
+    // exam-config so the candidate app reads it rather than hard-coding it.
+    consentVersion = ""
   } = ctx;
 
   // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
@@ -284,7 +287,10 @@ export function makePublicRoutes(ctx) {
       take_home_enabled: Boolean(contest.take_home_enabled),
       proctor_contact_phone: contest.proctor_contact_phone || "",
       enforcement: enforcementConfigFor(contest),
-      camera_recording: cameraRecordingConfigFor(contest)
+      camera_recording: cameraRecordingConfigFor(contest),
+      // v1.1 G1: the consent-text version the candidate app must echo back at
+      // session start (so a copy bump is detectable; the app never hard-codes it).
+      consent_version: consentVersion
     };
   }
 

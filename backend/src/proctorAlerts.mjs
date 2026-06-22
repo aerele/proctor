@@ -57,8 +57,14 @@ export function makeProctorAlerts(ctx) {
     // env-captured collection names / settings id (by value at handler load)
     settingsCollection,
     alertsCollection,
-    alertSettingsId
+    alertSettingsId,
+    // v1.1 G3 (#5): optional hot-path read cache for the alert-settings doc
+    // (read on every heartbeat/events/beacon/room-gate). A single shared key.
+    // Null when disabled → every read hits Firestore (prior behavior). The
+    // alert-settings WRITE path (routes/alerts.mjs) invalidates it.
+    alertSettingsCache = null
   } = ctx;
+  const ALERT_SETTINGS_CACHE_KEY = "proctor_alert_settings";
 
   // ---- Sure-shot proctor alerts (Phase 2, 2.3 / Epic 4) ---------------------
 
@@ -129,9 +135,19 @@ export function makeProctorAlerts(ctx) {
   // once per request and thread the result into the sure-shot upsert sites so a
   // single request never re-reads it.
   async function getAlertSettings() {
+    // v1.1 G3 (#5): read through the TTL cache. The merged result is cached (it
+    // is a pure function of the stored doc); a settings write invalidates the
+    // cache, and the TTL bounds cross-instance staleness. Caches the MERGED
+    // object so the per-request merge is also skipped on a hit.
+    if (alertSettingsCache) {
+      const hit = alertSettingsCache.get(ALERT_SETTINGS_CACHE_KEY);
+      if (hit !== undefined) return hit;
+    }
     const doc = await getFirestore().collection(settingsCollection).doc(alertSettingsId).get();
     const stored = doc.exists ? (doc.data()?.proctor || {}) : {};
-    return mergeAlertSettings(stored);
+    const merged = mergeAlertSettings(stored);
+    if (alertSettingsCache) alertSettingsCache.set(ALERT_SETTINGS_CACHE_KEY, merged);
+    return merged;
   }
 
   function mergeAlertSettings(stored) {

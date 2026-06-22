@@ -65,7 +65,10 @@ export function makeAlertRoutes(ctx) {
     sessionCollection,
     sessionsQueryLimit,
     settingsCollection,
-    alertSettingsId
+    alertSettingsId,
+    // v1.1 G3 (#5): invalidate the hot-path alert-settings read cache after a
+    // settings write (by reference). No-op fallback when no cache is configured.
+    invalidateAlertSettingsCache = () => {}
   } = ctx;
 
   async function ingestAlerts(req) {
@@ -213,6 +216,7 @@ export function makeAlertRoutes(ctx) {
       proctor: merged.proctor,
       updated_at: now
     });
+    invalidateAlertSettingsCache(); // v1.1 G3 (#5): settings write invalidates the read cache
     return merged;
   }
 
