@@ -28,9 +28,12 @@
 //                    invigilator". Empty-safe.
 //
 // Content draft source: internal design notes (privacy/T&C drafts).
-// PENDING final okay — placeholders in [SQUARE BRACKETS] are factual
-// items he must fill (organisation legal name, jurisdiction, grievance contact,
-// dates). They render verbatim so a missed placeholder is impossible to miss.
+// Karthi-approved factual values filled 2026-06-22 (legal entity, governing
+// law / jurisdiction, effective date). The grievance/privacy contact is set to
+// the RECOMMENDED address privacy@aerele.in — pending Karthi's confirmation of
+// the live mailbox at sign-off. One optional disclosure (storage region) is
+// left as a clearly-marked fill-field; any remaining [SQUARE BRACKET] renders
+// verbatim so a missed placeholder is impossible to miss.
 
 // The authoritative consent text version. Bump on a MATERIAL copy change.
 // Mirrored by the backend CONSENT_VERSION (design §1.3); the frontend falls
@@ -58,14 +61,14 @@ export type ConsentVersionContent = {
 
 const V1_1: ConsentVersionContent = {
   version: "v1.1",
-  lastUpdated: "[DATE — Karthi to fill]",
+  lastUpdated: "2026-06-22",
   terms: {
     title: "Terms & Conditions",
     markdown: `Please read these Terms before you start your test. By checking the consent box and starting the proctored session, you agree to them. **If you do not agree, do not start the test** — you can contact the organisation running the contest (or {PROCTOR_TAIL}) about alternatives.
 
 ## 1. What this is
 
-This is a **proctored coding contest** run on the Aerele Proctor platform on behalf of **[ORGANISATION LEGAL NAME — Karthi to fill]** ("the Organisation", "we", "us"). The Organisation uses this test to assess your coding ability for **hiring / shortlisting**, and the proctoring exists to keep the test fair for everyone.
+This is a **proctored coding contest** run on the Aerele Proctor platform on behalf of **Aerele Technologies Private Limited** ("the Organisation", "we", "us"). The Organisation uses this test to assess your coding ability for **hiring / shortlisting**, and the proctoring exists to keep the test fair for everyone.
 
 The test may be taken in one of two ways:
 
@@ -131,15 +134,15 @@ Genuine technical issues (for example a brief network change) are taken into acc
 
 ## 9. Changes and contact
 
-The Organisation may update these Terms; the version shown when you take the test is the one that applies to your session. For questions about the test, contact **[ORGANISATION CONTACT — Karthi to fill]** (remote candidates: use the on-screen proctor support number).
+The Organisation may update these Terms; the version shown when you take the test is the one that applies to your session. For questions about the test, contact **privacy@aerele.in** (remote candidates: use the on-screen proctor support number).
 
-These Terms are governed by the laws of **[JURISDICTION / COUNTRY — Karthi to fill]**.`
+These Terms are governed by the laws of **India**, and any disputes are subject to the exclusive jurisdiction of **the courts of Tamil Nadu, India**.`
   },
   privacy: {
     title: "Privacy Policy",
     markdown: `This Privacy Policy explains what personal data we collect when you take a proctored coding contest on the Aerele Proctor platform, why we collect it, how long we keep it, and your choices. It is written to be read by candidates — plainly, not in heavy legalese.
 
-The contest is run by **[ORGANISATION LEGAL NAME — Karthi to fill]** ("the Organisation", "we", "us"), who decides how your data is used. The platform is self-hosted by the Organisation.
+The contest is run by **Aerele Technologies Private Limited** ("the Organisation", "we", "us"), who decides how your data is used. The platform is self-hosted by the Organisation.
 
 ## 1. What we collect
 
@@ -209,10 +212,10 @@ We take reasonable measures to protect your data: access is restricted, recordin
 
 For any privacy question or request, contact:
 
-- **Data / grievance contact:** **[NAME + EMAIL/PHONE — Karthi to fill]**
+- **Data / grievance contact:** **privacy@aerele.in**
 - **Remote take-home candidates:** for help during the test, call the **proctor support number shown on your screen**.
 
-This Policy is governed by the laws of **[JURISDICTION / COUNTRY — Karthi to fill]**.`
+This Policy is governed by the laws of **India**, and any disputes are subject to the exclusive jurisdiction of **the courts of Tamil Nadu, India**.`
   }
 };
 

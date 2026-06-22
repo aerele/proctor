@@ -27,6 +27,14 @@ const IDENTITY_LABEL_DEFAULT = "Candidate ID"; // S-A interim label (F9 §5 S-A)
 const RETENTION_DAYS_DEFAULT = 4;              // F9 Q2 default, clamp 1..30
 const RETENTION_DAYS_MIN = 1;
 const RETENTION_DAYS_MAX = 30;
+// v1.1 G1: the retention-clock anchor. "selection_done" is the safe pre-v1.1
+// semantics (the manual admin stamp is the ONLY clock-start; absent → same).
+// "exam_end" OPTS IN to the automatic end_at-derived clock so evidence
+// auto-sweeps N days after the exam window closes with no manual click
+// (dataLifecycle.retentionAnchorMs). KPR-safety: this is OPT-IN only — see the
+// createContest default below, which sets it ONLY for new take-home contests.
+const RETENTION_ANCHORS = ["selection_done", "exam_end"];
+const RETENTION_ANCHOR_DEFAULT = "selection_done";
 const CONTESTS_QUERY_LIMIT = 500;
 const SLUG_COLLISION_LIMIT = 50;
 const PROCTOR_CONTACT_PHONE_MAX = 40; // country code + spaces/dashes/parens
@@ -174,6 +182,17 @@ export async function createContest(body) {
   const takeHomeEnabled = body?.take_home_enabled === undefined
     ? false
     : requireBoolean(body.take_home_enabled, "take_home_enabled");
+  // v1.1 G1 KPR-safe wiring: a NEW take-home contest DEFAULTS to the "exam_end"
+  // anchor so its evidence auto-sweeps N days after the exam window closes with
+  // no manual selection-done click. Non-take-home (college) contests default to
+  // the safe "selection_done" semantics (invigilator-driven, never auto-swept).
+  // Legacy contests created before v1.1 carry NO anchor field at all → they keep
+  // selection_done semantics in dataLifecycle.retentionAnchorMs, so KPR stays
+  // protected. An admin may override per contest (the field is editable).
+  const retentionAnchor = normalizeRetentionAnchor(
+    body?.retention_anchor,
+    takeHomeEnabled ? "exam_end" : RETENTION_ANCHOR_DEFAULT
+  );
   const proctorContactPhone = normalizeProctorContactPhone(body?.proctor_contact_phone);
   const rooms = normalizeContestRooms(body?.rooms);
   // W4: an admin-ASSIGNED code is validated + clash-checked exactly like
@@ -223,6 +242,9 @@ export async function createContest(body) {
       updated_at: now,
       // Lifecycle block placeholders (F9 §3) — S-G/S-H fill these in.
       selection_done_at: null,
+      // v1.1 G1: retention-clock anchor (default exam_end for take-home, else
+      // selection_done). dataLifecycle.retentionAnchorMs reads this.
+      retention_anchor: retentionAnchor,
       evidence_retention_days: retentionDays,
       evidence_purged_at: null,
       db_purged_at: null,
@@ -294,6 +316,12 @@ export async function updateContest(slugRaw, body) {
   if (body?.listed !== undefined) patch.listed = requireBoolean(body.listed, "listed");
   if (body?.evidence_retention_days !== undefined) {
     patch.evidence_retention_days = normalizeRetentionDays(body.evidence_retention_days);
+  }
+  // v1.1 G1: admin may override the retention anchor per contest. An explicit
+  // value must be one of the known anchors; absent leaves the stored value
+  // untouched (a legacy contest with no field stays anchorless → never swept).
+  if (body?.retention_anchor !== undefined) {
+    patch.retention_anchor = normalizeRetentionAnchor(body.retention_anchor, RETENTION_ANCHOR_DEFAULT);
   }
   // Window edits validate against the MERGED window so a partial edit can never
   // leave start >= end behind.
@@ -637,6 +665,19 @@ function normalizeRetentionDays(raw) {
     throw httpError(400, "evidence_retention_days must be an integer");
   }
   return Math.min(RETENTION_DAYS_MAX, Math.max(RETENTION_DAYS_MIN, num));
+}
+
+// v1.1 G1 retention anchor: absent → the caller-supplied default ("exam_end"
+// for a new take-home contest, "selection_done" otherwise / on update). An
+// explicit value must be a known anchor; garbage is a hard 400 (the admin asked
+// for SOMETHING and we couldn't honor it — never silently defaulted).
+function normalizeRetentionAnchor(raw, fallback) {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const anchor = String(raw).trim();
+  if (!RETENTION_ANCHORS.includes(anchor)) {
+    throw httpError(400, `retention_anchor must be one of ${RETENTION_ANCHORS.join(", ")}`);
+  }
+  return anchor;
 }
 
 // Window fields are OPTIONAL in draft (the publish gate enforces presence at
