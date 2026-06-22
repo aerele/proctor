@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** READY (stretch item S1 of the 2026-06-09 night run). Paired spec: `docs/superpowers/specs/2026-06-09-s1-exam-shell-design.md`.
+**Status:** READY (stretch item S1 of the 2026-06-09 night run). Paired spec: `docs/design-history/specs/2026-06-09-s1-exam-shell-design.md`.
 
 **Goal:** The candidate flow becomes fullscreen-first (a blank dark gate with one "Enter fullscreen" button is the FIRST screen); every `StudentApp` branch carries a unique fixed dark top bar (stage block 1–5 color-coded + name/roll/room + ticking wall clock + elapsed exam timer + pulsing REC dot); ANY anomaly while recording vanishes the bar instantly and shows a red panel; restore is candidate-self-serve (preconditions + explicit acknowledge) and permanently increments a red ⚑ flag chip. An invigilator at the back of the room reads everything without walking over — and a missing bar IS the walk-over signal.
 
@@ -202,7 +202,7 @@ Expected: FAIL — `Cannot find module './examShell'` (or unresolved import).
 // Everything here is vitest-tested; the React hook (useExamShell.ts) and the
 // shell components stay thin.
 //
-// Design: docs/superpowers/specs/2026-06-09-s1-exam-shell-design.md
+// Design: docs/design-history/specs/2026-06-09-s1-exam-shell-design.md
 
 import type { SessionStatus } from "../types";
 

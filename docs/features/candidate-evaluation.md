@@ -165,4 +165,4 @@ where `score_frac = total/maxTotal`; `hardness_frac = Σweight(solved-full)/Σwe
 
 - [admin-results-people.md](admin-results-people.md) · [admin-recording-review.md](admin-recording-review.md)
 - [alert-taxonomy.md](alert-taxonomy.md)
-- [architecture-overview.md](architecture-overview.md) · [exam-day-ops-runbook.md](exam-day-ops-runbook.md)
+- [architecture-overview.md](architecture-overview.md) · [../EXAM-DAY-OPS.md](../EXAM-DAY-OPS.md)

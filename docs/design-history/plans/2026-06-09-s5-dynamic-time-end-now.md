@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Spec:** `docs/superpowers/specs/2026-06-09-s5-dynamic-time-end-now-design.md` — read it first.
+**Spec:** `docs/design-history/specs/2026-06-09-s5-dynamic-time-end-now-design.md` — read it first.
 
 **Goal:** Admin extends/shortens the live exam end time or force-ends the exam for everyone; students see a skew-corrected countdown that updates within one heartbeat (≤15 s), with change notices and a time-up state — no reload.
 

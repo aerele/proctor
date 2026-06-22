@@ -12,7 +12,7 @@
 - Parameterized pure-function port already in-repo: `monitoring/contest_eval_core.py` (normalization, clone clustering, recurring pairs, tight-gap, artifacts, provenance — keep JS port byte-parity with this).
 - Platform capture: `backend/src/handler.mjs` (`ingestEditorEvents` ~:1580, `recordEvents` ~:1210, `recordHeartbeat` ~:1637, `execSubmit` ~:1460, review queue ~:4785–5200), `backend/src/scoreboard.mjs`, `backend/src/identity.mjs`, `docs/features/{architecture-overview,admin-results-people,admin-recording-review,alert-taxonomy}.md`.
 - Guards: `backend/test/{scopingLint,routesAuthLint,canaryIsolation,envLint}.test.mjs`.
-- Decomposition plan (do not fight it): `docs/superpowers/plans/2026-06-11-architecture-decomposition.md` — new code lands as `routes/<domain>.mjs` factories + flat `src/*.mjs` domain modules, exactly as that plan prescribes.
+- Decomposition plan (do not fight it): `docs/design-history/plans/2026-06-11-architecture-decomposition.md` — new code lands as `routes/<domain>.mjs` factories + flat `src/*.mjs` domain modules, exactly as that plan prescribes.
 
 **Carried-over philosophy (verbatim from the old playbook — load-bearing):**
 1. Outputs are **EVIDENCE / flags, not verdicts**; a supervised round (or the owner) is ground truth.

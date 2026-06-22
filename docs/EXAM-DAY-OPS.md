@@ -1,6 +1,6 @@
 # Exam-Day Operations Runbook (1 page)
 
-For the **platform operator/admin** running a live test on the Aerele proctor platform. Every behavior below is verified against this repo's routes/UI; anything not directly verifiable is marked **(unverified)**. Console = `<web-url>/admin`, unlocked with `ADMIN_PASSWORD`. (For a **non-technical on-site conductor**, hand them the plain-language [`CONDUCTOR-GUIDE.md`](CONDUCTOR-GUIDE.md) instead; the narrated route-by-route version is [`features/exam-day-ops-runbook.md`](features/exam-day-ops-runbook.md).)
+For the **platform operator/admin** running a live test on the Aerele proctor platform. Every behavior below is verified against this repo's routes/UI; anything not directly verifiable is marked **(unverified)**. Console = `<web-url>/admin`, unlocked with `ADMIN_PASSWORD`. (For a **non-technical on-site conductor**, hand them the plain-language [`CONDUCTOR-GUIDE.md`](CONDUCTOR-GUIDE.md) instead.)
 
 Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/invigilator?contest=<slug>&key=<invigilator_key>` (derived in `admin/contestAdmin.ts`).
 
@@ -38,7 +38,23 @@ Conventions: candidate URL `<web>/?contest=<slug>` · invigilator URL `<web>/inv
 ## 4. AFTER
 
 1. **Results** tab — ranked table (per-problem best, integrity column). Shortlist / select / reject candidates, then **Mark selection done** (freezes a snapshot + starts the retention clock). CSV export. Cross-round per-person view in **People**; recordings in **Recordings** (screen + camera, events/alerts timeline, click-to-jump).
-2. **Data lifecycle** (contest detail) — **Export** first (downloads a self-contained archive). Then the **triple-gated Purge**: a prior export must exist + tick "I understand…" + **type the contest slug exactly**. Purge deletes sessions/submissions/recordings; **scores and selection always survive** (tombstone). Evidence auto-deletes via GCS lifecycle at **age 3 days**; export zips at **age 11 days** (`backend/gcs-lifecycle.json`).
+2. **Evaluate** (Results tab, after window close) — press **Evaluate contest** to compute deterministic talent + integrity scorecards from captured session evidence. Admin-triggered, cursor-batched (auto-resumes until done), idempotent (skips unchanged; pass `force` to recompute). Adds a talent tier + 0–100 composite, an integrity tier, and a per-row evidence drawer. See [`features/candidate-evaluation.md`](features/candidate-evaluation.md).
+3. **Data lifecycle** (contest detail) — **Export** first (downloads a self-contained archive). Then the **triple-gated Purge**: a prior export must exist + tick "I understand…" + **type the contest slug exactly**. Purge deletes sessions/submissions/recordings; **scores and selection always survive** (tombstone). Evidence auto-deletes via GCS lifecycle at **age 3 days**; export zips at **age 11 days** (`backend/gcs-lifecycle.json`).
+
+---
+
+## Key defaults (confirm before exam)
+
+| Setting | Default | Source |
+|---|---|---|
+| Room start gate | **OFF** (candidates self-start; no start code) | `contest.room_gate_enabled` defaults false |
+| Camera recording | **ON** (~10 fps, 640w) | `normalizeCameraRecording` defaults enabled |
+| Invigilator alert sharing | **All OFF** (admin opts each type in) | per-type "Share with invigilator" default off |
+| Fullscreen enforcement mode | **Block** (lock on expiry / exit limit) | enforcement mode select |
+| Fullscreen re-entry countdown | **20 s** (blank = 20) | `FULLSCREEN_REENTRY_DEFAULT_SECONDS`, `backend/src/templates.mjs` |
+| Fullscreen exit limit | **2** exits (blank = 2) | `FULLSCREEN_EXIT_LIMIT_DEFAULT`, `backend/src/templates.mjs` |
+| Live stats / alerts auto-poll | **5 s** | `ADMIN_POLL_INTERVAL_MS = 5000` |
+| Purge confirmation | Type the contest **slug** *(unverified: F9 design originally said name; shipped as slug)* | `dataLifecycle` purge gate |
 
 ---
 

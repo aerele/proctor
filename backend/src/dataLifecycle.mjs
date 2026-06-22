@@ -7,11 +7,11 @@
 // deletes a contest's heavy data after evaluatePurgeGate() returns ok:true.
 //
 // Specs:
-//   docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//   docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //     §3.1 (export → manifest + per-dataset jsonl), §3.2 (triple-gated purge,
 //     tombstone), §3.4 (retention sweep), Decision 12 (gates), Decision 14
 //     (ONE daily scheduler → sweep endpoint).
-//   docs/superpowers/specs/2026-06-10-f10-product-vision.md
+//   docs/design-history/specs/2026-06-10-f10-product-vision.md
 //     §2.9 (purge-survivor: enrollments + final_snapshot retained),
 //     §2.16 (export carries persons/enrollments/colleges, schema_version:1),
 //     §10.4 (export zips auto-delete after 10 days via the same daily sweep).

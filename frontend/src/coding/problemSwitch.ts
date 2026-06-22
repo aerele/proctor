@@ -7,7 +7,7 @@
 // backend scoreboard.mjs computeSessionSummary semantics) and the helpers for
 // rendering SERVER-driven cooldowns (retry_after_seconds — the client never
 // double-accounts cooldown windows).
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md.
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md.
 import type { ProblemSubmissionSummary, SubmitResult } from "../types";
 
 // Backend MAX_SOURCE_CODE_LENGTH parity (handler.mjs): a draft the server

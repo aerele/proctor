@@ -2,7 +2,7 @@
 
 **Status:** Night-run stretch item 5 (locked scope: `night-run/MORNING-NOTES.md` → STRETCH 5; intent: platform design §8 "Dynamic time control: update end-time live; **end now** for everyone (new time or immediate)").
 **Author:** Ram (architect subagent). **Date:** 2026-06-09.
-**Paired plan:** `docs/superpowers/plans/2026-06-09-s5-dynamic-time-end-now.md`.
+**Paired plan:** `docs/design-history/plans/2026-06-09-s5-dynamic-time-end-now.md`.
 
 ---
 

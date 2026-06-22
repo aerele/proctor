@@ -7,7 +7,7 @@
 // dataLifecycle.test.ts. The UI in ContestsPanel renders from these; this module
 // is the single source of truth and MIRRORS the server's gate exactly.
 //
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md
 //   §2.16 export → triple-gated purge → tombstone; selection-done → retention sweep
 //   §2.9  purge-survivor (enrollments + final_snapshot retained; the contest doc
 //         stays as a tombstone, Results/People still read via final_snapshot)

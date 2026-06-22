@@ -2,7 +2,7 @@
 
 **Status:** READY for tonight's build (STRETCH item 3 of the 2026-06-09 night run).
 **Author:** architect subagent. **Date:** 2026-06-09.
-**Parent design:** `docs/superpowers/specs/2026-06-09-own-editor-design.md` (§6, §7, §8 — invigilator portal minus signed-QR).
+**Parent design:** `docs/design-history/specs/2026-06-09-own-editor-design.md` (§6, §7, §8 — invigilator portal minus signed-QR).
 **Guardrails:** `night-run/MORNING-NOTES.md` — scope is LOCKED to: room OTP/passcode distribution, start-now/allow-all bypass, basic room stats, selective alerts. **Signed-QR ID verification is DEFERRED — not designed here.**
 
 ---

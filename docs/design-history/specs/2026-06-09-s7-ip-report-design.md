@@ -2,7 +2,7 @@
 
 **Status:** Night-run stretch item 7 (locked scope: `night-run/MORNING-NOTES.md` → STRETCH 7; intent: platform design §8 "IP-address report: admin screen/status showing **IP-wise count** of logged-in users (catch off-campus testing); group/flag clusters").
 **Author:** Ram (architect subagent). **Date:** 2026-06-09.
-**Paired plan:** `docs/superpowers/plans/2026-06-09-s7-ip-report.md`.
+**Paired plan:** `docs/design-history/plans/2026-06-09-s7-ip-report.md`.
 
 ---
 

@@ -1,8 +1,8 @@
 // backend/test/dataLifecycle.test.mjs — Wave7-G PURE logic (S-G/S-H).
-// Specs: docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+// Specs: docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          §3.1 (export bundle/manifest), §3.2 (triple-gated purge),
 //          §3.4 (retention sweep), Decision 12 (purge gates), Decision 14.
-//        docs/superpowers/specs/2026-06-10-f10-product-vision.md
+//        docs/design-history/specs/2026-06-10-f10-product-vision.md
 //          §2.16 (lifecycle re-scoped: persons/enrollments/colleges in export,
 //          enrollments survive purge with snapshot), §10.4 (export-zip 10-day
 //          retention + sweep deletes expired zips).

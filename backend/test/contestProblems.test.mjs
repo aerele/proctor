@@ -1,7 +1,7 @@
 // backend/test/contestProblems.test.mjs — S-I §1.3: the contest problems[]
 // shim, effective points, and the pure reference filter behind the
 // live-reference guard. PURE unit tests — no handler import, no env, no GCP.
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md §1.3/§1.4
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md §1.3/§1.4
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

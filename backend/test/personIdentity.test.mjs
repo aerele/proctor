@@ -1,9 +1,9 @@
 // backend/test/personIdentity.test.mjs — S-C slice 2: person-mode identity
 // derivation at session start + dual-norm contest-pinned resume.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.4 (identity
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.4 (identity
 //          chain: username_norm = person_id; server-side college resolution;
 //          picker ONLY on genuine ambiguity; no-roster person_id:null), §2.10
-//        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//        docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          D2 (one identity field candidate_id), D4 (identity_label denorm),
 //          D6 (H1 live-lock unchanged), D8 (dual-norm contest-pinned resume)
 // THE CANARY: the legacy start path must produce IDENTICAL session docs —

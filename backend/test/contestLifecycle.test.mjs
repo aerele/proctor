@@ -1,10 +1,10 @@
 // backend/test/contestLifecycle.test.mjs — Wave7-G data-lifecycle ENDPOINTS
 // (S-G/S-H). The handler-level integration over in-memory Firestore + GCS fakes.
 //
-// Specs: docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+// Specs: docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          §3.1 (export), §3.2 (triple-gated purge + tombstone), §3.4 (sweep),
 //          Decision 12 (gates), Decision 14 (scheduler key auth).
-//        docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.9
+//        docs/design-history/specs/2026-06-10-f10-product-vision.md §2.9
 //          (purge retains enrollments + final_snapshot), §2.16, §10.4 (zip
 //          retention).
 //

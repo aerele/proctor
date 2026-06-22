@@ -7,7 +7,7 @@
 //   1. non-empty problems[] -> sorted by `order`, normalized entries
 //   2. nothing              -> []
 //
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md §1.3/§1.4
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md §1.3/§1.4
 
 export function contestProblemEntries(contest) {
   const source = contest && typeof contest === "object" ? contest : {};
