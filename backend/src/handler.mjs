@@ -1387,6 +1387,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));
     if (req.method === "GET" && path === "/api/admin/attendance") return send(res, 200, await adminAttendance(req));
     if (req.method === "GET" && path === "/api/admin/contest-results") return send(res, 200, await adminContestResults(req));
+    if (req.method === "GET" && path === "/api/admin/contest-data-size") return send(res, 200, await adminContestDataSize(req));
     if (req.method === "POST" && path === "/api/admin/contest-evaluate") return send(res, 200, await adminContestEvaluate(req));
     if (req.method === "GET" && path === "/api/admin/contest-evaluations") return send(res, 200, await adminContestEvaluations(req));
     if (req.method === "GET" && path === "/api/admin/contest-evaluate-status") return send(res, 200, await adminContestEvaluateStatus(req));
@@ -1952,6 +1953,83 @@ async function adminContestExport(req) {
   }, adminActor(req, body), exportedAt);
 
   return { ok: true, gcs_key: gcsKey, signed_url: signedUrl, counts: bundle.manifest.counts, exported_at: exportedAt };
+}
+
+// GET /api/admin/contest-data-size?contest=<slug> — G1 (v1.1, design §2.6).
+// READ-ONLY: sums the contest's stored evidence objects in GCS and returns a
+// per-kind byte breakdown so the admin can see how much heavy data a contest is
+// holding before deciding to export/purge it. Async by nature (a whole-prefix
+// bucket listing — slow for a large contest; the admin UI shows a spinner), so
+// there is no extra batching here. ADMIN-ONLY. STRICTLY scoped to the ONE
+// contest's evidence prefix `contests/<slug>/` — it never lists another
+// contest's objects (the canary isolation suite pins this).
+//
+// Object kinds are derived from the storage layout
+// `contests/<slug>/sessions/<user>/<session>/<kind>/...`: the segment right
+// after the per-session prefix names the kind (screen / camera / events /
+// editor-events → `editorEvents` for the UI / review), with a bare
+// `manifest.json` mapped to `manifests` and anything else to `other`. The
+// frontend renders by_kind GENERICALLY (any key, byte values), so adding a kind
+// here never needs a frontend change.
+async function adminContestDataSize(req) {
+  requireAdmin(req);
+  const contest = await personContestForFilter(req.query?.contest ?? req.query?.contest_slug);
+  if (!contest) return badRequest("contest must name a person-mode contest");
+
+  // SCOPE: the one contest's evidence subtree ONLY. exports/ lives under a
+  // sibling top-level prefix, so this listing can never include export zips.
+  const prefix = `contests/${contest.slug}/`;
+  const [files] = await bucket().getFiles({ prefix });
+
+  const byKind = {};
+  let totalBytes = 0;
+  let totalObjects = 0;
+  for (const file of files || []) {
+    const name = file?.name || "";
+    // Belt-and-braces: the listing is already prefix-scoped, but never count an
+    // object that doesn't actually sit under THIS contest's prefix.
+    if (!name.startsWith(prefix)) continue;
+    const size = Number(file?.metadata?.size) || 0;
+    totalBytes += size;
+    totalObjects += 1;
+    const kind = evidenceKindOf(name, prefix);
+    byKind[kind] = (byKind[kind] || 0) + size;
+  }
+
+  return {
+    contest: contest.slug,
+    evidence_bytes: totalBytes,
+    evidence_objects: totalObjects,
+    by_kind: byKind,
+    computed_at: new Date().toISOString()
+  };
+}
+
+// Classify one evidence object key into a UI-facing kind, from the storage
+// layout contests/<slug>/sessions/<user>/<session>/<kind>/<file>. The kind is
+// the path segment right after the per-session prefix; a bare per-session
+// manifest.json has no kind segment → "manifests". Keys outside the
+// sessions/ subtree (or otherwise unrecognized) fall to "other".
+function evidenceKindOf(name, contestPrefix) {
+  const rel = name.slice(contestPrefix.length); // sessions/<user>/<session>/...
+  const segs = rel.split("/");
+  // sessions/<user>/<session>/<rest...> — the kind lives at segs[3].
+  if (segs[0] !== "sessions" || segs.length < 4) return "other";
+  const tailFirst = segs[3];
+  if (segs.length === 4) {
+    // A file sitting DIRECTLY under the session prefix (e.g. manifest.json).
+    return tailFirst === "manifest.json" ? "manifests" : "other";
+  }
+  switch (tailFirst) {
+    case "screen": return "screen";
+    case "camera": return "camera";
+    case "events": return "events";
+    // EDITOR_EVENTS_COLLECTION sub-prefix label (default "editor-events") — the
+    // demo + UI breakdown name this kind `editorEvents`.
+    case EDITOR_EVENTS_COLLECTION: return "editorEvents";
+    case "review": return "review";
+    default: return "other";
+  }
 }
 
 // POST /api/admin/contest-purge {contest, confirm, slug, include_evidence} —
