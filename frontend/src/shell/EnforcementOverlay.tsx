@@ -15,7 +15,7 @@ import { AlertTriangle, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, enforcementHeadline, enforcementSubline, type EnforcementPhase, type ViolationPhase } from "./enforcement";
 
-export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, onAckChange, onEnterFullscreen }: {
+export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, proctorPhone = "", onAckChange, onEnterFullscreen }: {
   phase: EnforcementPhase;
   /** The violation that tripped the hold — words the alert_hold banner (wave-3). */
   violation: ViolationPhase | null;
@@ -27,6 +27,9 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
    *  hidden; re-entering fullscreen is the only action. Lands live via the
    *  heartbeat-delivered enforcement config. */
   simplifiedRecovery?: boolean;
+  /** #135 take-home: proctor contact number — shown as an optional help tail on
+   *  the calm pre-T0 soft nudge. Empty ⇒ the tail is omitted. */
+  proctorPhone?: string;
   /** Called on every keystroke — the hook matches against the exact phrase. */
   onAckChange: (text: string) => void;
   onEnterFullscreen: () => Promise<void>;
@@ -67,6 +70,52 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
     onAckChange("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
+
+  // #135 take-home pre-T0 SOFT nudge: a calm (non-red) banner with a SINGLE
+  // "Back to fullscreen" button — no countdown, no typed-ack step, no "test will
+  // be locked" copy. The exam hasn't started, so nothing is held against the
+  // candidate; this is a gentle prompt to be ready when the test opens.
+  if (phase === "soft") {
+    return (
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="enforcement-soft-title"
+        className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-ink/80 p-6"
+      >
+        <div className="w-full max-w-lg rounded-xl border border-line bg-white p-8 text-ink shadow-2xl">
+          <div className="flex items-start gap-4">
+            <Maximize2 size={32} className="mt-1 shrink-0 text-accent" />
+            <div>
+              <h1 id="enforcement-soft-title" className="text-2xl font-bold">
+                {enforcementHeadline(phase, fullscreen, simplifiedRecovery)}
+              </h1>
+              <p className="mt-2 text-base text-muted">
+                {enforcementSubline(phase, fullscreen, exitCount, simplifiedRecovery)}
+              </p>
+            </div>
+          </div>
+          <div className="mt-6">
+            <button
+              className="focus-ring inline-flex h-11 items-center gap-2 rounded-md bg-ink px-5 text-sm font-bold text-white"
+              onClick={() => {
+                setFsError("");
+                void onEnterFullscreen().catch(() => setFsError("Your browser blocked fullscreen. Click again to retry."));
+              }}
+            >
+              <Maximize2 size={16} /> Back to fullscreen
+            </button>
+            {fsError ? <p className="mt-2 text-sm font-semibold text-red-600">{fsError}</p> : null}
+          </div>
+          {proctorPhone ? (
+            <p className="mt-4 text-sm text-muted">
+              Trouble with fullscreen? Call your proctor at <a className="font-medium text-accent underline" href={`tel:${proctorPhone}`}>{proctorPhone}</a>.
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
