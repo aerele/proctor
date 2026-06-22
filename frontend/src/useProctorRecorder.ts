@@ -14,6 +14,7 @@ import {
 import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import { writeChunkHwm } from "./chunkContinuity";
 import { advanceUploadChain, runUploadWithRetry } from "./chunkUploadRetry";
+import { shouldSurfaceExamTime } from "./examTime";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 // Tier-1 buffer: the per-session circuit-breaker latch. Starts from the pre-
@@ -901,8 +902,11 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         }
         // S5: surface the current exam end time on every heartbeat. #135: also
         // surface the start (T0) + remote-mode flag + proctor phone, so a take-
-        // home session refreshes them even when no end_at is set.
-        if (response.end_at || response.start_at) {
+        // home session refreshes them even when no end_at is set. The start_at-
+        // only arm is gated on take_home so a normal (non-remote) session — for
+        // which the backend now ALSO always emits start_at — stays byte-identical
+        // to its pre-#135 behavior (fires only on end_at, no extra state write).
+        if (shouldSurfaceExamTime({ endAt: response.end_at, startAt: response.start_at, takeHome: response.take_home })) {
           options.onExamTimeChange?.({
             endAt: response.end_at ?? "",
             serverNow: response.server_now ?? "",

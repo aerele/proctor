@@ -1,6 +1,6 @@
 // frontend/src/examTime.test.ts — pure exam-time math (S5).
 import { describe, expect, it } from "vitest";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, resolveSavedEndAt, sessionElapsedAnchorMs, waitingRoomGate, waitingRoomMilestone, WAITING_ROOM_WINDOW_MS } from "./examTime";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, recordingPreExamState, remainingMs, resolveSavedEndAt, sessionElapsedAnchorMs, shouldSurfaceExamTime, waitingRoomGate, waitingRoomMilestone, WAITING_ROOM_WINDOW_MS } from "./examTime";
 
 describe("computeClockSkewMs", () => {
   it("is server minus client", () => {
@@ -209,6 +209,77 @@ describe("waitingRoomGate — clock skew (T-F2)", () => {
     expect(g.msUntilStart).toBe(20_000 - 90_000); // -70s → past T0 on the server
     expect(g.waitingRoomActive).toBe(false); // exam open, not waiting
     expect(g.tooEarly).toBe(false);
+  });
+});
+
+// #135 take-home — the recording pre-exam render precedence. The load-bearing
+// invariant (FIX #1, spec §4d): a tooEarly candidate whose session is already
+// recording must HOLD on the come-back-later screen and must NEVER fall through
+// to the live exam (an admin pushing start_at >15 min out mid-wait must not leak
+// the questions pre-T0).
+describe("recordingPreExamState — pre-T0 hold precedence (FIX #1)", () => {
+  it("tooEarly while recording HOLDS and never allows the exam view", () => {
+    const s = recordingPreExamState({ tooEarly: true, waitingRoomActive: false });
+    expect(s.holdWhileRecording).toBe(true);
+    expect(s.examViewAllowed).toBe(false); // the question-leak guard
+    expect(s.waitingRoomActive).toBe(false);
+  });
+
+  it("tooEarly wins even if the waiting-window boolean is somehow also set", () => {
+    // Defense in depth: tooEarly and waitingRoomActive are mutually exclusive in
+    // examTime math, but the precedence must still hold the candidate, not leak.
+    const s = recordingPreExamState({ tooEarly: true, waitingRoomActive: true });
+    expect(s.holdWhileRecording).toBe(true);
+    expect(s.examViewAllowed).toBe(false);
+    expect(s.waitingRoomActive).toBe(false);
+  });
+
+  it("inside the 15-min window → waiting room, not the exam, not the hold", () => {
+    const s = recordingPreExamState({ tooEarly: false, waitingRoomActive: true });
+    expect(s.holdWhileRecording).toBe(false);
+    expect(s.waitingRoomActive).toBe(true);
+    expect(s.examViewAllowed).toBe(false);
+  });
+
+  it("past T0 (neither hold nor waiting) → the live exam is allowed", () => {
+    const s = recordingPreExamState({ tooEarly: false, waitingRoomActive: false });
+    expect(s.holdWhileRecording).toBe(false);
+    expect(s.waitingRoomActive).toBe(false);
+    expect(s.examViewAllowed).toBe(true);
+  });
+
+  it("the three states are mutually exclusive across every input combo", () => {
+    for (const tooEarly of [true, false]) {
+      for (const waitingRoomActive of [true, false]) {
+        const s = recordingPreExamState({ tooEarly, waitingRoomActive });
+        const flags = [s.holdWhileRecording, s.waitingRoomActive, s.examViewAllowed].filter(Boolean);
+        expect(flags.length).toBe(1); // exactly one branch is ever active
+      }
+    }
+  });
+});
+
+// #135 take-home — heartbeat exam-time surfacing gate (FIX #2). The backend now
+// always emits start_at, so the non-take-home path must stay byte-identical:
+// the trigger fires only on end_at (as before) unless take_home is set.
+describe("shouldSurfaceExamTime — non-remote byte-identity (FIX #2)", () => {
+  it("non-take-home with start_at but no end_at does NOT fire (pre-#135 behavior)", () => {
+    expect(shouldSurfaceExamTime({ startAt: "2026-06-22T10:00:00.000Z" })).toBe(false);
+    expect(shouldSurfaceExamTime({ startAt: "2026-06-22T10:00:00.000Z", takeHome: false })).toBe(false);
+  });
+
+  it("non-take-home with end_at fires (unchanged from before)", () => {
+    expect(shouldSurfaceExamTime({ endAt: "2026-06-22T11:00:00.000Z" })).toBe(true);
+    expect(shouldSurfaceExamTime({ endAt: "2026-06-22T11:00:00.000Z", startAt: "2026-06-22T10:00:00.000Z" })).toBe(true);
+  });
+
+  it("take-home with start_at fires even without end_at (waiting-room countdown stays live)", () => {
+    expect(shouldSurfaceExamTime({ startAt: "2026-06-22T10:00:00.000Z", takeHome: true })).toBe(true);
+  });
+
+  it("nothing present → no fire", () => {
+    expect(shouldSurfaceExamTime({})).toBe(false);
+    expect(shouldSurfaceExamTime({ takeHome: true })).toBe(false);
   });
 });
 

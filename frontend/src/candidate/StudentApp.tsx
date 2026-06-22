@@ -14,7 +14,7 @@ import { clearChunkBuffer } from "../chunkBuffer";
 import { chunkIndexBase, clearChunkContinuity, mergeManifest, readChunkHwm, readStintManifest, writeStintManifest } from "../chunkContinuity";
 import { MultiProblemWorkspace } from "../coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "../coding/problemSwitch";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, sessionElapsedAnchorMs, waitingRoomGate } from "../examTime";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, recordingPreExamState, remainingMs, sessionElapsedAnchorMs, waitingRoomGate } from "../examTime";
 import { candidateIdOf } from "../identity";
 import { normalizeOtpInput } from "../invigilator/gateLogic";
 import { MarkerLayer } from "../markers/MarkerLayer";
@@ -1715,6 +1715,35 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     );
   }
 
+  // #135 defense-in-depth (spec §4d): a recording session whose start_at is
+  // pushed >15 min out mid-wait must HOLD, not fall through to the live exam.
+  // "Should be unreachable" via the form-stage guard above (tooEarly && isFormStage),
+  // but that guard requires gate==="form"/!recording, so it can't catch an
+  // in-session heartbeat re-stamp of examStartAt while status==="recording".
+  // Keep shellChrome/enforcementOverlay/markerLayer here (unlike the form-stage
+  // version): recording is already live, so the fullscreen/permission hold persists.
+  // recordingPreExamState centralizes the precedence (hold → waiting room → exam)
+  // so the "tooEarly must never reach the exam" invariant is unit-tested in isolation.
+  const recordingState = status === "recording"
+    ? recordingPreExamState({ tooEarly, waitingRoomActive })
+    : null;
+  if (recordingState?.holdWhileRecording) {
+    const startDate = examStartAt ? new Date(examStartAt) : null;
+    return (
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
+        {enforcementOverlay}
+        {markerLayer}
+        <ComeBackLaterPanel
+          contestName={pinned?.config.contest_name ?? null}
+          startAtLabel={startDate ? startDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null}
+          startDateLabel={startDate ? startDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }) : null}
+          proctorPhone={proctorPhone}
+        />
+      </Shell>
+    );
+  }
+
   // #135 take-home (D1 / D9): the WAITING ROOM — recording is live and fullscreen
   // is held, but the exam hasn't opened (pre-T0, ≤15min). The enforcement overlay
   // here is the SOFT nudge (softMode: waitingRoomActive). At T0 waitingRoomActive
@@ -1749,7 +1778,7 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // (HackerRank-link) sessions and all waiting/error states keep the classic
   // proctoring-first layout below. #135: !waitingRoomActive keeps the pre-T0
   // take-home hold on the WaitingRoom branch above until T0.
-  if (hasProblem && status === "recording" && gate === "running" && !examGateActive && !waitingRoomActive) {
+  if (hasProblem && status === "recording" && gate === "running" && !examGateActive && recordingState?.examViewAllowed) {
     return (
       <Shell padTop={shellPadTop} variant="exam">
         <ExamShellChrome

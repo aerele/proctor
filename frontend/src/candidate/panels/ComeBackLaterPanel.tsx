@@ -4,7 +4,9 @@
 // link well before the start must NOT acquire screen share / start a recording
 // for a long dead wait (D6). The take-home pre-session re-fetch (A4) re-evaluates
 // the boundary every ~30s, so once the clock crosses inside the 15-min window
-// this screen AUTO-ADVANCES into the WaitingRoom (no candidate action needed).
+// this screen is replaced by the registration form; the candidate then clicks
+// Start (a user gesture is required for getDisplayMedia, D1) to enter the
+// WaitingRoom — entry is NOT automatic.
 import { CalendarClock } from "lucide-react";
 import { ProctorHelpLine } from "./ProctorHelpLine";
 
@@ -31,7 +33,7 @@ export function ComeBackLaterPanel({ contestName, startAtLabel, startDateLabel, 
       </p>
       <p className="mt-2 text-sm leading-6 text-muted">
         Close this tab and come back about 10 minutes before{startAtLabel ? <> <strong className="text-ink">{startAtLabel}</strong></> : " the start time"}.
-        When you return and open this link, you&rsquo;ll go straight into the waiting screen and the test will begin on its own.
+        When you return and open this link, you&rsquo;ll be able to start the test and wait for it to open.
       </p>
 
       <ul className="mt-4 space-y-2 text-sm leading-6 text-muted">
