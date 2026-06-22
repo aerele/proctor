@@ -2,7 +2,7 @@
 
 The Problem Bank is where an admin authors the coding problems candidates solve inside the Aerele proctor platform's own React + Monaco workspace — statement, sample/hidden tests, time/memory limits, points, and scoring — then publishes one or more and assigns them to a contest. This page documents authoring, the per-language starter stubs candidates begin from, the curated editor autocomplete, and the guards that protect a contest that is already running.
 
-> Product context: Aerele proctor is a **standalone, own-editor exam platform**. Candidates write and run code in our Monaco editor with Judge0-backed Run/Submit; the legacy HackerRank candidate path was dropped (F8.2). A separate, **optional** contest-eval monitoring poller (`monitoring/`, Python) still exists to live-watch an externally-hosted HackerRank contest and emit cheating alerts into the same alerts pipeline — that component is documented elsewhere and is not part of the Problem Bank flow described here.
+> Product context: Aerele proctor is a **standalone, own-editor exam platform**. Candidates write and run code in our Monaco editor with Judge0-backed Run/Submit; the legacy HackerRank candidate path was dropped (F8.2). (The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.)
 
 ---
 

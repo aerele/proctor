@@ -35,7 +35,7 @@ export function routeForPinnedOutcome(
     return { kind: "landing", notice: "That test link is not recognized. Enter your test code instead." };
   }
   if (outcome.code === "contest_not_open" || outcome.status === 403) {
-    return { kind: "landing", notice: "That test is not open right now. Enter your test code, or check with your invigilator." };
+    return { kind: "landing", notice: "That test is not open right now. Enter your test code, or check with whoever set up your test." };
   }
   // Anything else (network, 5xx) is transient: the link may be perfectly
   // valid, so hold the candidate on a retry screen.
@@ -45,6 +45,19 @@ export function routeForPinnedOutcome(
 // Mint alphabet parity with backend contests.mjs ACCESS_CODE_ALPHABET:
 // A-Z plus the digits 2-9 (0 and 1 are never minted — 0/O, 1/I ambiguity).
 const ACCESS_CODE_PATTERN = /^[A-Z2-9]{6}$/;
+
+// #135 take-home (C-8 / §5a): optional remote context threaded into the candidate
+// copy helpers. When `takeHome` is set, the trailing "ask an invigilator" /
+// "check with your invigilator" fallback is replaced by "call your proctor at
+// {phone}" (the remote candidate has no invigilator in the room). Absent ⇒
+// byte-identical in-venue copy (D3). Pure so the wording is vitest-tested.
+export type CandidateCopyOptions = { takeHome?: boolean; phone?: string };
+
+// The remote "call your proctor" tail, or the in-venue invigilator fallback.
+function proctorFallback(opts: CandidateCopyOptions | undefined, invigilatorText: string): string {
+  if (!opts?.takeHome) return invigilatorText;
+  return `call your proctor at ${opts.phone || "the number provided"}`;
+}
 
 /** Uppercase, strip all whitespace, cap at the 6-char box length. */
 export function normalizeAccessCodeInput(raw: string): string {
@@ -62,7 +75,7 @@ export function landingErrorMessage(status?: number, code?: string): string {
     return "Too many attempts from this network. Wait a minute, then try again.";
   }
   if (status === 404 || code === "code_not_found") {
-    return "That code was not recognized. Check it against the code your invigilator gave you and try again.";
+    return "That code was not recognized. Check it against the code you were given and try again.";
   }
   if (status === 400 || code === "invalid_code") {
     return "Enter the full 6-character test code (letters and digits only).";
@@ -76,21 +89,25 @@ export function landingErrorMessage(status?: number, code?: string): string {
  * the candidate gets a plain wait-and-retry message (with the server's
  * retry_after_seconds when present) instead of the raw `rate_limited` string.
  * A 404 is a wrong/unknown id; anything else is a generic try-again.
+ *
+ * #135 take-home (§5a): with `opts.takeHome`, the "ask/call an invigilator"
+ * tail is replaced by "call your proctor at {phone}". Absent ⇒ in-venue copy.
  */
 export function rosterLookupErrorMessage(
   status?: number,
   code?: string,
-  retryAfterSeconds?: number
+  retryAfterSeconds?: number,
+  opts?: CandidateCopyOptions
 ): string {
   if (status === 429 || code === "rate_limited") {
     const secs = Number(retryAfterSeconds);
     const wait = Number.isFinite(secs) && secs > 0
       ? `Wait ${secs} second${secs === 1 ? "" : "s"} and try again`
       : "Wait a minute and try again";
-    return `Too many lookups from this network. ${wait}, or ask an invigilator for help.`;
+    return `Too many lookups from this network. ${wait}, or ${proctorFallback(opts, "ask an invigilator for help")}.`;
   }
   if (status === 404 || code === "not_on_roster" || code === "roster_not_configured") {
-    return "We could not find that ID on the student list. Check it and try again, or call an invigilator.";
+    return `We could not find that ID on the student list. Check it and try again, or ${proctorFallback(opts, "call an invigilator")}.`;
   }
   return "Could not check that ID. Make sure you are online and try again.";
 }
@@ -119,8 +136,22 @@ type CandidateFormFields = {
   email: string;
   room: string;
   consent_accepted: boolean;
+  // G1 (v1.1 privacy & consent): the gate requires the candidate to have viewed
+  // BOTH pages and confirmed right-to-consent, on top of the consent tick. All
+  // four gate the Start button in both modes (the server re-enforces).
+  viewed_terms: boolean;
+  viewed_privacy: boolean;
+  right_to_consent: boolean;
   roster_unique_id: string;
 };
+
+// G1: the four-part consent gate, required in BOTH form modes. Viewed both pages
+// AND right-to-consent AND consent ticked. Pure so it is unit-tested alongside
+// candidateFormReady.
+export function consentGateReady(form: Pick<CandidateFormFields,
+  "viewed_terms" | "viewed_privacy" | "right_to_consent" | "consent_accepted">): boolean {
+  return Boolean(form.viewed_terms && form.viewed_privacy && form.right_to_consent && form.consent_accepted);
+}
 
 // Permissive email shape (F12 review gap): a non-space run, then @, then a
 // non-space run, then a dot, then a non-space run. Deliberately lenient — it
@@ -136,19 +167,21 @@ export function isCandidateEmailValid(email: string): boolean {
 // person_roster = the roster supplies name/roll/email server-side, so only the
 // typed id + room + consent gate the button; person_open = the backend's
 // no-roster person contract (id + name + email required, roll optional).
+// G1 (v1.1): BOTH modes additionally require the full consent gate (viewed both
+// pages + right-to-consent + consent ticked) — consentGateReady.
 export function candidateFormReady(
   mode: CandidateFormMode,
   form: CandidateFormFields
 ): boolean {
+  if (!consentGateReady(form)) return false;
   if (mode === "person_roster") {
-    return Boolean(form.roster_unique_id.trim() && form.room.trim() && form.consent_accepted);
+    return Boolean(form.roster_unique_id.trim() && form.room.trim());
   }
   return Boolean(
     form.candidate_id.trim() &&
     form.name.trim() &&
     isCandidateEmailValid(form.email) &&
-    form.room.trim() &&
-    form.consent_accepted
+    form.room.trim()
   );
 }
 

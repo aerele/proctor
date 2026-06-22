@@ -29,7 +29,7 @@ process.env.ADMIN_PASSWORD = "enf-admin-pass";
 process.env.INVIGILATOR_PASSWORD = "enf-invig-pass";
 
 const handler = await import("../src/handler.mjs?enforcement");
-const { api, __setClientsForTest } = handler;
+const { api, __setClientsForTest, invalidateContestDocCache } = handler;
 
 // Inline req/res mocks + fakes (repo convention: copied per test file, NO helpers.mjs).
 function makeReq({ method, path, headers = {}, body, query = {} }) {
@@ -200,6 +200,11 @@ function seedSettings(firestore, overrides = {}) {
     ...(Object.keys(enforcement).length ? { enforcement } : {}),
     ...rest
   });
+  // A direct contest-doc seed is the test's stand-in for createContest/
+  // updateContest (which invalidate the hot-path read cache in prod). Invalidate
+  // here too so a RE-seed within a single test is read fresh (G3 cache must be
+  // transparent — D3 invariant). Harmless when the cache is disabled.
+  invalidateContestDocCache(CONTEST_SLUG);
 }
 
 function seedSession(firestore, id, overrides = {}) {
@@ -255,6 +260,10 @@ test("session start: doc gains enforcement_exemptions {}; response carries enfor
   assert.equal(res.body.locked_reason, null);
   const doc = sessionDoc(firestore, res.body.session_id);
   assert.deepEqual(doc.enforcement_exemptions, {});
+  // v1.1 G1: the consent-text version in force is stamped on the session doc.
+  assert.equal(doc.consent_accepted, true);
+  assert.ok(typeof doc.consent_version === "string" && doc.consent_version.length > 0,
+    `expected a non-empty consent_version, got ${JSON.stringify(doc.consent_version)}`);
 });
 
 test("heartbeat response carries enforcement config + the session's exemptions", async () => {

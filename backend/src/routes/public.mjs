@@ -64,6 +64,9 @@ export function makePublicRoutes(ctx) {
     // resident helpers (by reference)
     normalizeRooms,
     rateLimited,
+    // v1.1 triple-review #7: session-less preflight-block report sink writers.
+    putJsonl,
+    sanitizeObject,
     // enforcement config readers (src/enforcement.mjs), by reference
     enforcementConfigFor,
     cameraRecordingConfigFor,
@@ -74,10 +77,16 @@ export function makePublicRoutes(ctx) {
     rosterLimit,
     rosterCellMax,
     rosterColumnsLimit,
-    rosterMappableFields
+    rosterMappableFields,
+    // v1.1 G1: authoritative consent-text version (by value); served in
+    // exam-config so the candidate app reads it rather than hard-coding it.
+    consentVersion = "",
+    // v1.1 triple-review #5: pure per-contest retention resolver (by reference);
+    // served in exam-config so the candidate disclosure shows the real window.
+    retentionDaysOf = () => 4
   } = ctx;
 
-  // ---- S2 roster store (spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md)
+  // ---- S2 roster store (spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md)
 
   function rosterMetaRef() {
     return getFirestore().collection(settingsCollection).doc(rosterMetaId);
@@ -281,8 +290,18 @@ export function makePublicRoutes(ctx) {
       unique_id_label: contest.identity_label || "Candidate ID",
       rooms: normalizeRooms(contest.rooms),
       room_gate_enabled: Boolean(contest.room_gate_enabled),
+      take_home_enabled: Boolean(contest.take_home_enabled),
+      proctor_contact_phone: contest.proctor_contact_phone || "",
       enforcement: enforcementConfigFor(contest),
-      camera_recording: cameraRecordingConfigFor(contest)
+      camera_recording: cameraRecordingConfigFor(contest),
+      // v1.1 G1: the consent-text version the candidate app must echo back at
+      // session start (so a copy bump is detectable; the app never hard-codes it).
+      consent_version: consentVersion,
+      // v1.1 triple-review #5 (privacy-truthfulness): the REAL per-contest
+      // evidence-retention window in days, so the candidate T&C/Privacy
+      // disclosure shows the actual number (7/14/30) instead of the hard-coded
+      // 4-day default. Falls back to DEFAULT_RETENTION_DAYS inside retentionDaysOf.
+      retention_days: retentionDaysOf(contest)
     };
   }
 
@@ -334,6 +353,71 @@ export function makePublicRoutes(ctx) {
     const resolved = await resolveAccessCode(body?.code);
     refundAttempt(); // valid code — only failed attempts consume the budget
     return { ok: true, ...resolved };
+  }
+
+  // ---- v1.1 triple-review #7: PUBLIC preflight-block report --------------------
+  // POST /api/preflight-report {contest, verdict} — a SESSION-LESS sink for the
+  // G2 anti-cheat forensic signal that otherwise had NOWHERE to land: a candidate
+  // HARD-BLOCKED at the browser/codec preflight never creates a session, so the
+  // "who was blocked, on what capability" event reached only the client console.
+  // The frontend fires a best-effort POST on a preflight BLOCK; this persists a
+  // sanitized record under the contest's evidence prefix so an admin can see it.
+  //
+  // Hardened like the other public endpoints: per-IP fixed-window rate limit
+  // (anti-flood — it is unauthenticated), strict contest-slug resolution (a
+  // report for an unknown/closed contest is a 4xx, never a write), and a
+  // sanitized/size-capped verdict payload (no arbitrary keys, no unbounded text).
+  const PREFLIGHT_REPORT_RATE_LIMIT = 30;       // 30 blocks/min/IP is plenty
+  const PREFLIGHT_REPORT_RATE_WINDOW_MS = 60_000;
+  const PREFLIGHT_REPORT_RATE_MAP_LIMIT = 10_000;
+  let _preflightReportClock = () => Date.now();
+  function __setPreflightReportClockForTest(fn) {
+    _preflightReportClock = fn || (() => Date.now());
+  }
+  const preflightReportAttempts = new Map(); // ip -> { count, windowStartMs }
+
+  function checkPreflightReportRateLimit(ip) {
+    const nowMs = _preflightReportClock();
+    if (preflightReportAttempts.size >= PREFLIGHT_REPORT_RATE_MAP_LIMIT) {
+      for (const [key, entry] of preflightReportAttempts) {
+        if (nowMs - entry.windowStartMs >= PREFLIGHT_REPORT_RATE_WINDOW_MS) preflightReportAttempts.delete(key);
+      }
+    }
+    let entry = preflightReportAttempts.get(ip);
+    if (!entry || nowMs - entry.windowStartMs >= PREFLIGHT_REPORT_RATE_WINDOW_MS) {
+      entry = { count: 0, windowStartMs: nowMs };
+      preflightReportAttempts.set(ip, entry);
+    }
+    entry.count += 1;
+    if (entry.count > PREFLIGHT_REPORT_RATE_LIMIT) {
+      throw rateLimited(Math.max(1, Math.ceil((entry.windowStartMs + PREFLIGHT_REPORT_RATE_WINDOW_MS - nowMs) / 1000)));
+    }
+  }
+
+  async function publicPreflightReport(req) {
+    checkPreflightReportRateLimit(getClientIp(req));
+    const body = parseBody(req);
+    const slug = String(body?.contest ?? "").trim();
+    if (!slug) throw httpError(400, "unknown_contest");
+    // Strict resolution — a report for an unknown/closed contest never writes.
+    const contest = await resolveContest(slug, { requireOpen: true });
+    const rawVerdict = body?.verdict;
+    // Only persist an actual BLOCK signal (passed:false). A passing preflight has
+    // no forensic value here and must not let a client write at will.
+    const passed = rawVerdict?.passed === true;
+    if (passed) return { ok: true, recorded: false };
+    const record = {
+      type: "browser_preflight_block",
+      contest_slug: contest.slug,
+      reported_at: new Date().toISOString(),
+      ip: getClientIp(req),
+      // sanitizeObject caps key count + string length + depth, so a hostile
+      // client can't smuggle a giant or deeply-nested payload onto the bucket.
+      verdict: sanitizeObject(rawVerdict && typeof rawVerdict === "object" ? rawVerdict : {})
+    };
+    const key = `contests/${contest.slug}/preflight-blocks/${Date.now()}-${randomUUID()}.jsonl`;
+    await putJsonl(key, [record]);
+    return { ok: true, recorded: true };
   }
 
   // The ACTIVE-version roster entry for a unique id, or null. Entries from a
@@ -466,6 +550,8 @@ export function makePublicRoutes(ctx) {
     // candidate-facing (no admin auth), outside that rule.
     publicExamConfig,
     publicAccessCode,
+    // v1.1 triple-review #7: session-less preflight-block report.
+    publicPreflightReport,
     rosterLookup,
     adminGetRoster,
     adminSaveRoster,
@@ -479,6 +565,8 @@ export function makePublicRoutes(ctx) {
     __setAccessCodeClockForTest,
     __setRosterLookupClockForTest,
     __resetRosterLookupRateLimitForTest,
-    checkRosterLookupRateLimit
+    checkRosterLookupRateLimit,
+    // v1.1 triple-review #7: preflight-report rate-limit clock seam (tests).
+    __setPreflightReportClockForTest
   };
 }

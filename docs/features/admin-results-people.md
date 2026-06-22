@@ -6,10 +6,8 @@ breakdown, integrity evidence and a hiring selection workflow — and the
 Both are **admin-only** (candidates never see each other's scores), and both are
 designed for the standalone own-editor exam platform: scores come from the
 candidate's in-browser Monaco workspace and live Judge0 Run/Submit, joined to the
-proctoring integrity signals. (An optional `monitoring/` contest-eval poller can
-also feed cheating alerts into the same integrity pipeline for an
-externally-hosted contest; those alerts show up here the same way native alerts
-do.)
+proctoring integrity signals. (The legacy HackerRank contest-eval poller was
+removed; proctor now uses its own in-app contest platform.)
 
 > **Product framing.** Proctor's primary surface is the own-editor platform.
 > HackerRank was removed from the candidate path (F8.2). The Results/People

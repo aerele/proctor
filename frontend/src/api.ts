@@ -62,6 +62,8 @@ import type {
   ServerSessionStatus,
   SessionActionRequest,
   SessionActionResponse,
+  SessionConsent,
+  ContestDataSizeResponse,
   SessionCardDetail,
   SessionCardDetailResponse,
   SessionDetail,
@@ -509,7 +511,8 @@ function demoPersonStart(
 export async function startSession(
   form: StudentForm,
   existingSessionId?: string,
-  opts?: { contest?: string; college?: string }
+  // G1 (v1.1): `consent` carries the structured consent record (design §2.1).
+  opts?: { contest?: string; college?: string; consent?: SessionConsent }
 ): Promise<SessionStartResponse> {
   if (demoMode) {
     await wait(250);
@@ -528,7 +531,7 @@ export async function startSession(
   return request<SessionStartResponse>("/api/session/start", {
     method: "POST",
     body: JSON.stringify({
-      ...sessionStartPayload(form, existingSessionId),
+      ...sessionStartPayload(form, existingSessionId, opts?.consent),
       ...(opts?.contest ? { contest: opts.contest } : {}),
       ...(opts?.college ? { college: opts.college } : {})
     })
@@ -593,17 +596,29 @@ export async function getUploadUrl(params: {
   });
 }
 
-export async function uploadBlob(uploadUrl: string, blob: Blob): Promise<void> {
+export async function uploadBlob(uploadUrl: string, blob: Blob, maxBytes?: number): Promise<void> {
   if (demoMode || uploadUrl.startsWith("demo://")) {
     await wait(80);
     return;
   }
 
+  // v1.1 G3 (#7): when the backend bound a per-chunk size cap into the signed
+  // WRITE URL (maxBytes>0), it signed the x-goog-content-length-range extension
+  // header, which GCS folds into X-Goog-SignedHeaders. The signature ONLY matches
+  // if this PUT sends that EXACT header — omit it and every chunk PUT 403s
+  // (SignatureDoesNotMatch) and no recording is ever stored. The value must be
+  // the same string the backend signed: `0,<max_bytes>`. When no cap was bound
+  // (legacy backend, max_bytes absent/0) we must NOT send the header.
+  const headers: Record<string, string> = {
+    "content-type": blob.type || "application/octet-stream"
+  };
+  if (typeof maxBytes === "number" && maxBytes > 0) {
+    headers["x-goog-content-length-range"] = `0,${maxBytes}`;
+  }
+
   const response = await fetch(uploadUrl, {
     method: "PUT",
-    headers: {
-      "content-type": blob.type || "application/octet-stream"
-    },
+    headers,
     body: blob
   });
 
@@ -1528,7 +1543,7 @@ export async function fetchAdminStats(password: string, contestSlug?: string, ro
 
 // ---- S6 attendance stats ----------------------------------------------------
 // GET /api/admin/attendance — roster-based taken / not-taken / absentees.
-// Spec: docs/superpowers/specs/2026-06-09-s6-attendance-stats-design.md.
+// Spec: docs/design-history/specs/2026-06-09-s6-attendance-stats-design.md.
 // `null` on 404 so the Attendance tab can show "not deployed yet" (same degrade
 // as fetchSessionsList / fetchRosterStatus). The demo branch joins the demo
 // roster against the REAL demo session store via the SAME pure computeAttendance
@@ -1802,6 +1817,34 @@ export async function runRetentionSweep(password: string): Promise<RetentionSwee
     method: "POST",
     headers: { "x-admin-password": password },
     body: JSON.stringify({})
+  });
+}
+
+// GET /api/admin/contest-data-size?contest=<slug> — G1 (design §2.6). Read-only:
+// sums the contest's stored evidence objects in GCS and returns a per-kind
+// breakdown. Async by nature (a bucket listing); the admin UI shows a spinner
+// until it resolves. Authed by the admin password.
+export async function fetchContestDataSize(password: string, contestSlug: string): Promise<ContestDataSizeResponse> {
+  if (demoMode) {
+    await wait(420);
+    assertDemoAdmin(password);
+    // Deterministic-ish demo figure so the spinner→size flow is visible.
+    const seed = [...contestSlug].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+    const screen = (seed % 9 + 1) * 180 * 1024 * 1024;
+    const camera = (seed % 5 + 1) * 22 * 1024 * 1024;
+    const events = (seed % 7 + 1) * 512 * 1024;
+    const editor = (seed % 4 + 1) * 256 * 1024;
+    return {
+      contest: contestSlug,
+      evidence_bytes: screen + camera + events + editor,
+      evidence_objects: (seed % 40 + 5) * 17,
+      by_kind: { screen, camera, events, editorEvents: editor },
+      computed_at: new Date().toISOString()
+    };
+  }
+  return request(`/api/admin/contest-data-size?contest=${encodeURIComponent(contestSlug)}`, {
+    method: "GET",
+    headers: { "x-admin-password": password }
   });
 }
 
@@ -2610,10 +2653,12 @@ function demoAlerts(): Alert[] {
       download_url: sampleVideo
     },
     {
-      id: "contest-eval:peer_copy_cluster:karan_v:mcet-june-2026:c3",
-      source: "contest-eval",
-      type: "peer_copy_cluster",
-      severity: "critical",
+      // HR-poller removal: the contest-eval peer_copy_cluster demo alert was
+      // converted to a core proctoring tab_away alert (the poller is gone).
+      id: "proctor:tab_away:karan_v:mcet-june-2026:c3",
+      source: "proctor",
+      type: "tab_away",
+      severity: "warning",
       // F6.7: INSIDE Karan's recording gap (09:03:30–09:04:30) — the log row
       // gets the "during blackout" tag.
       timestamp: "2026-06-05T09:04:10.000Z",
@@ -2621,9 +2666,9 @@ function demoAlerts(): Alert[] {
       hackerrank_username: "Karan_V",
       username_norm: "karan_v",
       room: "Lab B-2",
-      title: "Peer-copy cluster (3 candidates, 97% similar)",
-      detail: "Near-identical submissions for 'Balanced Brackets' across Karan_V, Neha_S, and Imran_K within a 4-minute window.",
-      data: { cluster: ["karan_v", "neha_s", "imran_k"], similarity_pct: 97, problem: "balanced-brackets" },
+      title: "Tab-away: assessment not visible for 38s",
+      detail: "Candidate's proctored tab was not the active surface for 38s, exceeding the configured threshold.",
+      data: { start_offset: 220, end_offset: 258, duration_seconds: 38 },
       download_url: sampleVideo
     },
     {
@@ -2645,18 +2690,20 @@ function demoAlerts(): Alert[] {
       download_url: sampleVideo
     },
     {
-      id: "contest-eval:web_paste:imran_k:mcet-june-2026:p2",
-      source: "contest-eval",
-      type: "web_paste",
+      // HR-poller removal: the contest-eval web_paste demo alert was converted to
+      // a core proctoring tab_hidden alert (the poller is gone).
+      id: "proctor:tab_hidden:imran_k:mcet-june-2026:p2",
+      source: "proctor",
+      type: "tab_hidden",
       severity: "warning",
       timestamp: "2026-06-05T09:18:40.000Z",
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Imran_K",
       username_norm: "imran_k",
       room: "Lab B-2",
-      title: "Web/editorial paste suspected",
-      detail: "Submission matches a known editorial for 'Two Sum' with identical variable naming and comment structure.",
-      data: { source_match: "editorial", similarity_pct: 88, problem: "two-sum" },
+      title: "Proctor tab hidden",
+      detail: "The liveness beacon reported the proctor tab hidden/backgrounded during the assessment.",
+      data: { beacon: "hidden" },
       download_url: sampleVideo
     },
     {
@@ -3271,7 +3318,7 @@ function maskPasscode(value = "") {
 }
 
 // ---- S2 roster (compulsory roster login) ------------------------------------
-// Spec: docs/superpowers/specs/2026-06-09-s2-roster-login-design.md
+// Spec: docs/design-history/specs/2026-06-09-s2-roster-login-design.md
 
 function demoApiError(status: number, code: string, body?: Record<string, unknown>): ApiError {
   const error = new Error(code) as ApiError;
@@ -3611,7 +3658,7 @@ export async function execSubmit(req: ExecRequest): Promise<SubmitResult> {
 }
 
 // ---- S-D: contests administration (Contests tab + selector + routing) -------
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5/§10.3.
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7/§5/§10.3.
 // Demo parity: a localStorage contests store seeded with one OPEN demo contest
 // whose access code is the fixed "DEMO42" (plus the lifecycle-state demo
 // contests added below).
@@ -3849,6 +3896,10 @@ export async function updateContestApi(password: string, body: ContestUpdateRequ
       // #71: carry the enforcement object through the demo update so the
       // ContestsPanel simplified-recovery toggle reflects after save in demo mode.
       ...(patch.enforcement !== undefined ? { enforcement: patch.enforcement } : {}),
+      // Take-home (A-2): carry the remote-mode fields through the demo update so the
+      // ContestsPanel take-at-home card reflects after save in demo mode.
+      ...(patch.take_home_enabled !== undefined ? { take_home_enabled: patch.take_home_enabled } : {}),
+      ...(patch.proctor_contact_phone !== undefined ? { proctor_contact_phone: patch.proctor_contact_phone || null } : {}),
       ...(patch.problems !== undefined
         ? { problems: patch.problems.map((entry, order) => ({ problem_id: entry.problem_id, points: entry.points ?? null, order })) }
         : {})
@@ -4008,10 +4059,36 @@ export async function fetchContestExamConfig(slug: string): Promise<ContestExamC
       camera_recording: demoCameraRecording(),
       start_at: contest.start_at,
       end_at: contest.end_at,
-      server_now: demoNowIso()
+      server_now: demoNowIso(),
+      // v1.1 triple-review #5: mirror the backend's per-contest retention window
+      // so the demo consent disclosure shows the real number, not the 4-default.
+      retention_days:
+        typeof contest.evidence_retention_days === "number" && contest.evidence_retention_days > 0
+          ? contest.evidence_retention_days
+          : 4
     };
   }
   return request<ContestExamConfig>(`/api/exam-config?contest=${encodeURIComponent(slug)}`, { method: "GET" });
+}
+
+// v1.1 triple-review #7 (G2 anti-cheat forensics): report a preflight HARD-BLOCK
+// to the backend. A blocked candidate never creates a session, so this is the
+// ONLY channel that gets the "who was blocked, on what capability" signal to the
+// server. BEST-EFFORT: a failure here must NEVER affect the candidate's UI (they
+// are already blocked) — all errors are swallowed. No-op in demo mode.
+export async function reportPreflightBlock(
+  contestSlug: string,
+  verdict: { passed: boolean; blockingFailures?: string[]; warnings?: string[] }
+): Promise<void> {
+  if (demoMode || !contestSlug) return;
+  try {
+    await request<{ ok: boolean }>("/api/preflight-report", {
+      method: "POST",
+      body: JSON.stringify({ contest: contestSlug, verdict })
+    });
+  } catch {
+    // swallow — the block is already enforced client-side; telemetry is best-effort.
+  }
 }
 
 // ---- S-D / FIX-B2 (#58): templates — the create-from-template picker AND the

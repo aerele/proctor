@@ -1,8 +1,8 @@
 // backend/test/dataLifecycle.test.mjs — Wave7-G PURE logic (S-G/S-H).
-// Specs: docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+// Specs: docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          §3.1 (export bundle/manifest), §3.2 (triple-gated purge),
 //          §3.4 (retention sweep), Decision 12 (purge gates), Decision 14.
-//        docs/superpowers/specs/2026-06-10-f10-product-vision.md
+//        docs/design-history/specs/2026-06-10-f10-product-vision.md
 //          §2.16 (lifecycle re-scoped: persons/enrollments/colleges in export,
 //          enrollments survive purge with snapshot), §10.4 (export-zip 10-day
 //          retention + sweep deletes expired zips).
@@ -222,13 +222,24 @@ test("evaluatePurgeGate: already-tombstoned contest → no-op (idempotent re-pur
 
 // ---- selectExpiredEvidence (retention sweep selection, clock seam) ---------
 
-function contestAt(slug, { selectionDoneAt = null, retentionDays = 4, evidencePurgedAt = null } = {}) {
-  return {
+// v1.1 triple-review #2 (KPR data-loss): every fixture now carries a PAST
+// end_at by default — exactly like a real contest — so the "never swept" cases
+// genuinely prove the protection holds WITH an end_at present (the old fixtures
+// omitted end_at, masking the regression where a bare end_at triggered a sweep).
+// No retention_anchor is set, so these exercise the safe DEFAULT (selection_done)
+// semantics: an absent anchor must NEVER derive from end_at.
+function contestAt(slug, { selectionDoneAt = null, retentionDays = 4, evidencePurgedAt = null, endAt = "2026-01-01T00:00:00.000Z", retentionAnchor = undefined } = {}) {
+  const doc = {
     slug,
+    end_at: endAt,
     selection_done_at: selectionDoneAt,
     evidence_retention_days: retentionDays,
     evidence_purged_at: evidencePurgedAt
   };
+  // Only attach retention_anchor when the test opts in — an ABSENT field is the
+  // exact KPR/legacy shape (resolves to safe selection_done semantics).
+  if (retentionAnchor !== undefined) doc.retention_anchor = retentionAnchor;
+  return doc;
 }
 
 const NOW = "2026-06-20T00:00:00.000Z";
@@ -261,9 +272,38 @@ test("selectExpiredEvidence: exactly at the threshold is NOT yet due (strict <)"
   assert.equal(due.length, 0);
 });
 
-test("selectExpiredEvidence: no selection_done_at → never swept", () => {
+test("selectExpiredEvidence: no selection_done_at → never swept (EVEN with a past end_at)", () => {
+  // The fixture carries a past end_at (contestAt default) and no retention_anchor,
+  // so this is the exact KPR/historical shape: it must STILL be never-swept.
   const due = selectExpiredEvidence(
-    [contestAt("kec-r4", { selectionDoneAt: null, retentionDays: 4 })],
+    [contestAt("kec-r4", { selectionDoneAt: null, retentionDays: 4, endAt: "2025-01-01T00:00:00.000Z" })],
+    NOW
+  );
+  assert.equal(due.length, 0);
+});
+
+test("selectExpiredEvidence: take-home (exam_end anchor) with a past end_at IS due (auto-sweep, no manual stamp)", () => {
+  // v1.1 G1: a NEW take-home contest carries retention_anchor:"exam_end" and no
+  // selection_done_at. With end_at 2026-06-10 + 4-day retention → expires
+  // 2026-06-14 < NOW(06-20), so it auto-sweeps WITHOUT any manual selection-done.
+  const due = selectExpiredEvidence(
+    [contestAt("remote-r1", {
+      selectionDoneAt: null, retentionDays: 4,
+      endAt: "2026-06-10T00:00:00.000Z", retentionAnchor: "exam_end"
+    })],
+    NOW
+  );
+  assert.deepEqual(due.map((c) => c.slug), ["remote-r1"]);
+});
+
+test("selectExpiredEvidence: explicit selection_done anchor with a past end_at is NOT due (no manual stamp)", () => {
+  // The opt-OUT case: even an EXPLICIT retention_anchor:"selection_done" must
+  // never derive from end_at — it waits for the manual stamp, same as absent.
+  const due = selectExpiredEvidence(
+    [contestAt("college-r1", {
+      selectionDoneAt: null, retentionDays: 4,
+      endAt: "2025-01-01T00:00:00.000Z", retentionAnchor: "selection_done"
+    })],
     NOW
   );
   assert.equal(due.length, 0);

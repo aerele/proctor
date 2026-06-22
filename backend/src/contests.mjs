@@ -3,9 +3,9 @@
 // contest-scoped read goes through.
 //
 // Specs:
-//   docs/superpowers/specs/2026-06-10-f10-product-vision.md  §2.7 (doc shape),
+//   docs/design-history/specs/2026-06-10-f10-product-vision.md  §2.7 (doc shape),
 //     §7 row S-B (identity_mode enum), §10.3 (typed access code)
-//   docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+//   docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //     §2.1 (F9 contest doc, frozen), §2.3 (no-bleed mechanisms), §3 (lifecycle
 //     placeholders)
 import { randomBytes, randomInt } from "node:crypto";
@@ -27,8 +27,17 @@ const IDENTITY_LABEL_DEFAULT = "Candidate ID"; // S-A interim label (F9 §5 S-A)
 const RETENTION_DAYS_DEFAULT = 4;              // F9 Q2 default, clamp 1..30
 const RETENTION_DAYS_MIN = 1;
 const RETENTION_DAYS_MAX = 30;
+// v1.1 G1: the retention-clock anchor. "selection_done" is the safe pre-v1.1
+// semantics (the manual admin stamp is the ONLY clock-start; absent → same).
+// "exam_end" OPTS IN to the automatic end_at-derived clock so evidence
+// auto-sweeps N days after the exam window closes with no manual click
+// (dataLifecycle.retentionAnchorMs). KPR-safety: this is OPT-IN only — see the
+// createContest default below, which sets it ONLY for new take-home contests.
+const RETENTION_ANCHORS = ["selection_done", "exam_end"];
+const RETENTION_ANCHOR_DEFAULT = "selection_done";
 const CONTESTS_QUERY_LIMIT = 500;
 const SLUG_COLLISION_LIMIT = 50;
+const PROCTOR_CONTACT_PHONE_MAX = 40; // country code + spaces/dashes/parens
 
 // Typed contest access code (vision §10.3): 6 chars, A-Z plus 2-9 (no 0/1 —
 // O/I lookalikes), minted ONCE at create with a bounded collision-retry loop.
@@ -54,8 +63,55 @@ export const ALL_CONTESTS = Symbol("ALL_CONTESTS");
 // instance) so the __setClientsForTest fakes propagate here too — the exact
 // configureProblemStore pattern.
 let store = null;
-export function configureContestStore({ getFirestore, collection, dataCollections }) {
-  store = { getFirestore, collection, dataCollections: dataCollections || [] };
+// v1.1 G3 (#5): an optional hot-path read cache for the contest doc, injected by
+// handler.mjs. `cache` is a tiny TTL cache ({ get, set, invalidate }); when
+// absent (tests / cache disabled) every read goes straight to Firestore (the
+// prior behavior). Writes ALWAYS invalidate so a config edit is visible
+// immediately on the writing instance; the TTL bounds cross-instance staleness.
+export function configureContestStore({ getFirestore, collection, dataCollections, cache = null }) {
+  store = { getFirestore, collection, dataCollections: dataCollections || [], cache };
+  // A (re)configuration swaps the active cache; start it empty so no entry from
+  // a prior wiring (e.g. a previous test's handler instance) can be served.
+  cache?.clear();
+}
+
+// Drop a slug from the contest-doc cache (called after every write). Safe when
+// no cache is configured. EXPORTED so the OTHER modules that write the contest
+// doc directly (handler.mjs retention sweep / selection-done / purge; identity's
+// roster-save colleges patch) invalidate the SAME shared cache.
+export function invalidateContestDocCache(slug) {
+  if (store?.cache && slug) store.cache.invalidate(String(slug));
+}
+
+// v1.1 G3 (#5) — TEST-ONLY reset of the contest-doc read cache. Clears the cache
+// CURRENTLY wired into `store` (not a handler-local variable). This matters
+// because each cache-busted `import("…/handler.mjs?tag")` re-runs
+// configureContestStore and overwrites store.cache — so a handler-instance-local
+// clear() would clear an ORPHANED cache while reads funnel through the
+// last-configured one. The test reset hook (__setClientsForTest) calls THIS so
+// the cache it clears is always the one actually serving reads. Prod never calls
+// it. No-op when no cache is configured.
+export function resetContestDocCacheForTest() {
+  store?.cache?.clear();
+}
+
+// Read a contest doc THROUGH the cache (TTL); returns the doc data or null. The
+// cache stores the parsed doc (or a NULL sentinel for a missing doc, so a hot
+// miss on a non-existent slug isn't re-read every time). Bypasses the cache when
+// none is configured.
+const CONTEST_MISS = Symbol("contest_doc_miss");
+async function readContestDocCached(slug) {
+  const key = String(slug);
+  if (!store?.cache) {
+    const doc = await contestRef(key).get();
+    return doc.exists ? doc.data() : null;
+  }
+  const cached = store.cache.get(key);
+  if (cached !== undefined) return cached === CONTEST_MISS ? null : cached;
+  const doc = await contestRef(key).get();
+  const value = doc.exists ? doc.data() : null;
+  store.cache.set(key, value === null ? CONTEST_MISS : value);
+  return value;
 }
 
 // Injectable RNG seam for deterministic access-code collision tests (mirrors
@@ -123,6 +179,21 @@ export async function createContest(body) {
   const roomGateEnabled = body?.room_gate_enabled === undefined
     ? false
     : requireBoolean(body.room_gate_enabled, "room_gate_enabled");
+  const takeHomeEnabled = body?.take_home_enabled === undefined
+    ? false
+    : requireBoolean(body.take_home_enabled, "take_home_enabled");
+  // v1.1 G1 KPR-safe wiring: a NEW take-home contest DEFAULTS to the "exam_end"
+  // anchor so its evidence auto-sweeps N days after the exam window closes with
+  // no manual selection-done click. Non-take-home (college) contests default to
+  // the safe "selection_done" semantics (invigilator-driven, never auto-swept).
+  // Legacy contests created before v1.1 carry NO anchor field at all → they keep
+  // selection_done semantics in dataLifecycle.retentionAnchorMs, so KPR stays
+  // protected. An admin may override per contest (the field is editable).
+  const retentionAnchor = normalizeRetentionAnchor(
+    body?.retention_anchor,
+    takeHomeEnabled ? "exam_end" : RETENTION_ANCHOR_DEFAULT
+  );
+  const proctorContactPhone = normalizeProctorContactPhone(body?.proctor_contact_phone);
   const rooms = normalizeContestRooms(body?.rooms);
   // W4: an admin-ASSIGNED code is validated + clash-checked exactly like
   // setContestAccessCode; absent/blank -> mint a random one (collision-checked
@@ -164,11 +235,16 @@ export async function createContest(body) {
       enforcement,
       languages,
       room_gate_enabled: roomGateEnabled,
+      take_home_enabled: takeHomeEnabled,
+      proctor_contact_phone: proctorContactPhone,
       rooms,
       created_at: now,
       updated_at: now,
       // Lifecycle block placeholders (F9 §3) — S-G/S-H fill these in.
       selection_done_at: null,
+      // v1.1 G1: retention-clock anchor (default exam_end for take-home, else
+      // selection_done). dataLifecycle.retentionAnchorMs reads this.
+      retention_anchor: retentionAnchor,
       evidence_retention_days: retentionDays,
       evidence_purged_at: null,
       db_purged_at: null,
@@ -177,6 +253,7 @@ export async function createContest(body) {
     };
     try {
       await contestRef(slug).create(item);
+      invalidateContestDocCache(slug); // v1.1 G3 (#5): a write invalidates the read cache
       return item;
     } catch (err) {
       if (isAlreadyExists(err)) continue;
@@ -225,6 +302,8 @@ export async function updateContest(slugRaw, body) {
   if (body?.enforcement !== undefined) patch.enforcement = normalizeTemplateEnforcement(body.enforcement);
   if (body?.languages !== undefined) patch.languages = normalizeContestLanguages(body.languages);
   if (body?.room_gate_enabled !== undefined) patch.room_gate_enabled = requireBoolean(body.room_gate_enabled, "room_gate_enabled");
+  if (body?.take_home_enabled !== undefined) patch.take_home_enabled = requireBoolean(body.take_home_enabled, "take_home_enabled");
+  if (body?.proctor_contact_phone !== undefined) patch.proctor_contact_phone = normalizeProctorContactPhone(body.proctor_contact_phone);
   // S-D: per-contest rooms list (vision §2.12) — sanitize/dedupe rules below.
   if (body?.rooms !== undefined) patch.rooms = normalizeContestRooms(body.rooms);
   if (body?.name !== undefined) {
@@ -238,6 +317,12 @@ export async function updateContest(slugRaw, body) {
   if (body?.evidence_retention_days !== undefined) {
     patch.evidence_retention_days = normalizeRetentionDays(body.evidence_retention_days);
   }
+  // v1.1 G1: admin may override the retention anchor per contest. An explicit
+  // value must be one of the known anchors; absent leaves the stored value
+  // untouched (a legacy contest with no field stays anchorless → never swept).
+  if (body?.retention_anchor !== undefined) {
+    patch.retention_anchor = normalizeRetentionAnchor(body.retention_anchor, RETENTION_ANCHOR_DEFAULT);
+  }
   // Window edits validate against the MERGED window so a partial edit can never
   // leave start >= end behind.
   const window = normalizeWindow(
@@ -249,6 +334,7 @@ export async function updateContest(slugRaw, body) {
 
   const item = { ...existing, ...patch, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -276,6 +362,7 @@ export async function setContestStatus(slugRaw, statusRaw) {
   }
   const item = { ...existing, status, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -289,6 +376,7 @@ export async function setContestAccessCode(slugRaw, codeRaw) {
   await requireCodeFreeAmongOpenContests(code, existing.slug);
   const item = { ...existing, access_code: code, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -306,6 +394,7 @@ export async function regenerateContestSecret(slugRaw, fieldRaw) {
     : { invigilator_key: mintInvigilatorKey() };
   const item = { ...existing, ...patch, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -367,6 +456,7 @@ export async function applyContestExamTime(slugRaw, body) {
     updated_at: now
   };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return { contest: item, field, now };
 }
 
@@ -374,9 +464,10 @@ export async function applyContestExamTime(slugRaw, body) {
 async function getRealContest(slugRaw) {
   const slug = String(slugRaw ?? "").trim();
   if (!slug) throw httpError(404, "contest_not_found");
-  const doc = await contestRef(slug).get();
-  if (!doc.exists) throw httpError(404, "contest_not_found");
-  return doc.data();
+  // v1.1 G3 (#5): read through the same TTL cache as resolveContest.
+  const contest = await readContestDocCached(slug);
+  if (!contest) throw httpError(404, "contest_not_found");
+  return contest;
 }
 
 // ---- list ----------------------------------------------------------------------
@@ -401,9 +492,11 @@ export async function listContests({ includeArchived = false } = {}) {
 export async function resolveContest(reqOrSlug, { requireOpen = true } = {}) {
   const slug = contestParamOf(reqOrSlug);
   if (!slug) throw httpError(400, "unknown_contest");
-  const doc = await contestRef(slug).get();
-  if (!doc.exists) throw httpError(400, "unknown_contest");
-  const contest = doc.data();
+  // v1.1 G3 (#5): hot path — heartbeat/events/beacon/room-gate all funnel here.
+  // Read through the TTL cache (config never changes mid-request; an admin edit
+  // invalidates immediately on the writing instance + within the TTL elsewhere).
+  const contest = await readContestDocCached(slug);
+  if (!contest) throw httpError(400, "unknown_contest");
   if (requireOpen && contest.status !== "open") throw httpError(403, "contest_not_open");
   return contest;
 }
@@ -508,6 +601,18 @@ function requireBoolean(value, field) {
   return value;
 }
 
+// Take-home contact phone: trimmed free-form (international/landline/whatsapp
+// all vary, so no format enforcement). Empty allowed (banner omits the line).
+// Over cap → hard 400 so the admin notices rather than silently truncating.
+function normalizeProctorContactPhone(raw) {
+  if (raw === undefined || raw === null) return "";
+  const phone = String(raw).trim();
+  if (phone.length > PROCTOR_CONTACT_PHONE_MAX) {
+    throw httpError(400, `proctor_contact_phone: max ${PROCTOR_CONTACT_PHONE_MAX} chars`);
+  }
+  return phone;
+}
+
 // S-I: contests may legitimately hold ZERO problems while draft (the publish
 // gate blocks opening) — so unlike templates, an absent/empty list is [].
 function normalizeContestProblems(raw) {
@@ -560,6 +665,19 @@ function normalizeRetentionDays(raw) {
     throw httpError(400, "evidence_retention_days must be an integer");
   }
   return Math.min(RETENTION_DAYS_MAX, Math.max(RETENTION_DAYS_MIN, num));
+}
+
+// v1.1 G1 retention anchor: absent → the caller-supplied default ("exam_end"
+// for a new take-home contest, "selection_done" otherwise / on update). An
+// explicit value must be a known anchor; garbage is a hard 400 (the admin asked
+// for SOMETHING and we couldn't honor it — never silently defaulted).
+function normalizeRetentionAnchor(raw, fallback) {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const anchor = String(raw).trim();
+  if (!RETENTION_ANCHORS.includes(anchor)) {
+    throw httpError(400, `retention_anchor must be one of ${RETENTION_ANCHORS.join(", ")}`);
+  }
+  return anchor;
 }
 
 // Window fields are OPTIONAL in draft (the publish gate enforces presence at

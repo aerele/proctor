@@ -217,7 +217,7 @@ test("ingestAlerts accepts a batch via {alerts:[...]}", async () => {
     body: {
       alerts: [
         validAlert({ id: "a1" }),
-        validAlert({ id: "a2", source: "contest-eval", type: "web_paste", severity: "warning" })
+        validAlert({ id: "a2", source: "proctor", type: "tab_away", severity: "warning" })
       ]
     }
   }));
@@ -414,8 +414,12 @@ test("adminAlerts filters by contest_slug / severity / source", async () => {
   __setClientsForTest({ firestore: fakeFirestore, storage: { bucket: () => ({ file: () => ({ getSignedUrl: async () => [""] }) }) } });
   const headers = { "x-api-key": TEST_API_KEY };
 
+  // HR-poller removal: "proctor" is now the ONLY valid source (the contest-eval
+  // poller was removed). Both alerts are proctor; they still differ on
+  // contest_slug + severity so the other in-memory filters are exercised, and the
+  // source filter is exercised against the single remaining source below.
   await call(makeReq({ method: "POST", path: "/api/alerts", headers, body: validAlert({ id: "p1", contest_slug: "alpha", severity: "critical", source: "proctor" }) }));
-  await call(makeReq({ method: "POST", path: "/api/alerts", headers, body: validAlert({ id: "p2", contest_slug: "beta", severity: "warning", source: "contest-eval", type: "web_paste" }) }));
+  await call(makeReq({ method: "POST", path: "/api/alerts", headers, body: validAlert({ id: "p2", contest_slug: "beta", severity: "warning", source: "proctor", type: "tab_away" }) }));
 
   const byContest = await call(makeReq({
     method: "GET",
@@ -436,20 +440,30 @@ test("adminAlerts filters by contest_slug / severity / source", async () => {
   }));
   assert.deepEqual(bySeverity.body.alerts.map((a) => a.id), ["p2"], "in-memory severity filter");
 
+  // Source filter still works mechanically; with only "proctor" left it matches
+  // BOTH alerts (no longer partitions), and a non-existent source matches none.
   const bySource = await call(makeReq({
     method: "GET",
     path: "/api/admin/alerts",
     headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
     query: { source: "proctor" }
   }));
-  assert.deepEqual(bySource.body.alerts.map((a) => a.id), ["p1"], "in-memory source filter");
+  assert.deepEqual([...bySource.body.alerts.map((a) => a.id)].sort(), ["p1", "p2"], "in-memory source filter: all proctor");
+
+  const byMissingSource = await call(makeReq({
+    method: "GET",
+    path: "/api/admin/alerts",
+    headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
+    query: { source: "contest-eval" }
+  }));
+  assert.equal(byMissingSource.body.alerts.length, 0, "no alert has the removed contest-eval source");
 
   // B6: all three at once — one server-side (contest_slug) + two in memory.
   const combined = await call(makeReq({
     method: "GET",
     path: "/api/admin/alerts",
     headers: { "x-admin-password": TEST_ADMIN_PASSWORD },
-    query: { contest_slug: "beta", severity: "warning", source: "contest-eval" }
+    query: { contest_slug: "beta", severity: "warning", source: "proctor" }
   }));
   assert.deepEqual(combined.body.alerts.map((a) => a.id), ["p2"], "combined filter, no composite index");
 

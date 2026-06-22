@@ -14,7 +14,7 @@ Backing surfaces:
 
 ## Where the portal fits in the product
 
-Proctor is a standalone, own-editor exam platform: candidates sit the exam entirely inside our React + Monaco workspace with Judge0-backed Run/Submit. The invigilator portal is the on-the-ground operator surface for that platform — the person standing in the exam hall. A separate, optional `monitoring/` contest-eval poller (which watches an externally-hosted HackerRank contest and emits cheating alerts into the same alerts pipeline) still exists as its own component; when it is in use, the alerts it raises can also surface here through the same selective-alerts mechanism described below.
+Proctor is a standalone, own-editor exam platform: candidates sit the exam entirely inside our React + Monaco workspace with Judge0-backed Run/Submit. The invigilator portal is the on-the-ground operator surface for that platform — the person standing in the exam hall. (The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.)
 
 ---
 
@@ -242,4 +242,4 @@ All dispatched in `backend/src/handler.mjs` (lines 394-400), implemented in `bac
 - [Admin — Roster, Rooms, College + Person Identity](./admin-roster-rooms-identity.md) — room labels and person identity the console displays
 - [Fullscreen Enforcement Ladder](./candidate-enforcement-ladder.md) — the candidate-side lock that the unlock code / per-row Unlock releases
 - [Candidate Flow](./candidate-flow.md) — the candidate onboarding and workspace the invigilator oversees
-- [Architecture Overview](./architecture-overview.md) — standalone own-editor platform plus the optional contest-eval poller
+- [Architecture Overview](./architecture-overview.md) — the standalone own-editor platform tour

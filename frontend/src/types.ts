@@ -8,9 +8,32 @@ export type StudentForm = {
   email: string;
   room: string;
   consent_accepted: boolean;
+  // G1 (v1.1 privacy & consent): the structured consent gate. The candidate
+  // must VIEW both pages (viewed_terms/viewed_privacy), confirm right-to-consent
+  // (right_to_consent), and tick consent (consent_accepted) before start can
+  // fire. candidateRouting.candidateFormReady gates the button on all four; the
+  // server re-enforces (design §2.1). These are the booleans backing the gate;
+  // identity.ts assembles them into the wire `consent` object on start.
+  viewed_terms: boolean;
+  viewed_privacy: boolean;
+  right_to_consent: boolean;
   // S2: the roster unique-ID the candidate confirmed ("" when no roster / not
   // yet confirmed). Sent to /api/session/start, which re-verifies it.
   roster_unique_id: string;
+};
+
+// G1 structured consent record sent on session start (design contract §1.2).
+// `context` distinguishes a remote take-home sitting from an on-site one. The
+// frontend ALSO sends the flat consent_accepted mirror for one transitional
+// release so today's backend keeps working unchanged.
+export type SessionConsent = {
+  accepted: boolean;
+  right_to_consent: boolean;
+  viewed_terms: boolean;
+  viewed_privacy: boolean;
+  consent_version: string;
+  accepted_at: string;
+  context: "remote_take_home" | "at_college";
 };
 
 // Lifecycle status of the session as reported by the backend (Phase 2). Distinct
@@ -132,6 +155,14 @@ export type SessionStartResponse = {
   // the backend predates S5.
   end_at?: string;
   server_now?: string;
+  // Take-home: the official exam start (T0), the remote-mode flag, and the
+  // proctor contact phone — threaded into the runtime contract so the in-session
+  // waiting-room countdown + phone display are skew-safe against server_now
+  // (not just the pre-session ContestExamConfig fetch). Absent/falsy on a
+  // non-take-home contest (or older backend) — byte-identical to today.
+  start_at?: string;
+  take_home?: boolean;
+  proctor_contact_phone?: string;
   // F1 (e2e finding): server-side chunk-index continuation knowledge — counts
   // of issued upload URLs and the exact per-kind index high-water marks. The
   // recorder resumes its chunk count from max(these, the local sessionStorage
@@ -168,6 +199,13 @@ export type HeartbeatResponse = {
   // S5: current exam end time + server clock — the live update channel.
   end_at?: string;
   server_now?: string;
+  // Take-home: the live channel also refreshes the official start (T0), the
+  // remote-mode flag, and the proctor contact phone, so the in-session countdown
+  // + phone stay skew-safe and current. Absent/falsy off take-home (or older
+  // backend) — byte-identical to today.
+  start_at?: string;
+  take_home?: boolean;
+  proctor_contact_phone?: string;
   // F5.3/F5.5: live enforcement config + this session's exemptions, so an
   // admin/invigilator change applies within one heartbeat interval.
   enforcement?: EnforcementConfigPayload;
@@ -178,6 +216,12 @@ export type UploadUrlResponse = {
   upload_url: string;
   storage_key: string;
   expires_in: number;
+  /** v1.1 G3 (#7): the per-chunk size cap the backend bound into the signed URL
+   *  via the x-goog-content-length-range extension header. GCS folds that header
+   *  into X-Goog-SignedHeaders, so the client PUT MUST echo it back verbatim
+   *  ('0,<max_bytes>') or GCS returns 403 SignatureDoesNotMatch. Absent/0 ⇒ no
+   *  cap was bound (legacy backend) and the PUT must NOT send the header. */
+  max_bytes?: number;
 };
 
 // Tier-1 buffer: "ending_draining" is the blocking END-OF-TEST WAIT GATE — End
@@ -518,7 +562,11 @@ export type SessionActionResponse = {
 // source, type, severity, timestamp, hackerrank_username, title.
 export type AlertSeverity = "critical" | "warning" | "info";
 
-export type AlertSource = "proctor" | "contest-eval";
+// HR-poller removal: "proctor" is the ONLY alert source now — the contest-eval
+// poller was removed when proctor moved to its own in-app contest platform.
+// (Legacy stored alerts may still carry source:"contest-eval"; the console
+// displays whatever string is stored, but no new contest-eval alerts are ingested.)
+export type AlertSource = "proctor";
 
 export type AlertVerdictStatus = "pending" | "real" | "false_positive" | "inconclusive";
 
@@ -535,8 +583,9 @@ export type Alert = {
   /**
    * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected | fullscreen_enforcement
    *   (legacy, no longer raised but may still appear in stored data: invalid_share_surface)
-   * contest-eval: peer_copy_cluster | recurring_pair | web_paste | first_attempt_solve | tough_first_attempt
-   *   (legacy alias, no longer emitted: fast_solve)
+   * Legacy contest-eval types (peer_copy_cluster | recurring_pair | web_paste |
+   *   first_attempt_solve | tough_first_attempt | fast_solve) are no longer
+   *   ingested — the HackerRank poller was removed — but may persist in old docs.
    */
   type: string;
   severity: AlertSeverity;
@@ -1057,7 +1106,7 @@ export type PublicProblem = {
 };
 
 // ---- S-I §1: templates + contest problems[] (backend shipped; UI = next wave)
-// Spec: docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md
+// Spec: docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md
 
 /** One ordered problem reference on a contest or template. points null = use
  * the bank problem's points at serve time; else an int override 0..1000. */
@@ -1124,7 +1173,7 @@ export type ProblemSubmissionSummary = {
 };
 
 // ---- S-D: contest administration (Contests tab + selector + routing) --------
-// Spec: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§5 A1-A3
+// Spec: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7/§5 A1-A3
 
 export type ContestStatus = "draft" | "open" | "archived";
 
@@ -1153,6 +1202,11 @@ export type ContestSummary = {
   /** OMR P1: screen-marker flag snapshot (absent on pre-flag docs = off). */
   screen_markers?: ScreenMarkersConfigPayload;
   enforcement?: EnforcementConfigPayload;
+  /** Take-home: master gate for remote behavior (D3; absent on legacy docs = false). */
+  take_home_enabled?: boolean;
+  /** Take-home: proctor contact phone shown on remote waiting/in-exam/locked
+   *  screens (D4; absent/null on legacy docs). */
+  proctor_contact_phone?: string | null;
   languages?: ProblemLanguage[];
   evidence_retention_days?: number;
   // ---- Data-lifecycle stamps (Wave7-G backend; spread from the contest doc) ----
@@ -1194,6 +1248,17 @@ export type ContestPurgeResponse = {
   enrollments_retained?: boolean;
 };
 
+/** GET /api/admin/contest-data-size response (G1, design §2.6). Read-only sum of
+ *  the contest's stored evidence objects in GCS, computed async on demand. */
+export type ContestDataSizeResponse = {
+  contest: string;
+  evidence_bytes: number;
+  evidence_objects: number;
+  /** Per-kind byte breakdown (screen / camera / events / editorEvents / other). */
+  by_kind: Record<string, number>;
+  computed_at: string;
+};
+
 /** POST /api/admin/retention-sweep response (Wave7-G). */
 export type RetentionSweepResponse = {
   ok: boolean;
@@ -1233,6 +1298,10 @@ export type ContestUpdateRequest = {
   /** #71: full enforcement object (updateContest does a full .set(), so the
    *  admin must send EVERY field — existing knobs + simplified_fullscreen_recovery). */
   enforcement?: EnforcementConfigPayload;
+  /** Take-home: master gate for remote behavior (D3). */
+  take_home_enabled?: boolean;
+  /** Take-home: proctor contact phone (D4; null clears it). */
+  proctor_contact_phone?: string | null;
 };
 
 /** Per-contest pre-session config (GET /api/exam-config?contest=). */
@@ -1249,6 +1318,20 @@ export type ContestExamConfig = ExamConfig & {
   start_at: string | null;
   end_at: string | null;
   server_now: string;
+  /** Take-home: master gate for remote behavior (D3; false on legacy docs).
+   *  Seeds the candidate waiting-room gate before a session exists. */
+  take_home_enabled?: boolean;
+  /** Take-home: proctor contact phone for the pre-session help line (D4). */
+  proctor_contact_phone?: string | null;
+  /** G1 (v1.1 privacy & consent): the authoritative consent text version the
+   *  candidate must agree to (design §2.2). Absent on legacy docs ⇒ the frontend
+   *  falls back to its CONSENT_VERSION constant. The consent gate echoes this
+   *  back in the structured consent on session start. */
+  consent_version?: string | null;
+  /** G1: the per-contest evidence-retention window in days (design §2.2). Drives
+   *  the truthful "erased after N days" candidate disclosure and the T&C/Privacy
+   *  interpolation. Absent on legacy docs ⇒ the DEFAULT_RETENTION_DAYS fallback. */
+  retention_days?: number | null;
 };
 
 /** One 409 college_choices option from /api/session/start (person contests). */

@@ -16,7 +16,10 @@ import { RefreshCw, UploadCloud } from "lucide-react";
 // "tell your invigilator" line, and stays up for the FULL drain wait (the
 // buffer survived a force-close, so this gate re-enters on reopen). When absent
 // it is the original transient "finishing up" overlay (status === "ending").
-export function FinishingOverlay({ draining }: { draining?: { pendingCount: number; pendingBytes: number } }) {
+// #135 take-home: `proctorPhone` routes the stuck-drain help line to the remote
+// proctor ("call your proctor at {phone}") instead of "tell your invigilator".
+// Empty/absent ⇒ the in-venue copy (D3).
+export function FinishingOverlay({ draining, proctorPhone = "" }: { draining?: { pendingCount: number; pendingBytes: number }; proctorPhone?: string }) {
   const mb = draining ? Math.max(0, draining.pendingBytes) / (1024 * 1024) : 0;
   return (
     <div
@@ -38,7 +41,9 @@ export function FinishingOverlay({ draining }: { draining?: { pendingCount: numb
               Your recording is saved on this computer and is uploading automatically. Closing now would lose part of it.
             </p>
             <p className="mt-2 text-xs leading-5 text-muted">
-              If this stays stuck, tell your invigilator — they can help. Do not exit fullscreen or close this tab.
+              {proctorPhone
+                ? <>If this stays stuck, call your proctor at <a className="font-medium text-accent underline" href={`tel:${proctorPhone}`}>{proctorPhone}</a> — they can help. Do not exit fullscreen or close this tab.</>
+                : "If this stays stuck, tell your invigilator — they can help. Do not exit fullscreen or close this tab."}
             </p>
           </>
         ) : (

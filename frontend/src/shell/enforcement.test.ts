@@ -520,6 +520,234 @@ describe("alertHoldMessage", () => {
   });
 });
 
+// #135 take-home — SOFT pre-T0 enforcement. While softMode is true (the
+// take-home WaitingRoom hold, pre-T0), a fullscreen exit is RECORDED as an event
+// and shows a gentle nudge, but never consumes the exit limit and never reports
+// a violation. At T0 softMode flips false and the real ladder starts clean.
+describe("enforcementReducer — soft pre-T0 mode (#135)", () => {
+  const soft: EnforcementConfig = { ...config, softMode: true };
+
+  // T-F3 — soft→full transition
+  it("T-F3: a soft exit records an event, leaves exitCount untouched, no report_violation, phase 'soft'", () => {
+    const { state, effects } = exit(initialEnforcementState, T0, soft);
+    expect(state.phase).toBe("soft");
+    expect(state.exitCount).toBe(0); // NOT consumed
+    expect(effects).toEqual([
+      { kind: "event", type: "fullscreen_exit_soft", detail: { expected: false } }
+    ]);
+    // no report_violation in the effects at all
+    expect(effects.some((e) => e.kind === "report_violation")).toBe(false);
+  });
+
+  it("T-F3: re-entering fullscreen clears the soft nudge to idle (no ack event)", () => {
+    const softState = exit(initialEnforcementState, T0, soft).state;
+    expect(softState.phase).toBe("soft");
+    const { state, effects } = enforcementReducer(softState, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 2000 }, soft);
+    expect(state.phase).toBe("idle");
+    expect(state.exitCount).toBe(0);
+    expect(effects).toEqual([]); // silent — nothing was held against the candidate
+  });
+
+  it("T-F3: flipping softMode OFF (T0) clears a lingering soft nudge to idle; the NEXT exit starts the ladder at exitCount=1", () => {
+    const softState = exit(initialEnforcementState, T0, soft).state;
+    expect(softState.phase).toBe("soft");
+    // T0 flip: softMode now false.
+    const flipped = enforcementReducer(softState, { kind: "config_change", nowMs: T0 + 1000, fullscreen: false }, config);
+    expect(flipped.state.phase).toBe("idle");
+    expect(flipped.state.exitCount).toBe(0); // soft exits never seeded the count
+    expect(flipped.effects).toEqual([]);
+    // The first real exit after T0 engages the full ladder at exitCount=1.
+    const firstReal = exit(flipped.state, T0 + 2000, config);
+    expect(firstReal.state.phase).toBe("blocking");
+    expect(firstReal.state.exitCount).toBe(1);
+    expect(firstReal.state.deadlineMs).toBe(T0 + 2000 + 20_000);
+  });
+
+  // T-F4 — soft never locks
+  it("T-F4: repeated soft exits beyond the exit limit never lock and never POST a violation", () => {
+    let state = initialEnforcementState;
+    let allEffects: ReturnType<typeof exit>["effects"] = [];
+    // exitLimit is 2; fire 5 soft exits — far past it.
+    for (let i = 0; i < 5; i++) {
+      const res = exit(state, T0 + i * 1000, soft);
+      state = res.state;
+      allEffects = allEffects.concat(res.effects);
+    }
+    expect(state.phase).toBe("soft");
+    expect(state.exitCount).toBe(0);
+    expect(allEffects.every((e) => e.kind === "event" && e.type === "fullscreen_exit_soft")).toBe(true);
+    expect(allEffects.some((e) => e.kind === "report_violation")).toBe(false);
+  });
+
+  // T-F5 — soft inert in tick
+  it("T-F5: tick on a 'soft' state is a noop (no deadline, no escalation)", () => {
+    const softState = exit(initialEnforcementState, T0, soft).state;
+    const { state, effects } = enforcementReducer(softState, { kind: "tick", nowMs: T0 + 60_000 }, soft);
+    expect(state).toBe(softState); // referentially unchanged
+    expect(effects).toEqual([]);
+  });
+
+  // T-F4 cont. — the expected end-of-test exit and not-recording are still ignored in soft mode.
+  it("soft mode still ignores exits while not recording and the expected exit", () => {
+    expect(exit(initialEnforcementState, T0, soft, false).state.phase).toBe("idle");
+    expect(exit(initialEnforcementState, T0, soft, true, true).state.phase).toBe("idle");
+  });
+
+  // exemptFullscreen still wins over softMode (an exempt session never overlays).
+  it("exemptFullscreen takes precedence over softMode (no overlay at all)", () => {
+    const cfg: EnforcementConfig = { ...soft, exemptFullscreen: true };
+    const { state, effects } = exit(initialEnforcementState, T0, cfg);
+    expect(state).toBe(initialEnforcementState);
+    expect(effects).toEqual([]);
+  });
+});
+
+// T-F7 — soft-mode trigger (C-1 regression). softMode is the reducer's only
+// lever for soft enforcement; it is driven by waitingRoomActive at the call site
+// (StudentApp), NOT examGateActive. A take-home contest with room_gate_enabled
+// off therefore still enters soft mode — proven here at the reducer boundary:
+// soft behavior depends ONLY on config.softMode, with no room-gate coupling.
+describe("enforcementReducer — soft trigger is config.softMode alone (T-F7 / C-1)", () => {
+  it("soft behavior engages purely from config.softMode (room-gate-independent)", () => {
+    // No room-gate concept exists in the reducer — softMode is the whole trigger.
+    const soft: EnforcementConfig = { ...config, softMode: true };
+    expect(exit(initialEnforcementState, T0, soft).state.phase).toBe("soft");
+    // The same exit with softMode off is the classic blocking ladder.
+    expect(exit(initialEnforcementState, T0, config).state.phase).toBe("blocking");
+  });
+});
+
+// AMENDMENT A2 + A16 — the soft phase must NOT persist (cross-T0 stale-overlay
+// kill) and the T0 boundary must be deterministic.
+describe("soft phase persistence + T0 boundary determinism (A2 / A16)", () => {
+  const soft: EnforcementConfig = { ...config, softMode: true };
+
+  // A2: serialize a soft phase AS idle; never restore soft on deserialize.
+  it("A2: a soft phase serializes AS 'idle' and round-trips to idle (never restored)", () => {
+    const softState = exit(initialEnforcementState, T0, soft).state;
+    expect(softState.phase).toBe("soft");
+    const serialized = serializeEnforcementState(softState);
+    expect(JSON.parse(serialized).phase).toBe("idle"); // serialized AS idle
+    const restored = deserializeEnforcementState(serialized);
+    expect(restored.phase).toBe("idle");
+  });
+
+  it("A2: a tampered/forced { phase: 'soft' } payload falls back to the initial state (soft not in allowlist)", () => {
+    expect(deserializeEnforcementState(JSON.stringify({ phase: "soft", exitCount: 3, deadlineMs: null })))
+      .toEqual(initialEnforcementState);
+  });
+
+  // A16: persist soft → deserialize (softMode=false) → phase idle + exitCount
+  // preserved + next exit increments to 1; first exit strictly after
+  // softMode=false yields exitCount=1; no double-count.
+  it("A16: persist soft → deserialize (softMode off) → phase idle, exitCount preserved, next exit increments to 1", () => {
+    // Build a state that already has a real pre-existing exitCount, then a soft
+    // nudge layered on (exitCount must survive the soft serialize→restore).
+    let state = exit(initialEnforcementState, T0, config).state; // real exit, exitCount=1
+    state = enforcementReducer(state, { kind: "ack", matched: true, fullscreen: true, nowMs: T0 + 500 }, config).state; // resolve → idle, exitCount=1
+    expect(state.exitCount).toBe(1);
+    // Now a soft nudge (would only happen if softMode were on — construct it directly via the reducer).
+    const softState = exit(state, T0 + 1000, soft).state;
+    expect(softState.phase).toBe("soft");
+    expect(softState.exitCount).toBe(1); // soft did not touch it
+    // Persist (cross-T0 reload) and restore under softMode=false.
+    const restored = deserializeEnforcementState(serializeEnforcementState(softState));
+    expect(restored.phase).toBe("idle"); // soft never restored
+    expect(restored.exitCount).toBe(1); // preserved
+    // The next REAL exit (post-T0) increments to 2 — one physical exit, one increment.
+    const next = exit(restored, T0 + 2000, config);
+    expect(next.state.phase).toBe("blocking");
+    expect(next.state.exitCount).toBe(2);
+  });
+
+  it("A16: the first exit strictly after softMode=false yields exitCount=1 from a clean start (no pre-T0 seeding, no double-count)", () => {
+    // Pre-T0: several soft exits — none seed the count.
+    let state = initialEnforcementState;
+    for (let i = 0; i < 3; i++) state = exit(state, T0 + i * 1000, soft).state;
+    expect(state.phase).toBe("soft");
+    expect(state.exitCount).toBe(0);
+    // T0 flip clears the lingering soft nudge.
+    const cleared = enforcementReducer(state, { kind: "config_change", nowMs: T0 + 5000, fullscreen: false }, config).state;
+    expect(cleared.phase).toBe("idle");
+    expect(cleared.exitCount).toBe(0);
+    // The FIRST real exit yields exactly 1 — not 0 (no-op), not 2 (double-count).
+    const first = exit(cleared, T0 + 6000, config);
+    expect(first.state.exitCount).toBe(1);
+    expect(first.state.phase).toBe("blocking");
+  });
+});
+
+// REGRESSION (D3): with softMode absent/false throughout, every soft-touching
+// path is byte-identical to today — the soft feature is fully gated.
+describe("regression — softMode=false is behavior-preserving (D3)", () => {
+  it("a fullscreen exit with softMode off behaves exactly as today (blocking ladder, exitCount=1)", () => {
+    const { state, effects } = exit(initialEnforcementState, T0, config);
+    expect(state.phase).toBe("blocking");
+    expect(state.exitCount).toBe(1);
+    expect(state.deadlineMs).toBe(T0 + 20_000);
+    expect(effects).toEqual([]);
+  });
+
+  it("config_change with softMode off and no soft phase is the pre-existing no-op (idle stays idle)", () => {
+    const { state, effects } = enforcementReducer(initialEnforcementState, { kind: "config_change", nowMs: T0, fullscreen: false }, config);
+    expect(state).toBe(initialEnforcementState);
+    expect(effects).toEqual([]);
+  });
+
+  it("config_change with softMode off does not disturb an active blocking episode", () => {
+    const blocking = exit(initialEnforcementState, T0, config).state;
+    const { state, effects } = enforcementReducer(blocking, { kind: "config_change", nowMs: T0 + 1000, fullscreen: false }, config);
+    expect(state).toBe(blocking);
+    expect(effects).toEqual([]);
+  });
+
+  it("serialize/deserialize of a normal blocking state is unchanged by the soft coercion", () => {
+    const blocking = exit(initialEnforcementState, T0, config).state;
+    const restored = deserializeEnforcementState(serializeEnforcementState(blocking));
+    expect(restored.phase).toBe("blocking");
+    expect(restored.exitCount).toBe(1);
+    expect(restored.deadlineMs).toBe(T0 + 20_000);
+  });
+});
+
+// T-F6 — message variants. With { takeHome, phone } the locking/alert copy
+// routes to the proctor phone; without the opts arg the in-venue copy is
+// byte-identical (D3). Plus the soft copy arms.
+describe("copy variants — take-home {phone} threading + soft arms (T-F6)", () => {
+  it("enforcementSubline locking: takeHome+phone routes to the proctor number", () => {
+    const remote = enforcementSubline("locking", false, 3, false, { takeHome: true, phone: "+91 98765 43210" });
+    expect(remote).toContain("Call your proctor at +91 98765 43210");
+    expect(remote).not.toMatch(/raise your hand/i);
+  });
+
+  it("enforcementSubline locking: no opts arg is byte-identical in-venue copy (D3)", () => {
+    expect(enforcementSubline("locking", true, 3)).toBe("Your test is being locked. Raise your hand and call your room proctor.");
+    // explicit falsy opts is also in-venue
+    expect(enforcementSubline("locking", true, 3, false, { takeHome: false })).toBe("Your test is being locked. Raise your hand and call your room proctor.");
+  });
+
+  it("alertHoldMessage: takeHome+phone routes to the proctor number, not the invigilator", () => {
+    const remote = alertHoldMessage("countdown_expired", false, { takeHome: true, phone: "+91 98765 43210" });
+    expect(remote).toContain("call your proctor at +91 98765 43210");
+    expect(remote).not.toMatch(/invigilator/i);
+  });
+
+  it("alertHoldMessage: no opts arg is byte-identical in-venue copy (D3)", () => {
+    expect(alertHoldMessage("countdown_expired")).toBe("Time expired — your proctor has been alerted. Complete both steps below to continue, or wait for the invigilator.");
+    expect(alertHoldMessage("countdown_expired", false, { takeHome: false })).toBe("Time expired — your proctor has been alerted. Complete both steps below to continue, or wait for the invigilator.");
+  });
+
+  it("the soft headline/subline arms are gentle and never imply the limit or name 'exit #N'", () => {
+    expect(enforcementHeadline("soft", false)).toBe("You're not in fullscreen");
+    expect(enforcementHeadline("soft", true)).toBe("You're not in fullscreen");
+    const sub = enforcementSubline("soft", false, 5);
+    expect(sub).toContain("hasn't started yet");
+    expect(sub).toContain("not counted against you");
+    expect(sub).not.toMatch(/exit #/i);
+    expect(sub).not.toMatch(/both steps/i);
+  });
+});
+
 // W10 (exam morning): the ack phrase is judged case- and whitespace-insensitively.
 describe("matchesAckPhrase (W10)", () => {
   it("accepts the exact phrase", () => {

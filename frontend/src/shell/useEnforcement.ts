@@ -240,6 +240,16 @@ export function useEnforcement(opts: {
     }
   }, [simplifiedFullscreenRecovery, dispatch]);
 
+  // #135 take-home: the soft-mode edge. When softMode flips (notably OFF at T0,
+  // the exam opening), dispatch config_change so the reducer drops a lingering
+  // soft nudge to idle and the real escalation ladder starts clean at
+  // exitCount=0. Fires on both edges; the reducer only acts on the OFF→soft
+  // case, so the ON edge is a harmless no-op.
+  const softMode = config.softMode;
+  useEffect(() => {
+    dispatch({ kind: "config_change", nowMs: Date.now(), fullscreen: Boolean(document.fullscreenElement) });
+  }, [softMode, dispatch]);
+
   // The server lock became visible through ANY channel (violation verdict or
   // the heartbeat's status flip): settle a pending report so the tick retry
   // loop stops POSTing against a session that is already locked.

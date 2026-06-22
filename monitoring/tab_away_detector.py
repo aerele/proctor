@@ -22,8 +22,8 @@ with the gap start mapped to a wall-clock offset, a human `detail`, structured
 `download_url` that DEEP-LINK the recording at the gap start via a `#t=<seconds>`
 media fragment (the documented deep-link convention — see tab-away-README.md).
 
-Alerts are POSTed to <api-base>/api/alerts with header x-api-key, reusing the
-existing poller's POST helper + the shared contract validator.
+Alerts are POSTed to <api-base>/api/alerts with header x-api-key via the inlined
+post_alerts() helper + the shared-contract validator (both self-contained below).
 
 ------------------------------------------------------------------------------
 IMAGING BACKEND (auto-detected at import; design adapts to what is installed)
@@ -44,7 +44,9 @@ Frame extraction always uses ffmpeg (no imaging lib needed for that), so the
 Run `python3 monitoring/tab_away_detector.py --help` for the CLI.
 """
 import argparse
+import datetime
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -56,9 +58,58 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-# Reuse the existing poster + the shared-contract helpers from the poller stack.
-from poller import post_alerts                          # noqa: E402
-from alerts import normalize_username, validate_alert, _now_iso  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Self-contained shared-contract helpers.
+#
+# These four helpers were previously imported from the HackerRank contest-eval
+# poller stack (poller.py / alerts.py). That poller was REMOVED when proctor
+# moved to its own in-app contest platform, so the helpers are now inlined here
+# to keep this CORE proctoring detector (tab_away is a proctor-source alert)
+# self-contained. The bodies are byte-for-byte the originals.
+# ---------------------------------------------------------------------------
+def normalize_username(value):
+    """Match backend normalizeUsername(): trim, lowercase, non-[a-z0-9._-]->'_', slice 120."""
+    s = str(value).strip().lower()
+    s = re.sub(r'[^a-z0-9._-]', '_', s)
+    return s[:120]
+
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def validate_alert(a):
+    """Cheap client-side mirror of backend required-field validation."""
+    required = ["source", "type", "severity", "timestamp", "hackerrank_username", "title"]
+    missing = [f for f in required if not a.get(f)]
+    if missing:
+        return f"missing required fields: {missing}"
+    # HR-poller removal: "proctor" is now the ONLY valid alert source (the
+    # contest-eval source was retired with the poller). tab_away alerts are
+    # proctor-source, so this stays correct.
+    if a["source"] != "proctor":
+        return f"bad source {a['source']!r}"
+    if a["severity"] not in ("critical", "warning", "info"):
+        return f"bad severity {a['severity']!r}"
+    return None
+
+
+def post_alerts(api_base, api_key, alert_list, timeout=20):
+    """POST alerts to <api-base>/api/alerts with x-api-key. Returns (ok, info)."""
+    url = api_base.rstrip("/") + "/api/alerts"
+    body = json.dumps({"alerts": alert_list}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("content-type", "application/json")
+    req.add_header("x-api-key", api_key or "")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:500]
+        return False, f"HTTP {e.code}: {detail}"
+    except (urllib.error.URLError, OSError) as e:
+        return False, f"network error: {e}"
 
 # Default minimum continuous absent span to flag. The admin console
 # (Settings -> tab_away -> threshold_seconds) is the SOURCE OF TRUTH and is passed

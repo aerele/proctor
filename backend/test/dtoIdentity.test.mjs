@@ -1,11 +1,11 @@
 // backend/test/dtoIdentity.test.mjs — S-C slice 3: candidateOf across DTOs,
 // submissions denorm, ingest candidate_id aliases, per-contest review-state
 // ids, per-contest attendance.
-// Specs: docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md
+// Specs: docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md
 //          §1.2 (candidateOf dual-read adapter; ingest accepts both field names
 //          forever), D7 (submissions denorm on NEW docs at submit time),
 //          D17 ({norm}::{reviewerKey}::{slug} review ids; slugless = legacy)
-//        docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.11, §7 S-C
+//        docs/design-history/specs/2026-06-10-f10-product-vision.md §2.11, §7 S-C
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -276,9 +276,9 @@ test("sure-shot alert raised from a person session carries the display candidate
 test("alerts ingest accepts candidate_id as an alias for hackerrank_username", async () => {
   const { firestore } = freshClients();
   const res = await call(makeReq({ method: "POST", path: "/api/alerts", headers: INGEST_HEADERS, body: { alerts: [{
-    source: "contest-eval", type: "peer_copy", severity: "critical",
+    source: "proctor", type: "tab_away", severity: "warning",
     timestamp: "2026-06-10T03:00:00.000Z", candidate_id: "21 CS 001",
-    username_norm: "kec--21cs001", contest_slug: "kec-r1", title: "Peer copy suspected"
+    username_norm: "kec--21cs001", contest_slug: "kec-r1", title: "Tab-away"
   }] } }));
   assert.equal(res.statusCode, 200, JSON.stringify(res.body));
   const alert = [...firestore._collections.get("di_alerts").values()][0];
@@ -287,19 +287,10 @@ test("alerts ingest accepts candidate_id as an alias for hackerrank_username", a
   assert.equal(alert.username_norm, "kec--21cs001");
 });
 
-test("submission-events ingest accepts candidate_id as an alias", async () => {
-  const { firestore } = freshClients();
-  const res = await call(makeReq({ method: "POST", path: "/api/submission-events", headers: INGEST_HEADERS, body: { events: [{
-    candidate_id: "21 CS 001", submission_id: 42, submitted_at: "2026-06-10T03:05:00.000Z",
-    valid: true, contest_slug: "kec-r1"
-  }] } }));
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
-  // Doc id derivation is UNCHANGED (normalizeUsername of the display value) —
-  // mapping poller events onto person norms is S-F scope; only the alias lands here.
-  const doc = firestore._collections.get("di_submission_events").get("21_cs_001:kec-r1");
-  assert.ok(doc, [...firestore._collections.get("di_submission_events").keys()].join(","));
-  assert.equal(doc.events[0].hackerrank_username, "21 CS 001");
-});
+// NOTE (HR-poller removal): the "submission-events ingest accepts candidate_id
+// as an alias" test was DELETED with the POST /api/submission-events ingest
+// endpoint (HackerRank poller removed). The alert-ingest candidate_id alias above
+// still covers the kept alias path on normalizeAlert.
 
 // ---- RUN events surfaced + merged with submits (recording-review timeline) ----
 

@@ -4,7 +4,7 @@
 // derivation, workspace totals, per-problem localStorage draft guards, the
 // single-problem/legacy layout pin, submit-summary merging and the
 // server-driven cooldown helpers. Spec:
-// docs/superpowers/specs/2026-06-10-s-i-multiproblem-detail-spec.md §4.1-4.3.
+// docs/design-history/specs/2026-06-10-s-i-multiproblem-detail-spec.md §4.1-4.3.
 import { describe, it, expect } from "vitest";
 import {
   DRAFT_KEY_PREFIX,

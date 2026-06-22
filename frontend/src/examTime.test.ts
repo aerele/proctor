@@ -1,6 +1,6 @@
 // frontend/src/examTime.test.ts — pure exam-time math (S5).
 import { describe, expect, it } from "vitest";
-import { classifyEndAtChange, computeClockSkewMs, formatRemaining, remainingMs, resolveSavedEndAt, sessionElapsedAnchorMs } from "./examTime";
+import { classifyEndAtChange, computeClockSkewMs, formatRemaining, recordingPreExamState, remainingMs, resolveSavedEndAt, sessionElapsedAnchorMs, shouldSurfaceExamTime, waitingRoomGate, waitingRoomMilestone, WAITING_ROOM_WINDOW_MS } from "./examTime";
 
 describe("computeClockSkewMs", () => {
   it("is server minus client", () => {
@@ -130,5 +130,173 @@ describe("sessionElapsedAnchorMs", () => {
     // A skewed/garbled stamp placing the start in the client future.
     const anchor = sessionElapsedAnchorMs("2026-06-12T11:00:00.000Z", undefined, clientNow);
     expect(anchor).toBe(clientNow);
+  });
+});
+
+// #135 take-home — the candidate WaitingRoom gate (pure boundary math).
+describe("waitingRoomGate — 15-min boundary (T-F1)", () => {
+  const now = Date.parse("2026-06-22T10:00:00.000Z");
+  const at = (msFromNow: number) => new Date(now + msFromNow).toISOString();
+
+  it("T-F1: +14:59 to T0 → waitingRoomActive, not tooEarly (inside the window, pre-T0)", () => {
+    const g = waitingRoomGate(at(14 * 60_000 + 59_000), now, 0);
+    expect(g.msUntilStart).toBe(14 * 60_000 + 59_000);
+    expect(g.waitingRoomActive).toBe(true);
+    expect(g.tooEarly).toBe(false);
+  });
+
+  it("T-F1: exactly +15:00 to T0 → still inside the window (<= boundary), waitingRoomActive", () => {
+    const g = waitingRoomGate(at(WAITING_ROOM_WINDOW_MS), now, 0);
+    expect(g.waitingRoomActive).toBe(true);
+    expect(g.tooEarly).toBe(false);
+  });
+
+  it("T-F1: +15:01 to T0 → tooEarly, NOT waitingRoomActive (beyond the window)", () => {
+    const g = waitingRoomGate(at(WAITING_ROOM_WINDOW_MS + 1_000), now, 0);
+    expect(g.waitingRoomActive).toBe(false);
+    expect(g.tooEarly).toBe(true);
+  });
+
+  it("T-F1: -1s (just past T0) → BOTH false (exam open, W1 condition satisfied)", () => {
+    const g = waitingRoomGate(at(-1_000), now, 0);
+    expect(g.msUntilStart).toBe(-1_000);
+    expect(g.waitingRoomActive).toBe(false);
+    expect(g.tooEarly).toBe(false);
+  });
+
+  it("T-F1: exactly at T0 (0ms) → both false (msUntilStart > 0 required for waiting)", () => {
+    const g = waitingRoomGate(at(0), now, 0);
+    expect(g.waitingRoomActive).toBe(false);
+    expect(g.tooEarly).toBe(false);
+  });
+
+  it("T-F1: missing/unparseable start_at → null + both false (no take-home schedule, no gate)", () => {
+    expect(waitingRoomGate(undefined, now, 0)).toEqual({ msUntilStart: null, waitingRoomActive: false, tooEarly: false });
+    expect(waitingRoomGate("", now, 0)).toEqual({ msUntilStart: null, waitingRoomActive: false, tooEarly: false });
+    expect(waitingRoomGate("garbage", now, 0)).toEqual({ msUntilStart: null, waitingRoomActive: false, tooEarly: false });
+  });
+});
+
+describe("waitingRoomGate — clock skew (T-F2)", () => {
+  const localNow = Date.parse("2026-06-22T10:00:00.000Z");
+  // T0 is 10 minutes ahead on the SERVER clock.
+  const startAt = new Date(localNow + 10 * 60_000).toISOString();
+
+  it("T-F2: with no skew, a +10min start is inside the window", () => {
+    const g = waitingRoomGate(startAt, localNow, 0);
+    expect(g.msUntilStart).toBe(10 * 60_000);
+    expect(g.waitingRoomActive).toBe(true);
+  });
+
+  it("T-F2: the gate flips at SERVER T0, not the local clock (skew applied)", () => {
+    // Server is 30s AHEAD of local (server_now 30s later than local). The skew-
+    // corrected remaining = end - (local + skew) → 30s LESS real time to T0.
+    const skew = computeClockSkewMs(new Date(localNow + 30_000).toISOString(), localNow);
+    expect(skew).toBe(30_000);
+    const g = waitingRoomGate(startAt, localNow, skew);
+    expect(g.msUntilStart).toBe(10 * 60_000 - 30_000); // server time, not local
+    expect(g.waitingRoomActive).toBe(true);
+  });
+
+  it("T-F2 (stale-config server_now): a 5-min-old server stamp would put us PAST a near T0 by local clock, but the fresh re-evaluation crosses correctly", () => {
+    // start_at is +20s out by the SERVER clock; the client clock is 90s SLOW
+    // (server_now is 90s ahead). Without skew correction the client thinks it has
+    // 20s left; WITH skew the server says T0 already passed 70s ago → exam open.
+    const start = new Date(localNow + 20_000).toISOString();
+    const skew = computeClockSkewMs(new Date(localNow + 90_000).toISOString(), localNow);
+    expect(skew).toBe(90_000);
+    const g = waitingRoomGate(start, localNow, skew);
+    expect(g.msUntilStart).toBe(20_000 - 90_000); // -70s → past T0 on the server
+    expect(g.waitingRoomActive).toBe(false); // exam open, not waiting
+    expect(g.tooEarly).toBe(false);
+  });
+});
+
+// #135 take-home — the recording pre-exam render precedence. The load-bearing
+// invariant (FIX #1, spec §4d): a tooEarly candidate whose session is already
+// recording must HOLD on the come-back-later screen and must NEVER fall through
+// to the live exam (an admin pushing start_at >15 min out mid-wait must not leak
+// the questions pre-T0).
+describe("recordingPreExamState — pre-T0 hold precedence (FIX #1)", () => {
+  it("tooEarly while recording HOLDS and never allows the exam view", () => {
+    const s = recordingPreExamState({ tooEarly: true, waitingRoomActive: false });
+    expect(s.holdWhileRecording).toBe(true);
+    expect(s.examViewAllowed).toBe(false); // the question-leak guard
+    expect(s.waitingRoomActive).toBe(false);
+  });
+
+  it("tooEarly wins even if the waiting-window boolean is somehow also set", () => {
+    // Defense in depth: tooEarly and waitingRoomActive are mutually exclusive in
+    // examTime math, but the precedence must still hold the candidate, not leak.
+    const s = recordingPreExamState({ tooEarly: true, waitingRoomActive: true });
+    expect(s.holdWhileRecording).toBe(true);
+    expect(s.examViewAllowed).toBe(false);
+    expect(s.waitingRoomActive).toBe(false);
+  });
+
+  it("inside the 15-min window → waiting room, not the exam, not the hold", () => {
+    const s = recordingPreExamState({ tooEarly: false, waitingRoomActive: true });
+    expect(s.holdWhileRecording).toBe(false);
+    expect(s.waitingRoomActive).toBe(true);
+    expect(s.examViewAllowed).toBe(false);
+  });
+
+  it("past T0 (neither hold nor waiting) → the live exam is allowed", () => {
+    const s = recordingPreExamState({ tooEarly: false, waitingRoomActive: false });
+    expect(s.holdWhileRecording).toBe(false);
+    expect(s.waitingRoomActive).toBe(false);
+    expect(s.examViewAllowed).toBe(true);
+  });
+
+  it("the three states are mutually exclusive across every input combo", () => {
+    for (const tooEarly of [true, false]) {
+      for (const waitingRoomActive of [true, false]) {
+        const s = recordingPreExamState({ tooEarly, waitingRoomActive });
+        const flags = [s.holdWhileRecording, s.waitingRoomActive, s.examViewAllowed].filter(Boolean);
+        expect(flags.length).toBe(1); // exactly one branch is ever active
+      }
+    }
+  });
+});
+
+// #135 take-home — heartbeat exam-time surfacing gate (FIX #2). The backend now
+// always emits start_at, so the non-take-home path must stay byte-identical:
+// the trigger fires only on end_at (as before) unless take_home is set.
+describe("shouldSurfaceExamTime — non-remote byte-identity (FIX #2)", () => {
+  it("non-take-home with start_at but no end_at does NOT fire (pre-#135 behavior)", () => {
+    expect(shouldSurfaceExamTime({ startAt: "2026-06-22T10:00:00.000Z" })).toBe(false);
+    expect(shouldSurfaceExamTime({ startAt: "2026-06-22T10:00:00.000Z", takeHome: false })).toBe(false);
+  });
+
+  it("non-take-home with end_at fires (unchanged from before)", () => {
+    expect(shouldSurfaceExamTime({ endAt: "2026-06-22T11:00:00.000Z" })).toBe(true);
+    expect(shouldSurfaceExamTime({ endAt: "2026-06-22T11:00:00.000Z", startAt: "2026-06-22T10:00:00.000Z" })).toBe(true);
+  });
+
+  it("take-home with start_at fires even without end_at (waiting-room countdown stays live)", () => {
+    expect(shouldSurfaceExamTime({ startAt: "2026-06-22T10:00:00.000Z", takeHome: true })).toBe(true);
+  });
+
+  it("nothing present → no fire", () => {
+    expect(shouldSurfaceExamTime({})).toBe(false);
+    expect(shouldSurfaceExamTime({ takeHome: true })).toBe(false);
+  });
+});
+
+describe("waitingRoomMilestone — coarse a11y announcements (A9)", () => {
+  it("buckets to 10 / 5 / 1 minute, then 'started'; null beyond 10 min", () => {
+    // The announcement is the NEXT milestone at-or-above the remaining minutes
+    // (ceil): you hear "10 minutes" until you cross into the ≤5 bucket, etc.
+    expect(waitingRoomMilestone(12 * 60_000)).toBeNull();      // >10 min: silent
+    expect(waitingRoomMilestone(10 * 60_000)).toBe("Exam starts in 10 minutes.");
+    expect(waitingRoomMilestone(6 * 60_000)).toBe("Exam starts in 10 minutes.");  // ceil(6)=6 → ≤10 bucket
+    expect(waitingRoomMilestone(5 * 60_000)).toBe("Exam starts in 5 minutes.");
+    expect(waitingRoomMilestone(2 * 60_000)).toBe("Exam starts in 5 minutes.");   // ceil(2)=2 → ≤5 bucket
+    expect(waitingRoomMilestone(90_000)).toBe("Exam starts in 5 minutes.");       // ceil(1.5)=2 → ≤5 bucket
+    expect(waitingRoomMilestone(60_000)).toBe("Exam starts in 1 minute.");        // ceil(1)=1 → ≤1 bucket
+    expect(waitingRoomMilestone(1)).toBe("Exam starts in 1 minute.");
+    expect(waitingRoomMilestone(0)).toBe("Your exam has started.");
+    expect(waitingRoomMilestone(-5_000)).toBe("Your exam has started.");
+    expect(waitingRoomMilestone(null)).toBeNull();
   });
 });

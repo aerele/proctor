@@ -5,7 +5,7 @@ which needs **no backend and no Google Cloud account** — you can run, edit, an
 hot-reload the entire UI with `gcloud` not even installed.
 
 Repo root: the cloned `proctor` directory (an npm **workspaces** monorepo:
-`frontend`, `backend`, `video-worker`). **Run all npm commands from the repo
+`frontend`, `backend`). **Run all npm commands from the repo
 root**, not from `frontend/`.
 
 > This is the contributor quickstart. The fastest path needs neither a backend
@@ -45,8 +45,7 @@ This runs the full UI with fake sessions/uploads/settings (stored in `localStora
 | Backend **data routes** (Firestore) | ⚠️ Emulator | Firestore emulator needs gcloud — **not installed** |
 | Backend **storage routes** (`/api/upload-url`, `/api/session/end`, `/api/admin/sessions`) — GCS v4 signed URLs | ❌ No | No GCS emulator; v4 signing needs **real** credentials |
 | Real evidence upload end-to-end | ❌ No | Needs real Firestore + GCS bucket + ADC |
-| video-worker / merge CLI (review videos) | ❌ No | Needs real GCS buckets; CLI also needs gcloud. Not part of the dev loop |
-| Full GCP deploy (`deploy-gcp.sh` ×3) | ❌ No | All three scripts require **gcloud** — not installed |
+| Full GCP deploy (`deploy-gcp.sh` ×2) | ❌ No | Both scripts require **gcloud** — not installed |
 
 **Bottom line:** the laptop-runnable paths are (a) demo mode and (b) frontend against an already-deployed backend. A meaningful full local stack with real evidence upload is **not** achievable here without gcloud/emulators/credentials — see §4(c).
 
@@ -158,7 +157,6 @@ On-demand gates (all from repo root):
 npm run lint          # frontend: tsc -b --pretty false  → TYPECHECK only (see note)
 npm run build         # frontend: tsc -b && vite build    → typecheck + bundle to frontend/dist
 npm run backend:test  # backend:  node --test test/*.test.mjs  (offline, no env)
-npm --workspace video-worker run check   # node --check src/server.mjs (syntax only)
 ```
 
 Notes:
@@ -201,10 +199,9 @@ Notes:
 - **Don't set both** `VITE_DEMO_MODE=true` and `VITE_API_BASE_URL` expecting the real backend — demo mode short-circuits the network. If neither is set, every API call throws `VITE_API_BASE_URL is not configured.`
 - **Admin password ships in client JS** — semi-public, UI-gate only; real auth is the backend `x-admin-password` check.
 - **Screen capture is real even in demo mode**: needs a Chromium browser + a user gesture; works over `http://localhost`; **must** select "Entire Screen".
-- **Ports:** dev server **5173**; backend / video-worker / nginx all default to **8080**. Backend and the Firestore emulator both default to 8080 — distinct ports if both run.
+- **Ports:** dev server **5173**; backend / nginx both default to **8080**. Backend and the Firestore emulator both default to 8080 — distinct ports if both run.
 - **Dev server binds `0.0.0.0`** (`vite --host`), so it's exposed on the LAN, not just localhost.
 - **Backend `npm start` quirk:** use `npm start --workspace backend` (or `npx @google-cloud/functions-framework --target=api`). Do **not** run bare `npx functions-framework` — it resolves the wrong legacy unscoped package.
-- **video-worker and the merge CLI are not in the dev loop** — they produce review videos for finished sessions, need real GCS buckets. Skip them for local testing.
-- **gcloud is not installed**, so the Firestore emulator path and all three `deploy-gcp.sh` scripts are unavailable until you install + auth the Google Cloud SDK.
+- **gcloud is not installed**, so the Firestore emulator path and both `deploy-gcp.sh` scripts are unavailable until you install + auth the Google Cloud SDK.
 
 **Key files for editing:** `frontend/src/api.ts` (all backend calls + the demo stub + the three env reads), `frontend/src/App.tsx` (routing + admin unlock), `frontend/src/useProctorRecorder.ts` (real capture/MediaRecorder/heartbeat — the only part demo mode does not stub), `frontend/src/types.ts` (API shapes), `frontend/vite.config.ts` (port 5173, no proxy).

@@ -174,8 +174,9 @@ def main():
         check(a["source"] == "proctor", "alert.source == 'proctor'", detail=str(a["source"]))
         check(a["type"] == "tab_away", "alert.type == 'tab_away'", detail=str(a["type"]))
         check(a["severity"] == "warning", "alert.severity == 'warning'", detail=str(a["severity"]))
-        from alerts import validate_alert
-        err = validate_alert(a)
+        # HR-poller removal: validate_alert is now inlined in tab_away_detector
+        # (was imported from the deleted alerts.py poller module).
+        err = tad.validate_alert(a)
         check(err is None, "alert passes the shared-contract validator", detail=str(err))
 
         # id format: proctor:tab_away:<user>:<slug>:<dedupe> (5 colon segments)

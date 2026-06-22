@@ -101,7 +101,7 @@ describe("sessionForAlert", () => {
     expect(joined).toBeNull();
   });
 
-  it("returns null for contest-eval candidates with no session at all", () => {
+  it("returns null for a session-less alert whose candidate never started a session", () => {
     expect(sessionForAlert({ hackerrank_username: "Ghost_X" }, sessions)).toBeNull();
     expect(sessionForAlert({ hackerrank_username: "Ghost_X" }, [])).toBeNull();
   });

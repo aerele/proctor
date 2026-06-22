@@ -6,7 +6,7 @@ Build + Artifact Registry) from scratch.
 
 This runbook is self-contained: every command and behavior below tracks the
 actual repo — `backend/deploy-gcp.sh`, `frontend/deploy-gcp.sh`,
-`video-worker/deploy-gcp.sh`, `backend/src/config.mjs`, `backend/src/handler.mjs`,
+`backend/src/config.mjs`, `backend/src/handler.mjs`,
 `backend/src/lib/clients.mjs`, `backend/src/lib/auth.mjs`,
 `backend/src/routes/healthCheck.mjs`, `frontend/src/api.ts`, `.env.deploy.example`,
 `backend/gcs-lifecycle.json`, and `backend/gcs-cors.json`. For current deployed
@@ -58,6 +58,42 @@ The APIs the platform needs (also enabled idempotently by the deploy scripts):
 `run`, `cloudbuild`, `artifactregistry`, `firestore`, `storage`, `iamcredentials`
 (the setup doc additionally enables `cloudresourcemanager`).
 
+### From-scratch bootstrap steps
+
+This first step is run by a **person with full `gcloud` auth** (someone who can
+create projects and link billing), **not** by the build/deploy agent. Its job is
+only: project + billing + APIs + deployer SA + key + handoff. It deliberately does
+**not** create app secrets or run the deploy scripts. The isolation requirement —
+brand-new, budget-capped, deletable project; deployer SA scoped to only this
+project (GCP IAM is per-project, so it cannot see other projects/VMs/prod); no
+org/folder roles; no handover of personal user credentials.
+
+| Step | Action |
+| --- | --- |
+| 1. Create project | `gcloud projects create "$PROJECT_ID"` — IDs are globally unique (6-30 chars). |
+| 2. Link billing | Link an open billing account. Recommended: a small budget (~$20) with **50/90/100% alerts** so an overnight run can't run up cost. |
+| 3. Enable APIs | `run`, `cloudbuild`, `artifactregistry`, `firestore`, `storage`, `iamcredentials`, `cloudresourcemanager`. |
+| 4. Deployer SA | `proctor-deployer@…`, granted **`roles/owner` on this project only** (or the tighter per-role list above). |
+| 5. Create key | A scoped SA JSON key at `$HOME/<service-account-key.json>`, **`chmod 600`**. |
+| 6. Cloud Build perm | Grant the Cloud Build SA `roles/cloudbuild.builds.builder` (fresh-project gotcha; non-fatal if redundant). |
+| 7. Verify | Activate the key on its own and confirm `gcloud projects describe` prints the project id. |
+
+**Handoff to the build agent.** On the machine that holds the proctor repo, the
+bootstrap writes the gitignored env file the deploy agent reads:
+
+```bash
+cd proctor
+mkdir -p monitoring/.data
+cat > monitoring/.data/gcp-dev.env <<EOF
+GCP_PROJECT_ID=$PROJECT_ID
+GCP_REGION=$REGION
+GOOGLE_APPLICATION_CREDENTIALS=$KEY_PATH
+EOF
+chmod 600 monitoring/.data/gcp-dev.env
+```
+
+**Cleanup** when done: delete the SA key, then `gcloud projects delete "$PROJECT_ID"`.
+
 ### Project facts
 
 | Fact | Value |
@@ -99,14 +135,9 @@ Fields in `.env.deploy.example` (verified):
 | `ALERTS_COLLECTION` | Firestore alerts collection. Default `proctor_alerts`. |
 | `PUBLIC_APP_ORIGIN` | CORS origin. Start `*`; tighten to the frontend URL later (§5). |
 | `EVIDENCE_BUCKET` | Globally-unique GCS bucket for evidence. |
-| `SOURCE_BUCKET` | Video-worker source — usually equal to `EVIDENCE_BUCKET`. |
-| `DEST_BUCKET` | Merged-review-video bucket (video-worker only). |
 | `BACKEND_SERVICE_NAME` | `proctor-api`. |
 | `FRONTEND_SERVICE_NAME` | `proctor-web`. |
-| `VIDEO_WORKER_SERVICE_NAME` | `proctor-video-worker`. |
 | `API_URL` | Backend Cloud Run URL — fill AFTER the backend deploy (§2). |
-| `WORKER_TOKEN` | Protects the video-worker `/merge` endpoint. `openssl rand -base64 32`. |
-| `MAX_USERNAMES_PER_REQUEST` | Local merge-helper batch cap. Default `25`. |
 
 ### Read by the backend but NOT yet in `.env.deploy.example`
 
@@ -190,6 +221,13 @@ export API_URL="$(gcloud run services describe "$BACKEND_SERVICE_NAME" \
 > resets a tuned limit to a code default. You no longer hand-`--update-env-vars`
 > the Judge0/invigilator/sweep keys — set them in `.env.deploy.local` and run the
 > script.
+
+The script ends by printing the **Backend URL** — copy it into `API_URL` before the
+frontend deploy.
+
+![Deployed proctor live in an exam capture (dev stack)](assets/verification/deployed-in-exam-capture-verified.png)
+
+*The candidate workspace running against a deployed stack — confirmation that the backend + frontend deploy described here yields a working in-exam experience.*
 
 ### 2c. Recording-signing key (the signer secret)
 
@@ -279,7 +317,7 @@ back to `proctor_*` defaults; the four credentials are closed-by-default when un
 `EXEC_RUN_CONCURRENCY` (`2`), `EXEC_SUBMIT_CONCURRENCY` (`4`),
 `EXEC_POLL_CONCURRENCY` (`16`), `EXEC_MAX_QUEUE` (`200`),
 `DISCONNECTED_STALENESS_MS` (`45000`), `PUBLIC_APP_ORIGIN` (`*`),
-`GATE_ATTEMPT_LIMIT` (`20`).
+`GATE_ATTEMPT_LIMIT` (`20` — a bad/≤0 value falls back to `20`, never disabling the cap).
 
 ### 2b. Retention lifecycle + daily sweep (Wave-7)
 
@@ -334,9 +372,10 @@ SERVICE_NAME="$FRONTEND_SERVICE_NAME" ./frontend/deploy-gcp.sh
    put in the bundle**; the unlock gates hash the typed password and compare to the
    embedded hash (`frontend/src/api.ts`).
 4. Builds: `VITE_API_BASE_URL=$API_URL VITE_ADMIN_PASSWORD_HASH=… VITE_INVIGILATOR_PASSWORD_HASH=… npm --workspace frontend run build`.
-5. **Post-build verification gate:** greps `frontend/dist` for **both** expected
-   hash strings; if either is missing it prints a loud error and `exit 1` to
-   **abort the deploy** (so a hash-less bundle can never ship).
+5. **Post-build verification gate** (`verify_dist_has_hashes`): greps `frontend/dist`
+   for **both** expected hash strings; if either is missing it prints a loud error
+   and `exit 1` to **abort the deploy** (so a hash-less bundle can never ship). The
+   gate is factored into a function and unit-tested by `frontend/deploy-gcp.guard.test.sh`.
 6. `gcloud builds submit frontend --tag $IMAGE`.
 7. `gcloud run deploy` — port `8080`, `128Mi`, cpu `1`, `--min-instances 0`,
    `--max-instances 3`, `--concurrency 1000`.
@@ -358,31 +397,7 @@ also unlocks it — `InvigilatorApp.tsx` accepts the admin hash as a fallback.
 
 ---
 
-## 4. (Optional) Deploy the video-worker
-
-```bash
-SERVICE_NAME="$VIDEO_WORKER_SERVICE_NAME" ./video-worker/deploy-gcp.sh
-```
-
-`video-worker/deploy-gcp.sh` (verified): creates `DEST_BUCKET` + applies
-`backend/gcs-lifecycle.json`; grants the runtime SA `storage.objectViewer` on
-`SOURCE_BUCKET`, `storage.objectAdmin` on `DEST_BUCKET`, and project
-`datastore.user` (the worker writes `merged_video_key` back to the session doc);
-deploys with `1Gi`, `--concurrency 1`, **`--timeout 3600s`** (ffmpeg/ffprobe come
-from its Dockerfile). Env set by the script: `SOURCE_BUCKET`, `DEST_BUCKET`,
-`SESSION_COLLECTION`, `MAX_USERNAMES_PER_REQUEST`, `WORKER_TOKEN`.
-
-> **CAVEAT (`video-worker/README.md`, untested vs real GCP):** if
-> `DEST_BUCKET` ≠ `EVIDENCE_BUCKET`, the backend signs the alert `video_key`
-> against the evidence bucket and the deep-link can 404. **The video-worker is NOT
-> deployed on the dev stack** — the alert→recording deep-link currently has no
-> merged video; admin recording review plays raw chunks directly (the player
-> builds a playlist from `screen/chunk-*.webm`). **(unverified against a real GCP
-> run.)**
-
----
-
-## 4.5 (Optional) Deploy the eval service (`proctor-eval`)
+## 4. (Optional) Deploy the eval service (`proctor-eval`)
 
 `proctor-eval` is the **same `backend/` source as `proctor-api`, a different
 entrypoint** — it is built from `backend/Dockerfile.eval` (functions-framework
@@ -676,6 +691,14 @@ What changed, and is now the standing practice:
 | API root `/` | Returns **404 by design** — all routes are `/api/*`. |
 | min-instances | `0` for testing; set `1` for a real exam (cold-start avoidance). |
 
+### Capacity & cost notes
+
+The defaults are tuned for cost: **zero min instances** (set `1` for a real exam),
+**low-bitrate screen chunks**, and a **short evidence auto-delete window** with
+longer-lived export zips. Video is inherently large — at **~800 candidates × 90 min**,
+expect meaningful GCS usage. **Test with 20–30 devices** before a real drive to
+size concurrency, Judge0 throughput, and storage.
+
 ---
 
 ## Verify the deploy (smoke test)
@@ -714,3 +737,54 @@ return 401 unauthenticated.
 
 > For a real exam, also drive the deployed stack in a browser as Admin /
 > Candidate / Invigilator and confirm the happy path.
+
+---
+
+## Real-exam standing rules
+
+- **Stage every cut + pre-flight before you flip traffic.** Deploy as a no-traffic
+  tagged revision, run the admin pre-flight health-check (`POST
+  /api/admin/health-check`, light) + smoke on the tag URL, then `update-traffic` to
+  it — keeping the prior revision at 0% for instant rollback. Run pre-flight
+  **again** right before the exam opens.
+- **`min-instances = 1` for a real exam.** Both scripts default `--min-instances 0`
+  (fine for testing — scale-to-zero). For an exam set the backend to `1` so the
+  first candidate doesn't eat a cold start:
+  `gcloud run services update "$BACKEND_SERVICE_NAME" --region "$REGION" --min-instances=1`.
+- **Lock CORS.** First deploy can keep `PUBLIC_APP_ORIGIN=*`; after the frontend URL
+  exists, set it to the exact frontend URL in `.env.deploy.local` and re-run the
+  backend in `full` mode (or one-key `--update-env-vars` it) — see §5.
+- **Set every secret in `.env.deploy.local`; the full deploy does the rest.**
+  `RETENTION_SWEEP_API_KEY`, `INVIGILATOR_PASSWORD`, `JUDGE0_API_KEY`, the signer-key
+  mount, and any `EXEC_*` overrides are all set by a `full` backend deploy (the
+  pre-flight gate aborts before build if a required one is missing). The frontend's
+  `VITE_INVIGILATOR_PASSWORD_HASH` is baked + verified by `frontend/deploy-gcp.sh` —
+  just set `INVIGILATOR_PASSWORD`.
+- **Create the signer-key secret once (out of band).** Recording-signing needs
+  `proctor-signer-key` in Secret Manager (mounted at `/secrets/signer-key.json`) —
+  see [§2c](#2c-recording-signing-key-the-signer-secret). The full-mode deploy
+  aborts if it's missing.
+- **Create the Cloud Scheduler sweep job** (§2b) — not automated by any script.
+- **Deploy ≠ push.** Deploying does **not** require a `git push` — deploys run from
+  local commits. Run a PII history scrub before pushing the repo anywhere public.
+
+### Quick sequence
+
+```bash
+# 0. (setup agent) bootstrap project + SA key + handoff env   → §0
+# 0b. (once) create the signer-key secret out of band:
+#     gcloud secrets create proctor-signer-key --replication-policy=automatic
+#     gcloud secrets versions add proctor-signer-key --data-file=<signer-sa-key.json>
+# 1. fill ALL secrets (ADMIN/INVIGILATOR pw, ingest+sweep keys, JUDGE0_API_KEY, buckets, EXEC_* tuning)
+cp .env.deploy.example .env.deploy.local && $EDITOR .env.deploy.local
+set -a; source .env.deploy.local; set +a
+# 2. backend, full mode → sets the COMPLETE env + mounts the signer key; prints Backend URL
+SERVICE_NAME="$BACKEND_SERVICE_NAME" ./backend/deploy-gcp.sh   # DEPLOY_MODE=full (default); image-only for routine code redeploys
+# 3. put that URL into API_URL, then frontend (bakes + verifies password hashes)
+export API_URL="$(gcloud run services describe "$BACKEND_SERVICE_NAME" --region "$REGION" --format='value(status.url)')"
+SERVICE_NAME="$FRONTEND_SERVICE_NAME" ./frontend/deploy-gcp.sh
+# 4. pre-flight + go-live: run POST /api/admin/health-check (light) → green;
+#    for prod, stage as --no-traffic --tag, verify on the tag URL, then update-traffic;
+#    set min-instances=1, lock CORS, create the scheduler sweep job (§2b).
+# NEVER git push without a PII history scrub first.
+```

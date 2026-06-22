@@ -1,8 +1,8 @@
 # Admin — Live Stats, Sessions, Alerts Console, IP Report, Attendance
 
-The admin console's **live-monitoring surfaces** let an exam administrator watch a contest in real time: how many candidates are live/locked/pending, drill into any session, triage proctoring and contest-eval alerts, spot proxy/off-campus IP clusters, and reconcile attendance against the roster — all scoped to the globally-selected contest and (where supported) a single room.
+The admin console's **live-monitoring surfaces** let an exam administrator watch a contest in real time: how many candidates are live/locked/pending, drill into any session, triage proctoring alerts, spot proxy/off-campus IP clusters, and reconcile attendance against the roster — all scoped to the globally-selected contest and (where supported) a single room.
 
-> **Product context.** Proctor is a standalone own-editor exam platform: candidates work inside our React + Monaco editor with Judge0-backed Run/Submit, and HackerRank was dropped from the candidate path (F8.2). The monitoring surfaces below watch sessions created by that own-editor flow. Separately, an **optional contest-eval monitoring poller** (`monitoring/`, Python) live-watches an *externally-hosted* HackerRank contest and emits cheating signals into the **same** alerts pipeline; those show up in the Live alerts console with `source: contest-eval`. The poller is an optional add-on, not the primary product.
+> **Product context.** Proctor is a standalone own-editor exam platform: candidates work inside our React + Monaco editor with Judge0-backed Run/Submit, and HackerRank was dropped from the candidate path (F8.2). The monitoring surfaces below watch sessions created by that own-editor flow. (The legacy HackerRank contest-eval poller — which used to emit `source: contest-eval` cheating alerts into this same pipeline — was removed when proctor moved to its own in-app contest platform, so those `source: contest-eval` alerts no longer appear; `proctor` is the only alert source now.)
 
 All surfaces in this page live in the admin frontend under `frontend/src/admin/` — the `/admin` surface (`frontend/src/App.tsx` is now just a ~26-line pathname router) — and are gated by the admin password (`x-admin-password`, `requireAdmin` on every backing route). The backend is decomposed: `backend/src/handler.mjs` owns the central dispatch table (plus a few cross-factory helpers kept single-source), while the route bodies live in `backend/src/routes/*.mjs` factory modules wired in at handler module scope.
 
@@ -134,7 +134,7 @@ Bulk buttons in the alerts console show the **union** of valid actions across th
 
 ## Live alerts console
 
-**Admin POV.** The **Live alerts** tab (`AlertsConsole` in `frontend/src/admin/views/AlertsConsole.tsx`) shows proctoring and contest-eval signals across all rooms, **newest first**, auto-refreshing every 5 s (the same poll as Live stats). It is backed by `GET /api/admin/alerts` (`adminAlerts` in `backend/src/routes/alerts.mjs`). Each row can carry a recorded evidence clip.
+**Admin POV.** The **Live alerts** tab (`AlertsConsole` in `frontend/src/admin/views/AlertsConsole.tsx`) shows proctoring signals across all rooms, **newest first**, auto-refreshing every 5 s (the same poll as Live stats). It is backed by `GET /api/admin/alerts` (`adminAlerts` in `backend/src/routes/alerts.mjs`). Each row can carry a recorded evidence clip.
 
 ![Live alerts console with filters and selection bar](../assets/e2e/admin-review/04a-alerts-console.png)
 
@@ -142,7 +142,6 @@ Bulk buttons in the alerts console show the **union** of valid actions across th
 
 | Filter | Options | Side | Notes |
 | --- | --- | --- | --- |
-| Source | All / Proctor / Contest-eval | server (`?source=`) | `contest-eval` rows come from the optional monitoring poller |
 | Severity | All / Critical / Warning / Info | server (`?severity=`) | |
 | Room | All rooms / each room | server (`?room=`) | room list comes from session docs (`listSessionRooms`) so it matches Live stats |
 | Group by | No grouping / Candidate / Alert type | client | grouping only (`alertGrouping.ts`) |

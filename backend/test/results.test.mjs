@@ -1,5 +1,5 @@
 // backend/test/results.test.mjs — S-J §2.14 the Results-tab rollup, PURE half.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md
 //          §2.14 (Results tab: rank/per-problem/integrity column/selection),
 //          §2.13 (multi-college projection rule), §2.9 (Enrollment selection +
 //          final_snapshot), §3.3 (best-per-problem rollup + tie-break)
@@ -143,7 +143,8 @@ test("buildResultsRows: PURGED contest falls back to enrollment.final_snapshot (
       total_score: 130,
       per_problem: { p1: 80, p2: 50 },
       integrity: { alerts_by_severity: { critical: 1, warning: 0, info: 0 }, review_verdict: "flagged" },
-      unique_id: "21CS001", name: "Asha"
+      // v1.1 G1: roll_number now rides the snapshot alongside unique_id/name.
+      unique_id: "21CS001", name: "Asha", roll_number: "R-117"
     }
   }];
   const rows = buildResultsRows({
@@ -156,6 +157,20 @@ test("buildResultsRows: PURGED contest falls back to enrollment.final_snapshot (
   assert.equal(rows[0].from_snapshot, true);
   assert.equal(rows[0].per_problem[0].best_score, 80);
   assert.equal(rows[0].integrity.review_verdict, "flagged");
+  // v1.1 G1 (erasure keeps roll#): the snapshot-sourced roll_number survives purge.
+  assert.equal(rows[0].roll_number, "R-117");
+});
+
+test("buildResultsRows: roll_number rides the LIVE row from the person doc (v1.1 G1)", () => {
+  const fx = fixture();
+  // Attach roll numbers to the person docs (the live, un-purged path).
+  fx.persons.get("kec~21cs001").roll_number = "R-1";
+  fx.persons.get("psg~21cs001").roll_number = "R-2";
+  const rows = buildResultsRows({ ...fx, problemOrder: PROBLEM_ORDER, multiCollege: true });
+  assert.equal(rows[0].roll_number, "R-1");
+  assert.equal(rows[1].roll_number, "R-2");
+  // A person with no roll_number → "" (never undefined; CSV/UI-safe).
+  assert.equal(rows[2].roll_number, "");
 });
 
 // ---- buildResultsCsv -----------------------------------------------------------

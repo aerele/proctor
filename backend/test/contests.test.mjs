@@ -1,6 +1,6 @@
 // backend/test/contests.test.mjs — S-B: contests collection, SHIPS DARK.
-// Specs: docs/superpowers/specs/2026-06-10-f10-product-vision.md §2.7/§7 row 2/§10.3
-//        docs/superpowers/specs/2026-06-10-f9-identity-data-lifecycle-design.md §2/§6
+// Specs: docs/design-history/specs/2026-06-10-f10-product-vision.md §2.7/§7 row 2/§10.3
+//        docs/design-history/specs/2026-06-10-f9-identity-data-lifecycle-design.md §2/§6
 // Covers: proctor_contests CRUD (create/list/update/status via admin endpoints),
 // slugify + collision -2 suffix, access-code mint + collision retry, server-side
 // validation, resolveContest and the scopedQuery chokepoint.
@@ -199,6 +199,94 @@ test("create: optional fields are validated and stored", async () => {
   assert.equal(contest.start_at, "2026-07-01T04:00:00.000Z");
   assert.equal(contest.end_at, "2026-07-01T07:00:00.000Z");
   assert.equal(contest.evidence_retention_days, 10);
+});
+
+// ---- take-home: persisted fields (T-B2 create/update round-trip, T-B3 phone) -
+
+test("T-B2 create: take_home defaults falsy; explicit values persist (behavior-preserving)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  // Legacy/default create: both new fields default falsy, byte-identical to today.
+  const plain = (await call(createReq({ name: "Plain" }))).body.contest;
+  assert.equal(plain.take_home_enabled, false);
+  assert.equal(plain.proctor_contact_phone, "");
+  // Explicit remote create persists both.
+  const remote = (await call(createReq({
+    name: "Remote", take_home_enabled: true, proctor_contact_phone: "+91 98765 43210"
+  }))).body.contest;
+  assert.equal(remote.take_home_enabled, true);
+  assert.equal(remote.proctor_contact_phone, "+91 98765 43210");
+});
+
+test("T-B2 update: toggles both; absent-in-body leaves them untouched (spread preserves)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  await call(createReq({ name: "Toggle", take_home_enabled: true, proctor_contact_phone: "+1 555 0100" }));
+  // Toggle both in one update.
+  const off = (await call(updateReq({ slug: "toggle", take_home_enabled: false, proctor_contact_phone: "" }))).body.contest;
+  assert.equal(off.take_home_enabled, false);
+  assert.equal(off.proctor_contact_phone, "");
+  // Re-enable, then an UNRELATED update must leave both untouched (the spread).
+  await call(updateReq({ slug: "toggle", take_home_enabled: true, proctor_contact_phone: "+1 555 0199" }));
+  const renamed = (await call(updateReq({ slug: "toggle", name: "Toggle (renamed)" }))).body.contest;
+  assert.equal(renamed.take_home_enabled, true, "absent take_home_enabled in body is untouched");
+  assert.equal(renamed.proctor_contact_phone, "+1 555 0199", "absent proctor_contact_phone in body is untouched");
+});
+
+test("T-B3 phone validation: >40 chars → 400; null/undefined → \"\"; whitespace trimmed", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  // Over the 40-char cap is a hard 400 (no silent truncation).
+  const over = await call(createReq({ name: "OverCap", proctor_contact_phone: "9".repeat(41) }));
+  assert.equal(over.statusCode, 400);
+  // At the cap is fine; surrounding whitespace is trimmed.
+  const atCap = (await call(createReq({ name: "AtCap", proctor_contact_phone: "  " + "9".repeat(40) + "  " }))).body.contest;
+  assert.equal(atCap.proctor_contact_phone, "9".repeat(40));
+  // null → "".
+  const nullPhone = (await call(createReq({ name: "NullPhone", proctor_contact_phone: null }))).body.contest;
+  assert.equal(nullPhone.proctor_contact_phone, "");
+  // Bad take_home_enabled type → 400.
+  assert.equal((await call(createReq({ name: "BadFlag", take_home_enabled: "yes" }))).statusCode, 400);
+  // Update path enforces the cap too.
+  await call(createReq({ name: "UpdCap" }));
+  assert.equal((await call(updateReq({ slug: "updcap", proctor_contact_phone: "x".repeat(41) }))).statusCode, 400);
+});
+
+// ---- v1.1 G1: retention_anchor wiring (KPR-safe auto-sweep opt-in) ----------
+
+test("retention_anchor: a NEW take_home contest defaults to exam_end (auto-sweep)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  const remote = (await call(createReq({ name: "Remote Anchor", take_home_enabled: true }))).body.contest;
+  // Take-home opts in to the automatic end_at-derived clock → auto-sweeps with
+  // no manual selection-done click.
+  assert.equal(remote.retention_anchor, "exam_end");
+});
+
+test("retention_anchor: a non-take_home contest defaults to selection_done (manual)", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  // College/on-site contest keeps the safe pre-v1.1 semantics — never auto-swept.
+  const college = (await call(createReq({ name: "College Anchor" }))).body.contest;
+  assert.equal(college.retention_anchor, "selection_done");
+  // Explicit take_home_enabled:false is also selection_done.
+  const explicitOff = (await call(createReq({ name: "Explicit Off", take_home_enabled: false }))).body.contest;
+  assert.equal(explicitOff.retention_anchor, "selection_done");
+});
+
+test("retention_anchor: admin may override per contest (create + update); garbage → 400", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore() });
+  // Override on create: a take-home contest forced back to manual.
+  const forcedManual = (await call(createReq({
+    name: "Forced Manual", take_home_enabled: true, retention_anchor: "selection_done"
+  }))).body.contest;
+  assert.equal(forcedManual.retention_anchor, "selection_done");
+  // Override on create: a college contest opted in to auto-sweep.
+  const forcedAuto = (await call(createReq({
+    name: "Forced Auto", retention_anchor: "exam_end"
+  }))).body.contest;
+  assert.equal(forcedAuto.retention_anchor, "exam_end");
+  // Update path can flip the anchor.
+  const flipped = (await call(updateReq({ slug: "forced-auto", retention_anchor: "selection_done" }))).body.contest;
+  assert.equal(flipped.retention_anchor, "selection_done");
+  // Garbage anchor → hard 400 (never silently defaulted) on both paths.
+  assert.equal((await call(createReq({ name: "Bad Anchor", retention_anchor: "whenever" }))).statusCode, 400);
+  assert.equal((await call(updateReq({ slug: "forced-auto", retention_anchor: "whenever" }))).statusCode, 400);
 });
 
 test("create: slug collision gets the -2 / -3 suffix", async () => {
