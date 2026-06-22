@@ -248,12 +248,6 @@ Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all
 
 ---
 
-## 10. Optional video-worker merge service
-
-`video-worker/src/server.mjs` is an **optional** Cloud Run service that merges a session's screen chunks into one review video and writes `merged_video_key` back onto the session doc. It is **NOT deployed by default** — and the alert→recording deep-link falling back to the chunk player (vs deploying the video-worker) is a **pending** follow-up. Consequently, when the worker is not deployed, alert deep-links and recording review **play the raw chunks** rather than a merged video.
-
----
-
 ## 11. Full HTTP route inventory (77 routes)
 
 There are **77 unique routes**, extracted from every `path === "…"` dispatch site in the backend: **74** `/api/*` routes dispatched from the main handler `backend/src/handler.mjs` (route *bodies* live in the `routes/*.mjs` factories — §6 — but the central dispatch table is in `handler.mjs`), plus **3** `/eval-ui/*` page routes served by the separate proctor-eval entrypoint `backend/src/eval-server.mjs` (NOT `handler.mjs`). The root [`README.md`](../../README.md) HTTP API reference is the canonical, fuller per-route table (method · auth · purpose); this section is the grouped at-a-glance map. Unmatched path → `404`. Grouped by family:

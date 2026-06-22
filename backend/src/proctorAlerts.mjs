@@ -362,12 +362,15 @@ export function makeProctorAlerts(ctx) {
     return item;
   }
 
-  // Deep-link target for a sure-shot alert: the merged review video the worker
-  // wrote back onto the session doc (merged_video_key) once a merge succeeded.
-  // B4: if no merged video exists yet, return null rather than a `…/screen/`
-  // FOLDER prefix — a folder prefix signs a nonexistent object and renders a
-  // broken link. With null, the console simply hides the link until the merge
-  // runs and merged_video_key is populated.
+  // Deep-link target for a sure-shot alert: a merged review video object key, if
+  // one was ever written onto the session doc as `merged_video_key`. There is no
+  // longer a producer for this field (the optional merge worker was dropped in
+  // favor of admin chunk-based playback), so in practice this resolves to null
+  // and the console hides the deep-link. Kept as a defensive read so a future
+  // merged-video producer can populate `merged_video_key` and have deep-links
+  // light up with no further wiring.
+  // B4: never return a `…/screen/` FOLDER prefix — a folder prefix signs a
+  // nonexistent object and renders a broken link. null cleanly hides the link.
   function sureShotVideoKey(session) {
     return session.merged_video_key || null;
   }
