@@ -21,7 +21,7 @@ import {
   analyzeClones,
 } from "./evaluationClone.mjs";
 
-export const EVALUATOR_VERSION = "3";
+export const EVALUATOR_VERSION = "4";
 
 export const THRESHOLDS = {
   // D3 — switch-away → paste correlation window (paste/burst within 10s of episode end).
@@ -1239,19 +1239,73 @@ export function crossCandidateAnalysis({ candidates, problems }) {
 
   const submit_clusters = computeSubmitClusters(candidates, hardness, roomByKey);
 
+  // PENDING-3: per-(unordered)-pair proximity index — does the pair share a room,
+  // an IP /24, or have a tight-gap co-submission on any shared problem? A
+  // single-problem cluster may only escalate to `confirmed` when ≥1 of these is
+  // present (different-room/different-machine/far-apart strangers who match a
+  // single problem are not conclusively copying). Keyed by sorted pair.
+  const tightPairKeys = new Set();
+  for (const t of tightAnnotated) tightPairKeys.add([t.a, t.b].sort().join("|"));
+  const pairProximity = (a, b) => {
+    const ra = roomByKey.get(a) || "";
+    const rb = roomByKey.get(b) || "";
+    const same_room = !!ra && ra === rb;
+    const same_ip_prefix = ipPrefixOverlap(ipsByKey.get(a) || [], ipsByKey.get(b) || []);
+    const tight = tightPairKeys.has([a, b].sort().join("|"));
+    return same_room || same_ip_prefix || tight;
+  };
+
   // ---- patches per identity ----
   const patches = new Map();
   for (const c of candidates) patches.set(c.identityKey, emptyPatch());
 
-  // clone cluster refs (exact + skeleton)
-  attachClusterRefs(patches, clone.exact_clusters, "exact", hardnessMap);
-  attachClusterRefs(patches, clone.skeleton_clusters, "skeleton", hardnessMap);
+  // clone cluster refs (exact + skeleton); canonical map down-weights hard flags.
+  const canonicalMap = clone.canonical || {};
+  attachClusterRefs(patches, clone.exact_clusters, "exact", hardnessMap, canonicalMap);
+  attachClusterRefs(patches, clone.skeleton_clusters, "skeleton", hardnessMap, canonicalMap);
   attachFailedClusterRefs(patches, failedClusters);
 
-  // recurring pairs
+  // recurring pairs — conclusiveness (PENDING-1/2/3, 2026-06-22).
+  // A recurring pair is CONCLUSIVE (drives `confirmed`) iff it is EITHER:
+  //   • MULTI-problem: ≥2 shared SKELETON problems — recurring identical
+  //     structure across two or more problems is real copying even when
+  //     variables were renamed (the renamed-variable copy is precisely what the
+  //     SKELETON signature catches). This path is UNCHANGED by the fixes: the
+  //     the multi-problem skeleton-only renamed-variable rings stay confirmed.
+  //     A purely-canonical multi-problem coincidence is still removed below.
+  //   • SINGLE-problem: the one shared problem must be a byte-identical
+  //     (coreExact) match — PENDING-1: skeleton-only agreement on a SINGLE
+  //     problem is not proof (convergent algorithms collide on skeleton) — AND
+  //     that problem must be HARD and NON-canonical — PENDING-2: an identical
+  //     canonical one-liner (e.g. weather-observation-station-5 SQL) is
+  //     convergence, not copying — AND the pair must have a PROXIMITY signal:
+  //     same room / same IP / tight co-submission — PENDING-3: a single-problem
+  //     match between different-room/different-machine/far-apart strangers is
+  //     not a confirmed copy.
+  //
+  // SCOPE NOTE: PENDING-1's coreExact requirement applies to the SINGLE-problem
+  // case only (per the spec). Restricting the multi-problem path to coreExact
+  // would release real renamed-variable copy rings — a false
+  // negative far worse than the canonical-SQL false positive being fixed.
   for (const rp of clone.recurring_pairs || []) {
-    const conclusive = rp.n_problems >= 2 || rp.n_hard >= 1;
     const [a, b] = rp.pair;
+    const nProblems = rp.n_problems;
+    // Multi-problem: ≥2 shared SKELETON problems, of which ≥1 is NON-canonical.
+    // Two independent skeleton matches is the original conclusive signal; the
+    // only thing the canonical guard removes is the degenerate case where BOTH
+    // shared problems are canonical one-liners (pure convergence, no substance).
+    // the substantive+canonical pair (one substantive + one canonical problem) keeps ≥1
+    // non-canonical and stay conclusive; the KPR renamed-variable rings (2 med
+    // skeleton problems, neither canonical) stay conclusive.
+    const canonicalShared = (rp.problems || []).filter((c) => canonicalMap[c]).length;
+    const nNonCanonProblems = nProblems - canonicalShared;
+    const multiProblem = nProblems >= 2 && nNonCanonProblems >= 1;
+    const nHardConclusive = Number(rp.n_hard_conclusive) || 0;
+    const singleProblem =
+      nProblems === 1 &&
+      nHardConclusive >= 1 &&
+      pairProximity(a, b);
+    const conclusive = multiProblem || singleProblem;
     attachRecurringRef(patches, a, b, rp, conclusive);
     attachRecurringRef(patches, b, a, rp, conclusive);
   }
@@ -1290,6 +1344,9 @@ export function crossCandidateAnalysis({ candidates, problems }) {
     tight: tightAnnotated,
     paste_match_edges,
     submit_clusters,
+    // PENDING-2: per-problem canonical/low-entropy map (surfaced for the UI +
+    // the origin-rescue's skeleton-only guard).
+    canonical: clone.canonical || {},
     cohort: buildCohort(candidates),
   };
 
@@ -1321,21 +1378,33 @@ function candidateTotalScore(c) {
   return t;
 }
 
-function attachClusterRefs(patches, clusters, kind, hardnessMap) {
+function attachClusterRefs(patches, clusters, kind, hardnessMap, canonicalMap = {}) {
   for (const g of clusters || []) {
     const users = [...new Set(g.members.map((m) => m.user))];
-    for (const u of users) {
-      const patch = patches.get(u);
-      if (!patch) continue;
-      const others = users.filter((x) => x !== u);
-      patch.clone_cluster_refs.push({
-        problem_id: g.ch,
-        kind,
-        n_users: g.n_users,
-        hardness: g.hardness || hardnessMap[g.ch] || "easy",
-        others,
-      });
-    }
+    const rawHardness = g.hardness || hardnessMap[g.ch] || "easy";
+    // PENDING-2: a HARD cluster on a CANONICAL (low-entropy, short-form) problem
+    // is down-weighted — an identical canonical answer is convergence, not copy
+    // evidence — so it does NOT emit the critical `hard_clone_cluster` flag. It
+    // is recorded as the problem's effective hardness with a `canonical` marker
+    // so deriveCrossFlags treats it as a (warning-level) clone_cluster, not hard.
+    const canonical = !!canonicalMap[g.ch];
+    patch_push(patches, users, {
+      problem_id: g.ch,
+      kind,
+      n_users: g.n_users,
+      hardness: rawHardness,
+      canonical,
+    });
+  }
+}
+
+// shared per-user clone-ref push (each user gets the cluster ref minus self).
+function patch_push(patches, users, ref) {
+  for (const u of users) {
+    const patch = patches.get(u);
+    if (!patch) continue;
+    const others = users.filter((x) => x !== u);
+    patch.clone_cluster_refs.push({ ...ref, others });
   }
 }
 
@@ -1539,8 +1608,11 @@ function deriveCrossFlags(key, patch) {
   }
 
   // hard clone cluster → critical; any clone → warning.
+  // PENDING-2: a hard cluster on a CANONICAL problem is down-weighted — it does
+  // NOT count as a hard cluster (an identical canonical one-liner is convergence,
+  // not copying), so it falls through to the warning-level `clone_cluster`.
   const exactSkel = patch.clone_cluster_refs.filter((r) => r.kind === "exact" || r.kind === "skeleton");
-  const hardClones = exactSkel.filter((r) => r.hardness === "hard");
+  const hardClones = exactSkel.filter((r) => r.hardness === "hard" && !r.canonical);
   if (hardClones.length) {
     const r = hardClones[0];
     flags.push({

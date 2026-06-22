@@ -23,6 +23,67 @@
 const PY_WS = "\\t\\n\\x0b\\f\\r\\x1c\\x1d\\x1e\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
 
 // ---------------------------------------------------------------------------
+// canonical-answer / low-entropy guard (PENDING-2, applied 2026-06-22)
+// ---------------------------------------------------------------------------
+// A problem is CANONICAL (its accepted solutions converge to a handful of
+// near-identical short forms) when, cohort-wide, the distinct normalized
+// accepted forms are FEW *and* the typical accepted solution is SHORT. Two
+// strangers writing the same canonical SQL one-liner (e.g.
+// weather-observation-station-5) collide on coreExact by convergence, not
+// copying — so an identical match on a canonical problem is NOT copy evidence
+// and its clone cluster is down-weighted regardless of the solver-count
+// "hardness" (which is rare-solve, not algorithmic difficulty).
+//
+// The two-part gate (few forms AND short solutions) is what separates a
+// canonical one-liner from a substantive algorithm that merely happens to have
+// few distinct forms: a 672-char Josephus solution shared byte-for-byte is real
+// copying even if only a few people solved it, because an identical LONG program
+// does not arise by convergence. June-20 evidence: weather-5 = 7 forms / 165-char
+// median (CANONICAL); challenge-5-aerele = 4 forms / 672-char median (NOT — the
+// the substantive 672-char identical match stays conclusive).
+export const CANONICAL_MAX_FORMS = 8; // ≤8 distinct accepted forms cohort-wide
+export const CANONICAL_MAX_LEN = 200; // AND median accepted coreExact length ≤200
+// AND enough INDEPENDENT solvers that convergence is demonstrable. A problem
+// solved by only 2 people who happen to share short identical code is NOT
+// "canonical" — that is suspicious convergence (likely a copy), not a cohort-wide
+// editorial collapse. The canonical down-weight only applies when a real pool of
+// independent solvers converged to few short forms (weather-5: 10 solvers).
+export const CANONICAL_MIN_SOLVERS = 5;
+
+function medianLen(lens) {
+  if (!lens.length) return 0;
+  const a = lens.slice().sort((x, y) => x - y);
+  const n = a.length;
+  return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+}
+
+// Per-problem canonical map from ACCEPTED records. Returns Object<ch, bool>.
+// distinctForms counts distinct coreExact strings among accepted submissions for
+// the problem (one count per distinct user-form so a single user's resubmission
+// of the same form is not double-counted); medianLen is over those same forms.
+function computeCanonical(acceptedRecs) {
+  const byCh = new Map(); // ch -> Map(exact -> Set(user))
+  for (const r of acceptedRecs) {
+    if (!byCh.has(r.ch)) byCh.set(r.ch, new Map());
+    const m = byCh.get(r.ch);
+    if (!m.has(r.exact)) m.set(r.exact, new Set());
+    m.get(r.exact).add(r.user);
+  }
+  const out = {};
+  for (const [ch, forms] of byCh) {
+    const distinctForms = forms.size;
+    const nSolvers = new Set([].concat(...[...forms.values()].map((s) => [...s]))).size;
+    const lens = [...forms.keys()].map((s) => s.length);
+    const med = medianLen(lens);
+    out[ch] =
+      distinctForms <= CANONICAL_MAX_FORMS &&
+      med <= CANONICAL_MAX_LEN &&
+      nSolvers >= CANONICAL_MIN_SOLVERS;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // difficulty bucketing (identical thresholds to the Python original)
 // ---------------------------------------------------------------------------
 export function makeHardness(challenges) {
@@ -242,6 +303,23 @@ export function analyzeClones(meta, code) {
   const exactCl = clusters(acc, "exact");
   const skelCl = clusters(acc, "skel");
 
+  // canonical/low-entropy guard (PENDING-2) — per-problem, over accepted recs.
+  const canonical = computeCanonical(acc);
+
+  // EXACT (coreExact byte-identical) co-occurrence per pair per problem, derived
+  // from the EXACT clusters. A pair shares an exact problem iff both users appear
+  // in the same exact-signature cluster for that ch (PENDING-1: skeleton-only
+  // agreement on a single problem is not proof; require coreExact).
+  const exactPairChs = new Map(); // pairKey -> Set(ch) where they coreExact-match
+  for (const g of exactCl) {
+    const users = [...new Set(g.members.map((m) => m.user))].sort(pyStrCmp);
+    for (const [a, b] of combinations2(users)) {
+      const k = pairKey(a, b);
+      if (!exactPairChs.has(k)) exactPairChs.set(k, new Set());
+      exactPairChs.get(k).add(g.ch);
+    }
+  }
+
   // recurring pairs (angle 13)
   function pairProblems(clusterList) {
     const pp = new Map(); // pairKey -> {pair, set of ch}
@@ -270,6 +348,17 @@ export function analyzeClones(meta, code) {
     const chs = entry.chs;
     const hardEntry = ppHard.get(k);
     const hardChs = hardEntry ? hardEntry.chs : new Set();
+    // PENDING-1: the problems on which the pair shares a byte-identical coreExact
+    // accepted form (a strict subset of the skeleton-shared `chs`).
+    const exactChs = exactPairChs.get(k) || new Set();
+    const exactProblems = [...chs].filter((c) => exactChs.has(c)).sort(pyStrCmp);
+    // PENDING-2: exact-matched problems that are NOT canonical — the substantive
+    // identical matches (an identical answer on a canonical one-liner is
+    // convergence, not copy evidence, and is down-weighted out of conclusiveness).
+    const exactNonCanonChs = exactProblems.filter((c) => !canonical[c]);
+    // PENDING-2: hard problems that are BOTH exact-matched AND not canonical —
+    // the only hard problems that count toward single-problem conclusiveness.
+    const hardConclusiveChs = [...hardChs].filter((c) => exactChs.has(c) && !canonical[c]);
     if (chs.size >= 2 || hardChs.size >= 1) {
       recurring.push({
         pair, // [a, b]
@@ -278,6 +367,13 @@ export function analyzeClones(meta, code) {
         problems: [...chs].sort(pyStrCmp),
         n_hard: hardChs.size,
         hard_problems: [...hardChs].sort(pyStrCmp),
+        // PENDING-1/2 conclusiveness inputs (consumed by the cross-pass gate):
+        n_exact: exactProblems.length,
+        exact_problems: exactProblems,
+        n_exact_noncanonical: exactNonCanonChs.length,
+        exact_noncanonical_problems: exactNonCanonChs.sort(pyStrCmp),
+        n_hard_conclusive: hardConclusiveChs.length,
+        hard_conclusive_problems: hardConclusiveChs.sort(pyStrCmp),
       });
     }
   }
@@ -315,15 +411,30 @@ export function analyzeClones(meta, code) {
       a: a.user,
       b: b.user,
     })),
+    // PENDING-2: per-problem canonical/low-entropy map (Object<ch, bool>).
+    // JS-only enrichment for the cross-pass conclusiveness gate; stripped from
+    // cloneAnalysisCanonical so the Python byte-parity contract is preserved.
+    canonical,
   };
   out._records = recs;
   return out;
 }
 
 export function cloneAnalysisCanonical(meta, code) {
-  // Exactly the dict clone_detect.py serializes (drops the _records extra).
+  // Exactly the dict clone_detect.py serializes (drops the _records extra and
+  // the JS-only conclusiveness enrichments added 2026-06-22 for PENDING-1/2 —
+  // canonical map + per-pair n_exact/exact_problems/n_hard_conclusive/
+  // hard_conclusive_problems — so the Python byte-parity contract is preserved).
   const out = analyzeClones(meta, code);
   delete out._records;
+  delete out.canonical;
+  out.recurring_pairs = out.recurring_pairs.map((r) => {
+    const {
+      n_exact, exact_problems, n_exact_noncanonical, exact_noncanonical_problems,
+      n_hard_conclusive, hard_conclusive_problems, ...rest
+    } = r;
+    return rest;
+  });
   return out;
 }
 

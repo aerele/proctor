@@ -1,7 +1,7 @@
 # Proctor Evaluation Engine — SPEC
 
 **Status:** source of truth for all evaluation rules. Code conforms to this; this does not describe code.
-**Derived from:** the live code on branch `feat/eval-logic` (evaluator_version `"3"`, recommend_version `"1"`).
+**Derived from:** the live code on branch `feat/eval-logic` (evaluator_version `"4"`, recommend_version `"2"`).
 **Scope:** the per-candidate + cross-candidate evaluation that turns raw contest evidence (submissions, editor/shell/clipboard telemetry) into a verdict (`integrity` tier × `talent` tier × `composite`) and a hire recommendation.
 
 Every rule cites `file:line` from `backend/src/`. Read the code only to verify; implement from this.
@@ -29,60 +29,87 @@ The integrity axis answers: *did this candidate cheat?* It is **orthogonal to ta
 
 Clone detection compares two normalized forms of source code, per problem.
 
-**`coreExact`** — `evaluationClone.mjs:72-89`. Pipeline:
-1. `stripBoiler` removes import/boilerplate lines: any line matching shebang, `import `, `os.environ`, `OUTPUT_PATH`, `__main__`, `fptr`, `package `, `using System` (`evaluationClone.mjs:59-70`).
-2. Strip all comments — `//…`, `/*…*/`, `#…`, `--…` (`COMMENT` regex `:47`; applied `:74`).
-3. Strip Python `'''…'''` triple-quoted blocks (`:78`).
-4. Collapse all (Python-class) whitespace to a single space (`:80`).
-5. Strip whitespace around operators `=+-*/(),:;<>[]{}%&|!` (`:82-85`).
-6. `strip().lower()` (`:87-88`).
+**`coreExact`** — `evaluationClone.mjs:133-150`. Pipeline:
+1. `stripBoiler` removes import/boilerplate lines: any line matching shebang, `import `, `os.environ`, `OUTPUT_PATH`, `__main__`, `fptr`, `package `, `using System` (`evaluationClone.mjs:120-131`).
+2. Strip all comments — `//…`, `/*…*/`, `#…`, `--…` (`COMMENT` regex `:108`).
+3. Strip Python `'''…'''` triple-quoted blocks.
+4. Collapse all (Python-class) whitespace to a single space.
+5. Strip whitespace around operators `=+-*/(),:;<>[]{}%&|!`.
+6. `strip().lower()`.
 
 Two submissions have an **exact match** iff their `coreExact` strings are byte-identical.
 
-**`skeleton`** — `evaluationClone.mjs:102-119`. Same boiler/comment strip, then tokenize and replace: every identifier → `V`, every number → `N`, keywords (the `KW` set `:49-57`) and structural punctuation are kept. This catches **renamed-variable copies**. Identifier test `IDENT_RE` `:98`; digit test `DIGITS_RE` `:100`; tokenizer `TOKEN` `:93`.
+**`skeleton`** — `evaluationClone.mjs:163-180`. Same boiler/comment strip, then tokenize and replace: every identifier → `V`, every number → `N`, keywords (the `KW` set `:110`) and structural punctuation are kept. This catches **renamed-variable copies**. Identifier test `IDENT_RE` `:159`; digit test `DIGITS_RE` `:161`; tokenizer `TOKEN` `:154`.
 
-> A skeleton match is *weaker* evidence than an exact match: convergent algorithms with different variable names skeleton-match without being copies. This distinction drives several rules below.
+> A skeleton match is *weaker* evidence than an exact match: convergent algorithms with different variable names skeleton-match without being copies. This distinction drives several rules below (and is why single-problem conclusiveness now requires `coreExact`, §1.4).
 
 ### 1.2 Hardness (`makeHardness`) — **rare-solve, not algorithmic difficulty**
 
-`evaluationClone.mjs:28-41`. For a problem with `s` = number of accepted solvers:
+`evaluationClone.mjs:89-102`. For a problem with `s` = number of accepted solvers:
 
 ```
-s <= 10  -> "hard"   (:37)
-s <= 40  -> "med"    (:38)
-else     -> "easy"   (:39)
+s <= 10  -> "hard"
+s <= 40  -> "med"
+else     -> "easy"
 ```
 
-This is a **solver-rarity** bucket: a problem nobody solved is "hard" even if trivial; a canonical exercise everyone solves is "easy". (See CHANGELOG PENDING-2: this conflation is the root cause of a false-positive class.)
+This is a **solver-rarity** bucket: a problem nobody solved is "hard" even if trivial; a canonical exercise everyone solves is "easy". This rare-solve conflation was the root cause of a canonical-SQL false-positive class — addressed by the **canonical guard** (§1.4a) rather than by changing `makeHardness` itself (the rare-solve bucket is still useful as a *prior*; the canonical guard is the correction).
 
 ### 1.3 Exact / skeleton clusters
 
-`analyzeClones` (`evaluationClone.mjs:166-321`) builds, per problem, groups of **Accepted** submissions sharing a normalized signature, keeping only groups with **>1 distinct user** (`clusters()` `:201-240`, multi-user gate `:219`). Output per cluster: `{ch, hardness, n_users, members[]}` (`:222-235`). Records require real code, `len>=15` (`:181`). Two cluster sets are produced: `exact_clusters` (key=`coreExact`, `:242`) and `skeleton_clusters` (key=`skeleton`, `:243`).
+`analyzeClones` (`evaluationClone.mjs:227-…`) builds, per problem, groups of **Accepted** submissions sharing a normalized signature, keeping only groups with **>1 distinct user** (`clusters()` `:262`, multi-user gate). Output per cluster: `{ch, hardness, n_users, members[]}`. Records require real code, `len>=15`. Two cluster sets are produced: `exact_clusters` (key=`coreExact`) and `skeleton_clusters` (key=`skeleton`). The output also carries the JS-only `canonical` per-problem map (§1.4a) and the per-recurring-pair conclusiveness enrichments (§1.4).
 
-Cross-pass mapping to per-candidate patches: `attachClusterRefs` (`evaluationMetrics.mjs:1324-1340`) tags each cluster member with `{problem_id, kind: exact|skeleton, n_users, hardness, others}`.
+Cross-pass mapping to per-candidate patches: `attachClusterRefs` (`evaluationMetrics.mjs:1381-1408`) tags each cluster member with `{problem_id, kind: exact|skeleton, n_users, hardness, canonical, others}` — the `canonical` flag down-weights a hard cluster on a canonical problem (§1.4a).
 
 ### 1.4 Recurring pairs + the **conclusive** threshold
 
-Two candidates form a **recurring pair** when they co-occur in **skeleton** clusters (`pairProblems` over `skelCl`, `evaluationClone.mjs:246-265`). A pair is *surfaced* (`:273`) when:
+Two candidates form a **recurring pair** when they co-occur in **skeleton** clusters (`pairProblems` over `skelCl`, `evaluationClone.mjs:324-343`). A pair is *surfaced* when:
 
 ```
 chs.size >= 2  ||  hardChs.size >= 1
 ```
-i.e. they share ≥2 problems, **or** share ≥1 **hard** problem. Each surfaced pair carries `n_problems` and `n_hard` (count of shared **hard** problems) (`:274-281`).
+i.e. they share ≥2 skeleton problems, **or** share ≥1 **hard** skeleton problem. Each surfaced pair carries `n_problems`, `n_hard`, and the conclusiveness enrichments (`evaluationClone.mjs:363-381`):
+- `n_exact` / `exact_problems` — problems where the pair shares a byte-identical **coreExact** accepted form (a strict subset of the skeleton-shared problems, derived from the exact clusters).
+- `n_hard_conclusive` / `hard_conclusive_problems` — hard problems that are coreExact-matched **and not canonical** (§1.4a).
 
-The pair becomes **conclusive** in the cross-pass (`evaluationMetrics.mjs:1253`):
+The pair becomes **conclusive** in the cross-pass (`evaluationMetrics.mjs:1296-1308`). It is conclusive iff it is EITHER:
 
 ```js
-const conclusive = rp.n_problems >= 2 || rp.n_hard >= 1;
+// MULTI-problem: ≥2 shared skeleton problems, ≥1 of them non-canonical.
+const canonicalShared = rp.problems.filter((c) => canonicalMap[c]).length;
+const nNonCanonProblems = rp.n_problems - canonicalShared;
+const multiProblem = rp.n_problems >= 2 && nNonCanonProblems >= 1;
+// SINGLE-problem: the one shared problem is coreExact AND hard AND non-canonical
+// AND the pair has a proximity signal (§1.5).
+const singleProblem = rp.n_problems === 1 && rp.n_hard_conclusive >= 1 && pairProximity(a, b);
+const conclusive = multiProblem || singleProblem;
 ```
 
-A single shared **hard** problem (`n_hard >= 1`) is, by itself, conclusive. `deriveCrossFlags` (`:1529-1539`) emits a `recurring_pair_conclusive` critical flag and sets escalation `"confirmed"` for any pair with `conclusive === true`.
+`deriveCrossFlags` (`:1568-1582`) emits a `recurring_pair_conclusive` critical flag and sets escalation `"confirmed"` for any pair with `conclusive === true`.
 
-> **Combined effect (root cause, see CHANGELOG PENDING-2):** `makeHardness` calls a problem "hard" at ≤10 solvers (rarity), and a single shared hard skeleton-cluster makes a pair conclusive ⇒ `confirmed` ⇒ exclude. One canonical-SQL match between two people can therefore produce a false "confirmed copied".
+> **Why two paths (the 2026-06-22 fixes (i)/(iii)):** a single canonical-SQL match between two strangers must not confirm copying. So a **single-problem** pair now requires a byte-identical `coreExact` match (skeleton-only convergence on one problem is not proof — fix (i)), on a hard **non-canonical** problem (fix (ii) §1.4a), **and** a proximity signal (fix (iii) §1.5). A **multi-problem** pair keeps the original skeleton-based signal (two independent skeleton matches is real copying even when variables were renamed) — the coreExact requirement is single-problem-only, so renamed-variable copy rings (sharing ≥2 problems by skeleton) stay conclusive; only a pair whose *every* shared problem is canonical is dropped.
 
-### 1.5 Tight-gap / same-minute co-submission
+### 1.4a Canonical-answer / low-entropy guard
 
-On **hard** skeleton clusters, member pairs whose submit times are within 300s are recorded as `tight` (`evaluationClone.mjs:288-303`): `dt <= 60` → `SAME-MINUTE`, else `tight-gap`. The cross-pass annotates each tight record with `same_room` and `same_ip_prefix` proximity (`evaluationMetrics.mjs:1232-1238`). **Note:** in the current code, `tight`/proximity is *evidence surfaced for review*, not a gate on the `confirmed` verdict (PENDING-3 proposes making proximity a required escalation signal).
+`computeCanonical` (`evaluationClone.mjs:64-96`). A problem is **canonical** (its accepted solutions are a handful of near-identical short forms, so an identical match is convergence not copying) iff, over the cohort's accepted submissions for that problem, all three hold:
+
+```
+distinct coreExact forms  <= CANONICAL_MAX_FORMS   (8)    (evaluationClone.mjs:44)
+median accepted form length <= CANONICAL_MAX_LEN    (200)  (:45)
+distinct independent solvers >= CANONICAL_MIN_SOLVERS (5)  (:51)
+```
+
+The three-part gate is deliberate: *few short forms* catches canonical one-liners (SQL / editorial); the *length* bound protects a substantive algorithm that merely has few distinct forms (a 672-char identical match is copying even at 4 forms); the *min-solvers* bound prevents a 2-person identical-short-code pair (suspicious convergence) from being excused as canonical. The per-problem map is exposed as `clone.canonical` (and the contest `meta.canonical`, `evaluationMetrics.mjs:1349`).
+
+Effects: a hard clone cluster on a canonical problem is **down-weighted** — `attachClusterRefs` tags the ref `canonical:true` (`evaluationMetrics.mjs:1381-1408`) and `deriveCrossFlags` (`:1577-1582`) treats it as a warning `clone_cluster`, **not** a critical `hard_clone_cluster`; and a canonical problem never contributes to `n_hard_conclusive`, so it cannot drive single-problem conclusiveness (§1.4). It is byte-stripped from `cloneAnalysisCanonical` (the Python-parity output) since it is a JS-only enrichment.
+
+### 1.5 Tight-gap / same-minute co-submission + the proximity gate
+
+On **hard** skeleton clusters, member pairs whose submit times are within 300s are recorded as `tight` (`evaluationClone.mjs:383-403`): `dt <= 60` → `SAME-MINUTE`, else `tight-gap`. The cross-pass annotates each tight record with `same_room` and `same_ip_prefix` proximity (`evaluationMetrics.mjs:1232-1238`).
+
+**Proximity now gates single-problem escalation** (fix (iii)). `pairProximity(a, b)` (`evaluationMetrics.mjs:1242-1255`) is true iff the pair shares a **room** OR an **IP /24 prefix** OR has a **tight-gap** co-submission on any shared problem. A **single-problem** cluster may only reach `confirmed` when `pairProximity` holds (§1.4). A different-room / different-machine / far-apart single-problem match is not a confirmed copy. (Multi-problem conclusiveness does not require proximity — two independent skeleton matches is sufficient.)
+
+> **Caveat for single-LAN contests:** `same_ip_prefix` at /24 is non-discriminating when a whole cohort sits behind one campus NAT (every pair "shares" the egress /24). In that regime the proximity gate alone would not separate strangers from copiers — but the canonical guard (§1.4a) independently removes the canonical-SQL problem from conclusiveness, so the false-positive is cleared without leaning on the IP signal.
 
 ### 1.6 Foreign-paste detection (`isForeign`)
 
@@ -132,11 +159,11 @@ Cross-pass flags (`deriveCrossFlags`, `evaluationMetrics.mjs:1524-1612`):
 
 | Flag | Sev | Condition | Cite |
 |---|---|---|---|
-| `recurring_pair_conclusive` | critical | §1.4 conclusive pair → escalation `confirmed` | `:1529-1539` |
-| `hard_clone_cluster` | critical | member of an exact/skeleton cluster with `hardness === "hard"` | `:1542-1551` |
-| `clone_cluster` | warning | member of any (non-hard) exact/skeleton cluster | `:1552-1560` |
-| `failed_clone_cluster` | critical / warning | identical **failed** code with a peer: critical if ≥2 shared failed problems with the same peer, else warning | `:1562-1597` |
-| `directed_paste_match` | critical | §1.8 | `:1599-1609` |
+| `recurring_pair_conclusive` | critical | §1.4 conclusive pair → escalation `confirmed` | `:1568-1582` |
+| `hard_clone_cluster` | critical | member of an exact/skeleton cluster with `hardness === "hard"` **and `canonical !== true`** (a hard cluster on a canonical problem is down-weighted, §1.4a) | `:1585-1594` |
+| `clone_cluster` | warning | member of any non-hard **or canonical** exact/skeleton cluster | `:1595-1603` |
+| `failed_clone_cluster` | critical / warning | identical **failed** code with a peer: critical if ≥2 shared failed problems with the same peer, else warning | `:1605-1640` |
+| `directed_paste_match` | critical | §1.8 | `:1642-1652` |
 
 Failed-submission clustering (`computeFailedClusters`, `:1383-…`) prefers the candidate's persisted, near-stub-filtered `failed_norms` so convergent bare-stub guesses never cluster.
 
@@ -259,11 +286,13 @@ otherwise                                        -> BELOW_BAR           (:174-18
 
 **Genuine-origin profile** (`isGenuineOriginProfile:370-373`): `paste_ratio < 0.12` AND `genuineArcCount >= 2` AND `foreignPasteCount === 0` — they typed it themselves, have ≥2 real arcs, and pasted nothing foreign.
 
-**Group resolution:** for each exact clone cluster and each recurring pair, members are ordered by submit time (clusters carry `created`; pairs use earliest-seen submit, `:412-427`). The **earliest** member is the candidate origin (`:432`). If that earliest member passes the genuine-origin profile, they are rescued from `EXCLUDE_INTEGRITY` into the separate visible bucket `GENUINE_COPIED` (order 4): talent **kept**, integrity demoted to a **note** (`:436-457`, override `:499-503`). The later members (copiers) stay excluded.
+**Group resolution:** for each exact clone cluster and each *coreExact* recurring pair, members are ordered by submit time (clusters carry `created`; pairs use earliest-seen submit). Two guards constrain which groups form and who can be an origin (fix (iv)):
+- **(a) skeleton-only guard** (`evaluationRecommend.mjs:421-438`): a recurring pair is admitted as a rescue group only when it carries a real byte-identical match (`n_exact >= 1`). A skeleton-only-differing pair is not a copy, so it has no victim to rescue. (Exact CLUSTERS are coreExact by construction and are always admitted.) A pre-fix meta without `n_exact` falls back to admitting the pair (no regression on old data).
+- **(b) one origin per group / no mutual origin** (`:440-500`): the set of candidates who are a downstream COPIER (a non-earliest member) in **any** group is computed first; a candidate in that set can never also be rescued as an origin. So two byte-identical typists who each rank "earliest" on a different problem are **both** excluded — neither is a clean victim.
 
-**Guard:** if the earliest member has a foreign paste / fails the profile, the whole group is externally sourced ⇒ **no rescue** for anyone (`:436`). The rescue override only ever lifts an `EXCLUDE`; it never touches a hire/hold/below-bar (`:499`).
+The **earliest** member of an admitted group, if they are never a copier elsewhere (b) and pass the genuine-origin profile, is rescued from `EXCLUDE_INTEGRITY` into the separate visible bucket `GENUINE_COPIED` (order 4): talent **kept**, integrity demoted to a **note**. The later members (copiers) stay excluded. `GENUINE_COPIED` is **not** a hire bucket — the rescued origin is surfaced as a victim for review, and the underlying detector tier stays `confirmed` (the copying detection still holds).
 
-> Current behavior to note (PENDING-3(iv)): a single candidate can be the origin of more than one group and the sets are merged (`:439-447`); but groups are formed from skeleton-derived recurring pairs too, and origin-rescue can fire on skeleton-only-differing pairs. PENDING changes will restrict this.
+**Guard:** if the earliest member has a foreign paste / fails the profile, the whole group is externally sourced ⇒ **no rescue** for anyone. The rescue override only ever lifts an `EXCLUDE`; it never touches a hire/hold/below-bar.
 
 ### 3.5 Report assembly
 
@@ -295,8 +324,9 @@ Bucket display order (`BUCKET_META:47-55`): strong_hire(1) → hire_deskcheck(2)
 | `MISMATCH` | 0.15 | telemetry-tampered (D16b) |
 | `CLIPBOARD_MATCH_MIN` | 40 | premeditated_clipboard (D15) |
 | `MIN_FOREIGN_PASTE_LEN` | 30 | `REPLAY` `evaluationReplay.mjs:21` |
-| hardness cutoffs | 10 / 40 | `makeHardness` `evaluationClone.mjs:37-39` |
-| conclusive | `n_problems>=2 \|\| n_hard>=1` | `evaluationMetrics.mjs:1253` |
+| hardness cutoffs | 10 / 40 | `makeHardness` `evaluationClone.mjs:88-90` |
+| conclusive | multi: `n_problems>=2 && non-canonical>=1`; single: `coreExact && hard && non-canonical && proximity` | `evaluationMetrics.mjs:1296-1308` |
+| `CANONICAL_MAX_FORMS` / `CANONICAL_MAX_LEN` / `CANONICAL_MIN_SOLVERS` | 8 / 200 / 5 | canonical guard `evaluationClone.mjs:44-51` |
 | genuine_arc paste cap | 0.5 | `evaluationMetrics.mjs:467` |
 | strong floor | `hard>=1 \|\| med>=3` | `evaluationMetrics.mjs:925` |
 | origin profile | `paste<0.12, arcs>=2, foreign==0` | `evaluationRecommend.mjs:372` |

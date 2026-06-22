@@ -27,7 +27,7 @@
 // a `watch` note (a single shared medium problem — weak by design). A naive
 // "any flag => exclude" rule would have rejected most of the real hires.
 
-export const RECOMMEND_VERSION = "1";
+export const RECOMMEND_VERSION = "2";
 
 export const BUCKET = {
   STRONG_HIRE: "strong_hire",
@@ -409,6 +409,13 @@ function computeOriginRescues(meta, byId) {
   // Each "group" is a member-id list with a comparator for submit order. Exact
   // clusters order by the cluster's own per-problem `created`; recurring pairs
   // order by each member's earliest-seen submit time (from firstSeen).
+  //
+  // PENDING-4(a): origin-rescue must NOT fire on SKELETON-ONLY-differing pairs.
+  // Exact CLUSTERS are coreExact-identical by construction (safe). But recurring
+  // PAIRS are built from skeleton agreement — a skeleton-only pair (different
+  // accepted code, same algorithm shape) is not a copy at all, so it can never
+  // have a victim/origin to rescue. We require the pair carry ≥1 byte-identical
+  // coreExact shared problem (`n_exact >= 1`) before it forms a rescue group.
   const groups = [];
   for (const cl of exact) {
     const members = (cl.members || [])
@@ -420,16 +427,37 @@ function computeOriginRescues(meta, byId) {
   }
   for (const p of (meta && meta.recurring_pairs) || []) {
     if (!p || !Array.isArray(p.pair) || p.pair.length < 2) continue;
+    // PENDING-4(a): skip skeleton-only-differing pairs (no exact match → no copy
+    // → nothing to rescue). `n_exact` is the cross-pass enrichment; absent (older
+    // meta) → fall back to allowing the pair (no regression on pre-fix data).
+    if (p.n_exact != null && Number(p.n_exact) < 1) continue;
     const order = p.pair
       .slice()
       .sort((a, b) => (firstSeen.has(a) ? firstSeen.get(a) : Infinity) - (firstSeen.has(b) ? firstSeen.get(b) : Infinity));
     groups.push({ kind: "recurring_pair", label: (p.problems || []).join(", "), order });
   }
 
+  // PENDING-4(b): a clone group resolves to AT MOST ONE origin — NO mutual origin.
+  // A candidate who is a downstream COPIER (a non-earliest member) in ANY group
+  // can never also be rescued as an origin. This kills the fragile case where two
+  // candidates with byte-identical code each rank "earliest" on a different
+  // problem and BOTH get rescued (the substantive-copy pair): if neither is unambiguously
+  // first across every shared group, neither is a clean victim and both stay
+  // excluded. Build the global copier set first, then only earliest-everywhere
+  // members are eligible.
+  const everCopier = new Set();
+  for (const g of groups) {
+    const order = g.order || [];
+    for (let i = 1; i < order.length; i++) everCopier.add(order[i]);
+  }
+
   for (const g of groups) {
     const order = g.order;
     if (!order || order.length < 2) continue;
     const earliest = order[0];
+    // PENDING-4(b): an origin that is ALSO a copier somewhere is not a clean
+    // victim — skip the whole group (no mutual origin).
+    if (everCopier.has(earliest)) continue;
     const earliestCard = byId.get(earliest);
     // earliest has a foreign paste (or no card / no profile) → whole group is
     // externally sourced via them → NO rescue; everyone stays excluded.
@@ -439,7 +467,8 @@ function computeOriginRescues(meta, byId) {
     const existing = rescues.get(earliest);
     if (existing) {
       // same candidate is the genuine origin of more than one group — merge the
-      // copier set + keep the richest chain (most copiers).
+      // copier set + keep the richest chain (most copiers). (Still ONE origin per
+      // group; this only aggregates that single origin's multiple victims.)
       for (const c of copiedBy) if (existing.copied_by.indexOf(c) === -1) existing.copied_by.push(c);
       if (copiedBy.length > (existing._n || 0)) {
         existing.chain = chain;
