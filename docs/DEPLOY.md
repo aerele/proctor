@@ -647,6 +647,14 @@ What changed, and is now the standing practice:
 | API root `/` | Returns **404 by design** — all routes are `/api/*`. |
 | min-instances | `0` for testing; set `1` for a real exam (cold-start avoidance). |
 
+### Capacity & cost notes
+
+The defaults are tuned for cost: **zero min instances** (set `1` for a real exam),
+**low-bitrate screen chunks**, and a **short evidence auto-delete window** with
+longer-lived export zips. Video is inherently large — at **~800 candidates × 90 min**,
+expect meaningful GCS usage. **Test with 20–30 devices** before a real drive to
+size concurrency, Judge0 throughput, and storage.
+
 ---
 
 ## Verify the deploy (smoke test)
