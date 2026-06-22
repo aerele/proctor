@@ -36,7 +36,7 @@ export type DetailJoinAlert = JoinableAlert & { id: string };
 
 /**
  * The already-fetched alerts that belong to THIS session: alerts referencing
- * the session's id directly, plus session-less alerts (contest-eval signals)
+ * the session's id directly, plus session-less alerts (alerts with no session_id)
  * for the same candidate — but never another session's alerts, even for the
  * same candidate (those belong to that other attempt's card).
  */

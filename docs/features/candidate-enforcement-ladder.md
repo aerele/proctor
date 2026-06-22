@@ -9,10 +9,9 @@ the ladder off for legitimate environment problems.
 
 Aerele proctor is a **standalone, own-editor exam platform**: candidates write,
 Run, and Submit code inside our React + Monaco workspace against a Judge0-backed
-executor. (HackerRank was removed from the candidate path in F8.2; an
-**optional** `monitoring/` contest-eval poller still exists separately for
-externally-hosted contests and feeds the same alerts pipeline — see
-[Related](#related). This page is about the own-editor candidate path.)
+executor. (HackerRank was removed from the candidate path in F8.2; the legacy
+HackerRank contest-eval poller was removed when proctor moved to its own in-app
+contest platform. This page is about the own-editor candidate path.)
 
 > **Presentation note (2026-06-12 exam-shell redesign).** The chrome *around*
 > the ladder changed: healthy = a slim dark proctoring strip, anomaly episode

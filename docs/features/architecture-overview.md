@@ -1,6 +1,6 @@
-# Architecture Overview — standalone own-editor platform + optional contest-eval poller
+# Architecture Overview — standalone own-editor platform
 
-Aerele Proctor is a **standalone own-editor exam platform**: candidates register, share their screen, and solve coding problems entirely inside our own React + Monaco workspace with Judge0-backed Run/Submit, while admins and invigilators monitor live and review the recorded evidence. A separate, **optional** Python "contest-eval" poller can additionally live-watch an externally-hosted HackerRank contest and feed cheating alerts into the same pipeline.
+Aerele Proctor is a **standalone own-editor exam platform**: candidates register, share their screen, and solve coding problems entirely inside our own React + Monaco workspace with Judge0-backed Run/Submit, while admins and invigilators monitor live and review the recorded evidence. A legacy HackerRank "contest-eval" poller — a separate Python poller that live-watched an externally-hosted HackerRank contest and fed cheating alerts into the same pipeline — was removed when proctor moved to its own in-app contest platform.
 
 > **Note.** Everything below tracks the code in this repo (`backend/src/*.mjs`, `frontend/src/*.tsx|*.ts`). Anything not confirmed is marked **(unverified)**.
 
@@ -13,7 +13,7 @@ Proctor began life as a "HackerRank companion proctor" where students kept the p
 | | Component | Role | Status |
 |---|---|---|---|
 | **Primary** | Own-editor exam platform | Candidates do *everything* in our React + Monaco workspace; Run/Submit run against **Judge0**; evidence (screen video + events) streams to GCS. | Built and deployable to Cloud Run (see `docs/DEPLOY.md`). |
-| **Secondary / optional** | `monitoring/` contest-eval poller | Live-watches an **externally-hosted** HackerRank contest and emits `source:"contest-eval"` cheating alerts into the **same** alerts pipeline the platform reads. | Still present; a separate, optional component. The "easily-startable adapter" follow-up (F8.5 / task #32) is **pending**. |
+| **Removed** | `monitoring/` contest-eval poller | Used to live-watch an **externally-hosted** HackerRank contest and emit `source:"contest-eval"` cheating alerts into the alerts pipeline. | Removed (proctor moved to its own in-app contest platform). The `monitoring/` dir now holds only the local tab-away detector. |
 
 The HackerRank-companion lineage survives only as **legacy code paths** kept for backward compatibility — for example `frontend/src/studentCopy.ts` still has an `ownEditor:false` variant ("End the proctoring session only after submitting HackerRank…") that renders only in the legacy external-HR mode. The wire field is still named `hackerrank_username` (frozen for compatibility, per the F9 D1 note in `types.ts`), but the candidate-facing identity input is labelled **"Candidate ID"** (`StudentForm.candidate_id` in `frontend/src/types.ts`).
 
@@ -225,9 +225,9 @@ Legacy contests use `username_norm` (bare `identityNorm`); the person-model back
 
 ---
 
-## 9. Shared Alert JSON contract — one pipeline, two producers
+## 9. Shared Alert JSON contract — one pipeline
 
-Both producers — the **proctor** backend (`source:"proctor"`) and the **contest-eval** poller (`source:"contest-eval"`) — emit the **same `Alert` shape** and land in the one `ALERTS_COLLECTION`, which the admin console reads. The contract is defined in `frontend/src/types.ts` (`Alert`). Required on ingest: `source`, `type`, `severity`, `timestamp`, `hackerrank_username`, `title`. The `id` is stable + idempotent (e.g. `"<source>:<type>:<username_norm>:<contest_slug>:<dedupe>"`), so re-ingesting merges rather than duplicates.
+The **proctor** backend (`source:"proctor"`) emits the `Alert` shape into the one `ALERTS_COLLECTION`, which the admin console reads. (`source:"contest-eval"` was the legacy HackerRank poller, removed when proctor moved to its own in-app contest platform; `proctor` is the only alert source now.) The contract is defined in `frontend/src/types.ts` (`Alert`). Required on ingest: `source`, `type`, `severity`, `timestamp`, `hackerrank_username`, `title`. The `id` is stable + idempotent (e.g. `"<source>:<type>:<username_norm>:<contest_slug>:<dedupe>"`), so re-ingesting merges rather than duplicates.
 
 Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all if the key is unset; `lib/auth.mjs` `requireApiKey`). A bare object or a batch (`{alerts:[…]}`) is accepted.
 
@@ -244,7 +244,7 @@ Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all
 | `tab_away` | warning (`threshold_seconds` default 12; consumed by the monitoring tab-away detector) |
 | `disconnected` | warning |
 
-`invalid_share_surface` was **removed** from the catalog — the recorder now refuses to record on a non-Entire-Screen surface, so the event can never fire (stored alerts of that type still display). Contest-eval alert types (`peer_copy_cluster`, `recurring_pair`, `web_paste`, `first_attempt_solve`, `tough_first_attempt`) are configured in `monitoring/alert-config.json`, not in the admin console — **(unverified in this pass; documented from `types.ts` and the root README, not re-read from `monitoring/`)**.
+`invalid_share_surface` was **removed** from the catalog — the recorder now refuses to record on a non-Entire-Screen surface, so the event can never fire (stored alerts of that type still display). The legacy `source:"contest-eval"` poller alert types (`peer_copy_cluster`, `recurring_pair`, `web_paste`, `first_attempt_solve`, `tough_first_attempt`) were removed with the HackerRank poller (and `monitoring/alert-config.json` is gone), so `proctor` is the only alert source now.
 
 ---
 
@@ -304,4 +304,4 @@ There are **77 unique routes**, extracted from every `path === "…"` dispatch s
 - [`../README.md`](../README.md) — the documentation index (start here for the full page map)
 - [`../../README.md`](../../README.md) — repo root README
 
-> Per-feature deep dives now live alongside this page under `docs/features/` (candidate flow, enforcement ladder, the admin-console surfaces, the invigilator portal, the alert taxonomy, and the optional contest-eval poller). See the documentation index at [`../README.md`](../README.md) for the full map.
+> Per-feature deep dives now live alongside this page under `docs/features/` (candidate flow, enforcement ladder, the admin-console surfaces, the invigilator portal, and the alert taxonomy). See the documentation index at [`../README.md`](../README.md) for the full map.

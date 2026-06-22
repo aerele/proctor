@@ -2,7 +2,7 @@
 
 This page documents the **Data lifecycle** controls an admin uses to take a finished contest off the platform safely: download a self-contained archive of its data, irreversibly purge the heavy session/submission/recording data behind a triple gate, and let recordings auto-expire on a retention clock. Scores and selection always survive a purge.
 
-> **Product context.** Proctor is a standalone own-editor exam platform: candidates code in our React + Monaco editor with Judge0-backed Run/Submit, and each administered round is a *contest*. The data-lifecycle controls described here apply to these own-editor (person-mode) contests. A separate optional `monitoring/` contest-eval poller (which live-watches an externally-hosted HackerRank contest and emits cheating alerts into the same alerts pipeline) still exists as an independent component — it is not part of this lifecycle surface.
+> **Product context.** Proctor is a standalone own-editor exam platform: candidates code in our React + Monaco editor with Judge0-backed Run/Submit, and each administered round is a *contest*. The data-lifecycle controls described here apply to these own-editor (person-mode) contests. (The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.)
 
 All three flows live in one collapsible **Data lifecycle** section at the bottom of a contest's detail page in the admin **Contests** tab.
 

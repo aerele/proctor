@@ -6,7 +6,7 @@ import { isAllSelected, usernamesForSelection } from "../../alertSelection";
 import { groupAlerts, type AlertGroupBy } from "../../alertGrouping";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "../alertActions";
 import { candidateIdOf } from "../../identity";
-import type { Alert, AlertFilters, AlertSeverity, AlertSource, RecordingSession, SessionAction } from "../../types";
+import type { Alert, AlertFilters, AlertSeverity, RecordingSession, SessionAction } from "../../types";
 import { FilterSelect } from "../../ui/FilterSelect";
 import { SeverityPill } from "../../ui/SeverityPill";
 import { Metric } from "../../ui/Metric";
@@ -117,7 +117,7 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
             <Bell size={20} />
             <div>
               <h1 className="text-2xl font-semibold">Live alerts console</h1>
-              <p className="mt-1 text-sm text-muted">Proctoring and contest-eval signals across all rooms, newest first. Auto-refreshes every 5s. Click a clip to open the recorded evidence.</p>
+              <p className="mt-1 text-sm text-muted">Proctoring signals across all rooms, newest first. Auto-refreshes every 5s. Click a clip to open the recorded evidence.</p>
             </div>
           </div>
           <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
@@ -126,12 +126,8 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
         </div>
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
-          <FilterSelect
-            label="Source"
-            value={filters.source ?? ""}
-            options={[{ value: "", label: "All sources" }, { value: "proctor", label: "Proctor" }, { value: "contest-eval", label: "Contest-eval" }]}
-            onChange={(value) => onFiltersChange({ ...filters, source: value ? (value as AlertSource) : undefined })}
-          />
+          {/* HR-poller removal: the Source filter was dropped — "proctor" is now
+              the only alert source (the contest-eval poller was removed). */}
           <FilterSelect
             label="Severity"
             value={filters.severity ?? ""}
@@ -254,7 +250,7 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
           <div className="rounded-lg border border-line bg-panel p-5 text-sm text-muted">
             {candidateFilter
               ? <>No alerts for candidate <span className="font-mono">{candidateFilter}</span> under the current filters. Clear the candidate chip above to see everyone.</>
-              : "No alerts match the current filters. New proctoring and contest-eval signals appear here as they arrive."}
+              : "No alerts match the current filters. New proctoring signals appear here as they arrive."}
           </div>
         ) : groups === null ? (
           visibleAlerts.map(renderAlertRow)

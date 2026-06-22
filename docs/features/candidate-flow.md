@@ -5,9 +5,9 @@ Aerele proctor exam link to the moment they end their test, and names the
 backing routes/components so a developer can find the code. Aerele proctor is a
 **standalone, own-editor exam platform**: candidates write, Run, and Submit code
 entirely inside our React + Monaco workspace against a Judge0-backed executor.
-(HackerRank was removed from the candidate path in F8.2; an **optional**
-`monitoring/` contest-eval poller still exists separately for externally-hosted
-contests and is not part of this flow — see [Related](#related).)
+(HackerRank was removed from the candidate path in F8.2; the legacy HackerRank
+contest-eval poller was removed when proctor moved to its own in-app contest
+platform.)
 
 The candidate app's surface root is `frontend/src/candidate/StudentApp.tsx`
 (`frontend/src/App.tsx` is now just a ~26-line pathname router that dispatches the
@@ -494,5 +494,4 @@ tab."*
 - [admin-contests-templates.md](./admin-contests-templates.md) — Contests + Templates, the access code, and `?contest=` routing.
 - [admin-live-monitoring.md](./admin-live-monitoring.md) · [admin-results-people.md](./admin-results-people.md) · [admin-recording-review.md](./admin-recording-review.md) · [admin-data-lifecycle.md](./admin-data-lifecycle.md) — the admin console surfaces.
 - [invigilator-portal.md](./invigilator-portal.md) — tokenized name-only auth, room stats, unlock codes, enforcement exemptions, selective alerts.
-- [contest-eval-monitoring.md](./contest-eval-monitoring.md) — the optional `monitoring/` poller for externally-hosted HackerRank contests (feeds the same alerts pipeline).
 - [architecture-overview.md](./architecture-overview.md) — the full platform tour.

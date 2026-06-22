@@ -2610,10 +2610,12 @@ function demoAlerts(): Alert[] {
       download_url: sampleVideo
     },
     {
-      id: "contest-eval:peer_copy_cluster:karan_v:mcet-june-2026:c3",
-      source: "contest-eval",
-      type: "peer_copy_cluster",
-      severity: "critical",
+      // HR-poller removal: the contest-eval peer_copy_cluster demo alert was
+      // converted to a core proctoring tab_away alert (the poller is gone).
+      id: "proctor:tab_away:karan_v:mcet-june-2026:c3",
+      source: "proctor",
+      type: "tab_away",
+      severity: "warning",
       // F6.7: INSIDE Karan's recording gap (09:03:30–09:04:30) — the log row
       // gets the "during blackout" tag.
       timestamp: "2026-06-05T09:04:10.000Z",
@@ -2621,9 +2623,9 @@ function demoAlerts(): Alert[] {
       hackerrank_username: "Karan_V",
       username_norm: "karan_v",
       room: "Lab B-2",
-      title: "Peer-copy cluster (3 candidates, 97% similar)",
-      detail: "Near-identical submissions for 'Balanced Brackets' across Karan_V, Neha_S, and Imran_K within a 4-minute window.",
-      data: { cluster: ["karan_v", "neha_s", "imran_k"], similarity_pct: 97, problem: "balanced-brackets" },
+      title: "Tab-away: assessment not visible for 38s",
+      detail: "Candidate's proctored tab was not the active surface for 38s, exceeding the configured threshold.",
+      data: { start_offset: 220, end_offset: 258, duration_seconds: 38 },
       download_url: sampleVideo
     },
     {
@@ -2645,18 +2647,20 @@ function demoAlerts(): Alert[] {
       download_url: sampleVideo
     },
     {
-      id: "contest-eval:web_paste:imran_k:mcet-june-2026:p2",
-      source: "contest-eval",
-      type: "web_paste",
+      // HR-poller removal: the contest-eval web_paste demo alert was converted to
+      // a core proctoring tab_hidden alert (the poller is gone).
+      id: "proctor:tab_hidden:imran_k:mcet-june-2026:p2",
+      source: "proctor",
+      type: "tab_hidden",
       severity: "warning",
       timestamp: "2026-06-05T09:18:40.000Z",
       contest_slug: "mcet-june-2026",
       hackerrank_username: "Imran_K",
       username_norm: "imran_k",
       room: "Lab B-2",
-      title: "Web/editorial paste suspected",
-      detail: "Submission matches a known editorial for 'Two Sum' with identical variable naming and comment structure.",
-      data: { source_match: "editorial", similarity_pct: 88, problem: "two-sum" },
+      title: "Proctor tab hidden",
+      detail: "The liveness beacon reported the proctor tab hidden/backgrounded during the assessment.",
+      data: { beacon: "hidden" },
       download_url: sampleVideo
     },
     {
