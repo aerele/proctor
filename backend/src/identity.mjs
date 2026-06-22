@@ -24,7 +24,7 @@
 // GLOBAL RULE (vision §2.1): composite ids are NEVER parsed back apart — their
 // components are always stored as fields alongside them.
 import { randomUUID } from "node:crypto";
-import { ALL_CONTESTS, scopedQuery } from "./contests.mjs";
+import { ALL_CONTESTS, invalidateContestDocCache, scopedQuery } from "./contests.mjs";
 import { httpError } from "./lib/http.mjs";
 import { mapWithConcurrency, sanitizeSegment } from "./lib/sanitize.mjs";
 
@@ -80,8 +80,26 @@ function col(name) {
 // component charset (see PERSON_ID_SEPARATOR — that is what keeps personIdOf
 // injective).
 
+// v1.1 G4 — non-ASCII identity normalization. Real rosters carry accented and
+// full-width characters ("José", "Müller", "ＡＢＣ123"), but a candidate at a lab
+// keyboard types the plain-ASCII form. We NFKD-decompose and STRIP combining
+// marks (diacritics) BEFORE the existing trim/lowercase/de-space pipeline, so
+// "José" and "Jose" — and a full-width "ＪＯＳＥ" — all normalize to the SAME key
+// and a candidate is matched to their roster entry regardless of which form was
+// typed/uploaded. ASCII-only input is byte-for-byte UNCHANGED (NFKD of pure
+// ASCII is identity, no combining marks to strip), so every existing roll-number
+// roster (the KPR-style numeric ids) keys exactly as before — this is purely
+// additive folding for the non-ASCII case. Residual undecomposable glyphs
+// (ligatures Æ/Œ, stroke letters Ł, CJK) are left for sanitizeSegment to map to
+// "_" downstream, exactly as today; the dup-reject at roster upload still catches
+// any two distinct ids that fold together.
+function foldNonAscii(value) {
+  // ̀-ͯ is the Unicode "combining diacritical marks" block.
+  return String(value).normalize("NFKD").replace(/[̀-ͯ]/g, "");
+}
+
 export function normalizeUniqueId(value) {
-  return String(value).trim().toLowerCase().replace(/\s+/g, "");
+  return foldNonAscii(value).trim().toLowerCase().replace(/\s+/g, "");
 }
 
 export function identityNorm(value) {
@@ -365,6 +383,7 @@ export async function saveContestRoster(contest, body, actor = {}) {
   // Derived read-only colleges list on the contest doc (vision §2.7).
   const collegeNorms = [...new Set(unique.map((c) => c.collegeNorm))].sort();
   await col("contests").doc(contest.slug).set({ colleges: collegeNorms, updated_at: now }, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5): contest-doc write invalidates the read cache
 
   // F-D (real-data hardening): warn-only unique-ID shape check rides the success
   // response (key present only when something was flagged — older callers and
@@ -828,6 +847,7 @@ export async function stampSelectionDone(contest, snapshotByPerson = new Map(), 
   // `evidence_retention_days` after this stamp is NOT built here — only the
   // field is stamped. See vision §2.16 / §7 row S-H.
   await col("contests").doc(contest.slug).set({ selection_done_at: now, updated_at: now }, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5): contest-doc write invalidates the read cache
 
   await writeAudit({
     action: "selection_done",

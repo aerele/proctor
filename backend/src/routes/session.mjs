@@ -94,7 +94,10 @@ export function makeSessionRoutes(ctx) {
     liveLockCollection,
     submissionsCollection,
     uploadConfig,
-    execMaxSubmissionsPerSession
+    execMaxSubmissionsPerSession,
+    // v1.1 G1: authoritative consent-text version (by value); stamped on the
+    // session at start so a later T&C bump is detectable per session.
+    consentVersion = ""
   } = ctx;
 
 async function startSession(req) {
@@ -305,6 +308,8 @@ async function startPersonSession(req, body, contest) {
     current_ip: clientIp,
     ip_change_count: 0,
     consent_accepted: true,
+    // v1.1 G1: the consent-text version in force when this candidate accepted.
+    consent_version: consentVersion,
     status,
     blocked_by_session_id: blockedBy,
     created_at: now,

@@ -77,7 +77,14 @@ export function makeSessionTelemetryRoutes(ctx) {
     uploadChunkKinds,
     urlExpirySeconds,
     editorEventsIngestLimit,
-    editorEventsCollection
+    editorEventsCollection,
+    // v1.1 G3 (#4): per-session per-endpoint rate-limit check (by reference). A
+    // no-op fallback keeps older ctx / tests that don't inject it working.
+    telemetryCheck = () => {},
+    // v1.1 G3 (#7): per-chunk signed-URL byte cap (HD headroom). A signed WRITE
+    // URL carries an x-goog-content-length-range condition so a valid token
+    // can't PUT an arbitrarily large object. 0/undefined → no cap (legacy).
+    maxUploadChunkBytes = 0
   } = ctx;
 
   async function createUploadUrl(req) {
@@ -87,6 +94,10 @@ export function makeSessionTelemetryRoutes(ctx) {
     // D2: an admin-ended session may still flush its in-flight final chunk for a
     // bounded window; everything else goes through the normal status gate.
     const session = inAdminEndGrace(fetched) ? fetched : requireWritableSession(fetched);
+    // v1.1 G3 (#4): per-session rate limit (after the ownership gate, before the
+    // expensive v4-signing path — the live-incident path). Tuned so a real
+    // chunk-upload cadence (even a reconnect backlog flush) never trips it.
+    telemetryCheck("upload-url", session.session_id);
     // F10.1: only the two known chunk kinds may mint a signed write URL.
     const kind = String(body.kind || "");
     if (!uploadChunkKinds.has(kind)) {
@@ -114,14 +125,23 @@ export function makeSessionTelemetryRoutes(ctx) {
 
     const extension = String(body.content_type).includes("webm") ? "webm" : "bin";
     const objectKey = `${sessionPrefix(session)}${kind}/chunk-${String(effectiveIndex).padStart(5, "0")}.${extension}`;
-    const [uploadUrl] = await signingBucket()
-      .file(objectKey)
-      .getSignedUrl({
-        version: "v4",
-        action: "write",
-        expires: Date.now() + urlExpirySeconds * 1000,
-        contentType: body.content_type
-      });
+    // v1.1 G3 (#7): bind a per-chunk size cap into the signed URL. The
+    // x-goog-content-length-range extension header makes the WRITE URL only
+    // accept a PUT whose body is 0..maxUploadChunkBytes — so a valid token
+    // can't mint a URL and PUT a multi-GB abuse object. The cap is large enough
+    // (64 MiB default) that a legit HD 30 s screen+camera webm chunk (single-
+    // digit MB even at high bitrate) is NEVER blocked. The candidate's uploader
+    // must send the SAME header on the PUT for the signature to match.
+    const signOpts = {
+      version: "v4",
+      action: "write",
+      expires: Date.now() + urlExpirySeconds * 1000,
+      contentType: body.content_type
+    };
+    if (maxUploadChunkBytes > 0) {
+      signOpts.extensionHeaders = { "x-goog-content-length-range": `0,${maxUploadChunkBytes}` };
+    }
+    const [uploadUrl] = await signingBucket().file(objectKey).getSignedUrl(signOpts);
 
     await sessionRef(session.session_id).update({
       updated_at: new Date().toISOString(),
@@ -140,7 +160,11 @@ export function makeSessionTelemetryRoutes(ctx) {
     return {
       upload_url: uploadUrl,
       storage_key: objectKey,
-      expires_in: urlExpirySeconds
+      expires_in: urlExpirySeconds,
+      // v1.1 G3 (#7): the cap the PUT must honor. The candidate uploader echoes
+      // this as the x-goog-content-length-range header so the signature matches.
+      // Absent/0 → no cap was bound (legacy).
+      ...(maxUploadChunkBytes > 0 ? { max_bytes: maxUploadChunkBytes } : {})
     };
   }
 
@@ -148,6 +172,7 @@ export function makeSessionTelemetryRoutes(ctx) {
     const body = parseBody(req);
     requireFields(body, ["session_id", "events"]);
     const session = requireWritableSession(await getSession(body.session_id));
+    telemetryCheck("events", session.session_id); // v1.1 G3 (#4)
     if (!Array.isArray(body.events)) return badRequest("events must be an array");
 
     const cleanedEvents = body.events.slice(0, 100).map((item) => ({
@@ -194,6 +219,7 @@ export function makeSessionTelemetryRoutes(ctx) {
     const sessionId = String(body.session_id || "");
     // Ownership gate (same as /api/events): unknown → 404; ended/locked/pending → 409/403.
     const session = requireWritableSession(await getSession(sessionId));
+    telemetryCheck("editor-events", session.session_id); // v1.1 G3 (#4)
     const events = Array.isArray(body.events) ? body.events : null;
     if (!events) return badRequest("events[] required");
     if (events.length > editorEventsIngestLimit) return badRequest(`max ${editorEventsIngestLimit} events per batch`);
@@ -226,6 +252,7 @@ export function makeSessionTelemetryRoutes(ctx) {
     const body = parseBody(req);
     requireFields(body, ["session_id", "nature", "records"]);
     const session = requireWritableSession(await getSession(body.session_id));
+    telemetryCheck("review-file", session.session_id); // v1.1 G3 (#4)
     if (!["clipboard", "tabs", "cookies"].includes(body.nature)) return badRequest("nature must be clipboard, tabs, or cookies");
     if (!Array.isArray(body.records)) return badRequest("records must be an array");
 
@@ -250,6 +277,7 @@ export function makeSessionTelemetryRoutes(ctx) {
     const body = parseBody(req);
     requireFields(body, ["session_id", "recording_state", "visibility_state"]);
     const session = requireWritableSession(await getSession(body.session_id));
+    telemetryCheck("heartbeat", session.session_id); // v1.1 G3 (#4)
     const now = new Date().toISOString();
     const currentIp = getClientIp(req);
     const startIp = session.start_ip || currentIp;
@@ -393,6 +421,10 @@ export function makeSessionTelemetryRoutes(ctx) {
     // Ownership gate: an unknown session_id is a 404 (no admin auth involved). The
     // session token is the only credential, matching sendBeacon's constraints.
     const session = await getSession(body.session_id);
+    // v1.1 G3 (#4): rate-limit the beacon too. sendBeacon ignores the response,
+    // so a throttled beacon simply isn't recorded — fine under a flood; the
+    // generous cap (60 burst, 1/s) never trips on real visibility flapping.
+    telemetryCheck("beacon", session.session_id);
     const now = new Date().toISOString();
 
     await sessionRef(session.session_id).update({

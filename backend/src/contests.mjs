@@ -55,8 +55,55 @@ export const ALL_CONTESTS = Symbol("ALL_CONTESTS");
 // instance) so the __setClientsForTest fakes propagate here too — the exact
 // configureProblemStore pattern.
 let store = null;
-export function configureContestStore({ getFirestore, collection, dataCollections }) {
-  store = { getFirestore, collection, dataCollections: dataCollections || [] };
+// v1.1 G3 (#5): an optional hot-path read cache for the contest doc, injected by
+// handler.mjs. `cache` is a tiny TTL cache ({ get, set, invalidate }); when
+// absent (tests / cache disabled) every read goes straight to Firestore (the
+// prior behavior). Writes ALWAYS invalidate so a config edit is visible
+// immediately on the writing instance; the TTL bounds cross-instance staleness.
+export function configureContestStore({ getFirestore, collection, dataCollections, cache = null }) {
+  store = { getFirestore, collection, dataCollections: dataCollections || [], cache };
+  // A (re)configuration swaps the active cache; start it empty so no entry from
+  // a prior wiring (e.g. a previous test's handler instance) can be served.
+  cache?.clear();
+}
+
+// Drop a slug from the contest-doc cache (called after every write). Safe when
+// no cache is configured. EXPORTED so the OTHER modules that write the contest
+// doc directly (handler.mjs retention sweep / selection-done / purge; identity's
+// roster-save colleges patch) invalidate the SAME shared cache.
+export function invalidateContestDocCache(slug) {
+  if (store?.cache && slug) store.cache.invalidate(String(slug));
+}
+
+// v1.1 G3 (#5) — TEST-ONLY reset of the contest-doc read cache. Clears the cache
+// CURRENTLY wired into `store` (not a handler-local variable). This matters
+// because each cache-busted `import("…/handler.mjs?tag")` re-runs
+// configureContestStore and overwrites store.cache — so a handler-instance-local
+// clear() would clear an ORPHANED cache while reads funnel through the
+// last-configured one. The test reset hook (__setClientsForTest) calls THIS so
+// the cache it clears is always the one actually serving reads. Prod never calls
+// it. No-op when no cache is configured.
+export function resetContestDocCacheForTest() {
+  store?.cache?.clear();
+}
+
+// Read a contest doc THROUGH the cache (TTL); returns the doc data or null. The
+// cache stores the parsed doc (or a NULL sentinel for a missing doc, so a hot
+// miss on a non-existent slug isn't re-read every time). Bypasses the cache when
+// none is configured.
+const CONTEST_MISS = Symbol("contest_doc_miss");
+async function readContestDocCached(slug) {
+  const key = String(slug);
+  if (!store?.cache) {
+    const doc = await contestRef(key).get();
+    return doc.exists ? doc.data() : null;
+  }
+  const cached = store.cache.get(key);
+  if (cached !== undefined) return cached === CONTEST_MISS ? null : cached;
+  const doc = await contestRef(key).get();
+  const value = doc.exists ? doc.data() : null;
+  store.cache.set(key, value === null ? CONTEST_MISS : value);
+  return value;
 }
 
 // Injectable RNG seam for deterministic access-code collision tests (mirrors
@@ -184,6 +231,7 @@ export async function createContest(body) {
     };
     try {
       await contestRef(slug).create(item);
+      invalidateContestDocCache(slug); // v1.1 G3 (#5): a write invalidates the read cache
       return item;
     } catch (err) {
       if (isAlreadyExists(err)) continue;
@@ -258,6 +306,7 @@ export async function updateContest(slugRaw, body) {
 
   const item = { ...existing, ...patch, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -285,6 +334,7 @@ export async function setContestStatus(slugRaw, statusRaw) {
   }
   const item = { ...existing, status, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -298,6 +348,7 @@ export async function setContestAccessCode(slugRaw, codeRaw) {
   await requireCodeFreeAmongOpenContests(code, existing.slug);
   const item = { ...existing, access_code: code, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -315,6 +366,7 @@ export async function regenerateContestSecret(slugRaw, fieldRaw) {
     : { invigilator_key: mintInvigilatorKey() };
   const item = { ...existing, ...patch, updated_at: new Date().toISOString() };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return item;
 }
 
@@ -376,6 +428,7 @@ export async function applyContestExamTime(slugRaw, body) {
     updated_at: now
   };
   await contestRef(item.slug).set(item);
+  invalidateContestDocCache(item.slug); // v1.1 G3 (#5): a write invalidates the read cache
   return { contest: item, field, now };
 }
 
@@ -383,9 +436,10 @@ export async function applyContestExamTime(slugRaw, body) {
 async function getRealContest(slugRaw) {
   const slug = String(slugRaw ?? "").trim();
   if (!slug) throw httpError(404, "contest_not_found");
-  const doc = await contestRef(slug).get();
-  if (!doc.exists) throw httpError(404, "contest_not_found");
-  return doc.data();
+  // v1.1 G3 (#5): read through the same TTL cache as resolveContest.
+  const contest = await readContestDocCached(slug);
+  if (!contest) throw httpError(404, "contest_not_found");
+  return contest;
 }
 
 // ---- list ----------------------------------------------------------------------
@@ -410,9 +464,11 @@ export async function listContests({ includeArchived = false } = {}) {
 export async function resolveContest(reqOrSlug, { requireOpen = true } = {}) {
   const slug = contestParamOf(reqOrSlug);
   if (!slug) throw httpError(400, "unknown_contest");
-  const doc = await contestRef(slug).get();
-  if (!doc.exists) throw httpError(400, "unknown_contest");
-  const contest = doc.data();
+  // v1.1 G3 (#5): hot path — heartbeat/events/beacon/room-gate all funnel here.
+  // Read through the TTL cache (config never changes mid-request; an admin edit
+  // invalidates immediately on the writing instance + within the TTL elsewhere).
+  const contest = await readContestDocCached(slug);
+  if (!contest) throw httpError(400, "unknown_contest");
   if (requireOpen && contest.status !== "open") throw httpError(403, "contest_not_open");
   return contest;
 }
