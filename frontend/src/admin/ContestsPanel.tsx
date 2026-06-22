@@ -12,6 +12,7 @@ import {
   adjustContestExamTime,
   createContestApi,
   exportContest,
+  fetchContestDataSize,
   fetchContests,
   fetchProblems,
   fetchTemplates,
@@ -37,8 +38,8 @@ import {
   testCodeIssue
 } from "./contestAdmin";
 import { DateTimeField } from "./DateTimeField";
-import { lifecyclePhase, purgeGateState, retentionStatus } from "./dataLifecycle";
-import type { ContestExportResponse, ContestStatus, ContestSummary, ProblemSummary } from "../types";
+import { formatBytes, lifecyclePhase, purgeGateState, retentionStatus } from "./dataLifecycle";
+import type { ContestDataSizeResponse, ContestExportResponse, ContestStatus, ContestSummary, ProblemSummary } from "../types";
 
 const STATUS_CHIP_CLASSES: Record<ReturnType<typeof contestStatusTone>, string> = {
   open: "bg-accent/15 text-accent border-accent/30",
@@ -369,6 +370,11 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
   // simplified-recovery save which sends the WHOLE enforcement object.
   const [takeHomeEnabled, setTakeHomeEnabled] = useState(contest.take_home_enabled === true);
   const [proctorPhone, setProctorPhone] = useState(contest.proctor_contact_phone ?? "");
+  // G1 (v1.1): per-contest evidence-retention window (days). String-backed so a
+  // blank field ⇒ the backend default (not a coerced 0); the backend clamps 1–30.
+  const [retentionDays, setRetentionDays] = useState(
+    contest.evidence_retention_days === undefined ? "" : String(contest.evidence_retention_days)
+  );
   const [reentrySeconds, setReentrySeconds] = useState(
     contest.enforcement?.fullscreen_reentry_seconds === undefined ? "" : String(contest.enforcement.fullscreen_reentry_seconds)
   );
@@ -458,6 +464,9 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
       slug: contest.slug,
       take_home_enabled: takeHomeEnabled,
       proctor_contact_phone: proctorPhone.trim() || null,
+      // G1 (v1.1): blank ⇒ omit (keep the backend default); else send the typed
+      // window. The backend clamps to 1–30 days at write.
+      ...(retentionDays.trim() === "" ? {} : { evidence_retention_days: Number(retentionDays) }),
       enforcement: {
         fullscreen_reentry_seconds: reentry,
         fullscreen_exit_limit: exit,
@@ -713,6 +722,13 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
             </div>
             <p className="mt-2 text-xs text-muted">The countdown is how long the red exit screen waits before locking; the exit limit is how many full-screen exits are allowed before the session auto-locks. Blank = defaults (20s / 2). Clamped to 5–300s and 1–10. Takes effect on in-progress sessions within ~15s via the heartbeat.</p>
 
+            {/* G1 (v1.1): per-contest evidence-retention window. */}
+            <label className="mt-3 block max-w-xs">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted">Evidence retention (days)</span>
+              <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="number" min={1} max={30} placeholder="4" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} />
+            </label>
+            <p className="mt-2 text-xs text-muted">Erase recordings, audio, keystrokes &amp; personal details this many days after results are finalised. <span className="font-medium text-ink">Scores and our evaluation are always kept.</span> Blank = default (4). Clamped to 1–30. Candidates see this exact number on the consent screen.</p>
+
             <div className="mt-3">
               <button className="focus-ring inline-flex h-9 items-center rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" disabled={busy} onClick={saveRemoteSettings}>
                 Save remote settings
@@ -754,6 +770,24 @@ function DataLifecycleSection({ password, contest, busy, runMutation }: {
   const gate = purgeGateState({ contest, confirmed, typedSlug });
   const purged = gate.alreadyPurged;
   const lastExportAt = contest.last_export_at ?? null;
+
+  // G1 (v1.1, design §4.2): async stored-data size. Fired ON DEMAND (a bucket
+  // listing is expensive; never auto-run on every contest render). Spinner while
+  // loading, then the formatted size + per-kind breakdown.
+  const [dataSize, setDataSize] = useState<ContestDataSizeResponse | null>(null);
+  const [dataSizeLoading, setDataSizeLoading] = useState(false);
+  const [dataSizeError, setDataSizeError] = useState("");
+  const checkDataSize = async () => {
+    setDataSizeLoading(true);
+    setDataSizeError("");
+    try {
+      setDataSize(await fetchContestDataSize(password, contest.slug));
+    } catch (cause) {
+      setDataSizeError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDataSizeLoading(false);
+    }
+  };
 
   // runMutation owns error surfacing (panel-level) + the post-mutation reload.
   const doExport = () => runMutation(async () => {
@@ -840,6 +874,45 @@ function DataLifecycleSection({ password, contest, busy, runMutation }: {
         <button className="focus-ring mt-2 inline-flex h-8 items-center gap-1 rounded-md border border-line bg-white px-3 text-xs font-medium disabled:opacity-50" disabled={busy} onClick={doSweep} title="Runs the same daily Cloud Scheduler sweep on demand">
           <RefreshCw size={12} /> Run retention sweep now
         </button>
+
+        {/* G1 (v1.1): on-demand stored-data size (spinner → size). */}
+        <div className="mt-3 border-t border-line pt-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-medium text-ink">Stored data</p>
+            <button
+              className="focus-ring inline-flex h-8 items-center gap-1 rounded-md border border-line bg-white px-3 text-xs font-medium disabled:opacity-50"
+              disabled={dataSizeLoading}
+              onClick={() => void checkDataSize()}
+              title="Sums the contest's evidence objects in storage (read-only)"
+            >
+              <RefreshCw size={12} className={dataSizeLoading ? "animate-spin" : ""} /> {dataSizeLoading ? "Checking…" : dataSize ? "Refresh size" : "Check size"}
+            </button>
+          </div>
+          {dataSizeLoading ? (
+            <p className="mt-1 text-xs text-muted">Measuring stored recordings…</p>
+          ) : dataSizeError ? (
+            <p className="mt-1 text-xs text-danger">{dataSizeError}</p>
+          ) : dataSize ? (
+            <div className="mt-1">
+              <p className="text-sm text-ink">
+                <span className="font-semibold">{formatBytes(dataSize.evidence_bytes)}</span>
+                <span className="text-muted"> across {dataSize.evidence_objects.toLocaleString()} object{dataSize.evidence_objects === 1 ? "" : "s"}</span>
+              </p>
+              {Object.entries(dataSize.by_kind).filter(([, v]) => v > 0).length ? (
+                <p className="mt-0.5 text-xs text-muted">
+                  {Object.entries(dataSize.by_kind)
+                    .filter(([, v]) => v > 0)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([kind, v]) => `${kind} ${formatBytes(v)}`)
+                    .join(" · ")}
+                </p>
+              ) : null}
+              <p className="mt-0.5 text-[11px] text-muted">Measured {new Date(dataSize.computed_at).toLocaleString()}.</p>
+            </div>
+          ) : (
+            <p className="mt-1 text-xs text-muted">Recordings, audio and event logs stored for this contest. Click to measure.</p>
+          )}
+        </div>
       </div>
 
       {/* PURGE — triple gate */}

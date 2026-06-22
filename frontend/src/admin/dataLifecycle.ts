@@ -91,10 +91,38 @@ export function purgeGateState({ contest, confirmed, typedSlug }: {
   return { exportDone, canConfirm: exportDone, confirmed: confirmedFlag, slugMatches, canPurge, alreadyPurged: false, nextStep };
 }
 
-function resolveRetentionDays(raw: number | null | undefined): number {
+// Resolve a contest's retention window to a positive integer of days, falling
+// back to DEFAULT_RETENTION_DAYS for absent/garbage values — must match the
+// server (dataLifecycle.mjs retentionDaysOf). Exported (G1) so the candidate
+// "erased after N days" disclosure and the T&C/Privacy interpolation read the
+// SAME truthful N the admin countdown uses.
+export function resolveRetentionDays(raw: number | null | undefined): number {
   const num = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(num) || !Number.isInteger(num) || num <= 0) return DEFAULT_RETENTION_DAYS;
   return num;
+}
+
+// ---- byte formatting (PURE; G1 admin data-size, design §4.2) -----------------
+//
+// Human-readable size for the admin "Stored data" row. Binary units (1024) so it
+// matches what an operator sees in GCS console. 0 → "0 B"; sub-KB stays in bytes;
+// otherwise one decimal place (trimmed) up to TB.
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"] as const;
+
+export function formatBytes(bytes: number | null | undefined): string {
+  const n = typeof bytes === "number" ? bytes : Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n < 1024) return `${Math.round(n)} B`;
+  let value = n;
+  let unit = 0;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // One decimal, but drop a trailing ".0" so "1 GB" not "1.0 GB".
+  const rounded = Math.round(value * 10) / 10;
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  return `${text} ${BYTE_UNITS[unit]}`;
 }
 
 // ---- retention status / countdown (PURE) ------------------------------------

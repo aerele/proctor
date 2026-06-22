@@ -136,8 +136,22 @@ type CandidateFormFields = {
   email: string;
   room: string;
   consent_accepted: boolean;
+  // G1 (v1.1 privacy & consent): the gate requires the candidate to have viewed
+  // BOTH pages and confirmed right-to-consent, on top of the consent tick. All
+  // four gate the Start button in both modes (the server re-enforces).
+  viewed_terms: boolean;
+  viewed_privacy: boolean;
+  right_to_consent: boolean;
   roster_unique_id: string;
 };
+
+// G1: the four-part consent gate, required in BOTH form modes. Viewed both pages
+// AND right-to-consent AND consent ticked. Pure so it is unit-tested alongside
+// candidateFormReady.
+export function consentGateReady(form: Pick<CandidateFormFields,
+  "viewed_terms" | "viewed_privacy" | "right_to_consent" | "consent_accepted">): boolean {
+  return Boolean(form.viewed_terms && form.viewed_privacy && form.right_to_consent && form.consent_accepted);
+}
 
 // Permissive email shape (F12 review gap): a non-space run, then @, then a
 // non-space run, then a dot, then a non-space run. Deliberately lenient — it
@@ -153,19 +167,21 @@ export function isCandidateEmailValid(email: string): boolean {
 // person_roster = the roster supplies name/roll/email server-side, so only the
 // typed id + room + consent gate the button; person_open = the backend's
 // no-roster person contract (id + name + email required, roll optional).
+// G1 (v1.1): BOTH modes additionally require the full consent gate (viewed both
+// pages + right-to-consent + consent ticked) — consentGateReady.
 export function candidateFormReady(
   mode: CandidateFormMode,
   form: CandidateFormFields
 ): boolean {
+  if (!consentGateReady(form)) return false;
   if (mode === "person_roster") {
-    return Boolean(form.roster_unique_id.trim() && form.room.trim() && form.consent_accepted);
+    return Boolean(form.roster_unique_id.trim() && form.room.trim());
   }
   return Boolean(
     form.candidate_id.trim() &&
     form.name.trim() &&
     isCandidateEmailValid(form.email) &&
-    form.room.trim() &&
-    form.consent_accepted
+    form.room.trim()
   );
 }
 

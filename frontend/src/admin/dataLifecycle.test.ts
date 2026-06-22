@@ -6,11 +6,61 @@
 import { describe, expect, it } from "vitest";
 import {
   DAY_MS,
+  DEFAULT_RETENTION_DAYS,
+  formatBytes,
   lifecyclePhase,
   purgeGateState,
+  resolveRetentionDays,
   retentionStatus,
   type LifecycleContest
 } from "./dataLifecycle";
+
+// G1 (v1.1): the byte formatter + exported retention resolver.
+describe("formatBytes (G1 admin data-size)", () => {
+  it("0 / negative / garbage → 0 B", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(-5)).toBe("0 B");
+    expect(formatBytes(NaN)).toBe("0 B");
+    expect(formatBytes(null)).toBe("0 B");
+    expect(formatBytes(undefined)).toBe("0 B");
+  });
+
+  it("sub-KB stays in whole bytes", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1023)).toBe("1023 B");
+  });
+
+  it("scales through KB / MB / GB / TB (binary, 1024)", () => {
+    expect(formatBytes(1024)).toBe("1 KB");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(1024 * 1024)).toBe("1 MB");
+    expect(formatBytes(180 * 1024 * 1024)).toBe("180 MB");
+    expect(formatBytes(1024 * 1024 * 1024)).toBe("1 GB");
+    expect(formatBytes(2.5 * 1024 * 1024 * 1024)).toBe("2.5 GB");
+    expect(formatBytes(1024 ** 4)).toBe("1 TB");
+  });
+
+  it("drops a trailing .0 (no '1.0 GB')", () => {
+    expect(formatBytes(1024 ** 3)).toBe("1 GB");
+    expect(formatBytes(3 * 1024 ** 3)).toBe("3 GB");
+  });
+});
+
+describe("resolveRetentionDays (G1, exported)", () => {
+  it("passes a valid positive integer through", () => {
+    expect(resolveRetentionDays(7)).toBe(7);
+    expect(resolveRetentionDays(1)).toBe(1);
+    expect(resolveRetentionDays(30)).toBe(30);
+  });
+
+  it("falls back to the default for garbage / zero / non-integer", () => {
+    expect(resolveRetentionDays(0)).toBe(DEFAULT_RETENTION_DAYS);
+    expect(resolveRetentionDays(-3)).toBe(DEFAULT_RETENTION_DAYS);
+    expect(resolveRetentionDays(4.5)).toBe(DEFAULT_RETENTION_DAYS);
+    expect(resolveRetentionDays(null)).toBe(DEFAULT_RETENTION_DAYS);
+    expect(resolveRetentionDays(undefined)).toBe(DEFAULT_RETENTION_DAYS);
+  });
+});
 
 function contest(over: Partial<LifecycleContest> = {}): LifecycleContest {
   return {
