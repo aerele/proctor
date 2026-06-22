@@ -409,3 +409,81 @@ test("(d) a moderate-with-gm2 origin that was only WATCH (not confirmed) is NOT 
   assert.ok(rep.hires.some((r) => r.identity_key === "sh2"));
   assert.ok(!rep.genuineCopied.some((r) => r.identity_key === "sh2"));
 });
+
+// ============================================================================
+// PENDING-4 (2026-06-22): tighten origin-rescue.
+//   (a) do NOT fire on skeleton-only-differing recurring pairs (n_exact===0).
+//   (b) a group resolves to AT MOST ONE origin — no mutual origin (a candidate
+//       who is a copier in ANY group can never also be rescued as an origin).
+// ============================================================================
+
+test("(d) PENDING-4(a): skeleton-only recurring pair (n_exact=0) does NOT rescue anyone", () => {
+  // Two confirmed candidates form a recurring pair with NO byte-identical match
+  // (skeleton-only: same algorithm shape, different code) → no copy → nothing to
+  // rescue. The earliest is genuine-profiled, but the pair is skeleton-only.
+  const cohort = [genuineMember("s1", "Skel Origin"), copierMember("s2", "Skel Other")];
+  const meta = {
+    clusters: { exact: [] }, // NO exact cluster → skeleton-only
+    recurring_pairs: [{ pair: ["s1", "s2"], n_problems: 2, problems: ["p1", "p2"], n_exact: 0 }],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  assert.equal(rep.counts.genuine_copied, 0, "skeleton-only pair (n_exact=0) yields NO rescue");
+  assert.ok(rep.excluded.some((r) => r.identity_key === "s1"));
+  assert.ok(rep.excluded.some((r) => r.identity_key === "s2"));
+});
+
+test("(d) PENDING-4(a): exact recurring pair (n_exact>=1) STILL rescues the genuine origin", () => {
+  // Same as above but with a real coreExact match → rescue fires as before.
+  const cohort = [genuineMember("e1", "Exact Origin"), copierMember("e2", "Exact Copier")];
+  const meta = {
+    clusters: { exact: [{ ch: "p1", hardness: "med", members: [{ user: "e1", created: 100 }, { user: "e2", created: 900 }] }] },
+    recurring_pairs: [{ pair: ["e1", "e2"], n_problems: 2, problems: ["p1", "p2"], n_exact: 1 }],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  assert.equal(rep.counts.genuine_copied, 1);
+  assert.ok(rep.genuineCopied.some((r) => r.identity_key === "e1"));
+  assert.ok(rep.excluded.some((r) => r.identity_key === "e2"));
+});
+
+test("(d) PENDING-4(b): MUTUAL origin is impossible — two byte-identical typists, neither is rescued", () => {
+  // two-byte-identical-typists shape: both typed byte-identical code, each ranks 'earliest'
+  // on a DIFFERENT problem. Under the old merge BOTH were rescued (mutual origin);
+  // now a candidate who is a copier in ANY group cannot be an origin → NEITHER is
+  // rescued, both stay excluded (real copiers correctly held).
+  const cohort = [genuineMember("m1", "Typist One"), genuineMember("m2", "Typist Two")];
+  const meta = {
+    clusters: {
+      exact: [
+        // on p-a, m1 is earliest; on p-b, m2 is earliest → each is a copier on the other
+        { ch: "p-a", hardness: "med", members: [{ user: "m1", created: 100 }, { user: "m2", created: 200 }] },
+        { ch: "p-b", hardness: "med", members: [{ user: "m2", created: 300 }, { user: "m1", created: 400 }] },
+      ],
+    },
+    recurring_pairs: [{ pair: ["m1", "m2"], n_problems: 2, problems: ["p-a", "p-b"], n_exact: 2 }],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  assert.equal(rep.counts.genuine_copied, 0, "no mutual origin — neither rescued");
+  assert.ok(rep.excluded.some((r) => r.identity_key === "m1"));
+  assert.ok(rep.excluded.some((r) => r.identity_key === "m2"));
+});
+
+test("(d) PENDING-4(b): a clean unambiguous origin (earliest everywhere) is STILL rescued", () => {
+  // o is earliest on BOTH problems (never a copier) → still a clean origin.
+  const cohort = [genuineMember("o", "Clean Origin"), copierMember("c1", "Copier A"), copierMember("c2", "Copier B")];
+  const meta = {
+    clusters: {
+      exact: [
+        { ch: "p-a", hardness: "med", members: [{ user: "o", created: 100 }, { user: "c1", created: 500 }] },
+        { ch: "p-b", hardness: "med", members: [{ user: "o", created: 150 }, { user: "c2", created: 600 }] },
+      ],
+    },
+    recurring_pairs: [],
+  };
+  const rep = computeRecommendationReport(cohort, meta);
+  assert.equal(rep.counts.genuine_copied, 1);
+  const o = rep.genuineCopied.find((r) => r.identity_key === "o");
+  assert.ok(o, "earliest-everywhere origin still rescued");
+  assert.deepEqual(o.copied_by.sort(), ["c1", "c2"]);
+  assert.ok(rep.excluded.some((r) => r.identity_key === "c1"));
+  assert.ok(rep.excluded.some((r) => r.identity_key === "c2"));
+});

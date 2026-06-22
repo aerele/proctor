@@ -85,7 +85,7 @@ function sub(o) {
 }
 
 test("EVALUATOR_VERSION and THRESHOLDS constants", () => {
-  assert.equal(EVALUATOR_VERSION, "3");
+  assert.equal(EVALUATOR_VERSION, "4");
   assert.equal(THRESHOLDS.AWAY_PASTE_WINDOW_MS, 10000);
   assert.equal(THRESHOLDS.SUPERHUMAN_CPS, 14);
   assert.equal(THRESHOLDS.SUPERHUMAN_RUN, 25);
@@ -214,7 +214,7 @@ function baseInput(overrides) {
 test("buildScorecard basic schema + identity fields", () => {
   const sc = buildScorecard(baseInput({}));
   assert.equal(sc.schema_version, 1);
-  assert.equal(sc.evaluator_version, "3");
+  assert.equal(sc.evaluator_version, "4");
   assert.equal(sc.contest_slug, "c1");
   assert.equal(sc.person_id, null);
   assert.equal(sc.username_norm, "u1");
@@ -847,6 +847,137 @@ test("crossCandidateAnalysis: exact clone pair on hard problem → recurring con
   assert.equal(pa.integrity_escalation, "confirmed");
   assert.ok(pa.flags.find((f) => f.code === "recurring_pair_conclusive" && f.severity === "critical"));
   assert.ok(pa.flags.find((f) => f.code === "hard_clone_cluster"));
+});
+
+// ===========================================================================
+// PENDING-1/2/3 (2026-06-22): recurring-pair conclusiveness gate.
+// ===========================================================================
+
+// Helper: build N accepted candidates on a SINGLE problem with given codes.
+function cohortOnProblem(pid, entries, opts = {}) {
+  // entries: [{key, code, ts, room, ips}]
+  return entries.map((e, i) =>
+    makeCandidate(e.key, {
+      submissions: [sub({ problem_id: pid, verdict: "accepted", score: 100, max_points: 100, source_code: e.code, created_at: tsAt(e.ts != null ? e.ts : 1000 * (i + 1)) })],
+      room: e.room || opts.room || "",
+      ips: e.ips || opts.ips || [],
+      total: 100,
+    })
+  );
+}
+
+test("PENDING-2: single-problem CANONICAL exact match → NOT conclusive (no confirm)", () => {
+  // 6 solvers, 3 short canonical SQL forms, ≥5 solvers → canonical. The two
+  // candidates who share a form are NOT confirmed (convergence, not copying).
+  const f = [
+    "select city from station order by length(city) limit 1",
+    "select city from station order by length(city) desc limit 1",
+    "select city from station group by city order by length(city) limit 1",
+  ];
+  const entries = [];
+  for (let i = 0; i < 6; i++) entries.push({ key: `c${i}`, code: f[i % 3], room: "R", ips: ["10.0.0.1"] });
+  const cands = cohortOnProblem("wos5", entries);
+  const { meta, patches } = crossCandidateAnalysis({ candidates: cands, problems: [{ problem_id: "wos5" }] });
+  assert.equal(meta.hardness.wos5, "hard"); // 6 solvers ≤10
+  assert.equal(meta.canonical.wos5, true);
+  // c0 and c3 share form f[0] (proximity present: same room) but it is canonical.
+  const p0 = patches.get("c0");
+  assert.ok(!p0.recurring_pair_refs.some((r) => r.conclusive), "canonical single-problem pair NOT conclusive");
+  assert.notEqual(p0.integrity_escalation, "confirmed");
+  // the hard cluster is down-weighted to a (warning) clone_cluster, not critical.
+  assert.ok(!p0.flags.some((f2) => f2.code === "hard_clone_cluster"), "canonical hard cluster is down-weighted");
+  assert.ok(p0.flags.some((f2) => f2.code === "clone_cluster" && f2.severity === "warning"));
+});
+
+test("PENDING-1/2/3: single-problem exact+hard+non-canonical+PROXIMITY → conclusive", () => {
+  // 6 solvers on a SUBSTANTIVE (long) hard problem; 2 share identical long code
+  // AND are in the same room → conclusive copy.
+  const longA = "class result{public static int solve(int n){int s=0;for(int i=2;i<=n;i++){s=(s*i+7)%1000003;}return s;}}public class main{public static void main(string[]a){scanner sc=new scanner(system.in);system.out.println(result.solve(sc.nextint()));}}";
+  const variants = [];
+  for (let i = 0; i < 4; i++) variants.push(longA.replace("int s=0", `int s=${i}`).replace("return s", `return s/* ${i} */ +0-0`));
+  const entries = [
+    { key: "X", code: longA, room: "R1", ips: ["10.0.0.5"], ts: 1000 },
+    { key: "Y", code: longA, room: "R1", ips: ["10.0.0.5"], ts: 2000 }, // same room → proximity
+    { key: "Z0", code: variants[0], room: "R2" }, { key: "Z1", code: variants[1], room: "R3" },
+    { key: "Z2", code: variants[2], room: "R4" }, { key: "Z3", code: variants[3], room: "R5" },
+  ];
+  const cands = cohortOnProblem("hardP", entries);
+  const { meta, patches } = crossCandidateAnalysis({ candidates: cands, problems: [{ problem_id: "hardP" }] });
+  assert.equal(meta.hardness.hardP, "hard");
+  assert.equal(meta.canonical.hardP, false, "long forms ⇒ not canonical");
+  const px = patches.get("X");
+  assert.ok(px.recurring_pair_refs.some((r) => r.other === "Y" && r.conclusive), "exact+hard+non-canon+same-room ⇒ conclusive");
+  assert.equal(px.integrity_escalation, "confirmed");
+  assert.ok(px.flags.some((f2) => f2.code === "hard_clone_cluster"));
+});
+
+test("PENDING-3: single-problem exact+hard+non-canonical but NO proximity → NOT conclusive", () => {
+  // Same as above but the two sharers are in different rooms with no IP overlap
+  // and no tight gap → no proximity → NOT confirmed (different-room-no-proximity separation).
+  const longA = "class result{public static int solve(int n){int s=0;for(int i=2;i<=n;i++){s=(s*i+7)%1000003;}return s;}}public class main{public static void main(string[]a){scanner sc=new scanner(system.in);system.out.println(result.solve(sc.nextint()));}}";
+  const variants = [];
+  for (let i = 0; i < 4; i++) variants.push(longA.replace("int s=0", `int s=${i}`).replace("return s", `return s/* ${i} */ +0-0`));
+  const entries = [
+    { key: "X", code: longA, room: "RA", ips: ["10.1.1.1"], ts: 1000 },
+    { key: "Y", code: longA, room: "RB", ips: ["10.2.2.2"], ts: 1000 + 5_000_000 }, // far apart, diff room/IP
+    { key: "Z0", code: variants[0], room: "RC" }, { key: "Z1", code: variants[1], room: "RD" },
+    { key: "Z2", code: variants[2], room: "RE" }, { key: "Z3", code: variants[3], room: "RF" },
+  ];
+  const cands = cohortOnProblem("hardP", entries);
+  const { patches } = crossCandidateAnalysis({ candidates: cands, problems: [{ problem_id: "hardP" }] });
+  const px = patches.get("X");
+  assert.ok(!px.recurring_pair_refs.some((r) => r.conclusive), "no proximity ⇒ single-problem NOT conclusive");
+  assert.notEqual(px.integrity_escalation, "confirmed");
+});
+
+test("PENDING-1: single-problem SKELETON-ONLY (code differs) → NOT conclusive even if hard+same-room", () => {
+  // Renamed-variable convergence on one hard problem, SAME room — skeleton matches
+  // but coreExact differs → not proof on a single problem.
+  const a = "class result{public static int solve(int n){int total=0;for(int i=2;i<=n;i++){total=(total*i+7)%1000003;}return total;}}";
+  const b = "class result{public static int solve(int n){int acc=0;for(int j=2;j<=n;j++){acc=(acc*j+7)%1000003;}return acc;}}";
+  // pad cohort so the problem is hard (≤10 solvers) with distinct code each.
+  const entries = [
+    { key: "A", code: a, room: "R1", ips: ["10.0.0.9"], ts: 1000 },
+    { key: "B", code: b, room: "R1", ips: ["10.0.0.9"], ts: 2000 },
+  ];
+  const cands = cohortOnProblem("hardP", entries);
+  const { patches } = crossCandidateAnalysis({ candidates: cands, problems: [{ problem_id: "hardP" }] });
+  const pa = patches.get("A");
+  assert.ok(!pa.recurring_pair_refs.some((r) => r.conclusive), "skeleton-only single problem ⇒ not conclusive");
+  assert.notEqual(pa.integrity_escalation, "confirmed");
+});
+
+test("PENDING-1 SCOPE: multi-problem SKELETON-only (renamed-variable ring) STAYS conclusive (KPR guard)", () => {
+  // Two candidates share the SAME skeleton on TWO problems with different
+  // variable names (a real renamed-variable copy ring). The
+  // coreExact requirement is single-problem-only — a 2-problem skeleton ring is
+  // still conclusive copying. (Long, substantive code so neither problem is
+  // canonical; different variable names so coreExact differs — skeleton-only.)
+  const a1 = "class r{int solve(int n){int total=0;for(int i=0;i<n;i++){total=(total*i+13)%99991;}return total;}}public class main{public static void main(string[]a){scanner sc=new scanner(system.in);system.out.println(r.solve(sc.nextint()));}}";
+  const b1 = a1.replace(/total/g, "acc").replace(/\bi\b/g, "k");
+  // NB: avoid SQL keywords (sum/max/min/count are in the skeleton KW set and stay
+  // literal — they would NOT rename to V and break the skeleton-match intent).
+  const a2 = "class r{int g(int m){int tot=0;for(int i=0;i<m;i++){tot=(tot+i*i-1)%88883;}return tot;}}public class main{public static void main(string[]a){scanner sc=new scanner(system.in);system.out.println(r.g(sc.nextint()));}}";
+  const b2 = a2.replace(/tot/g, "acc").replace(/\bi\b/g, "k");
+  const A = makeCandidate("A", { submissions: [
+    sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: a1, created_at: tsAt(1000) }),
+    sub({ problem_id: "p2", verdict: "accepted", score: 100, max_points: 100, source_code: a2, created_at: tsAt(1100) }),
+  ], total: 200 });
+  const B = makeCandidate("B", { submissions: [
+    sub({ problem_id: "p1", verdict: "accepted", score: 100, max_points: 100, source_code: b1, created_at: tsAt(2000) }),
+    sub({ problem_id: "p2", verdict: "accepted", score: 100, max_points: 100, source_code: b2, created_at: tsAt(2100) }),
+  ], total: 200 });
+  const { meta, patches } = crossCandidateAnalysis({ candidates: [A, B], problems: [{ problem_id: "p1" }, { problem_id: "p2" }] });
+  // sanity: skeleton matches, coreExact differs (renamed variables)
+  const rpMeta = meta.recurring_pairs.find((r) => r.pair.includes("A") && r.pair.includes("B"));
+  assert.ok(rpMeta, "A↔B recurring pair surfaced (skeleton on 2 problems)");
+  assert.equal(rpMeta.n_problems, 2);
+  assert.equal(rpMeta.n_exact, 0, "skeleton-only — no coreExact match on either problem");
+  const pa = patches.get("A");
+  const rp = pa.recurring_pair_refs.find((r) => r.other === "B");
+  assert.ok(rp, "A↔B recurring ref on A's patch");
+  assert.ok(rp.conclusive, "multi-problem skeleton-only ring STAYS conclusive (KPR regression guard)");
+  assert.equal(pa.integrity_escalation, "confirmed");
 });
 
 test("crossCandidateAnalysis: directed paste edge", () => {
