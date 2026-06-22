@@ -248,9 +248,9 @@ Ingest is `POST /api/alerts` (`x-api-key`, **closed-by-default** — rejects all
 
 ---
 
-## 11. Full HTTP route inventory (77 routes)
+## 11. Full HTTP route inventory (76 routes)
 
-There are **77 unique routes**, extracted from every `path === "…"` dispatch site in the backend: **74** `/api/*` routes dispatched from the main handler `backend/src/handler.mjs` (route *bodies* live in the `routes/*.mjs` factories — §6 — but the central dispatch table is in `handler.mjs`), plus **3** `/eval-ui/*` page routes served by the separate proctor-eval entrypoint `backend/src/eval-server.mjs` (NOT `handler.mjs`). The root [`README.md`](../../README.md) HTTP API reference is the canonical, fuller per-route table (method · auth · purpose); this section is the grouped at-a-glance map. Unmatched path → `404`. Grouped by family:
+There are **76 unique routes**, extracted from every `path === "…"` dispatch site in the backend: **73** `/api/*` routes dispatched from the main handler `backend/src/handler.mjs` (route *bodies* live in the `routes/*.mjs` factories — §6 — but the central dispatch table is in `handler.mjs`), plus **3** `/eval-ui/*` page routes served by the separate proctor-eval entrypoint `backend/src/eval-server.mjs` (NOT `handler.mjs`). The [`http-api-reference.md`](http-api-reference.md) page is the canonical, fuller per-route table (method · auth · purpose); this section is the grouped at-a-glance map. Unmatched path → `404`. Grouped by family:
 
 **Candidate session (auth: knowing `session_id`, or time-window gate on start)**
 `POST /api/session/start` · `/api/session/resume` · `/api/upload-url` · `/api/events` · `/api/editor-events` · `/api/review-file` · `/api/heartbeat` · `/api/session/beacon` · `/api/session/validate-end` · `/api/session/end` · `/api/session/room-gate` · `/api/session/enforcement-violation` · `/api/session/unlock-gate`
@@ -274,7 +274,7 @@ There are **77 unique routes**, extracted from every `path === "…"` dispatch s
 `GET /api/admin/sessions` · `recording-sessions` · `sessions-list` · `session-detail` · `session-details` · `session-events` · `stats` · `ip-report` · `attendance` · `POST session-action`
 
 **Admin — submission events**
-`POST /api/submission-events` · `GET /api/admin/submission-events`
+`GET /api/admin/submission-events`
 
 **Admin — results, evaluation & lifecycle**
 `GET /api/admin/contest-results` · `POST contest-export` · `contest-purge` · `retention-sweep` · `POST /api/admin/contest-evaluate` · `GET contest-evaluations` · `contest-evaluate-status`
