@@ -38,7 +38,7 @@ import { ContestScopePicker } from "./views/ContestScopePicker";
 import { ExamTimeCard, type ExamTimeCardScope } from "./views/ExamTimeCard";
 import { ReviewSessionCard } from "./views/ReviewSessionCard";
 import { AlertsConsole } from "./views/AlertsConsole";
-import { CandidateRosterSection, ProctorAlertTypesSection, ContestEvalAlertTypesSection, ReviewRosterSection } from "./views/Settings";
+import { CandidateRosterSection, ProctorAlertTypesSection, ReviewRosterSection } from "./views/Settings";
 
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
@@ -1167,8 +1167,8 @@ export function AdminApp() {
         onReload={loadAlertSettings}
         onSave={saveAlertSettingsNow}
       />
-
-      <ContestEvalAlertTypesSection />
+      {/* HR-poller removal: the read-only "Contest-eval alert types" reference
+          section was dropped — those types are gone with the poller. */}
       </div>
       ) : null}
 

@@ -60,7 +60,7 @@ describe("alertsForSession", () => {
     expect(alertsForSession(alerts, session).map((a) => a.id)).toEqual(["a1"]);
   });
 
-  it("includes session-less alerts for the same candidate (contest-eval signals)", () => {
+  it("includes session-less alerts (no session_id) for the same candidate", () => {
     const alerts = [
       { id: "a1", hackerrank_username: "Asha_R" },
       { id: "a2", hackerrank_username: "Someone_Else" }

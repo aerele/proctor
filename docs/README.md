@@ -10,11 +10,11 @@ event logs) streams to Google Cloud Storage, and every integrity **alert** lands
 one console.
 
 HackerRank was dropped from the candidate path (F8.2) — candidates never leave our
-editor. A clearly-labelled **optional** secondary component still exists: a Python
-**contest-eval monitoring poller** (`monitoring/`) that live-watches an
-*externally-hosted* HackerRank contest and feeds cheating alerts into the **same**
-alerts pipeline. It is not part of the candidate experience and is not required to
-run an exam.
+editor. Proctor is now a standalone own-editor exam platform with its **own in-app
+contest platform**. The legacy HackerRank **contest-eval monitoring poller**
+(`monitoring/`) — a Python poller that live-watched an *externally-hosted*
+HackerRank contest and fed cheating alerts into the alerts pipeline — was removed
+when proctor moved to its own in-app contest platform.
 
 > **Note.** Every page here documents behavior against the code/UI in this repo.
 > Anything not independently confirmed is marked **(unverified)**. For current
@@ -67,12 +67,6 @@ Per-area, code-verified deep dives under [`features/`](features/).
 |---|---|
 | [`features/invigilator-portal.md`](features/invigilator-portal.md) | The tokenized, name-only per-room portal: key/password auth, room picker + console, clickable status filters, the start-code gate, the separate enforcement-unlock namespace, per-student unlock + exemption toggles, selective alerts (default all OFF), and least-privilege scope. |
 
-### Optional contest-eval poller
-
-| Page | What it covers |
-|---|---|
-| [`features/contest-eval-monitoring.md`](features/contest-eval-monitoring.md) | The optional `monitoring/` Python poller for externally-hosted HackerRank contests: the one-cycle pipeline, the unattended CDP driver, the file-queue LLM verdict seam, the local tab-away detector, the submission-events runbook, the offline demo + tests, and PII/git hygiene. |
-
 ### Runbooks (narrated)
 
 | Page | What it covers |
@@ -85,7 +79,7 @@ Per-area, code-verified deep dives under [`features/`](features/).
 | Page | What it covers |
 |---|---|
 | [`features/architecture-overview.md`](features/architecture-overview.md) | The fullest single-page tour: the three path-routed frontend surfaces, the decomposed `handler.mjs` backend (thin dispatch table + `routes/*.mjs` factories), the 21 Firestore collections + GCS evidence prefixes, the `person_id` identity model, the shared Alert contract, the optional not-deployed video-worker, and the 77-route HTTP inventory. **Read this first.** |
-| [`features/alert-taxonomy.md`](features/alert-taxonomy.md) | The shared Alert JSON contract (required fields, idempotent merge on `id`), the proctor alert catalog + admin alert-settings defaults, per-type Share-with-invigilator (default OFF), the optional contest-eval alert types, the `x-api-key` ingest (closed-by-default, batch ≤ 500), and the enforcement-violation lock-ladder flow. |
+| [`features/alert-taxonomy.md`](features/alert-taxonomy.md) | The shared Alert JSON contract (required fields, idempotent merge on `id`), the proctor alert catalog + admin alert-settings defaults, per-type Share-with-invigilator (default OFF), the `x-api-key` ingest (closed-by-default, batch ≤ 500), and the enforcement-violation lock-ladder flow. |
 
 ### Background research (pre-build)
 
@@ -115,9 +109,9 @@ so the specs still match the frontend code).
 
 ## Conventions used across these docs
 
-- **Own-editor platform** — the primary product; candidates code in our React +
-  Monaco workspace with Judge0 Run/Submit. The `monitoring/` contest-eval poller is
-  always called out as the **optional** secondary component.
+- **Own-editor platform** — the product; candidates code in our React +
+  Monaco workspace with Judge0 Run/Submit, with proctor's own in-app contest
+  platform. (The legacy `monitoring/` HackerRank contest-eval poller was removed.)
 - **Person identity** — `person_id = "{college_norm}~{uid_norm}"`, stable across
   contests; the multi-round spine. Legacy contests use bare `username_norm` until
   adopted.

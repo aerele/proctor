@@ -1,18 +1,15 @@
 // frontend/src/admin/views/Settings.tsx
-// Admin Settings sub-sections (candidate roster, proctor alert types, contest-eval
-// alert types reference, review roster), extracted verbatim from App.tsx (F3).
+// Admin Settings sub-sections (candidate roster, proctor alert types, review
+// roster), extracted verbatim from App.tsx (F3). The contest-eval alert-types
+// reference section was removed with the HackerRank poller.
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Bell, Download, ListChecks, RefreshCw, Search, UploadCloud, Users, X } from "lucide-react";
+import { AlertTriangle, Bell, Download, ListChecks, RefreshCw, UploadCloud, Users, X } from "lucide-react";
 import { clearRoster, fetchRosterStatus, parseRosterInput, uploadRoster } from "../../api";
 import type { ApiError } from "../../api";
 import { parseRoster, suggestMapping, type ParsedRoster, type RosterFieldMapping } from "../../roster/parseRoster";
 import { ROSTER_TEMPLATE_COLUMNS, buildRosterTemplateCsv } from "../../roster/rosterTemplate";
 import { buildCollegeResolutions } from "../../roster/personRoster";
 import type { AlertSettings, AlertSeverity, CollegeResolution, KnownCollege, NewCollegePreview, ProctorAlertTypeConfig, ReviewRosterSummary, RosterDuplicate, RosterStatus } from "../../types";
-
-// Read-only reference list — contest-eval alert types are configured in
-// monitoring/alert-config.json, NOT through this console.
-const CONTEST_EVAL_ALERT_TYPES = ["peer_copy_cluster", "recurring_pair", "web_paste", "first_attempt_solve", "tough_first_attempt"] as const;
 
 // SETTINGS tab — S2 candidate roster upload. The admin picks a CSV/TSV file, we
 // parse it CLIENT-SIDE (roster/parseRoster.ts), preview the first rows, choose
@@ -559,26 +556,9 @@ export function ProctorAlertTypesSection({ settings, loading, message, onReload,
   );
 }
 
-// SETTINGS tab — read-only reference for the contest-eval alert types, which are
-// configured in monitoring/alert-config.json (NOT through this console).
-export function ContestEvalAlertTypesSection() {
-  return (
-    <section className="rounded-lg border border-line bg-panel p-5 shadow-subtle">
-      <div className="mb-4 flex items-center gap-3">
-        <Search size={20} />
-        <div>
-          <h2 className="text-2xl font-semibold">Contest-eval alert types</h2>
-          <p className="mt-1 text-sm text-muted">Read-only. These are configured in <span className="font-mono">monitoring/alert-config.json</span>, not here.</p>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {CONTEST_EVAL_ALERT_TYPES.map((type) => (
-          <span key={type} className="rounded-full border border-line bg-white px-3 py-1.5 font-mono text-xs text-muted">{type}</span>
-        ))}
-      </div>
-    </section>
-  );
-}
+// HR-poller removal: the read-only "Contest-eval alert types" reference section
+// (ContestEvalAlertTypesSection) was removed — those alert types and their
+// monitoring/alert-config.json source were retired with the HackerRank poller.
 
 // SETTINGS tab — REVIEW ROSTER. The operator pastes the usernames to be reviewed
 // (comma or newline separated; parsed/deduped client-side too), saves them, sees

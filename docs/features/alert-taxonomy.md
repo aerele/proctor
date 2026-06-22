@@ -1,19 +1,20 @@
 # Alert Taxonomy and the shared Alert pipeline
 
-Every integrity signal in Aerele proctor — whether it comes from a candidate's own browser session or from the optional contest-eval poller — lands as one **Alert** in a single Firestore-backed pipeline that the admin console reads. This page documents the shared Alert JSON contract, the proctor and contest-eval alert catalogs, the ingest/read routes, and how enforcement violations feed the lock ladder.
+Every integrity signal in Aerele proctor — derived from the candidate's own browser session — lands as one **Alert** in a single Firestore-backed pipeline that the admin console reads. This page documents the shared Alert JSON contract, the proctor alert catalog, the ingest/read routes, and how enforcement violations feed the lock ladder.
+
+> **HackerRank poller removed.** Proctor moved to its own in-app contest platform, so the old optional `monitoring/` contest-eval poller (which emitted `source:"contest-eval"` cheating alerts) and its `POST /api/submission-events` ingest were removed. `proctor` is now the **only** alert source the pipeline accepts. Legacy `contest-eval` alerts may still exist in stored data and continue to display, but none are ingested anymore. (For the **in-app** contest evaluator — `/api/admin/contest-evaluate` — see [admin results & people](./admin-results-people.md); that is a different, living subsystem.)
 
 ## Product context
 
-The proctor platform is now a **standalone own-editor exam platform**: candidates do everything inside our React + Monaco editor with Judge0-backed Run/Submit. (The old README that calls this a "HackerRank companion" is stale.) Alongside the primary platform there is **one optional component** — the `monitoring/` contest-eval poller — which live-watches an externally-hosted HackerRank contest and emits cheating alerts into the **same** alerts pipeline. So there are two alert sources, and both write through the same contract:
+The proctor platform is a **standalone own-editor exam platform**: candidates do everything inside our React + Monaco editor with Judge0-backed Run/Submit. All alerts come from a single source:
 
 | Source | What it is | Where it runs |
 | --- | --- | --- |
 | `proctor` | Signals derived from the candidate's own browser session (recorder/heartbeat/events) | The proctor backend itself |
-| `contest-eval` | Deterministic cheating analysis over an externally-hosted contest | The optional `monitoring/` Python poller |
 
 ## The shared Alert JSON contract
 
-All three parties (proctor backend, contest-eval poller, admin console) agree on one `Alert` shape. The TypeScript type is `Alert` in `frontend/src/types.ts`; the backend validators live in `backend/src/proctorAlerts.mjs`; the Python mirror is `_alert()` / `validate_alert()` in `monitoring/alerts.py`.
+Both parties (proctor backend, admin console) agree on one `Alert` shape. The TypeScript type is `Alert` in `frontend/src/types.ts`; the backend validators live in `backend/src/proctorAlerts.mjs`.
 
 ### Required-on-ingest fields
 
@@ -21,7 +22,7 @@ On `POST /api/alerts` the backend (`normalizeAlert` in `backend/src/proctorAlert
 
 | Field | Notes |
 | --- | --- |
-| `source` | Must be `proctor` or `contest-eval` (`ALERT_SOURCES`). |
+| `source` | Must be `proctor` (`ALERT_SOURCES`). The retired `contest-eval` source is now rejected with 400. |
 | `type` | Free string; the catalogs below are the known types. |
 | `severity` | Must be `critical`, `warning`, or `info` (`ALERT_SEVERITIES`). |
 | `timestamp` | Must parse as ISO 8601 (`Date.parse`). |
@@ -93,27 +94,11 @@ There is no `invalid_share_surface` in `SURE_SHOT_EVENT_TYPES` or `DEFAULT_PROCT
 - When **no** type is shared, the invigilator response carries `alerts_shared: false` (`anyAlertSharedWithInvigilator`) so the portal can say "no alert types are shared" rather than a bare empty feed.
 - Even for shared alerts, the invigilator projection keeps only `type / severity / title / timestamp / hackerrank_username` — `detail` is dropped (the `ip_changed` detail embeds candidate IPs) and `session_id` is dropped (it is the candidate's bearer token).
 
-## Contest-eval alerts (`source: contest-eval`, optional poller)
+## Contest-eval alerts (removed)
 
-When the optional `monitoring/` poller is run against an externally-hosted contest, it builds Alert objects with `build_alerts()` in `monitoring/alerts.py` and POSTs them to `/api/alerts` (`post_alerts` in `monitoring/poller.py`, header `x-api-key`). These flow into the exact same pipeline and console as proctor alerts. The catalog and per-type toggles live in `monitoring/alert-config.json`.
+The `source:"contest-eval"` cheating-analytics alerts (`peer_copy_cluster`, `recurring_pair`, `web_paste`, `first_attempt_solve`, `tough_first_attempt`, and the deprecated `fast_solve` alias) were emitted by the optional `monitoring/` HackerRank poller. That poller was **removed** when proctor moved to its own in-app contest platform, so these types are no longer produced or ingested (`ALERT_SOURCES` is now `["proctor"]`). Any such alerts already in Firestore continue to **display** in the console for backward compatibility, but no new ones arrive.
 
-| Type | Default severity (shipped config) | Fires when |
-| --- | --- | --- |
-| `peer_copy_cluster` | critical | 2+ distinct users share identical (skeleton) code on the same MED/HARD problem. One alert per cluster member. |
-| `recurring_pair` | critical | A pair shares identical code on 2+ problems or 1+ hard problem (conclusive collusion). One alert per participant. |
-| `web_paste` | warning | Accepted code carries strong web/editorial provenance signatures (smart quotes, NBSP, zero-width, BOM, etc.). |
-| `first_attempt_solve` | info | A candidate got a **normal** problem accepted on their first attempt (zero prior wrong attempts). Metadata corroborator, not a standalone flag. |
-| `tough_first_attempt` | critical | A first-attempt accepted solve on a **tough** problem (a slug in the operator-marked `tough_questions` list, or — only when that list is empty — data-derived hard). This is the real "solved a tough question on attempt #1" flag. |
-
-Configuration semantics (from `alert-config.json` and `alerts.py`):
-
-- Each type's `enabled` gates whether the poller builds that type at all (disabled → silently skipped, never POSTed).
-- `severity` (when non-null) **overrides** the dynamically computed default. Setting it `null`/absent keeps the dynamic mapping. Because severity also drives the poller's verdict-seam routing, forcing a severity can change whether a type is routed for human review.
-- A **missing** `alert-config.json` means every type enabled with dynamic severity (legacy behavior); a **malformed** file fails loud (`ValueError`).
-- `tough_questions`: when non-empty it is authoritative (only those slugs are tough; the noisy ≤10-solver data rule is ignored). When empty, the data-derived rule applies.
-- `fast_solve` is a deprecated alias of `first_attempt_solve`, still accepted in the config; no alert is emitted under that type anymore.
-
-The Python `_alert()` builds the same idempotent id (`<source>:<type>:<username_norm>:<slug>:<dedupe>`) and seeds `verdict: {status: "pending"}`, matching the contract above.
+> Not to be confused with the **in-app contest evaluator** (`/api/admin/contest-evaluate`), which performs deterministic clone/web-paste analysis over the proctor's own `proctor_submissions` and surfaces results in the candidate-evaluation UI — that is a separate, living subsystem documented under [admin results & people](./admin-results-people.md).
 
 ## Ingest API: `POST /api/alerts`
 
@@ -125,11 +110,11 @@ The Python `_alert()` builds the same idempotent id (`<source>:<type>:<username_
 | Batch limit | **≤ 500** alerts per request (`alerts.length > 500` → 400 "Too many alerts in one request (max 500)"). |
 | Behavior | Each alert is validated + normalized, then `set(..., { merge: true })` on its `id` — idempotent. Response: `{ ok, ingested, ids }`. |
 
-This same `x-api-key` mechanism authenticates the related `POST /api/submission-events` poller ingest.
+The proctoring browser session and the in-app tab-away detector (`monitoring/tab_away_detector.py`) are the producers that POST here. (The related `POST /api/submission-events` poller ingest was removed with the HackerRank poller; the admin recording-review timeline now reads `proctor_submission_events` legacy docs if present, else falls back to `proctor_submissions`.)
 
 ## Admin read: `GET /api/admin/alerts`
 
-The admin **Live alerts console** (`frontend/src/admin/views/AlertsConsole.tsx`, auto-refresh every 5s) reads `GET /api/admin/alerts` (handler `adminAlerts` in `backend/src/routes/alerts.mjs`, admin-authed). The console shows every alert from both sources, newest first, and resolves a signed `download_url` for any alert that has a `video_key` so a reviewer can open the recorded clip.
+The admin **Live alerts console** (`frontend/src/admin/views/AlertsConsole.tsx`, auto-refresh every 5s) reads `GET /api/admin/alerts` (handler `adminAlerts` in `backend/src/routes/alerts.mjs`, admin-authed). The console shows every proctor alert, newest first, and resolves a signed `download_url` for any alert that has a `video_key` so a reviewer can open the recorded clip.
 
 Supported query filters (`AlertFilters`):
 
@@ -137,13 +122,13 @@ Supported query filters (`AlertFilters`):
 | --- | --- |
 | `contest_slug` | Scopes to one contest (the only equality filter pushed to Firestore, to stay index-free). |
 | `severity` | `critical` / `warning` / `info` (filtered in memory). |
-| `source` | `proctor` / `contest-eval` (filtered in memory). |
+| `source` | Filtered in memory. `proctor` is the only live source, so the console no longer exposes a Source dropdown; the backend filter still works for any legacy stored source. |
 | `room` | Matches the alert's stored room label. |
 | `include_archived` | Default excludes archived alerts; set true to include them. |
 
 The console also supports a client-side **Group by** control — `none` (flat), `candidate`, or `type` — implemented by `groupAlerts` in `frontend/src/alertGrouping.ts`; group headers show the worst severity in the group.
 
-![Admin Live alerts console — both sources, newest first, with Source / Severity / Room / Group-by filters](../assets/e2e/admin-review/04a-alerts-console.png)
+![Admin Live alerts console — newest first, with Severity / Room / Group-by filters](../assets/e2e/admin-review/04a-alerts-console.png)
 
 ![Admin Live alerts console grouped by alert type](../assets/verification/wave2-09b-admin-alerts-grouped-type.png)
 
@@ -173,7 +158,6 @@ The same consequence is reached server-side without trusting the client: `record
 | Alert list archived visibility | excluded (until `include_archived=true`) |
 | `POST /api/alerts` without `ALERTS_INGEST_API_KEY` | rejected (closed by default) |
 | `POST /api/alerts` batch size | ≤ 500 |
-| Contest-eval shipped severities | `peer_copy_cluster` critical, `recurring_pair` critical, `web_paste` warning, `first_attempt_solve` info, `tough_first_attempt` critical |
 
 ## Related
 

@@ -971,34 +971,30 @@ const {
 
 // Factory seam (decomp B5): the poller-sourced submission-time markers route
 // domain. ctx closes over THIS instance's live-client getter, the env-captured
-// submission-events collection name, the http transport helpers, and the
-// username normalizer. The two routes keep their DIFFERENT auth guards: the
-// poller ingest uses requireApiKey (the x-api-key mechanism, like alerts
-// ingest); the admin recording-review read is auth-first with requireAdmin
-// (routesAuthLint). The returned route handlers are destructured into the SAME
-// names the dispatch table uses, so the dispatch lines stay byte-identical
-// (canaryIsolation). The submission-events helpers it owns (submissionEventsDocId
-// / submissionEventsRef / normalizeSubmissionEvent / mergeSubmissionEvents) come
-// back too — currently used only by these routes.
+// submission-events collection name and the username normalizer. The HackerRank
+// poller ingest was removed; the one remaining route (the admin recording-review
+// read) is auth-first with requireAdmin (routesAuthLint). The returned route
+// handler is destructured into the SAME name the dispatch table uses, so the
+// dispatch line stays byte-identical (canaryIsolation). The submission-events
+// helpers it owns (submissionEventsDocId / submissionEventsRef /
+// mergeSubmissionEvents) come back too — currently used only by this route.
 const submissionEventsRoutes = makeSubmissionEventsRoutes({
   getFirestore,
-  requireApiKey,
   requireAdmin,
-  parseBody,
   badRequest,
-  httpError,
   normalizeUsername,
   // The contest_slug-filter chokepoint, for the native-submission fallback scope.
   scopedQuery,
   submissionEventsCollection: SUBMISSION_EVENTS_COLLECTION,
   // FALLBACK store for proctor-native contests: the in-app submissions the exam
-  // app writes (proctor_submission_events is the HackerRank-poller mirror only).
+  // app writes (proctor_submission_events is the legacy HackerRank-poller mirror,
+  // now read-only and no longer written).
   submissionsCollection: SUBMISSIONS_COLLECTION,
   // RUN events (execRun → SAMPLE tests): merged into the recording-review
   // timeline as distinct kind:"run" events alongside the submits.
   runEventsCollection: RUN_EVENTS_COLLECTION
 });
-const { ingestSubmissionEvents, adminSubmissionEvents } = submissionEventsRoutes;
+const { adminSubmissionEvents } = submissionEventsRoutes;
 
 // Factory seam (decomp B6): the admin live-counts dashboard route domain. ctx
 // closes over THIS instance's live-client getter, the auth guard from makeAuth,
@@ -1269,7 +1265,6 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
     if (req.method === "GET" && path === "/api/admin/session-detail") return send(res, 200, await adminSessionDetail(req));
     if (req.method === "GET" && path === "/api/admin/session-events") return send(res, 200, await adminSessionEvents(req));
-    if (req.method === "POST" && path === "/api/submission-events") return send(res, 200, await ingestSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
     if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));
@@ -1541,15 +1536,16 @@ async function contestScopeOf(slugRaw) {
 // factories + the resident selection cluster reuse them) and are passed BY REFERENCE
 // into makeAdminSessionsRoutes.
 
-// ---- Submission-time markers (poller-sourced) -----------------------------
-// The two submission-events route bodies (ingestSubmissionEvents [requireApiKey
-// poller ingest] / adminSubmissionEvents [requireAdmin recording-review read,
-// scoped GET]) + their owned helpers (submissionEventsDocId / submissionEventsRef
-// / normalizeSubmissionEvent / mergeSubmissionEvents, with the
-// SUBMISSION_EVENTS_INGEST_LIMIT cap) moved VERBATIM to the
+// ---- Submission-time markers ----------------------------------------------
+// The admin submission-events route body (adminSubmissionEvents [requireAdmin
+// recording-review read, scoped GET]) + its owned helpers (submissionEventsDocId
+// / submissionEventsRef / mergeSubmissionEvents) live in the
 // makeSubmissionEventsRoutes(ctx) factory in routes/submissionEvents.mjs (decomp
-// B5); destructured at module scope above so the dispatch lines stay
-// byte-identical (canaryIsolation). Each route keeps its DIFFERENT auth guard.
+// B5); destructured at module scope above so the dispatch line stays
+// byte-identical (canaryIsolation). The HackerRank poller ingest
+// (ingestSubmissionEvents, POST /api/submission-events) was removed with the
+// poller; adminSubmissionEvents still reads any legacy poller-mirror docs, then
+// falls back to the proctor's own in-app submissions.
 
 // Phase 2 (2.4 / Epic 6.4 / 4.4): the admin live-counts dashboard route
 // (adminStats, GET /api/admin/stats — by-status session counts + derived

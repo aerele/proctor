@@ -1417,105 +1417,39 @@ test("capture-state: GET /api/admin/sessions rows carry capture_state (recording
 // Submission-time markers — POST /api/submission-events + GET /api/admin/submission-events
 // =====================================================================
 
-const INGEST_HEADERS = { "x-api-key": process.env.ALERTS_INGEST_API_KEY };
+// HR-poller removal: the POST /api/submission-events poller ingest was removed
+// (proctor moved to its own in-app contest platform). The following tests that
+// ONLY exercised that ingest endpoint were DELETED with it:
+//   - "ingest stores a per-(user,contest) doc and admin reads it sorted ascending"
+//   - "re-posting the same submission_id de-dups (idempotent upsert)"
+//   - "ingest requires the api key (401 without x-api-key)"
+//   - "INGEST: poller-supplied score fields thread through when present + numeric"
+// The KEPT admin-READ behaviors (legacy poller-mirror docs still read back; the
+// proctor_submissions native fallback; cross-contest merge; run-event merge) are
+// still covered below — the two that previously SEEDED via the ingest endpoint
+// now seed the proctor_submission_events collection directly via Firestore.
 
-function submissionEvent(overrides = {}) {
-  return {
-    hackerrank_username: "Alice",
-    contest_slug: "mcet-june-2026",
-    submission_id: 1001,
-    challenge_slug: "two-sum",
-    challenge_name: "Two Sum",
-    lang: "python3",
-    status: "Accepted",
-    valid: true,
-    submitted_at: "2026-06-05T09:05:00.000Z",
-    ...overrides
-  };
+// Seed ONE legacy proctor_submission_events doc directly (the shape the now-removed
+// poller ingest used to write: one doc per (username_norm, contest_slug) with a
+// merged events[] array). Used to prove adminSubmissionEvents still reads legacy
+// poller-mirror data + prefers it over the native fallback.
+function seedPollerEvents(firestore, usernameNorm, contestSlug, events) {
+  firestore.collection(process.env.SUBMISSION_EVENTS_COLLECTION)
+    .doc(`${usernameNorm}:${contestSlug}`)
+    .set({ username_norm: usernameNorm, contest_slug: contestSlug, events, updated_at: "2026-06-05T10:00:00.000Z" });
 }
 
-test("submission-events: ingest stores a per-(user,contest) doc and admin reads it sorted ascending", async () => {
+test("submission-events: admin read with NO contest_slug merges across contests (legacy poller-mirror docs)", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
 
-  const res = await call(makeReq({
-    method: "POST",
-    path: "/api/submission-events",
-    headers: INGEST_HEADERS,
-    body: {
-      events: [
-        submissionEvent({ submission_id: 1002, submitted_at: "2026-06-05T09:10:00.000Z", status: "Wrong Answer", valid: false }),
-        submissionEvent({ submission_id: 1001, submitted_at: "2026-06-05T09:05:00.000Z" })
-      ]
-    }
-  }));
-  assert.equal(res.statusCode, 200);
-  assert.equal(res.body.ok, true);
-  assert.equal(res.body.stored, 2);
-
-  // One doc per (username_norm, contest_slug).
-  const store = firestore._collections.get(process.env.SUBMISSION_EVENTS_COLLECTION);
-  assert.equal(store.size, 1, "one merged doc per (username_norm, contest_slug)");
-  assert.ok(store.has("alice:mcet-june-2026"), `expected keyed doc, got ${[...store.keys()]}`);
-
-  const read = await call(makeReq({
-    method: "GET",
-    path: "/api/admin/submission-events",
-    headers: ADMIN_HEADERS,
-    query: { username: "Alice", contest_slug: "mcet-june-2026" }
-  }));
-  assert.equal(read.statusCode, 200);
-  assert.equal(read.body.events.length, 2);
-  // Sorted by submitted_at ascending.
-  assert.equal(read.body.events[0].submission_id, "1001");
-  assert.equal(read.body.events[1].submission_id, "1002");
-  assert.equal(read.body.events[0].valid, true);
-  assert.equal(read.body.events[1].valid, false);
-});
-
-test("submission-events: re-posting the same submission_id de-dups (idempotent upsert)", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  __setClientsForTest({ firestore, storage });
-
-  const post = (status, valid) => call(makeReq({
-    method: "POST",
-    path: "/api/submission-events",
-    headers: INGEST_HEADERS,
-    body: { events: [submissionEvent({ submission_id: 2001, status, valid })] }
-  }));
-
-  await post("Processing", false); // would be skipped poller-side, but exercise de-dup
-  await post("Accepted", true); // re-post same id with a terminal classification
-
-  const read = await call(makeReq({
-    method: "GET",
-    path: "/api/admin/submission-events",
-    headers: ADMIN_HEADERS,
-    query: { username: "Alice", contest_slug: "mcet-june-2026" }
-  }));
-  assert.equal(read.body.events.length, 1, "same submission_id de-duped to one event");
-  assert.equal(read.body.events[0].status, "Accepted", "later post overwrites the earlier one");
-  assert.equal(read.body.events[0].valid, true);
-});
-
-test("submission-events: admin read with NO contest_slug merges across contests", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  __setClientsForTest({ firestore, storage });
-
-  await call(makeReq({
-    method: "POST",
-    path: "/api/submission-events",
-    headers: INGEST_HEADERS,
-    body: {
-      events: [
-        submissionEvent({ contest_slug: "contest-a", submission_id: 3001, submitted_at: "2026-06-05T09:01:00.000Z" }),
-        submissionEvent({ contest_slug: "contest-b", submission_id: 3002, submitted_at: "2026-06-05T09:02:00.000Z", valid: false, status: "Runtime Error" })
-      ]
-    }
-  }));
+  seedPollerEvents(firestore, "alice", "contest-a", [
+    { submission_id: "3001", hackerrank_username: "Alice", valid: true, submitted_at: "2026-06-05T09:01:00.000Z", contest_slug: "contest-a" }
+  ]);
+  seedPollerEvents(firestore, "alice", "contest-b", [
+    { submission_id: "3002", hackerrank_username: "Alice", valid: false, status: "Runtime Error", submitted_at: "2026-06-05T09:02:00.000Z", contest_slug: "contest-b" }
+  ]);
 
   const read = await call(makeReq({
     method: "GET",
@@ -1527,19 +1461,6 @@ test("submission-events: admin read with NO contest_slug merges across contests"
   assert.equal(read.body.events.length, 2, "events from both contests merged");
   assert.equal(read.body.events[0].submission_id, "3001");
   assert.equal(read.body.events[1].submission_id, "3002");
-});
-
-test("submission-events: ingest requires the api key (401 without x-api-key)", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  __setClientsForTest({ firestore, storage });
-  const res = await call(makeReq({
-    method: "POST",
-    path: "/api/submission-events",
-    headers: {}, // no x-api-key
-    body: { events: [submissionEvent()] }
-  }));
-  assert.equal(res.statusCode, 401);
 });
 
 test("submission-events: admin read requires the admin password (401 without it)", async () => {
@@ -1651,33 +1572,10 @@ test("submission-events FALLBACK: non-numeric / missing score fields are omitted
   assert.equal(event.max_points, 100, "the one valid numeric field still threads through");
 });
 
-test("submission-events INGEST: poller-supplied score fields thread through when present + numeric", async () => {
-  const firestore = makeFakeFirestore();
-  const storage = makeFakeStorage();
-  __setClientsForTest({ firestore, storage });
-
-  // Today's poller does not send scores; verify the OPTIONAL passthrough works if
-  // a future poster includes them, and that a non-numeric value is dropped.
-  await call(makeReq({
-    method: "POST",
-    path: "/api/submission-events",
-    headers: INGEST_HEADERS,
-    body: { events: [submissionEvent({ submission_id: 9100, passed_count: 7, total: 9, score: 70, max_points: 90, lang: "java" })] }
-  }));
-
-  const read = await call(makeReq({
-    method: "GET",
-    path: "/api/admin/submission-events",
-    headers: ADMIN_HEADERS,
-    query: { username: "Alice", contest_slug: "mcet-june-2026" }
-  }));
-  assert.equal(read.statusCode, 200);
-  const [event] = read.body.events;
-  assert.equal(event.passed_count, 7);
-  assert.equal(event.total, 9);
-  assert.equal(event.score, 70);
-  assert.equal(event.max_points, 90);
-});
+// HR-poller removal: "INGEST: poller-supplied score fields thread through when
+// present + numeric" was DELETED — it exercised the removed POST ingest's optional
+// score passthrough. The native-submission score passthrough (the path that
+// actually runs now) stays covered by the two FALLBACK score tests above.
 
 test("submission-events FALLBACK: native query is scoped to (username_norm, contest_slug) — no cross-contest / cross-user bleed", async () => {
   const firestore = makeFakeFirestore();
@@ -1701,18 +1599,17 @@ test("submission-events FALLBACK: native query is scoped to (username_norm, cont
   assert.equal(read.body.events[0].submission_id, "mine");
 });
 
-test("submission-events FALLBACK: NOT used when the poller events store HAS data (poller path preserved)", async () => {
+test("submission-events FALLBACK: NOT used when the poller events store HAS data (legacy poller path preserved)", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();
   __setClientsForTest({ firestore, storage });
 
-  // The poller store HAS an event for (alice, mcet-june-2026).
-  await call(makeReq({
-    method: "POST",
-    path: "/api/submission-events",
-    headers: INGEST_HEADERS,
-    body: { events: [submissionEvent({ submission_id: 7001 })] }
-  }));
+  // The legacy poller-mirror store HAS an event for (alice, mcet-june-2026).
+  // (Seeded directly — the poller ingest endpoint that used to write this is
+  // removed, but adminSubmissionEvents must still PREFER existing mirror docs.)
+  seedPollerEvents(firestore, "alice", "mcet-june-2026", [
+    { submission_id: "7001", hackerrank_username: "Alice", valid: true, submitted_at: "2026-06-05T09:05:00.000Z", contest_slug: "mcet-june-2026" }
+  ]);
   // A native submission ALSO exists for the same key — it must be IGNORED while
   // the poller store has data (fallback only fires when poller returns nothing).
   seedNativeSubmission(firestore, "native-decoy", { username_norm: "alice", contest_slug: "mcet-june-2026" });

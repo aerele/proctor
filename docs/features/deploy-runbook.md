@@ -2,7 +2,7 @@
 
 This page is the operator's runbook for standing up the Aerele Proctor platform on Google Cloud from nothing: an isolated GCP project, the backend API, the candidate/admin frontend, the optional video-merge worker, and the daily retention sweep. It documents what the deploy scripts in this repo actually do — and, just as importantly, the env keys and steps they do **not** yet wire up (flagged so you set them by hand before a real exam).
 
-> **Product orientation.** Proctor is now a **standalone own-editor exam platform**: candidates do everything inside our own React + Monaco editor with Judge0-backed Run/Submit. (HackerRank was dropped from the candidate path in F8.2.) A separate, **optional** contest-eval monitoring poller under `monitoring/` still exists — it live-watches an externally-hosted HackerRank contest and emits cheating alerts into the same `POST /api/alerts` pipeline — but it is not part of this primary-stack deploy and is not covered here.
+> **Product orientation.** Proctor is now a **standalone own-editor exam platform**: candidates do everything inside our own React + Monaco editor with Judge0-backed Run/Submit. (HackerRank was dropped from the candidate path in F8.2.) The legacy HackerRank contest-eval poller was removed; proctor now uses its own in-app contest platform.
 
 Components deployed by this runbook:
 
