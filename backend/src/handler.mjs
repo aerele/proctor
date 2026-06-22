@@ -41,6 +41,9 @@
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { FieldValue, FieldPath } from "@google-cloud/firestore";
 import { makeExecQueue } from "./execQueue.mjs";
+import { makeJudge0Limiter } from "./judge0Limiter.mjs";
+import { makeTelemetryLimiter } from "./lib/telemetryLimiter.mjs";
+import { makeTtlCache } from "./lib/ttlCache.mjs";
 import { bucket, signingBucket, configureClients, getFirestore, judge0, putJsonl, resolveSignedReadUrl } from "./lib/clients.mjs";
 import { badRequest, httpError, httpErrorWith, isHttpUrl, isTruthyParam, parseBody, requireFields, requireValidEmail, send, setCors } from "./lib/http.mjs";
 import { getClientIp, hashPasscode, isoOrNow, mapWithConcurrency, maskEmail, maskPasscode, normalizeIp, normalizeUsername, safeEqual, sanitizeEditorDetail, sanitizeObject, sanitizeRoom, sanitizeSegment } from "./lib/sanitize.mjs";
@@ -69,20 +72,40 @@ import { makeAdminSessionsRoutes } from "./routes/adminSessions.mjs";
 import { makeHealthCheckRoutes } from "./routes/healthCheck.mjs";
 import { loadConfig } from "./config.mjs";
 import { composeSqlExecSource, configureProblemStore, getBankProblem, getProblem, isValidProblemId, LANGUAGE_IDS, scoreSubmission, validateProblemInput } from "./problems.mjs";
-import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, listContests, regenerateContestSecret, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
+import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContest, invalidateContestDocCache, listContests, regenerateContestSecret, resetContestDocCacheForTest, resolveAccessCode, resolveContest, scopedQuery, setContestAccessCode, setContestStatus, slugify, updateContest } from "./contests.mjs";
 import { applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, normalizeUniqueId, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
 import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people.mjs";
 import { buildIpReport } from "./ipReport.mjs";
-import { buildExportBundle, evaluatePurgeGate, exportObjectPath, selectExpiredEvidence, selectExpiredExports } from "./dataLifecycle.mjs";
+import { buildExportBundle, evaluatePurgeGate, exportObjectPath, selectExpiredEvidence, selectExpiredExports, retentionDaysOf, retentionAnchorMs, CONSENT_VERSION } from "./dataLifecycle.mjs";
 
 // The mutable GCP client singletons + their judge0/bucket/jsonl/signed-url
 // machinery now live in lib/clients.mjs (decomp B0). Re-export the test seams
 // so the handler's public surface (and the test destructure off it) is
 // unchanged. handler.mjs configures clients with env values just below.
-export { __setClientsForTest, __setJudge0AdapterForTest } from "./lib/clients.mjs";
+export { __setJudge0AdapterForTest } from "./lib/clients.mjs";
+import { __setClientsForTest as __rawSetClientsForTest } from "./lib/clients.mjs";
+// v1.1 G3 (#5): a Firestore client SWAP (test-only) means a different database,
+// so any in-process read cache (contest doc / alert settings) is stale by
+// definition — clear it. Production never calls this; zero impact there. The
+// wrapper is hoisted (function declaration) so it can reference the caches
+// created later at module scope. Re-exported under the original name so the test
+// destructure (`const { __setClientsForTest } = handler`) is unchanged.
+export function __setClientsForTest(arg) {
+  // Clear the contest-doc cache through contests.mjs's `store` (not the local
+  // `contestCache`): a prior cache-busted handler import may have re-run
+  // configureContestStore and made store.cache a DIFFERENT instance than this
+  // module's contestCache, so clearing the local one would miss the cache that
+  // actually serves reads. resetContestDocCacheForTest() always targets the
+  // active store.cache. The alert-settings cache is closure-local per handler
+  // instance (no shared singleton), so the local clear is correct for it.
+  resetContestDocCacheForTest();
+  contestCache?.clear();
+  alertSettingsCache?.clear();
+  return __rawSetClientsForTest(arg);
+}
 
 // The per-session exec rate-limiter clock + its __setExecClockForTest seam moved
 // to the makeExecRoutes(ctx) factory in routes/exec.mjs (decomp B12b); the factory
@@ -117,7 +140,13 @@ const {
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
   PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
-  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS, EVAL_WRITE_ALLOWLIST
+  EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS, EVAL_WRITE_ALLOWLIST,
+  // v1.1 G3 infra hardening
+  MAX_REQUEST_BODY_BYTES, MAX_UPLOAD_CHUNK_BYTES,
+  CONTEST_CACHE_TTL_MS, ALERT_SETTINGS_CACHE_TTL_MS,
+  JUDGE0_LIMITER_ENABLED, JUDGE0_LIMITER_COLLECTION, JUDGE0_LIMITER_CAPACITY,
+  JUDGE0_LIMITER_REFILL_PER_SEC, JUDGE0_LIMITER_SHARDS,
+  TELEMETRY_LIMITER_ENABLED
 } = loadConfig();
 
 // ---- Non-env code constants (kept local to the handler) ---------------------
@@ -193,6 +222,62 @@ const execQueue = makeExecQueue({
   maxQueue: EXEC_MAX_QUEUE
   // pollMaxQueue stays at its generous default (1000).
 });
+
+// v1.1 G3 — a 429 builder shared by the distributed Judge0 limiter and the
+// telemetry limiter (same shape as exec.mjs's rateLimited: a 429 carrying the
+// machine-readable retry hint the api() catch forwards). Defined here so the
+// limiters that are built BEFORE makeExecRoutes don't depend on its return value.
+function makeRateLimited(retryAfterSeconds) {
+  const error = httpError(429, "rate_limited");
+  error.retry_after_seconds = retryAfterSeconds;
+  return error;
+}
+
+// v1.1 G3 (#3 — the #132 Judge0-429 root-cause fix): a Firestore-backed SHARDED
+// token bucket caps GLOBAL Judge0 submit throughput across ALL Cloud Run
+// instances (the per-instance execQueue lanes can't — 20 instances × the lane
+// cap is the structural cause of the live 429 storm). No new infra, scales to
+// zero. Scale ceiling documented in docs/JUDGE0-RATE-LIMITER.md.
+const judge0Limiter = makeJudge0Limiter({
+  getFirestore,
+  collection: JUDGE0_LIMITER_COLLECTION,
+  enabled: JUDGE0_LIMITER_ENABLED,
+  capacity: JUDGE0_LIMITER_CAPACITY,
+  refillPerSec: JUDGE0_LIMITER_REFILL_PER_SEC,
+  shards: JUDGE0_LIMITER_SHARDS,
+  rateLimited: makeRateLimited
+});
+export const { __setClockForTest: __setJudge0LimiterClockForTest } = judge0Limiter;
+
+// v1.1 G3 (#4): per-session per-endpoint candidate-telemetry rate limiter. Tuned
+// to NEVER throttle real candidate data (lib/telemetryLimiter.mjs), only a
+// scripted flood. Disabled → a no-op check (so a deploy can bypass it).
+const telemetryLimiter = TELEMETRY_LIMITER_ENABLED
+  ? makeTelemetryLimiter({ rateLimited: makeRateLimited })
+  : { check: () => {}, peek: () => Infinity, __setClockForTest: () => {} };
+export const { __setClockForTest: __setTelemetryLimiterClockForTest } = telemetryLimiter;
+
+// v1.1 G3 (#5): hot-path TTL caches for the config docs read on EVERY heartbeat/
+// events/beacon (the contest doc + the alert-settings doc). Writes invalidate
+// explicitly (correct invalidation); a TTL bound self-heals any missed
+// invalidation within the TTL. A 0 TTL disables (always read fresh).
+const contestCache = CONTEST_CACHE_TTL_MS > 0 ? makeTtlCache({ ttlMs: CONTEST_CACHE_TTL_MS }) : null;
+const alertSettingsCache = ALERT_SETTINGS_CACHE_TTL_MS > 0 ? makeTtlCache({ ttlMs: ALERT_SETTINGS_CACHE_TTL_MS }) : null;
+export function __setHotCacheClocksForTest(fn) {
+  contestCache?.__setClockForTest(fn);
+  alertSettingsCache?.__setClockForTest(fn);
+}
+// Invalidation hook for the alert-settings cache: the settings write path
+// (routes/alerts.mjs) calls this so a settings edit is visible immediately on
+// the writing instance (the TTL bounds cross-instance staleness). The contest
+// doc invalidation goes through contests.mjs's invalidateContestDocCache (the
+// single owner of store.cache), not a handler-local helper.
+function invalidateAlertSettingsCache() { alertSettingsCache?.clear(); }
+// TEST-ONLY seam: re-export the contest-doc cache invalidate/reset so a test's
+// direct contest-doc seed (the stand-in for createContest/updateContest, which
+// invalidate in prod) can keep the cache transparent. Prod code never imports
+// these from the handler.
+export { invalidateContestDocCache, resetContestDocCacheForTest };
 // (PUBLIC_APP_ORIGIN, ADMIN_PASSWORD, INVIGILATOR_PASSWORD, ROOM_GATES_COLLECTION,
 // GATE_ATTEMPT_LIMIT, ALERTS_INGEST_API_KEY, RETENTION_SWEEP_API_KEY,
 // URL_EXPIRY_SECONDS come from config — see the loadConfig() destructure above.)
@@ -294,7 +379,9 @@ configureContestStore({
   // Wave-4 fix: createContest probes these for ORPHANED data carrying a
   // candidate slug (historic contest_slug values from earlier exam runs) and
   // walks to the next suffix instead of adopting the slug.
-  dataCollections: [SESSION_COLLECTION, SUBMISSIONS_COLLECTION, ALERTS_COLLECTION]
+  dataCollections: [SESSION_COLLECTION, SUBMISSIONS_COLLECTION, ALERTS_COLLECTION],
+  // v1.1 G3 (#5): the hot-path contest-doc read cache (null when disabled).
+  cache: contestCache
 });
 
 // S-C: the identity core (proctor_colleges / proctor_persons /
@@ -365,7 +452,9 @@ const proctorAlerts = makeProctorAlerts({
   intOrZero,
   settingsCollection: SETTINGS_COLLECTION,
   alertsCollection: ALERTS_COLLECTION,
-  alertSettingsId: ALERT_SETTINGS_ID
+  alertSettingsId: ALERT_SETTINGS_ID,
+  // v1.1 G3 (#5): the hot-path alert-settings read cache (null when disabled).
+  alertSettingsCache
 });
 const {
   SURE_SHOT_EVENT_TYPES,
@@ -461,7 +550,9 @@ const alertRoutes = makeAlertRoutes({
   sessionCollection: SESSION_COLLECTION,
   sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
   settingsCollection: SETTINGS_COLLECTION,
-  alertSettingsId: ALERT_SETTINGS_ID
+  alertSettingsId: ALERT_SETTINGS_ID,
+  // v1.1 G3 (#5): invalidate the alert-settings read cache on a settings write.
+  invalidateAlertSettingsCache
 });
 const {
   ingestAlerts, adminAlerts, adminAlertAction, adminGetAlertSettings, adminSaveAlertSettings
@@ -587,7 +678,11 @@ const sessionTelemetryRoutes = makeSessionTelemetryRoutes({
   uploadChunkKinds: UPLOAD_CHUNK_KINDS,
   urlExpirySeconds: URL_EXPIRY_SECONDS,
   editorEventsIngestLimit: EDITOR_EVENTS_INGEST_LIMIT,
-  editorEventsCollection: EDITOR_EVENTS_COLLECTION
+  editorEventsCollection: EDITOR_EVENTS_COLLECTION,
+  // v1.1 G3 (#4): per-session telemetry rate-limit check (by reference) +
+  // (#7) the signed-URL per-chunk size cap (by value, HD headroom).
+  telemetryCheck: (endpoint, sessionId) => telemetryLimiter.check(endpoint, sessionId),
+  maxUploadChunkBytes: MAX_UPLOAD_CHUNK_BYTES
 });
 const {
   createUploadUrl, recordEvents, ingestEditorEvents, recordReviewFile, recordHeartbeat, recordBeacon
@@ -623,6 +718,8 @@ const execRoutes = makeExecRoutes({
   scoreSubmission,
   judge0,
   execQueue,
+  // v1.1 G3 (#3): the distributed Judge0 submit limiter gate, by reference.
+  judge0SubmitGate: (key, fn) => judge0Limiter.gate(key, fn),
   randomUUID,
   contestsCollection: CONTESTS_COLLECTION,
   runEventsCollection: RUN_EVENTS_COLLECTION,
@@ -678,7 +775,10 @@ const publicRoutes = makePublicRoutes({
   rosterLimit: ROSTER_LIMIT,
   rosterCellMax: ROSTER_CELL_MAX,
   rosterColumnsLimit: ROSTER_COLUMNS_LIMIT,
-  rosterMappableFields: ROSTER_MAPPABLE_FIELDS
+  rosterMappableFields: ROSTER_MAPPABLE_FIELDS,
+  // v1.1 G1: serve the authoritative consent-text version in exam-config so the
+  // candidate app never hard-codes it (by value).
+  consentVersion: CONSENT_VERSION
 });
 const {
   publicExamConfig, publicAccessCode, rosterLookup, adminGetRoster, adminSaveRoster,
@@ -753,7 +853,10 @@ const sessionRoutes = makeSessionRoutes({
   liveLockCollection: LIVE_LOCK_COLLECTION,
   submissionsCollection: SUBMISSIONS_COLLECTION,
   uploadConfig,
-  execMaxSubmissionsPerSession: EXEC_MAX_SUBMISSIONS_PER_SESSION
+  execMaxSubmissionsPerSession: EXEC_MAX_SUBMISSIONS_PER_SESSION,
+  // v1.1 G1: the authoritative consent-text version, stamped on the session at
+  // start so a re-entry on a newer T&C version is detectable (by value).
+  consentVersion: CONSENT_VERSION
 });
 const {
   startSession, resumeSession, validateEndSession, endSession,
@@ -1219,6 +1322,20 @@ export const api = async (req, res) => {
     if (req.method === "OPTIONS") {
       res.status(204).send("");
       return;
+    }
+
+    // v1.1 G3 (#9): explicit request body-size cap. Reject an oversized body with
+    // a 413 BEFORE it is parsed into memory on a low-mem instance (the platform
+    // default is the only guard otherwise, and row/field caps apply only AFTER
+    // parse). We check the declared Content-Length first (cheap, covers the
+    // honest client + most floods) and, if the runtime already buffered a string
+    // body, its actual byte length too (covers a lying/absent header).
+    const declaredLen = Number(req.get?.("content-length") || req.headers?.["content-length"] || 0);
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_REQUEST_BODY_BYTES) {
+      return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+    }
+    if (typeof req.body === "string" && Buffer.byteLength(req.body, "utf8") > MAX_REQUEST_BODY_BYTES) {
+      return send(res, 413, { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
     }
 
     const path = req.path || new URL(req.url, "http://localhost").pathname;
@@ -1825,6 +1942,7 @@ async function adminContestExport(req) {
     last_export_at: exportedAt,
     updated_at: exportedAt
   }, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   await writeAudit({
     action: "contest_export",
@@ -1895,7 +2013,10 @@ async function adminContestPurge(req) {
         total_score: row.total,
         per_problem: perProblem,
         integrity: { alerts_by_severity: row.integrity.alerts_by_severity, review_verdict: row.integrity.review_verdict },
-        unique_id: row.candidate_id, name: row.name, session_status: ""
+        // v1.1 G1 (erasure keeps roll#/scores/eval): persist roll_number into the
+        // purge-survivor snapshot alongside unique_id/name so it survives even a
+        // full DB purge (sessions + roster_entries carry it but both get deleted).
+        unique_id: row.candidate_id, name: row.name, roll_number: row.roll_number || "", session_status: ""
       });
     }
     await stampSelectionDone(contest, snapshotByPerson, adminActor(req, body));
@@ -1918,6 +2039,7 @@ async function adminContestPurge(req) {
     evidence_prefixes: evidencePrefixes,
     updated_at: now
   }, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   // Evidence: if include_evidence, delete the GCS objects NOW via per-session
   // storage_prefix iteration (the only legacy-correct path; exports/ excluded).
@@ -1959,6 +2081,7 @@ async function adminContestPurge(req) {
     tombstone.evidence_prefixes = null;
   }
   await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set(tombstone, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   await writeAudit({
     action: "contest_purge_done",
@@ -2079,6 +2202,7 @@ async function adminRetentionSweep(req) {
           last_export_at: null,
           updated_at: now
         }, { merge: true }).catch(() => {});
+        invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
       }
     }
   }
@@ -2119,7 +2243,18 @@ async function sweepContestEvidence(contest, actor) {
   const now = new Date().toISOString();
   const patch = { evidence_prefixes: null, updated_at: now };
   if (stampable) patch.evidence_purged_at = now;
+  // v1.1 G1: back-fill retention_started_at the FIRST time the sweep acts on an
+  // exam_end-anchored contest that was due via the DERIVED end_at anchor (no
+  // explicit stamp yet — e.g. natural window expiry, no admin action). This
+  // records when the clock effectively started in the audit trail and pins the
+  // anchor so a later end_at edit can't move it. Only when the contest is due
+  // (it is — selectExpiredEvidence chose it) and not already stamped.
+  if (!contest.retention_started_at && contest.retention_anchor !== "selection_done") {
+    const anchorMs = retentionAnchorMs(contest);
+    if (Number.isFinite(anchorMs)) patch.retention_started_at = new Date(anchorMs).toISOString();
+  }
   await getFirestore().collection(CONTESTS_COLLECTION).doc(contest.slug).set(patch, { merge: true });
+  invalidateContestDocCache(contest.slug); // v1.1 G3 (#5)
 
   await writeAudit({
     action: "evidence_sweep",

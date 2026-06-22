@@ -114,6 +114,46 @@ export function loadConfig() {
     EVAL_WRITE_ALLOWLIST: process.env.EVAL_WRITE_ALLOWLIST || "",
     // S3 nit: a bad env value (Number("abc") -> NaN, or a <=0 value) must NOT
     // silently disable the brute-force cap; fall back to the safe default of 20.
-    GATE_ATTEMPT_LIMIT: positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20)
+    GATE_ATTEMPT_LIMIT: positiveIntOr(process.env.GATE_ATTEMPT_LIMIT, 20),
+
+    // ---- v1.1 G3 infra hardening ----------------------------------------------
+    // Request body-size cap (audit #9): reject oversized JSON with a 413 BEFORE
+    // parsing it into memory. 2 MiB comfortably exceeds the largest legit body
+    // (a roster CSV upload / editor-events batch) while bounding a low-mem
+    // instance's parse cost. Tunable for a friend's larger-roster deploy.
+    MAX_REQUEST_BODY_BYTES: positiveIntOr(process.env.MAX_REQUEST_BODY_BYTES, 2 * 1024 * 1024),
+    // Signed chunk-upload size cap (audit #7): the v4 WRITE URL is signed with an
+    // x-goog-content-length-range condition so a valid token can't PUT an
+    // arbitrarily large object. 64 MiB headroom: a 30 s screen+camera HD webm
+    // chunk is single-digit MB even at high bitrate, so a legit HD recording is
+    // NEVER blocked; only a multi-GB abuse PUT is. Tunable.
+    MAX_UPLOAD_CHUNK_BYTES: positiveIntOr(process.env.MAX_UPLOAD_CHUNK_BYTES, 64 * 1024 * 1024),
+
+    // ---- v1.1 G3 hot-path caches (audit #5) -----------------------------------
+    // Short TTL (seconds) for the hot single-doc reads (contest doc + alert
+    // settings). Staleness self-heals within the TTL even if an invalidation is
+    // missed; writes invalidate explicitly. 0 disables (always read fresh).
+    CONTEST_CACHE_TTL_MS: positiveIntOr(process.env.CONTEST_CACHE_TTL_MS, 10000),
+    ALERT_SETTINGS_CACHE_TTL_MS: positiveIntOr(process.env.ALERT_SETTINGS_CACHE_TTL_MS, 10000),
+
+    // ---- v1.1 G3 Judge0 distributed limiter (#3 — the #132 root-cause fix) -----
+    // A Firestore-backed SHARDED token bucket caps GLOBAL Judge0 submit throughput
+    // across all Cloud Run instances (the per-instance execQueue lanes cannot).
+    // Defaults sized to the hosted RapidAPI tier: ~10 submit-POSTs/sec sustained
+    // with a 40-burst, spread over 10 shards. See docs/JUDGE0-RATE-LIMITER.md for
+    // the scale-ceiling note. Disabled by default-off ENABLED flag would regress
+    // the fix, so it ships ENABLED; set JUDGE0_LIMITER_ENABLED=false to bypass.
+    JUDGE0_LIMITER_ENABLED: (process.env.JUDGE0_LIMITER_ENABLED || "true").toLowerCase() !== "false",
+    JUDGE0_LIMITER_COLLECTION: process.env.JUDGE0_LIMITER_COLLECTION || "proctor_judge0_ratelimit",
+    JUDGE0_LIMITER_CAPACITY: positiveIntOr(process.env.JUDGE0_LIMITER_CAPACITY, 40),
+    JUDGE0_LIMITER_REFILL_PER_SEC: Number(process.env.JUDGE0_LIMITER_REFILL_PER_SEC || "10"),
+    JUDGE0_LIMITER_SHARDS: positiveIntOr(process.env.JUDGE0_LIMITER_SHARDS, 10),
+
+    // ---- v1.1 G3 candidate-telemetry rate limit (#4) --------------------------
+    // Per-session per-endpoint token-bucket cap on the six telemetry endpoints.
+    // Tuned to NEVER throttle real candidate data (caps are ~15-60x the real
+    // client rate, see lib/telemetryLimiter.mjs). Ships ENABLED; set
+    // TELEMETRY_LIMITER_ENABLED=false to bypass.
+    TELEMETRY_LIMITER_ENABLED: (process.env.TELEMETRY_LIMITER_ENABLED || "true").toLowerCase() !== "false"
   };
 }
