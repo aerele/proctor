@@ -123,8 +123,15 @@ export function BankImportDialog({ password, onClose, onApplied }: {
     });
   };
 
+  // M4 (correctness review): a synchronous in-flight guard. `busy` is React state
+  // (its update is async), so two Apply clicks in the same tick both pass the
+  // `busy` check and fire two commits; the server's idempotency usually absorbs
+  // it, but a re-resolved fork/create on the second pass can mint a duplicate.
+  // The ref flips synchronously, so the second click is dropped before any await.
+  const inFlightRef = useRef(false);
   const apply = async () => {
-    if (!bundle || !plan) return;
+    if (!bundle || !plan || inFlightRef.current) return;
+    inFlightRef.current = true;
     setBusy(true);
     setError("");
     try {
@@ -139,6 +146,7 @@ export function BankImportDialog({ password, onClose, onApplied }: {
       setError(messageOf(cause));
     } finally {
       setBusy(false);
+      inFlightRef.current = false;
     }
   };
 

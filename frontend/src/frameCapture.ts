@@ -205,3 +205,37 @@ export async function captureAndUploadAlertFrame(io: AlertScreenshotIO): Promise
     return null;
   }
 }
+
+// M3: ceiling on how long a user-facing recovery (onFatalError "Screen sharing
+// stopped…") may wait on the best-effort screenshot. captureAndUploadAlertFrame
+// awaits getUploadUrl + uploadBlob, and NEITHER has a network timeout, so a
+// stalled/slow upload would otherwise strand the candidate on a chrome-less
+// fullscreen idle screen with no way to re-share until the fetch finally errors
+// — directly contradicting ALERT-2's "capture never blocks recovery" claim.
+export const ALERT_SCREENSHOT_CEILING_MS = 2500;
+
+// Race a (best-effort, never-throwing) screenshot capture against a short
+// ceiling. Resolves the stored object key if the capture settles within the
+// ceiling, else null when the ceiling wins first. The capture promise is NOT
+// aborted when the ceiling wins — it settles in the background (so a slow upload
+// still lands its object eventually), it just stops gating the recovery
+// decision. NEVER throws: captureAndUploadAlertFrame already swallows its own
+// failures into null, and a stray rejection (defensive) is treated as "no key".
+export function captureAlertFrameWithCeiling(
+  capture: Promise<string | null>,
+  ceilingMs: number = ALERT_SCREENSHOT_CEILING_MS,
+  setTimeoutFn: (cb: () => void, ms: number) => unknown = (cb, ms) => setTimeout(cb, ms),
+  clearTimeoutFn: (handle: unknown) => void = (handle) => clearTimeout(handle as Parameters<typeof clearTimeout>[0])
+): Promise<string | null> {
+  let timer: unknown;
+  const ceiling = new Promise<null>((resolve) => {
+    timer = setTimeoutFn(() => resolve(null), ceilingMs);
+  });
+  // Defensive `.catch` — the production capture never rejects, but this keeps
+  // the race itself from ever surfacing a rejection into the recovery path.
+  const settled = capture.catch(() => null);
+  return Promise.race([settled, ceiling]).then((key) => {
+    clearTimeoutFn(timer);
+    return key;
+  });
+}

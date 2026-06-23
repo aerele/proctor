@@ -15,7 +15,12 @@ import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import { writeChunkHwm } from "./chunkContinuity";
 import { advanceUploadChain, runUploadWithRetry } from "./chunkUploadRetry";
 import { shouldSurfaceExamTime } from "./examTime";
-import { captureAndUploadAlertFrame, grabTrackFrame, type FrameCaptureDeps } from "./frameCapture";
+import {
+  captureAlertFrameWithCeiling,
+  captureAndUploadAlertFrame,
+  grabTrackFrame,
+  type FrameCaptureDeps
+} from "./frameCapture";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 // Tier-1 buffer: the per-session circuit-breaker latch. Starts from the pre-
@@ -1117,11 +1122,18 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         updateMediaState("screen", "stopped");
         // ALERT-2: the track is ALREADY ended here, so the capture relies on the
         // cached last-good frame (a live grab is impossible). Attach the stored
-        // key to the SAME event that becomes the server-side alert. Capture is
-        // awaited only to thread the key in; the user-facing onFatalError still
-        // fires (after, unchanged) regardless of capture outcome, so the alert /
-        // recovery path is never blocked by a missing or failed screenshot.
-        void captureAlertScreenshot("track_ended").then((screenshotKey) => {
+        // key to the SAME event that becomes the server-side alert.
+        //
+        // M3: the user-facing recovery (onFatalError) MUST NOT wait on the upload.
+        // captureAlertScreenshot awaits getUploadUrl + uploadBlob, neither of which
+        // has a network timeout, so a stalled/slow upload would strand the candidate
+        // on a chrome-less fullscreen idle screen with no way to re-share until the
+        // fetch finally errors. Race the (best-effort, never-throwing) capture
+        // against a short ceiling and fire recovery the instant EITHER settles —
+        // threading the key if the capture won, omitting it (best-effort) if the
+        // ceiling did. The capture promise still settles in the background, so a
+        // slow upload's object eventually lands; it just no longer gates recovery.
+        void captureAlertFrameWithCeiling(captureAlertScreenshot("track_ended")).then((screenshotKey) => {
           emit("screen_share_stopped", {
             reason: "track_ended",
             ...(screenshotKey ? { screenshot_key: screenshotKey } : {})

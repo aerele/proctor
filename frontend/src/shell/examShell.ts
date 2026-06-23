@@ -251,7 +251,7 @@ export type TopBarAction =
   // sampled at dispatch time — anomalies vanish the bar ONLY while recording
   // (spec decision 4; the share-picker "starting" moment is therefore safe).
   | { kind: "event"; event: ProctorEvent; recording: boolean; nowMs: number }
-  // Candidate clicked "I have fixed this". Preconditions are re-checked here —
+  // Candidate clicked "I have fixed it — continue my test". Preconditions are re-checked here —
   // restore is a no-op unless ALL hold (spec §7.3).
   | { kind: "restore"; preconditions: RestorePreconditions; nowMs: number }
   // Test ended mid-episode: unhide so the DONE bar (with its permanent flag

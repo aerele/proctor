@@ -4,6 +4,8 @@
 // dependency-injection style of chunkBuffer.test.ts.
 import { describe, expect, it, vi } from "vitest";
 import {
+  ALERT_SCREENSHOT_CEILING_MS,
+  captureAlertFrameWithCeiling,
   captureAndUploadAlertFrame,
   grabTrackFrame,
   type AlertScreenshotIO,
@@ -216,5 +218,75 @@ describe("captureAndUploadAlertFrame", () => {
     const key = await captureAndUploadAlertFrame(io);
     expect(key).toBeNull();
     expect(onUploadFailed).toHaveBeenCalledWith("Error: upload 500");
+  });
+});
+
+// M3 — the user-facing recovery (onFatalError) must never wait on a stalled
+// screenshot upload. captureAlertFrameWithCeiling races the best-effort capture
+// against a short ceiling and resolves the instant EITHER settles. The timer is
+// injected so these tests are deterministic (no real 2.5s wait).
+describe("captureAlertFrameWithCeiling", () => {
+  // A controllable fake timer: tests fire the pending callback by calling tick().
+  function fakeTimer() {
+    let pending: (() => void) | null = null;
+    const setTimeoutFn = vi.fn((cb: () => void, _ms: number) => {
+      pending = cb;
+      return 1 as unknown;
+    });
+    const clearTimeoutFn = vi.fn();
+    return { setTimeoutFn, clearTimeoutFn, tick: () => pending?.() };
+  }
+
+  it("resolves with the key when the capture settles before the ceiling", async () => {
+    const { setTimeoutFn, clearTimeoutFn } = fakeTimer();
+    const capture = Promise.resolve("contests/c/sessions/u/s/screenshot/chunk-00001.jpg");
+    const key = await captureAlertFrameWithCeiling(capture, 2500, setTimeoutFn, clearTimeoutFn);
+    expect(key).toMatch(/screenshot\/chunk-00001\.jpg$/);
+    // The pending ceiling timer is cleared once the race settles.
+    expect(clearTimeoutFn).toHaveBeenCalledOnce();
+  });
+
+  it("resolves null (recovery proceeds) when a slow/never-resolving upload is still pending at the ceiling", async () => {
+    const { setTimeoutFn, clearTimeoutFn, tick } = fakeTimer();
+    // A capture that NEVER resolves — models a stalled getUploadUrl/uploadBlob
+    // with no network timeout. Recovery must NOT hang on it.
+    let captureResolved = false;
+    const neverResolves = new Promise<string | null>(() => {
+      /* intentionally never settles */
+    }).then((k) => {
+      captureResolved = true;
+      return k;
+    });
+    const racePromise = captureAlertFrameWithCeiling(neverResolves, 2500, setTimeoutFn, clearTimeoutFn);
+    // Fire the ceiling: the race must settle to null even though the upload is
+    // still in flight (it settles in the background, never gating recovery).
+    tick();
+    const key = await racePromise;
+    expect(key).toBeNull();
+    expect(captureResolved).toBe(false);
+    expect(setTimeoutFn).toHaveBeenCalledWith(expect.any(Function), 2500);
+  });
+
+  it("never throws even if the capture promise rejects (defensive — recovery still proceeds)", async () => {
+    const { setTimeoutFn, clearTimeoutFn } = fakeTimer();
+    const rejecting = Promise.reject(new Error("unexpected capture throw"));
+    const key = await captureAlertFrameWithCeiling(rejecting, 2500, setTimeoutFn, clearTimeoutFn);
+    expect(key).toBeNull();
+  });
+
+  it("threads the key through when the slow upload finishes JUST under the ceiling", async () => {
+    const { setTimeoutFn, clearTimeoutFn } = fakeTimer();
+    const capture = Promise.resolve<string | null>("key-123");
+    // Ceiling never fires (timer left pending) → the capture wins the race.
+    const key = await captureAlertFrameWithCeiling(capture, 2500, setTimeoutFn, clearTimeoutFn);
+    expect(key).toBe("key-123");
+    expect(clearTimeoutFn).toHaveBeenCalledOnce();
+  });
+
+  it("defaults to the exported 2500ms ceiling and the real timer when none injected", async () => {
+    expect(ALERT_SCREENSHOT_CEILING_MS).toBe(2500);
+    // With real timers, an already-resolved capture wins immediately (no wait).
+    const key = await captureAlertFrameWithCeiling(Promise.resolve("immediate"));
+    expect(key).toBe("immediate");
   });
 });
