@@ -7,9 +7,10 @@
 // Self-contained section (own state, password prop) following the ProblemBank /
 // Contests conventions; pure form logic lives in ./templateForm (unit-tested),
 // storage + validation live on the backend (handler.mjs + src/templates.mjs).
-import { ArrowDown, ArrowUp, Copy, LayoutTemplate, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, Download, LayoutTemplate, Plus, RefreshCw, Trash2, UploadCloud } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  bankExport,
   createTemplateApi,
   deleteTemplateApi,
   fetchProblems,
@@ -18,6 +19,8 @@ import {
   updateTemplateApi,
   type ContestTemplateSummary
 } from "../api";
+import { BankImportDialog } from "./BankImportDialog";
+import { bundleFilename, downloadJson } from "./bankDownload";
 import {
   TEMPLATE_ENFORCEMENT_MODES,
   TEMPLATE_FORM_BOUNDS,
@@ -40,6 +43,35 @@ export function TemplatesPanel({ password }: { password: string }) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [draft, setDraft] = useState<TemplateDraft | null>(null);
+  // BANK-1: multi-select for bulk export (a selected template auto-pulls its
+  // referenced problems server-side) + the upload→preview→commit dialog.
+  const [selectedSlugs, setSelectedSlugs] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+
+  const toggleSelected = (slug: string) => {
+    setSelectedSlugs((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  };
+
+  const exportSelected = async () => {
+    if (!selectedSlugs.size) return;
+    setExporting(true);
+    setError("");
+    try {
+      const bundle = await bankExport(password, { problem_ids: [], template_slugs: [...selectedSlugs] });
+      downloadJson(bundle, bundleFilename());
+      setMessage(`Exported ${bundle.counts.templates} template(s) + ${bundle.counts.problems} referenced problem(s) to a downloaded bundle.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -51,6 +83,12 @@ export function TemplatesPanel({ password }: { password: string }) {
       ]);
       setTemplates(list.sort((a, b) => a.name.localeCompare(b.name)));
       setBank(problems);
+      // Drop selections for templates that no longer exist after a reload.
+      setSelectedSlugs((prev) => {
+        const live = new Set(list.map((t) => t.slug));
+        const next = new Set([...prev].filter((slug) => live.has(slug)));
+        return next.size === prev.size ? prev : next;
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -147,9 +185,24 @@ export function TemplatesPanel({ password }: { password: string }) {
           </div>
         </div>
         {!draft ? (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={() => void load()} disabled={loading}>
               <RefreshCw size={16} /> Reload
+            </button>
+            {/* BANK-1: export the selected templates (each pulls in its problems). */}
+            <button
+              className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50"
+              onClick={() => void exportSelected()}
+              disabled={!selectedSlugs.size || exporting}
+              title={selectedSlugs.size ? "Download the selected templates (with their problems) as a portable bundle" : "Select one or more templates to export"}
+            >
+              <Download size={16} /> {exporting ? "Exporting…" : `Export selected (${selectedSlugs.size})`}
+            </button>
+            <button
+              className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium"
+              onClick={() => { setShowImport(true); setMessage(""); setError(""); }}
+            >
+              <UploadCloud size={16} /> Import bundle…
             </button>
             <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={openNew}>
               <Plus size={16} /> New template
@@ -178,6 +231,14 @@ export function TemplatesPanel({ password }: { password: string }) {
           ) : null}
           {(templates ?? []).map((template) => (
             <div key={template.slug} className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3 text-sm">
+              {/* BANK-1: multi-select checkbox feeding the Export selected action. */}
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-accent"
+                checked={selectedSlugs.has(template.slug)}
+                onChange={() => toggleSelected(template.slug)}
+                aria-label={`Select ${template.slug} for export`}
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-semibold text-ink">{template.name}</span>
@@ -210,6 +271,16 @@ export function TemplatesPanel({ password }: { password: string }) {
           ))}
         </div>
       )}
+
+      {/* BANK-1: the upload → preview → commit dialog. Reload after a commit so
+          imported/forked templates (and their problems) appear in the list. */}
+      {showImport ? (
+        <BankImportDialog
+          password={password}
+          onClose={() => setShowImport(false)}
+          onApplied={() => { void load(); }}
+        />
+      ) : null}
     </section>
   );
 }

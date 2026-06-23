@@ -11,6 +11,10 @@ import type {
   AlertSuppressionActionResponse,
   AlertSuppressionsResponse,
   AlertsResponse,
+  BankBundle,
+  BankImportCommitResult,
+  BankImportOverrides,
+  BankImportPlan,
   BeaconKind,
   DisputeAlertResponse,
   CaptureState,
@@ -5162,6 +5166,17 @@ function findDemoProblem(id: string): ProblemDoc | null {
     ?? null;
 }
 
+// The full demo bank as the admin sees it: authored docs shadow the seeds by id
+// (same bank-shadows-seed rule as findDemoProblem). BANK-1 export/preview read
+// THIS — not readDemoProblems() alone — so the seed problems are exportable on a
+// fresh store, exactly as fetchProblems lists them.
+function demoProblemsMerged(): ProblemDoc[] {
+  const bySlug = new Map<string, ProblemDoc>();
+  for (const seed of DEMO_SEED_PROBLEMS) bySlug.set(seed.id, seed);
+  for (const doc of readDemoProblems()) bySlug.set(doc.id, doc);
+  return [...bySlug.values()];
+}
+
 // S-I §6 demo shim (mirrors backend contestProblemEntries): non-empty contest
 // problems[] > legacy settings problem_id > []. The legacy demo deployment
 // therefore keeps today's single-problem behavior bit-for-bit.
@@ -5269,4 +5284,324 @@ export async function deleteProblem(password: string, id: string): Promise<void>
     headers: { "x-admin-password": password },
     body: JSON.stringify({ id })
   });
+}
+
+// ---- BANK-1 (F11): bulk problem/template export + import ---------------------
+// Three thin admin POST helpers mirroring the existing x-admin-password pattern.
+// Backend contracts (routes/adminBankIo.mjs):
+//   POST /api/admin/bank-export        { problem_ids[], template_slugs[] } -> BankBundle (§2)
+//   POST /api/admin/bank-import-preview { bundle }                          -> BankImportPlan (§3.5)
+//   POST /api/admin/bank-import-commit  { bundle, overrides?, preview_token }-> BankImportCommitResult
+// Export returns the bundle INLINE (small, no PII) — the UI Blob-downloads it
+// client-side (no GCS round-trip), unlike contest-export's signed URL.
+//
+// Demo stubs model the whole two-phase flow against the localStorage demo bank
+// so the offline screenshot/admin demo renders export → preview → commit without
+// a backend. Demo docs carry no stored portable_id, so the demo resolver matches
+// by slug (a slug match with differing content ⇒ fork, mirroring the real D case).
+
+export async function bankExport(
+  password: string,
+  selection: { problem_ids: string[]; template_slugs: string[] }
+): Promise<BankBundle> {
+  if (demoMode) {
+    await wait(180);
+    assertDemoAdmin(password);
+    return demoBankExport(selection);
+  }
+  return request<BankBundle>("/api/admin/bank-export", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(selection)
+  });
+}
+
+export async function bankImportPreview(password: string, bundle: BankBundle): Promise<BankImportPlan> {
+  if (demoMode) {
+    await wait(180);
+    assertDemoAdmin(password);
+    return demoBankImportPreview(bundle);
+  }
+  return request<BankImportPlan>("/api/admin/bank-import-preview", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify({ bundle })
+  });
+}
+
+export async function bankImportCommit(
+  password: string,
+  body: { bundle: BankBundle; overrides?: BankImportOverrides; preview_token?: string }
+): Promise<BankImportCommitResult> {
+  if (demoMode) {
+    await wait(220);
+    assertDemoAdmin(password);
+    return demoBankImportCommit(body);
+  }
+  return request<BankImportCommitResult>("/api/admin/bank-import-commit", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+}
+
+// ---- demo bank IO (slug-keyed; mirrors enough of the resolver to render) -----
+
+// A stable, deterministic "portable id" for a demo slug (demo never stores one).
+function demoPortableId(prefix: string, slug: string): string {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  const hex = h.toString(16).padStart(8, "0");
+  // RFC-4122-v4-shaped so isValidPortableId-style guards pass.
+  return `${hex}-${prefix}00-4000-8000-${hex}${"0".repeat(4)}`;
+}
+
+// A cheap content hash for the demo resolver's identical-vs-differs decision.
+function demoContentHash(value: unknown): string {
+  const json = JSON.stringify(value);
+  let h = 0;
+  for (let i = 0; i < json.length; i++) h = (h * 33 + json.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+function demoProblemToBundleItem(doc: ProblemDoc): BankBundle["problems"][number] {
+  const item: BankBundle["problems"][number] = {
+    portable_id: demoPortableId("a", doc.id),
+    id: doc.id,
+    title: doc.title,
+    statement: doc.statement,
+    languages: [...doc.languages],
+    cpuTimeLimit: doc.cpuTimeLimit,
+    memoryLimit: doc.memoryLimit,
+    points: doc.points,
+    scoring: doc.scoring,
+    status: doc.status,
+    tags: doc.tags ? [...doc.tags] : [],
+    sampleTests: doc.sampleTests.map((t) => ({ input: t.input, expected: t.expected })),
+    hiddenTests: doc.hiddenTests.map((t) => ({ input: t.input, expected: t.expected }))
+  };
+  if (doc.statement_format === "markdown") item.statement_format = "markdown";
+  if (doc.stubs && Object.keys(doc.stubs).length) item.stubs = { ...doc.stubs };
+  const hash = demoContentHash({ ...item, portable_id: undefined });
+  item.content_hash = hash;
+  item.parent_hash = hash;
+  return item;
+}
+
+function demoBankExport(selection: { problem_ids: string[]; template_slugs: string[] }): BankBundle {
+  const problemIds = (selection.problem_ids ?? []).map(String);
+  const templateSlugs = (selection.template_slugs ?? []).map(String);
+  const allProblems = demoProblemsMerged();
+  const allTemplates = demoTemplatesMerged();
+
+  // Resolve selected templates and pull in every problem they reference.
+  const templates = templateSlugs
+    .map((slug) => allTemplates.find((t) => t.slug === slug))
+    .filter((t): t is ContestTemplateDetail => Boolean(t));
+
+  const wantIds = new Set(problemIds);
+  for (const tpl of templates) for (const entry of tpl.problems) wantIds.add(entry.problem_id);
+
+  const problemDocs = [...wantIds]
+    .map((id) => allProblems.find((p) => p.id === id))
+    .filter((p): p is ProblemDoc => Boolean(p));
+
+  const slugToPortable = new Map(problemDocs.map((p) => [p.id, demoPortableId("a", p.id)]));
+  const problems = problemDocs.map(demoProblemToBundleItem);
+
+  const templateItems: BankBundle["templates"] = templates.map((tpl) => {
+    const entries = tpl.problems.map((entry) => ({
+      problem_portable_id: slugToPortable.get(entry.problem_id) ?? demoPortableId("a", entry.problem_id),
+      problem_id_hint: entry.problem_id,
+      points: entry.points ?? null,
+      order: entry.order
+    }));
+    const hash = demoContentHash({ name: tpl.name, description: tpl.description, defaults: tpl.defaults, entries });
+    return {
+      portable_id: demoPortableId("b", tpl.slug),
+      slug: tpl.slug,
+      name: tpl.name,
+      description: tpl.description ?? "",
+      defaults: tpl.defaults as unknown as Record<string, unknown>,
+      problems: entries,
+      content_hash: hash,
+      parent_hash: hash
+    };
+  });
+
+  return {
+    kind: "proctor.bank-bundle",
+    bundle_version: 1,
+    exported_at: demoNowIso(),
+    exported_from: "demo",
+    counts: { problems: problems.length, templates: templateItems.length },
+    problems,
+    templates: templateItems
+  };
+}
+
+function demoValidateBundle(bundle: BankBundle): void {
+  if (!bundle || typeof bundle !== "object") throw demoApiError(400, "bundle_not_object");
+  if (bundle.kind !== "proctor.bank-bundle") throw demoApiError(400, "unsupported_bundle");
+  if (bundle.bundle_version !== 1) throw demoApiError(400, "unsupported_bundle_version");
+}
+
+function demoBankImportPreview(bundle: BankBundle): BankImportPlan {
+  demoValidateBundle(bundle);
+  const localProblems = demoProblemsMerged();
+  const localTemplates = demoTemplatesMerged();
+  const summary = { created: 0, unchanged: 0, updated: 0, forked: 0, blocked: 0 };
+
+  // The slug→target-slug map the template ref resolution needs (a fork moves it).
+  const resolvedSlug = new Map<string, string>(); // bundle problem id -> local target slug
+  const taken = new Set(localProblems.map((p) => p.id));
+
+  const problems = (bundle.problems ?? []).map((incoming) => {
+    const local = localProblems.find((p) => p.id === incoming.id);
+    const pid = incoming.portable_id;
+    if (!local) {
+      summary.created += 1;
+      resolvedSlug.set(incoming.id, incoming.id);
+      taken.add(incoming.id);
+      return { portable_id: pid, id: incoming.id, status: incoming.status, action: "create" as const, target_slug: incoming.id, reason: "new" };
+    }
+    const incomingHash = demoContentHash(demoStripHash(incoming));
+    const localHash = demoContentHash(demoStripHash(demoProblemToBundleItem(local)));
+    if (incomingHash === localHash) {
+      summary.unchanged += 1;
+      resolvedSlug.set(incoming.id, local.id);
+      return { portable_id: pid, id: incoming.id, status: incoming.status, action: "skip" as const, target_slug: local.id, reason: "identical" };
+    }
+    // Differs, and demo docs have no portable identity ⇒ keep both (fork), the
+    // conservative D-style default (never a silent overwrite in demo).
+    let fork = `${incoming.id}-2`;
+    for (let n = 2; taken.has(fork); n++) fork = `${incoming.id}-${n}`;
+    taken.add(fork);
+    resolvedSlug.set(incoming.id, fork);
+    summary.forked += 1;
+    return { portable_id: pid, id: incoming.id, status: incoming.status, action: "fork" as const, target_slug: fork, reason: "slug_collision", forked_from: null };
+  });
+
+  const templates = (bundle.templates ?? []).map((incoming) => {
+    const dangling: Array<{ problem_portable_id: string | null; hint: string | null }> = [];
+    for (const entry of incoming.problems ?? []) {
+      const hint = entry.problem_id_hint ?? null;
+      const inBundle = hint ? resolvedSlug.has(hint) : false;
+      const localHas = hint ? localProblems.some((p) => p.id === hint) : false;
+      if (!inBundle && !localHas) dangling.push({ problem_portable_id: entry.problem_portable_id ?? null, hint });
+    }
+    if (dangling.length) {
+      summary.blocked += 1;
+      return { portable_id: incoming.portable_id, slug: incoming.slug, name: incoming.name, action: "blocked" as const, target_slug: null, reason: "dangling_problem_refs", dangling };
+    }
+    const local = localTemplates.find((t) => t.slug === incoming.slug);
+    if (!local) {
+      summary.created += 1;
+      return { portable_id: incoming.portable_id, slug: incoming.slug, name: incoming.name, action: "create" as const, target_slug: incoming.slug, reason: "new" };
+    }
+    // A matching slug locally with no portable identity ⇒ keep both (fork).
+    summary.forked += 1;
+    return { portable_id: incoming.portable_id, slug: incoming.slug, name: incoming.name, action: "fork" as const, target_slug: incoming.slug, reason: "divergent" };
+  });
+
+  return { problems, templates, summary, preview_token: demoContentHash({ p: bundle.problems, t: bundle.templates }) };
+}
+
+function demoStripHash(item: BankBundle["problems"][number]): unknown {
+  const { portable_id: _pid, content_hash: _ch, parent_hash: _ph, origin: _o, ...rest } = item;
+  return rest;
+}
+
+function demoBankImportCommit(body: { bundle: BankBundle; overrides?: BankImportOverrides; preview_token?: string }): BankImportCommitResult {
+  const bundle = body.bundle;
+  demoValidateBundle(bundle);
+  if (body.preview_token && body.preview_token !== demoContentHash({ p: bundle.problems, t: bundle.templates })) {
+    throw demoApiError(409, "bundle_changed");
+  }
+  const overrides = body.overrides ?? {};
+  const plan = demoBankImportPreview(bundle);
+  const applied = { created: 0, updated: 0, forked: 0, skipped: 0, blocked: 0 };
+  const now = new Date().toISOString();
+
+  const problemResults = plan.problems.map((item) => {
+    const incoming = bundle.problems.find((p) => p.portable_id === item.portable_id);
+    const override = overrides[item.portable_id];
+    const action = (override as BankImportPlan["problems"][number]["action"]) || item.action;
+    if (action === "skip" || !incoming) {
+      applied.skipped += 1;
+      return { ...item, action: "skip" as const, reason: "skipped" };
+    }
+    const targetSlug = action === "fork"
+      ? (item.action === "fork" ? item.target_slug! : `${incoming.id}-2`)
+      : (item.target_slug ?? incoming.id);
+    const all = readDemoProblems().filter((p) => p.id !== targetSlug);
+    const doc: ProblemDoc = {
+      id: targetSlug,
+      title: incoming.title,
+      statement: incoming.statement,
+      statement_format: incoming.statement_format,
+      languages: [...incoming.languages],
+      cpuTimeLimit: incoming.cpuTimeLimit,
+      memoryLimit: incoming.memoryLimit,
+      points: incoming.points,
+      scoring: incoming.scoring,
+      status: incoming.status,
+      tags: incoming.tags ? [...incoming.tags] : [],
+      stubs: incoming.stubs,
+      sampleTests: incoming.sampleTests.map((t) => ({ input: t.input, expected: t.expected })),
+      hiddenTests: incoming.hiddenTests.map((t) => ({ input: t.input, expected: t.expected })),
+      created_at: now,
+      updated_at: now
+    };
+    writeDemoProblems([...all, doc]);
+    if (action === "fork") applied.forked += 1;
+    else if (action === "update" || action === "adopt") applied.updated += 1;
+    else applied.created += 1;
+    const bucket = action === "fork" ? "fork" : action === "update" || action === "adopt" ? "update" : "create";
+    return { ...item, action: bucket as BankImportPlan["problems"][number]["action"], target_slug: targetSlug };
+  });
+
+  const templateResults = plan.templates.map((item) => {
+    if (item.action === "blocked") {
+      applied.blocked += 1;
+      return item;
+    }
+    const incoming = bundle.templates.find((t) => t.portable_id === item.portable_id);
+    const override = overrides[item.portable_id];
+    const action = override || item.action;
+    if (action === "skip" || !incoming) {
+      applied.skipped += 1;
+      return { ...item, action: "skip" as const, reason: "skipped" };
+    }
+    // Resolve each ref to the committed problem target slug (a forked problem moved).
+    const slugFor = (hint: string | null | undefined) => {
+      if (!hint) return null;
+      const forked = problemResults.find((r) => r.id === hint);
+      return forked?.target_slug ?? hint;
+    };
+    const entries = (incoming.problems ?? [])
+      .map((e) => ({ problem_id: slugFor(e.problem_id_hint), points: e.points ?? null, order: e.order }))
+      .filter((e): e is { problem_id: string; points: number | null; order: number } => Boolean(e.problem_id));
+    const docs = readDemoTemplates();
+    let slug = incoming.slug;
+    if (action === "fork") { for (let n = 2; docs.some((d) => d.slug === slug) || slug === DEMO_SEED_TEMPLATE.slug; n++) slug = `${incoming.slug}-${n}`; }
+    const item2: ContestTemplateDetail = {
+      slug,
+      name: incoming.name,
+      description: incoming.description ?? "",
+      archived: false,
+      preset: false,
+      problems: entries,
+      defaults: demoDefaults(incoming.defaults as Partial<ContestTemplateDetail["defaults"]> | undefined),
+      created_at: now,
+      updated_at: now
+    };
+    writeDemoTemplates([...docs.filter((d) => d.slug !== slug), item2]);
+    if (action === "fork") applied.forked += 1;
+    else if (action === "update") applied.updated += 1;
+    else applied.created += 1;
+    return { ...item, action: (action === "fork" ? "fork" : action === "update" ? "update" : "create") as BankImportPlan["templates"][number]["action"], target_slug: slug };
+  });
+
+  return { ok: true, applied, problems: problemResults, templates: templateResults };
 }

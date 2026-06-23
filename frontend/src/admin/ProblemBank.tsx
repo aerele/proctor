@@ -2,11 +2,13 @@
 // S4: admin question bank — list/author/publish problems and assign the active
 // contest problem. Self-contained section (own state, password prop) so the
 // App.tsx touchpoints stay minimal: import + tab + render branch.
-import { ClipboardList, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ClipboardList, Download, Plus, RefreshCw, Trash2, UploadCloud } from "lucide-react";
 import { useEffect, useState } from "react";
-import { deleteProblem, fetchContests, fetchProblemDetail, fetchProblems, saveProblem } from "../api";
+import { bankExport, deleteProblem, fetchContests, fetchProblemDetail, fetchProblems, saveProblem } from "../api";
 import { draftFromDoc, draftToDoc, emptyProblemDraft, PROBLEM_LANGUAGES, validateProblemDraft, type ProblemDraft } from "../problems/problemDraft";
 import { StatementView } from "../problems/StatementView";
+import { BankImportDialog } from "./BankImportDialog";
+import { bundleFilename, downloadJson } from "./bankDownload";
 import { liveContestsReferencingProblem, liveEditConfirmMessage, liveEditGuardFromError, liveEditRetryBody, liveSaveConfirmMessage, shouldConfirmLiveSave } from "./saveGuard";
 import type { ContestSummary, ProblemLanguage, ProblemSummary, ProblemTest } from "../types";
 
@@ -21,6 +23,34 @@ export function ProblemBankSection({ password }: { password: string }) {
   const [draft, setDraft] = useState<ProblemDraft | null>(null);
   const [editingExisting, setEditingExisting] = useState(false);
   const [saving, setSaving] = useState(false);
+  // BANK-1: multi-select for bulk export, and the upload→preview→commit dialog.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const exportSelected = async () => {
+    if (!selectedIds.size) return;
+    setExporting(true);
+    setError("");
+    try {
+      const bundle = await bankExport(password, { problem_ids: [...selectedIds], template_slugs: [] });
+      downloadJson(bundle, bundleFilename());
+      setMessage(`Exported ${bundle.counts.problems} problem(s) to a downloaded bundle.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -34,6 +64,12 @@ export function ProblemBankSection({ password }: { password: string }) {
       ]);
       setProblems(list);
       setContests(contestList);
+      // Drop any selected id that no longer exists (deleted, or never re-listed).
+      setSelectedIds((prev) => {
+        const live = new Set(list.map((p) => p.id));
+        const next = new Set([...prev].filter((id) => live.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -127,9 +163,24 @@ export function ProblemBankSection({ password }: { password: string }) {
           </div>
         </div>
         {!draft ? (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium" onClick={() => void load()} disabled={loading}>
               <RefreshCw size={16} /> Reload
+            </button>
+            {/* BANK-1: bulk export of the selected problems + import a bundle. */}
+            <button
+              className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50"
+              onClick={() => void exportSelected()}
+              disabled={!selectedIds.size || exporting}
+              title={selectedIds.size ? "Download the selected problems as a portable bundle" : "Select one or more problems to export"}
+            >
+              <Download size={16} /> {exporting ? "Exporting…" : `Export selected (${selectedIds.size})`}
+            </button>
+            <button
+              className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium"
+              onClick={() => { setShowImport(true); setMessage(""); setError(""); }}
+            >
+              <UploadCloud size={16} /> Import bundle…
             </button>
             <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={() => { setDraft(emptyProblemDraft()); setEditingExisting(false); setMessage(""); }}>
               <Plus size={16} /> New problem
@@ -158,6 +209,14 @@ export function ProblemBankSection({ password }: { password: string }) {
           ) : null}
           {problems.map((p) => (
             <div key={p.id} className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3 text-sm">
+              {/* BANK-1: multi-select checkbox feeding the Export selected action. */}
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-accent"
+                checked={selectedIds.has(p.id)}
+                onChange={() => toggleSelected(p.id)}
+                aria-label={`Select ${p.id} for export`}
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono font-semibold">{p.id}</span>
@@ -179,6 +238,16 @@ export function ProblemBankSection({ password }: { password: string }) {
           ))}
         </div>
       )}
+
+      {/* BANK-1: the upload → preview → commit dialog. Reload both the bank and
+          the selection after a commit so newly-created/forked problems appear. */}
+      {showImport ? (
+        <BankImportDialog
+          password={password}
+          onClose={() => setShowImport(false)}
+          onApplied={() => { void load(); }}
+        />
+      ) : null}
     </section>
   );
 }

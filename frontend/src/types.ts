@@ -1431,3 +1431,129 @@ export type CollegeChoice = {
   name: string;
   college: string;
 };
+
+// ---- BANK-1 (F11): bulk problem/template export+import bundle + import plan ---
+// Mirrors backend/src/bulkIo.mjs (§2 bundle, §3.5 plan) + routes/adminBankIo.mjs.
+// The frontend never authors these by hand: the bundle is the export response
+// (downloaded verbatim) and re-uploaded for preview; the plan/result come back
+// from preview/commit. Most item fields are passed straight through, so the
+// shapes stay loose where the server owns the contract.
+
+/** One problem inside a bank bundle (the full authored surface + portable id +
+ *  the self-describing content_hash/parent_hash the resolver compares). */
+export type BankBundleProblem = {
+  portable_id: string;
+  id: string;
+  title: string;
+  statement: string;
+  statement_format?: StatementFormat;
+  languages: ProblemLanguage[];
+  cpuTimeLimit: number;
+  memoryLimit: number;
+  points: number;
+  scoring: ProblemScoring;
+  status: ProblemStatus;
+  tags?: string[];
+  stubs?: Partial<Record<ProblemLanguage, string>>;
+  sampleTests: ProblemTest[];
+  hiddenTests: ProblemTest[];
+  origin?: { instance?: string; exported_from?: string; at?: string };
+  content_hash?: string;
+  parent_hash?: string;
+};
+
+/** One template inside a bank bundle. Problems are referenced BY PORTABLE ID so
+ *  the template survives an instance where its problems live under other slugs. */
+export type BankBundleTemplate = {
+  portable_id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  /** Server-owned normalized defaults block (passed through verbatim). */
+  defaults?: Record<string, unknown>;
+  problems: Array<{
+    problem_portable_id: string | null;
+    problem_id_hint?: string | null;
+    points: number | null;
+    order: number;
+  }>;
+  origin?: { instance?: string; exported_from?: string; at?: string };
+  content_hash?: string;
+  parent_hash?: string;
+};
+
+/** The portable export file (POST /api/admin/bank-export response). */
+export type BankBundle = {
+  kind: "proctor.bank-bundle";
+  bundle_version: number;
+  exported_at: string;
+  exported_from: string;
+  counts: { problems: number; templates: number };
+  problems: BankBundleProblem[];
+  templates: BankBundleTemplate[];
+};
+
+/** Per-item disposition the resolver picks (and the legal per-row overrides). */
+export type BankImportAction = "create" | "skip" | "update" | "fork" | "adopt" | "blocked";
+
+/** One planned/applied problem row (bank-import-preview + -commit). */
+export type BankImportProblemItem = {
+  portable_id: string;
+  id?: string;
+  status?: string;
+  action: BankImportAction;
+  target_slug: string | null;
+  reason: string;
+  forked_from?: string | null;
+  /** Commit-only: extra context for a blocked live-edit row (open contests). */
+  extra?: { contests?: string[] } & Record<string, unknown>;
+};
+
+/** One planned/applied template row. `dangling` lists unresolved problem refs. */
+export type BankImportTemplateItem = {
+  portable_id: string;
+  slug?: string;
+  name?: string;
+  action: BankImportAction;
+  target_slug: string | null;
+  reason: string;
+  dangling?: Array<{ problem_portable_id: string | null; hint: string | null }>;
+};
+
+/** Summary counts on the preview plan. */
+export type BankImportSummary = {
+  created: number;
+  unchanged: number;
+  updated: number;
+  forked: number;
+  blocked: number;
+};
+
+/** POST /api/admin/bank-import-preview response (the dry-run plan). */
+export type BankImportPlan = {
+  problems: BankImportProblemItem[];
+  templates: BankImportTemplateItem[];
+  summary: BankImportSummary;
+  preview_token: string;
+};
+
+/** Applied counts on the commit result. */
+export type BankImportApplied = {
+  created: number;
+  updated: number;
+  forked: number;
+  skipped: number;
+  blocked: number;
+};
+
+/** POST /api/admin/bank-import-commit response. */
+export type BankImportCommitResult = {
+  ok: boolean;
+  applied: BankImportApplied;
+  problems: BankImportProblemItem[];
+  templates: BankImportTemplateItem[];
+};
+
+/** The per-portable-id override map sent on commit ("<pid>": action). A live-edit
+ *  confirm rides as the special "<pid>:confirm_live_edit": "<target_slug>" key. */
+export type BankImportOverrides = Record<string, string>;
