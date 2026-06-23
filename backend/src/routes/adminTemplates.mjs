@@ -46,7 +46,12 @@ export function makeAdminTemplatesRoutes(ctx) {
     slugify,
     getBankProblem,
     // shared handler-resident helper (single source — stays in handler.mjs)
-    isAlreadyExists
+    isAlreadyExists,
+    // BANK-1 (F11) §1.2: portable identity minted on first template create (and
+    // on clone — a clone is a NEW template). The bank-io import passes its own
+    // resolved portable_id through, so createTemplateDoc only mints when absent.
+    mintPortableId,
+    instanceLabel
   } = ctx;
 
   // ---- S-I §1.1/§2: proctor templates (admin CRUD) -----------------------------
@@ -76,10 +81,16 @@ export function makeAdminTemplatesRoutes(ctx) {
     const baseSlug = slugify(template.name);
     if (!baseSlug) throw httpError(400, "name must contain letters or digits");
     const now = new Date().toISOString();
+    // BANK-1 (F11) §1.2: a portable_id rides every NEW template doc. The bank-io
+    // importer passes its own resolved portable_id (+ origin/parent_hash) through
+    // template, so we only mint when the caller didn't supply one (create/clone).
+    const identity = template.portable_id
+      ? {}
+      : { portable_id: mintPortableId(), origin: { instance: instanceLabel, at: now } };
     for (let n = 1; n <= TEMPLATE_SLUG_COLLISION_LIMIT; n++) {
       const slug = n === 1 ? baseSlug : `${baseSlug}-${n}`;
       if (Object.hasOwn(SEED_TEMPLATES, slug)) continue; // presets keep their slug
-      const item = { slug, ...template, archived: false, created_at: now, updated_at: now };
+      const item = { slug, ...template, ...identity, archived: false, created_at: now, updated_at: now };
       try {
         await templateRef(slug).create(item);
         return item;
@@ -174,6 +185,10 @@ export function makeAdminTemplatesRoutes(ctx) {
     const item = {
       slug: existing.slug,
       ...checked.template,
+      // BANK-1 (F11) §1.2: preserve the travelling identity across an edit (a full
+      // .set() would otherwise drop it; the slug-based update never re-mints).
+      ...(existing.portable_id ? { portable_id: existing.portable_id } : {}),
+      ...(existing.origin ? { origin: existing.origin } : {}),
       archived: Boolean(existing.archived),
       created_at: existing.created_at || now,
       updated_at: now

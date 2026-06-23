@@ -103,6 +103,12 @@ export function loadConfig() {
     EVAL_LEASE_MS: positiveIntOr(process.env.EVAL_LEASE_MS, 180000),
     PUBLIC_APP_ORIGIN: resolveCorsOrigin(),
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || "",
+    // BANK-1 (F11): the diagnostic instance label stamped on a portable_id's
+    // `origin` breadcrumb + the export bundle header (docs/proposed/
+    // bulk-problem-template-io.md §1/§2). Never a match key, never a guard input.
+    // Defaults to a stable generic value so a deploy that never sets it still
+    // produces a sensible label.
+    INSTANCE_LABEL: process.env.INSTANCE_LABEL || "proctor",
     // Write-isolation for the proctor-eval service. When set (comma-separated
     // collection names), the Firestore client guard rejects any WRITE to a
     // collection NOT in this list — so a runaway/compromised eval deploy can

@@ -56,6 +56,7 @@ import { makeEnforcement, sanitizeExemptions, intOrZero } from "./enforcement.mj
 import { makeEvaluationRoutes, EVAL_ROUTE_KEYS } from "./routes/evaluation.mjs";
 import { makeAdminTemplatesRoutes } from "./routes/adminTemplates.mjs";
 import { makeAdminProblemsRoutes } from "./routes/adminProblems.mjs";
+import { makeAdminBankIoRoutes } from "./routes/adminBankIo.mjs";
 import { makeAdminContestsRoutes } from "./routes/adminContests.mjs";
 import { makeSubmissionEventsRoutes } from "./routes/submissionEvents.mjs";
 import { makeAdminStatsRoutes } from "./routes/adminStats.mjs";
@@ -76,6 +77,7 @@ import { ALL_CONTESTS, applyContestExamTime, configureContestStore, createContes
 import { applySelectionTransition, configureIdentityStore, findContestRosterEntries, getCollegeNameMap, getContestRosterMeta, getContestRosterSummary, getPersonById, getPersonsByIds, identityNorm, listAllPersons, listColleges, listEnrollments, listEnrollmentsForPerson, normalizeUniqueId, resolveEnrollmentSpineMatches, rosterMetaIdFor, saveContestRoster, stampSelectionDone, writeAudit } from "./identity.mjs";
 import { configureTemplateStore, getTemplate, listTemplates, normalizeProblemEntries, normalizeTemplateCameraRecording, normalizeTemplateEnforcement, normalizeTemplateScreenMarkers, structuredCloneTemplate, validateTemplateInput, SEED_TEMPLATES, TEMPLATE_BOUNDS } from "./templates.mjs";
 import { contestProblemEntries, effectivePoints, findProblemReferences } from "./contestProblems.mjs";
+import { mintPortableId as bankMintPortableId } from "./bulkIo.mjs";
 import { buildResultsCsv, buildResultsRows, computeScoreboard, computeSessionSummary, summarizeIntegrity } from "./scoreboard.mjs";
 import { buildScorecardCsv, buildScorecardRows, filterDirectory } from "./people.mjs";
 import { buildIpReport } from "./ipReport.mjs";
@@ -139,7 +141,7 @@ const {
   RETENTION_SWEEP_API_KEY, EDITOR_EVENTS_INGEST_LIMIT, EXEC_RUN_COOLDOWN_SECONDS,
   EXEC_SUBMIT_COOLDOWN_SECONDS, EXEC_MAX_SUBMISSIONS_PER_SESSION, EXEC_RUN_CONCURRENCY,
   EXEC_SUBMIT_CONCURRENCY, EXEC_POLL_CONCURRENCY, EXEC_MAX_QUEUE, DISCONNECTED_STALENESS_MS,
-  PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
+  PUBLIC_APP_ORIGIN, PUBLIC_APP_URL, INSTANCE_LABEL, GATE_ATTEMPT_LIMIT, EVALUATE_BATCH_LIMIT,
   EVALUATE_TIME_BUDGET_MS, EVAL_LEASE_MS, EVAL_WRITE_ALLOWLIST,
   // v1.1 G3 infra hardening
   MAX_REQUEST_BODY_BYTES, MAX_UPLOAD_CHUNK_BYTES,
@@ -941,7 +943,10 @@ const adminTemplatesRoutes = makeAdminTemplatesRoutes({
   TEMPLATE_BOUNDS,
   slugify,
   getBankProblem,
-  isAlreadyExists
+  isAlreadyExists,
+  // BANK-1 (F11) §1.2 lazy backfill: mint a portable_id on first template create.
+  mintPortableId: bankMintPortableId,
+  instanceLabel: INSTANCE_LABEL
 });
 const {
   adminListTemplates, adminGetTemplate, adminCreateTemplate, adminUpdateTemplate,
@@ -971,11 +976,51 @@ const adminProblemsRoutes = makeAdminProblemsRoutes({
   validateProblemInput,
   getBankProblem,
   findProblemReferences,
-  listTemplates
+  listTemplates,
+  // BANK-1 (F11) §1.2 lazy backfill: mint a portable_id on first authoring.
+  mintPortableId: bankMintPortableId,
+  instanceLabel: INSTANCE_LABEL
 });
 const {
   adminListProblems, adminGetProblem, adminSaveProblem, adminDeleteProblem
 } = adminProblemsRoutes;
+
+// Factory seam (BANK-1 / F11): bulk export/import of problems + templates. ctx
+// closes over THIS instance's live-client getter, the auth guard, the http
+// transport helpers, the env-captured collection names + caps + the diagnostic
+// instance label, the problem/template domain validators + readers, the pure
+// contest-reference finder (live-edit guard reuse), the template-block helpers
+// requireKnownProblems/createTemplateDoc OWNED by makeAdminTemplatesRoutes (by
+// reference — single source), and writeAudit/adminActor. The pure hashing +
+// A/B/C/D resolver + bundle shaping live in src/bulkIo.mjs (no store/env). Every
+// import write goes back through validateProblemInput/validateTemplateInput +
+// requireKnownProblems — bundle JSON is never spread into Firestore (spec §0).
+const adminBankIoRoutes = makeAdminBankIoRoutes({
+  getFirestore,
+  requireAdmin,
+  parseBody,
+  badRequest,
+  httpError,
+  httpErrorWith,
+  problemsCollection: PROBLEMS_COLLECTION,
+  templatesCollection: TEMPLATES_COLLECTION,
+  contestsCollection: CONTESTS_COLLECTION,
+  problemsQueryLimit: PROBLEMS_QUERY_LIMIT,
+  validateProblemInput,
+  getBankProblem,
+  getTemplate,
+  listTemplates,
+  validateTemplateInput,
+  findProblemReferences,
+  requireKnownProblems: adminTemplatesRoutes.requireKnownProblems,
+  createTemplateDoc: adminTemplatesRoutes.createTemplateDoc,
+  instanceLabel: INSTANCE_LABEL,
+  writeAudit,
+  adminActor
+});
+const {
+  adminBankExport, adminBankImportPreview, adminBankImportCommit
+} = adminBankIoRoutes;
 
 // Factory seam (decomp B14): the ADMIN session-management route domain (sessions
 // search / recording-sessions picker / sessions-list drill-down / session-detail /
@@ -1398,6 +1443,9 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/problem") return send(res, 200, await adminGetProblem(req));
     if (req.method === "POST" && path === "/api/admin/problems") return send(res, 200, await adminSaveProblem(req));
     if (req.method === "POST" && path === "/api/admin/problem-delete") return send(res, 200, await adminDeleteProblem(req));
+    if (req.method === "POST" && path === "/api/admin/bank-export") return send(res, 200, await adminBankExport(req));
+    if (req.method === "POST" && path === "/api/admin/bank-import-preview") return send(res, 200, await adminBankImportPreview(req));
+    if (req.method === "POST" && path === "/api/admin/bank-import-commit") return send(res, 200, await adminBankImportCommit(req));
     if (req.method === "GET" && path === "/api/admin/sessions") return send(res, 200, await adminSessions(req));
     if (req.method === "GET" && path === "/api/admin/recording-sessions") return send(res, 200, await adminRecordingSessions(req));
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));

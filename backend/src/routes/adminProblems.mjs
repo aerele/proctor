@@ -40,7 +40,11 @@ export function makeAdminProblemsRoutes(ctx) {
     getBankProblem,
     // contest-reference finder (pure) + the template lister it reads through
     findProblemReferences,
-    listTemplates
+    listTemplates,
+    // BANK-1 (F11) §1.2: portable identity is minted on first authoring so the
+    // export bundle and the source doc agree forever after — no batch migration.
+    mintPortableId,
+    instanceLabel
   } = ctx;
 
   // ---- S4: problem bank (admin authoring) ------------------------------------
@@ -140,8 +144,17 @@ export function makeAdminProblemsRoutes(ctx) {
       }
     }
     const now = new Date().toISOString();
+    // BANK-1 (F11) §1.2: a portable_id + origin is minted ONCE (first author of
+    // this slug) and preserved verbatim on every later save. An existing doc's
+    // identity is never re-minted; a legacy doc with no portable_id stays as-is
+    // until export back-fills it (export is the other mint site).
+    const prior = existing.exists ? existing.data() : null;
+    const identity = (prior && prior.portable_id)
+      ? { portable_id: prior.portable_id, ...(prior.origin ? { origin: prior.origin } : {}) }
+      : (prior ? {} : { portable_id: mintPortableId(), origin: { instance: instanceLabel, at: now } });
     const item = {
       ...checked.problem,
+      ...identity,
       created_at: existing.exists ? (existing.data().created_at || now) : now,
       updated_at: now
     };
