@@ -171,7 +171,15 @@ export function makeSessionGateRoutes(ctx) {
   async function sessionDisputeAlert(req) {
     const body = parseBody(req);
     requireFields(body, ["session_id"]);
-    const session = requireWritableSession(await getSession(String(body.session_id)));
+    // B1 (correctness review): a dispute is a READ-ONLY flag for the admin, and
+    // its PRIMARY case is a candidate disputing a fullscreen LOCK from the lock
+    // overlay. requireWritableSession() 403s a locked session (`session_locked`),
+    // the frontend swallows the error, and the overlay then falsely shows
+    // "Reported" with NO dispute_raised alert ever raised. So accept any existing
+    // session except an ENDED one (the test is over → nothing to dispute).
+    // getSession() already 404s a missing session.
+    const session = await getSession(String(body.session_id));
+    if (session?.status === "ended") throw httpError(409, "session_ended");
     const disputedType = String(body.disputed_type || "").slice(0, 64);
     const note = body.note ? String(body.note).slice(0, 500) : "";
     const alertSettings = await getAlertSettings();

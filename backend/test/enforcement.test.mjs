@@ -1075,13 +1075,42 @@ test("dispute-alert raises a DISTINCT dispute_raised alert (info), idempotent pe
   assert.equal(alertsIn(firestore).length, 1, "same type+day dedupes to one dispute alert");
 });
 
-test("dispute-alert requires a valid writable session (candidate-token auth, not admin)", async () => {
+test("dispute-alert requires a valid, non-ended session (candidate-token auth, not admin)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });
   seedSettings(firestore);
   const missing = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
     body: { session_id: "nope", disputed_type: "tab_away" } }));
   assert.equal(missing.statusCode, 404);
+});
+
+// B1 regression: the PRIMARY dispute case — a candidate disputing a block-mode
+// fullscreen LOCK from the lock overlay. requireWritableSession would 403 a
+// locked session (the frontend then falsely shows "Reported"); the dispute MUST
+// succeed and raise the alert.
+test("dispute-alert WORKS when the session is LOCKED (block-mode lock dispute — B1)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "d-locked", { status: "locked" });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "d-locked", disputed_type: "fullscreen_enforcement", note: "locked by mistake" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.raised, true);
+  const alerts = alertsIn(firestore);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].type, "dispute_raised");
+});
+
+// ...but an ENDED session cannot be disputed (the test is over → nothing actionable).
+test("dispute-alert rejects an ENDED session (409)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "d-ended", { status: "ended" });
+  const res = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "d-ended", disputed_type: "tab_away" } }));
+  assert.equal(res.statusCode, 409);
 });
 
 test("dispute-alert honours the GLOBAL dispute_raised disable (spam control) — raises nothing", async () => {

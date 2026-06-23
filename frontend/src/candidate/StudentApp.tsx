@@ -1175,13 +1175,18 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           // FLOW-1 (v1.1): a MANUAL screen-share stop pauses recording — drop the
           // candidate out of fullscreen INTENTIONALLY so they aren't trapped in a
           // fullscreen idle/share-error screen with no chrome to re-share. Arm the
-          // exit as EXPECTED first so the enforcement ladder does NOT treat this
-          // self-initiated exit as a violation (status is already idle, so the
-          // reducer ignores it anyway — this belt-and-braces keeps the event
-          // tagged {expected:true} for the audit). retryScreenShare then leads
-          // cleanly back through the fullscreen gate → recording, no reload.
-          shell.markExpectedExit();
-          if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+          // exit as EXPECTED so the enforcement ladder does NOT treat this
+          // self-initiated exit as a violation. B2 (correctness review): arm the
+          // one-shot expected flag ONLY when we actually exit fullscreen. The flag
+          // is cleared by the fullscreenchange listener, so arming it while we are
+          // already OUT of fullscreen (the common case — the candidate hit Esc)
+          // would leak it onto the NEXT genuine fullscreen exit and silently
+          // exempt a real violation. retryScreenShare then leads cleanly back
+          // through the fullscreen gate → recording, no reload.
+          if (document.fullscreenElement) {
+            shell.markExpectedExit();
+            void document.exitFullscreen().catch(() => undefined);
+          }
           setStartError({
             kind: "share_cancelled",
             message: "Screen sharing stopped, so recording is paused — this was recorded for the proctor to review. Press “Try again — share entire screen” below, choose Entire Screen, and you'll continue right where you left off. Please don't close this tab."
