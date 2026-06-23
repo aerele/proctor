@@ -101,7 +101,7 @@ export function makeSessionTelemetryRoutes(ctx) {
     // F10.1: only the two known chunk kinds may mint a signed write URL.
     const kind = String(body.kind || "");
     if (!uploadChunkKinds.has(kind)) {
-      return badRequest("kind must be screen or camera");
+      return badRequest("kind must be screen, camera, or screenshot");
     }
     const chunkIndex = Number(body.chunk_index);
     // Security M1 (2026-06-12 review): cap the index — unsafe-integer values (e.g. 1e21)
@@ -119,11 +119,28 @@ export function makeSessionTelemetryRoutes(ctx) {
     // frontend resumes its count monotonically and never trips this guard.
     // Storage layout is unchanged (kind/chunk-{index:05d}.ext) — only which
     // index gets used. hwm fields are absent on pre-F1 sessions (-> 0, no bump).
-    const hwmField = kind === "camera" ? "camera_chunk_index_hwm" : "screen_chunk_index_hwm";
+    // ALERT-2: a third kind ("screenshot") carries its OWN hwm field so a
+    // monotonic per-session screenshot counter never collides with — or is
+    // bumped past by — the two recording series. Each kind writes a distinct
+    // field, so the read-modify-write below never races across kinds.
+    const hwmField = kind === "camera"
+      ? "camera_chunk_index_hwm"
+      : kind === "screenshot"
+        ? "screenshot_chunk_index_hwm"
+        : "screen_chunk_index_hwm";
     const indexHwm = Number(session[hwmField]) || 0;
     const effectiveIndex = chunkIndex <= indexHwm && indexHwm > 0 ? indexHwm + 1 : chunkIndex;
 
-    const extension = String(body.content_type).includes("webm") ? "webm" : "bin";
+    // Extension is cosmetic (the key is opaque) but keeps GCS object inspection
+    // sane: recording chunks are webm; ALERT-2 screenshots are image/jpeg|png.
+    const contentType = String(body.content_type);
+    const extension = contentType.includes("webm")
+      ? "webm"
+      : contentType.includes("image/jpeg") || contentType.includes("image/jpg")
+        ? "jpg"
+        : contentType.includes("image/png")
+          ? "png"
+          : "bin";
     const objectKey = `${sessionPrefix(session)}${kind}/chunk-${String(effectiveIndex).padStart(5, "0")}.${extension}`;
     // v1.1 G3 (#7): bind a per-chunk size cap into the signed URL. The
     // x-goog-content-length-range extension header makes the WRITE URL only
@@ -152,9 +169,16 @@ export function makeSessionTelemetryRoutes(ctx) {
       // F10.1: chunk_count stays the SCREEN counter — the admin UI's recording-
       // duration math (chunks × 30s) and the recordings picker both read it, so
       // camera chunks must never inflate it. The camera stream counts separately.
-      ...(kind === "camera"
-        ? { camera_chunk_count: FieldValue.increment(1) }
-        : { chunk_count: FieldValue.increment(1) })
+      // ALERT-2: a "screenshot" mint increments NEITHER recording counter — a
+      // per-alert still is not a recording chunk, so it must not inflate the
+      // duration math or REC-4's stored-chunk reconciliation. Only the two video
+      // kinds advance a counter; the prior `non-camera → chunk_count` fallthrough
+      // (which would have counted a screenshot as a screen chunk) is removed.
+      ...(kind === "screen"
+        ? { chunk_count: FieldValue.increment(1) }
+        : kind === "camera"
+          ? { camera_chunk_count: FieldValue.increment(1) }
+          : {})
     });
 
     return {

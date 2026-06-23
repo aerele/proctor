@@ -15,6 +15,7 @@ import { cameraTrackConstraints, shouldRecordCamera } from "./cameraRecording";
 import { writeChunkHwm } from "./chunkContinuity";
 import { advanceUploadChain, runUploadWithRetry } from "./chunkUploadRetry";
 import { shouldSurfaceExamTime } from "./examTime";
+import { captureAndUploadAlertFrame, grabTrackFrame, type FrameCaptureDeps } from "./frameCapture";
 import type { EnforcementConfigPayload, EnforcementExemptions, ProctorEvent, ServerSessionStatus, SessionStartResponse, UploadManifestItem } from "./types";
 
 // Tier-1 buffer: the per-session circuit-breaker latch. Starts from the pre-
@@ -60,6 +61,13 @@ type RecorderOptions = {
   bufferDeps?: ChunkBufferDeps | null;
   // Tier-1 buffer: injectable buffer (tests). Absent → openBuffer(bufferDeps).
   buffer?: ChunkBuffer | null;
+  // ALERT-2: injectable last-frame capture deps (tests pass a fake ImageCapture
+  // + canvas; the browser passes real ImageCapture/OffscreenCanvas). Absent →
+  // grabTrackFrame's real DOM-backed defaults.
+  frameCaptureDeps?: FrameCaptureDeps;
+  // ALERT-2: injectable frame grabber (tests stub the whole grab so they need no
+  // DOM at all). Absent → the real grabTrackFrame(track, frameCaptureDeps).
+  grabFrame?: (track: MediaStreamTrack) => Promise<Blob>;
   // B1: the session was locked/ended/paused server-side (heartbeat status or a
   // 403/409 from any write). The recorder has been stopped; the host flips its
   // gate to match. Distinct from onFatalError, which is a local capture failure.
@@ -336,6 +344,15 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   let uploadedCount = 0;
   let heartbeatTimer: number | undefined;
   let eventBuffer: ProctorEvent[] = [];
+  // ALERT-2: a rolling cache of the most-recent successfully-grabbed screen
+  // frame (a single JPEG blob), refreshed on each screen chunk boundary while
+  // the track is live. It is the ONLY frame source once the track has ended (the
+  // share-stopped / recording-stopped alert moment), where grabFrame() can no
+  // longer recover pixels. A monotonic per-session screenshot index keeps each
+  // upload on a distinct key (never overwritten, never collides with the screen
+  // series — server enforces its own hwm too).
+  let lastScreenFrame: Blob | null = null;
+  let screenshotChunkIndex = 0;
   const manifest: UploadManifestItem[] = [];
   const mediaState: MediaCaptureState = {
     screen: "inactive",
@@ -437,6 +454,62 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
     eventBuffer.push(event);
     options.onEvent(event);
   };
+
+  // ---- ALERT-2: per-alert last-frame screenshot ----------------------------
+  // The current LIVE screen video track, or null once it has ended/stopped.
+  const liveScreenTrack = (): MediaStreamTrack | null => {
+    const track = screenStream?.getVideoTracks()[0] ?? null;
+    return track && track.readyState === "live" ? track : null;
+  };
+
+  // grabFrame seam: injected fake in tests, real grabTrackFrame otherwise.
+  const grabFrame = (track: MediaStreamTrack): Promise<Blob> =>
+    options.grabFrame
+      ? options.grabFrame(track)
+      : grabTrackFrame(track, options.frameCaptureDeps);
+
+  // Refresh the rolling last-good-frame cache from the live track (best-effort:
+  // any failure is swallowed and simply leaves the prior cached frame in place).
+  // Called on each screen chunk boundary so the cache is at most one chunk-period
+  // (~30s) stale when the share is stopped — no extra timer to manage.
+  const refreshScreenFrameCache = async (): Promise<void> => {
+    const track = liveScreenTrack();
+    if (!track) return;
+    try {
+      lastScreenFrame = await grabFrame(track);
+    } catch {
+      // Keep the previous cached frame; a single failed grab is non-fatal.
+    }
+  };
+
+  // Upload one screenshot frame via the SAME signed-PUT discipline as recording
+  // chunks (a "screenshot" kind under a distinct GCS prefix, size-capped +
+  // CORS-bound write URL), returning the stored object key.
+  const uploadScreenshotFrame = async (frame: Blob): Promise<string> => {
+    const index = ++screenshotChunkIndex;
+    const upload = await getUploadUrl({
+      session_id: options.sessionId,
+      kind: "screenshot",
+      chunk_index: index,
+      content_type: frame.type || "image/jpeg"
+    });
+    await uploadBlob(upload.upload_url, frame, upload.max_bytes);
+    return upload.storage_key;
+  };
+
+  // Capture a still for an alert moment and upload it. Returns the stored object
+  // key, or null when there is no frame to send or the upload fails — it NEVER
+  // throws and NEVER blocks the alert that triggered it. The frame-selection +
+  // never-throw logic lives in the pure captureAndUploadAlertFrame orchestrator.
+  const captureAlertScreenshot = (reason: string): Promise<string | null> =>
+    captureAndUploadAlertFrame({
+      liveTrack: liveScreenTrack,
+      cachedFrame: () => lastScreenFrame,
+      setCachedFrame: (frame) => { lastScreenFrame = frame; },
+      grab: grabFrame,
+      upload: uploadScreenshotFrame,
+      onUploadFailed: (message) => emit("screenshot_upload_failed", { reason, message })
+    });
 
   // B1: stop the recorder and notify the host exactly once when the session is no
   // longer writable. Guards against the multiple concurrent writes (heartbeat +
@@ -1042,8 +1115,19 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
       screenTrack?.addEventListener("ended", () => {
         if (stopping) return;
         updateMediaState("screen", "stopped");
-        emit("screen_share_stopped", { reason: "track_ended" });
-        options.onFatalError("Screen sharing stopped. Return to the proctor app immediately.");
+        // ALERT-2: the track is ALREADY ended here, so the capture relies on the
+        // cached last-good frame (a live grab is impossible). Attach the stored
+        // key to the SAME event that becomes the server-side alert. Capture is
+        // awaited only to thread the key in; the user-facing onFatalError still
+        // fires (after, unchanged) regardless of capture outcome, so the alert /
+        // recovery path is never blocked by a missing or failed screenshot.
+        void captureAlertScreenshot("track_ended").then((screenshotKey) => {
+          emit("screen_share_stopped", {
+            reason: "track_ended",
+            ...(screenshotKey ? { screenshot_key: screenshotKey } : {})
+          });
+          options.onFatalError("Screen sharing stopped. Return to the proctor app immediately.");
+        });
       });
 
       if (streamFullyLive(cameraStream)) {
@@ -1261,11 +1345,27 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
         // Tier-1: buffering mode writes-to-pending first then live-uploads;
         // fallback mode routes through the UNCHANGED enqueueUpload floor.
         routeChunk("screen", event.data, index);
+        // ALERT-2: piggyback the chunk cadence to refresh the last-good-frame
+        // cache (best-effort, off the hot path — fire-and-forget so it never
+        // delays the chunk upload). This is the frame served if the share is
+        // later stopped, where a live grab is no longer possible.
+        void refreshScreenFrameCache();
       }
     });
     recorder.addEventListener("error", (event) => {
       updateMediaState("screen", "error");
-      emit("recording_error", { kind: "screen", message: String(event) });
+      // ALERT-2: on a recorder error the screen track is usually STILL LIVE, so
+      // captureAlertScreenshot grabs a fresh frame (falling back to the cache).
+      // Attach the stored key to the recording_error event that becomes the
+      // server-side alert. Capture never blocks the alert (key omitted on
+      // no-frame/upload-failure).
+      void captureAlertScreenshot("recording_error").then((screenshotKey) => {
+        emit("recording_error", {
+          kind: "screen",
+          message: String(event),
+          ...(screenshotKey ? { screenshot_key: screenshotKey } : {})
+        });
+      });
     });
     recorder.addEventListener("stop", () => {
       if (!stopping) startSegmentRecorder();

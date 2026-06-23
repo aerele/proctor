@@ -571,6 +571,92 @@ test("B4: sure-shot alert WITH a merged video deep-links to merged_video_key", a
   assert.ok(!alert.video_key.endsWith("/"), "never a folder prefix");
 });
 
+// ---- ALERT-2: per-alert screenshot key promote / validate / sign ----------
+
+function sessionPrefixOf(firestore, sessionId) {
+  return firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+}
+
+test("ALERT-2: a screenshot_key INSIDE the session prefix is promoted onto the alert", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage, { mergedVideoKey: null });
+  const key = `${sessionPrefixOf(firestore, sessionId)}screenshot/chunk-00001.jpg`;
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [{ type: "screen_share_stopped", timestamp: "2026-06-05T10:00:00Z", detail: { reason: "track_ended", screenshot_key: key } }]
+    }
+  }));
+
+  const alert = [...firestore._collections.get(process.env.ALERTS_COLLECTION).values()][0];
+  assert.ok(alert, "alert raised");
+  assert.equal(alert.screenshot_key, key, "in-prefix screenshot_key promoted onto the alert");
+});
+
+test("ALERT-2: a screenshot_key OUTSIDE the session prefix is IGNORED (security)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage, { mergedVideoKey: null });
+  // A malicious client points the key at ANOTHER session's object.
+  const evilKey = "contests/other/sessions/victim/sv/screen/chunk-00009.webm";
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [{ type: "recording_error", timestamp: "2026-06-05T10:00:00Z", detail: { screenshot_key: evilKey } }]
+    }
+  }));
+
+  const alert = [...firestore._collections.get(process.env.ALERTS_COLLECTION).values()][0];
+  assert.ok(alert, "alert still raised");
+  assert.equal(alert.screenshot_key, undefined, "out-of-prefix key must NOT be promoted (no cross-session read)");
+});
+
+test("ALERT-2: adminAlerts signs a screenshot_url for a stored screenshot_key", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage, { mergedVideoKey: null });
+  const key = `${sessionPrefixOf(firestore, sessionId)}screenshot/chunk-00001.jpg`;
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: {
+      session_id: sessionId,
+      events: [{ type: "screen_share_stopped", timestamp: "2026-06-05T10:00:00Z", detail: { reason: "track_ended", screenshot_key: key } }]
+    }
+  }));
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/alerts", headers: ADMIN_HEADERS }));
+  assert.equal(res.statusCode, 200);
+  const row = res.body.alerts.find((a) => a.type === "screen_share_stopped");
+  assert.ok(row, "alert present in admin feed");
+  assert.equal(row.screenshot_url, `https://signed.example/${key}`, "screenshot_key resolved to a signed read url");
+  // No merged video → the evidence-clip link stays null (independent fields).
+  assert.equal(row.download_url, null);
+});
+
+test("ALERT-2: an alert with NO screenshot_key has screenshot_url null on read (no thumbnail)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage, { mergedVideoKey: null });
+
+  await call(makeReq({
+    method: "POST",
+    path: "/api/events",
+    body: { session_id: sessionId, events: [{ type: "recording_error", timestamp: "2026-06-05T10:00:00Z" }] }
+  }));
+
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/alerts", headers: ADMIN_HEADERS }));
+  assert.equal(res.body.alerts[0].screenshot_url, null, "no screenshot_key → screenshot_url null");
+});
+
 test("noisy events (focus/blur/visibility/clipboard) → NO proctor alerts", async () => {
   const firestore = makeFakeFirestore();
   const storage = makeFakeStorage();

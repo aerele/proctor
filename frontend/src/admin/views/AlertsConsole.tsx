@@ -352,6 +352,26 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
+          {/* ALERT-2: still image of the screen at the alert moment (captured
+              from the cached last frame even when the recording had already
+              stopped). Clicking opens the full-size image in a new tab — same
+              UX as the evidence-clip link. */}
+          {alert.screenshot_url ? (
+            <a
+              className="focus-ring inline-block overflow-hidden rounded-md border border-line hover:border-ink/40"
+              href={alert.screenshot_url}
+              target="_blank"
+              rel="noreferrer"
+              title="Screen at alert time"
+            >
+              <img
+                src={alert.screenshot_url}
+                alt="Screen at alert time"
+                className="h-20 w-auto object-cover"
+                loading="lazy"
+              />
+            </a>
+          ) : null}
           {alert.download_url ? (
             <a
               className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40"

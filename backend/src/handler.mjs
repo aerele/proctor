@@ -328,14 +328,21 @@ const ROOMS_LIST_LIMIT = 200;
 // factory call below can pass it as ctx without a const temporal-dead-zone error.
 const ENFORCEMENT_LOCK_REASON = "fullscreen_enforcement";
 
-// F10.1: the chunk-upload surface is EXACTLY two kinds — the screen recording
-// and the separate low-res camera stream. Everything else under the session
-// prefix (events, manifest, merged video) is written server-side, so an
-// unknown kind is rejected outright rather than sanitized into a fresh
-// folder (path-traversal hardening on top of sanitizeSegment). Hoisted here
-// (decomp B12a) so the makeSessionTelemetryRoutes(ctx) factory call below can pass
-// it as ctx without a const temporal-dead-zone error.
-const UPLOAD_CHUNK_KINDS = new Set(["screen", "camera"]);
+// F10.1: the chunk-upload surface is EXACTLY two recording kinds — the screen
+// recording and the separate low-res camera stream — plus the ALERT-2
+// per-alert "screenshot" still (a single JPEG captured at an alert moment).
+// Everything else under the session prefix (events, manifest, merged video) is
+// written server-side, so an unknown kind is rejected outright rather than
+// sanitized into a fresh folder (path-traversal hardening on top of
+// sanitizeSegment). Hoisted here (decomp B12a) so the
+// makeSessionTelemetryRoutes(ctx) factory call below can pass it as ctx without
+// a const temporal-dead-zone error.
+// ALERT-2: "screenshot" objects land under a DISTINCT `screenshot/` prefix
+// segment (NOT `screen/`), so REC-4's countStoredChunks (which lists
+// `${prefix}screen/chunk-*` / `${prefix}camera/chunk-*`) never miscounts a
+// screenshot as a recording chunk, and minting one never bumps chunk_count /
+// camera_chunk_count (see sessionTelemetry.mjs createUploadUrl).
+const UPLOAD_CHUNK_KINDS = new Set(["screen", "camera", "screenshot"]);
 
 // The candidate recorder's authoritative chunk/bitrate config. Hoisted UP to
 // the non-env constants block (decomp B13) so the makeSessionRoutes(ctx) factory
@@ -450,6 +457,9 @@ const proctorAlerts = makeProctorAlerts({
   normalizeUsername,
   isoOrNow,
   candidateOf,
+  // ALERT-2: the per-session GCS prefix builder, so upsertProctorAlert can
+  // validate a client-supplied screenshot_key points inside this session.
+  sessionPrefix,
   sanitizeExemptions,
   intOrZero,
   settingsCollection: SETTINGS_COLLECTION,
@@ -2108,6 +2118,10 @@ function evidenceKindOf(name, contestPrefix) {
   switch (tailFirst) {
     case "screen": return "screen";
     case "camera": return "camera";
+    // ALERT-2: per-alert screenshot stills live under their own prefix segment so
+    // the admin storage breakdown labels them distinctly (never folded into the
+    // screen-recording count).
+    case "screenshot": return "screenshot";
     case "events": return "events";
     // EDITOR_EVENTS_COLLECTION sub-prefix label (default "editor-events") — the
     // demo + UI breakdown name this kind `editorEvents`.

@@ -645,6 +645,14 @@ export type Alert = {
   video_key?: string;
   /** Filled by backend GET /api/admin/alerts (never stored). */
   download_url?: string;
+  /**
+   * ALERT-2: GCS object key of the last screen frame captured at the alert
+   * moment (incl. when the recording had already stopped). Stored on the alert
+   * only after the backend validates it points inside the session's prefix.
+   */
+  screenshot_key?: string;
+  /** ALERT-2: signed READ url for screenshot_key; filled by GET /api/admin/alerts (never stored). */
+  screenshot_url?: string;
   verdict?: AlertVerdict;
   /** Archive flag — archived alerts are hidden from the default list. */
   archived?: boolean;

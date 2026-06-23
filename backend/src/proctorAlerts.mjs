@@ -50,6 +50,11 @@ export function makeProctorAlerts(ctx) {
     normalizeUsername,
     isoOrNow,
     candidateOf,
+    // ALERT-2: the per-session GCS prefix builder (lib/sessionStore, by
+    // reference). Used to VALIDATE a client-supplied screenshot_key points
+    // inside THIS session's prefix before signing a read URL for it — a
+    // candidate must never be able to point the key at another session's object.
+    sessionPrefix,
     // cross-domain enforcement helpers (resident at B9a; src/enforcement.mjs after
     // B10a) — by reference, single source
     sanitizeExemptions,
@@ -287,6 +292,13 @@ export function makeProctorAlerts(ctx) {
       const config = alertTypeConfig(settings, event.type, spec.severity);
       if (!config.enabled) continue;
       const timestamp = isoOrNow(event.timestamp);
+      // ALERT-2: the client threads the captured last-frame's GCS key through the
+      // SAME event detail that becomes this alert (alerts are exclusively
+      // server-derived from events — see spec §5.2). Promote it onto the alert so
+      // the admin read can sign a thumbnail URL. upsertProctorAlert validates it.
+      const screenshotKey = event.detail && typeof event.detail === "object"
+        ? event.detail.screenshot_key
+        : undefined;
       await upsertProctorAlert(session, {
         type: event.type,
         severity: config.severity,
@@ -294,7 +306,8 @@ export function makeProctorAlerts(ctx) {
         title: spec.title,
         detail: detailFromEvent(event),
         dedupe: timestamp.slice(0, 10),
-        data: event.detail && typeof event.detail === "object" ? event.detail : undefined
+        data: event.detail && typeof event.detail === "object" ? event.detail : undefined,
+        screenshotKey
       });
     }
 
@@ -347,7 +360,7 @@ export function makeProctorAlerts(ctx) {
   //   <source>:<type>:<username_norm>:<contest_slug>:<dedupe>
   // so retries / repeated heartbeats collapse to one document. Attaches video_key
   // (merged output if present, else the raw screen chunk prefix) for deep-linking.
-  async function upsertProctorAlert(session, { type, severity, timestamp, title, detail, dedupe, data }) {
+  async function upsertProctorAlert(session, { type, severity, timestamp, title, detail, dedupe, data, screenshotKey }) {
     const usernameNorm = session.username_norm;
     const contestSlug = session.contest_slug || "_";
     const id = `proctor:${type}:${usernameNorm}:${contestSlug}:${dedupe}`;
@@ -377,6 +390,19 @@ export function makeProctorAlerts(ctx) {
 
     const videoKey = sureShotVideoKey(session);
     if (videoKey) item.video_key = videoKey;
+
+    // ALERT-2: persist the per-alert screenshot key ONLY when it is a string that
+    // points INSIDE this session's own GCS prefix. Without this guard a malicious
+    // client could set screenshot_key to an arbitrary object (e.g. another
+    // session's video) and the admin read would sign a download URL for it. Same
+    // defensive posture as alertRef's id sanitization / normalizeAlert's field
+    // discipline. `sessionPrefix` is optional in ctx — if it is not wired the key
+    // is simply not promoted (fail closed), never trusted blindly.
+    if (typeof sessionPrefix === "function"
+      && typeof screenshotKey === "string"
+      && screenshotKey.startsWith(sessionPrefix(session))) {
+      item.screenshot_key = screenshotKey.slice(0, 300);
+    }
 
     await alertRef(id).set(item, { merge: true });
     return item;

@@ -199,9 +199,9 @@ function sessionDoc(firestore, id) {
   return firestore._collections.get(process.env.SESSION_COLLECTION).get(id);
 }
 
-async function uploadUrl(sessionId, kind, chunkIndex) {
+async function uploadUrl(sessionId, kind, chunkIndex, contentType = "video/webm") {
   return call(makeReq({ method: "POST", path: "/api/upload-url", body: {
-    session_id: sessionId, kind, chunk_index: chunkIndex, content_type: "video/webm"
+    session_id: sessionId, kind, chunk_index: chunkIndex, content_type: contentType
   } }));
 }
 
@@ -350,4 +350,83 @@ test("two stints with a resume in between never collide on storage keys", async 
     issued.add(res.body.storage_key);
   }
   assert.equal(issued.size, 5);
+});
+
+// ---- ALERT-2: the "screenshot" upload kind ---------------------------------
+//
+// A per-alert screenshot mints a signed write URL via the SAME route, but it is
+// NOT a recording chunk: it lands under a DISTINCT `screenshot/` prefix (so
+// REC-4's countStoredChunks never miscounts it) and it must increment NEITHER
+// chunk_count NOR camera_chunk_count (the recording-duration math + recordings
+// picker read those). It tracks its own hwm so its index never collides with
+// the two video series.
+
+test("upload-url: a screenshot mint lands under screenshot/ with a jpg ext and its own hwm", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s-shot");
+
+  const res = await uploadUrl("s-shot", "screenshot", 1, "image/jpeg");
+  assert.equal(res.statusCode, 200);
+  // DISTINCT prefix segment (NOT screen/ or camera/) + image extension.
+  assert.equal(res.body.storage_key, "contests/kec-2026/sessions/alice/s-shot/screenshot/chunk-00001.jpg");
+  // The prefix can NEVER collide with REC-4's chunk count, which keys on
+  // `${prefix}screen/chunk-` / `${prefix}camera/chunk-`.
+  assert.ok(!res.body.storage_key.includes("/screen/chunk-"));
+  assert.ok(!res.body.storage_key.includes("/camera/chunk-"));
+
+  const doc = sessionDoc(firestore, "s-shot");
+  assert.equal(doc.screenshot_chunk_index_hwm, 1, "tracks its own hwm");
+});
+
+test("upload-url: a screenshot mint increments NEITHER chunk_count NOR camera_chunk_count", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  // Seed with NON-zero recording counters so a stray bump would be visible.
+  seedSession(firestore, "s-noinflate", {
+    chunk_count: 7, camera_chunk_count: 5,
+    screen_chunk_index_hwm: 7, camera_chunk_index_hwm: 5
+  });
+
+  // Three screenshots in a row.
+  for (const index of [1, 2, 3]) {
+    const res = await uploadUrl("s-noinflate", "screenshot", index, "image/jpeg");
+    assert.equal(res.statusCode, 200);
+  }
+
+  const doc = sessionDoc(firestore, "s-noinflate");
+  // The branch `kind === "screen" ? chunk_count++ : kind === "camera" ?
+  // camera_chunk_count++ : {}` runs neither increment for "screenshot".
+  assert.equal(doc.chunk_count, 7, "screenshot must NOT inflate chunk_count");
+  assert.equal(doc.camera_chunk_count, 5, "screenshot must NOT inflate camera_chunk_count");
+  // The recording series hwms are also untouched; only the screenshot hwm moves.
+  assert.equal(doc.screen_chunk_index_hwm, 7);
+  assert.equal(doc.camera_chunk_index_hwm, 5);
+  assert.equal(doc.screenshot_chunk_index_hwm, 3);
+});
+
+test("upload-url: a screenshot index at/below its hwm is bumped (no overwrite), independent of the video series", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s-shot-bump", { screenshot_chunk_index_hwm: 4 });
+
+  // A stale client restarting its screenshot count at 1 is bumped to hwm+1.
+  const res = await uploadUrl("s-shot-bump", "screenshot", 1, "image/jpeg");
+  assert.equal(res.body.storage_key, "contests/kec-2026/sessions/alice/s-shot-bump/screenshot/chunk-00005.jpg");
+  // A screen chunk at index 1 is unaffected by the screenshot hwm.
+  const screen = await uploadUrl("s-shot-bump", "screen", 1);
+  assert.equal(screen.body.storage_key, "contests/kec-2026/sessions/alice/s-shot-bump/screen/chunk-00001.webm");
+});
+
+test("upload-url: an unknown kind still 400s (screenshot did not widen the surface to anything)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "s-badkind");
+
+  const res = await uploadUrl("s-badkind", "thumbnail", 1, "image/jpeg");
+  assert.equal(res.statusCode, 400);
 });

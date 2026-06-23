@@ -131,9 +131,16 @@ export function makeAlertRoutes(ctx) {
       .slice(0, alertsQueryLimit);
 
     const withUrls = await Promise.all(alerts.map(async (alert) => {
-      if (!alert.video_key) return { ...alert, download_url: null };
-      const downloadUrl = await resolveSignedReadUrl(alert.video_key);
-      return { ...alert, download_url: downloadUrl };
+      // ALERT-2: resolve BOTH the evidence-clip deep-link (video_key) and the
+      // per-alert screenshot still (screenshot_key) into signed READ urls.
+      // resolveSignedReadUrl already degrades to null on any failure, so a
+      // missing key or a signing error simply leaves the field null (the row
+      // renders "No recording attached." / no thumbnail) — never throws.
+      const [downloadUrl, screenshotUrl] = await Promise.all([
+        alert.video_key ? resolveSignedReadUrl(alert.video_key) : null,
+        alert.screenshot_key ? resolveSignedReadUrl(alert.screenshot_key) : null
+      ]);
+      return { ...alert, download_url: downloadUrl, screenshot_url: screenshotUrl };
     }));
 
     // Distinct rooms come from the SESSION docs (capped) so the console dropdown
