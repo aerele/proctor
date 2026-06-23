@@ -21,34 +21,36 @@ export function testRules(ownEditor: boolean): TestRuleCopy[] {
   return [
     {
       title: "Share your ENTIRE SCREEN",
-      body: "When prompted, choose Entire Screen — not a tab, window, or browser. Tab/window sharing is rejected and recording will not start."
+      body: "When prompted, choose Entire Screen — not a single tab or window. If you pick a tab or window, recording won't start and you'll be asked to share again."
     },
     {
-      title: "Keep recording running",
+      title: "Keep your screen shared",
       body: ownEditor
-        ? "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have submitted your solution here."
+        ? "Recording keeps running even when this tab is hidden, so don't stop sharing until you've submitted your solution here. If sharing stops, a red bar appears at the top — just share your screen again to continue."
         : "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have fully submitted on HackerRank."
     },
     {
       title: ownEditor ? "Stay on this tab" : "Stay on HackerRank and this tab",
-      body: "Don't switch to other tabs, apps, or windows. Focus changes, hidden states, and exits are logged and may need explanation."
+      body: ownEditor
+        ? "Stay on this tab — don't switch to other tabs, apps, or windows. If you do, a red bar appears at the top; come back to this tab to clear it. Switching away is recorded for the proctor to review."
+        : "Don't switch to other tabs, apps, or windows. Focus changes, hidden states, and exits are logged and may need explanation."
     },
     {
-      title: "No copy / paste or outside help",
+      title: "Do your own work",
       body: ownEditor
-        ? "Clipboard and paste activity is recorded. Everything you type in the coding editor, including keystroke timing, is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
+        ? "Work on your own — no copied code, AI tools, search engines, or help from anyone else. Everything you type in the coding editor, including keystroke timing, is recorded, along with any copy or paste activity. Outside help can lead to disqualification."
         : "Clipboard and paste activity is recorded. Copied code, AI-assisted answers, search engines, or another person can lead to disqualification."
     },
     {
       title: "Keep your camera visible",
       body: ownEditor
-        ? "If a camera is available, keep the self-view (or its pop-out) visible while you work in the coding workspace. Microphone is captured when available."
+        ? "If you have a camera, keep the self-view (or its pop-out) visible while you work in the coding workspace. Your microphone is captured when one is available."
         : "If a camera is available, keep the self-view (or its pop-out) visible while you work in HackerRank. Microphone is captured when available."
     },
     {
-      title: "End the test here when done",
+      title: "Press End test when you're done",
       body: ownEditor
-        ? "After you submit your solution here, press End test. Closing the tab early is logged as an incomplete session."
+        ? "After you submit your solution here, press End test to finish. If you close the tab early, the session is recorded as incomplete."
         : "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
     }
   ];
@@ -93,14 +95,14 @@ export function cameraStateLabel(state: string, cameraRecorded: boolean): string
 // EndTestPanel confirmation copy (shown when the candidate presses End test).
 export function endTestConfirmation(ownEditor: boolean): string {
   return ownEditor
-    ? "End the proctoring session only after submitting your solution here. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below."
-    : "End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below.";
+    ? "End the proctoring session only after you've submitted your solution here. If you close the tab before this step, the session is recorded as incomplete. Confirm below to finish."
+    : "End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. Confirm below to finish.";
 }
 
 // Entry-review "Tabs" audit line shown to the candidate after recording starts.
 export function tabAuditMessage(ownEditor: boolean): string {
   return ownEditor
-    ? "Tab/focus review active. Keep only this proctor session open; other activity may be visible in the shared-screen recording."
+    ? "Keep only this proctor session open. Anything else on your screen may be visible in the shared-screen recording."
     : "Tab/focus review active. Keep only HackerRank and this proctor session open; other activity may be visible in the shared-screen recording.";
 }
 
@@ -115,19 +117,19 @@ export function formStageIntro(ownEditor: boolean): string {
 // recording. Only the submissions-similarity notice is surface-specific.
 export function integrityNotices(ownEditor: boolean): string[] {
   return [
-    "Your screen recording is being uploaded throughout the assessment for review.",
-    "The shared screen is recorded directly so capture continues while this proctor tab is hidden.",
-    "If a camera is available, keep your face visible in the self-view throughout the assessment.",
-    "Clipboard snapshot and paste activity inside this session are part of the integrity record.",
-    "Focus changes, hidden page states, refreshes, and exits are logged and may require explanation.",
-    "Stopping screen sharing before submission is treated as a serious proctoring violation.",
+    "Your screen recording is uploaded throughout the assessment for the proctor to review.",
+    "The shared screen is recorded directly, so it keeps recording while this proctor tab is hidden.",
+    "If you have a camera, keep your face visible in the self-view throughout the assessment.",
+    "Copy and paste activity inside this session is part of the integrity record.",
+    "Tab switches, hidden pages, refreshes, and exits are recorded for the proctor to review.",
+    "Please keep your screen shared until you've submitted — if it stops, just share again.",
     ownEditor
       ? "Submitted code may be checked for similarity, unusual structure, and copied code patterns."
       : "HackerRank submissions may be checked for similarity, unusual structure, and copied code patterns.",
-    "Shortlisted candidates must be ready to explain and modify their submitted code live.",
-    "Suspicious candidate-ID/session behavior may lead to manual verification before shortlisting.",
-    "Upload gaps, missing recording chunks, and interrupted sessions are reviewed before results are accepted.",
-    "Any unexplained proctoring anomaly can affect shortlisting even if the code passes all tests.",
-    "Selection depends on score, originality, explanation, and clean proctoring evidence."
+    "If you're shortlisted, be ready to explain and modify your submitted code live.",
+    "Unusual candidate-ID or session activity may need a quick manual check before shortlisting.",
+    "Upload gaps, missing recording segments, and interrupted sessions are reviewed before results are accepted.",
+    "An unexplained proctoring issue can affect shortlisting even if your code passes every test.",
+    "Selection considers your score, originality, explanation, and clean proctoring evidence."
   ];
 }

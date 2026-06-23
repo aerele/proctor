@@ -13,11 +13,11 @@ import * as studentCopy from "../../studentCopy";
 // rules are a function of it instead of a module constant.
 const TEST_RULE_ICONS: React.ReactNode[] = [
   <MonitorUp size={18} />,   // Share your ENTIRE SCREEN
-  <Video size={18} />,       // Keep recording running
+  <Video size={18} />,       // Keep your screen shared
   <Eye size={18} />,         // Stay on (HackerRank and) this tab
-  <Copy size={18} />,        // No copy / paste or outside help
+  <Copy size={18} />,        // Do your own work
   <Camera size={18} />,      // Keep your camera visible
-  <ClipboardCheck size={18} /> // End the test here when done
+  <ClipboardCheck size={18} /> // Press End test when you're done
 ];
 const testRulesWithIcons = (ownEditor: boolean): Array<{ icon: React.ReactNode; title: string; body: string }> =>
   studentCopy.testRules(ownEditor).map((rule, index) => ({ icon: TEST_RULE_ICONS[index], ...rule }));

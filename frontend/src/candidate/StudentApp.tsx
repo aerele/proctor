@@ -1184,7 +1184,7 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
           setStartError({
             kind: "share_cancelled",
-            message: "Screen sharing stopped, so recording is paused. This is logged. Press Resume screen share and choose your Entire Screen to continue — do not close this tab."
+            message: "Screen sharing stopped, so recording is paused — this was recorded for the proctor to review. Press “Try again — share entire screen” below, choose Entire Screen, and you'll continue right where you left off. Please don't close this tab."
           });
           speakWarning("Screen sharing stopped. Press 'Try again — share entire screen' below to continue.");
         } else {

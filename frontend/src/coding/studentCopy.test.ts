@@ -45,19 +45,19 @@ describe("own-editor copy (ownEditor=true)", () => {
     expect(testRules(true).map((r) => r.title)).toContain("Stay on this tab");
   });
 
-  it("rules: keep-recording card directs sharing until the solution is submitted here", () => {
-    const rule = testRules(true).find((r) => r.title === "Keep recording running");
-    expect(rule?.body).toContain("until you have submitted your solution here");
+  it("rules: keep-sharing card directs sharing until the solution is submitted here", () => {
+    const rule = testRules(true).find((r) => r.title === "Keep your screen shared");
+    expect(rule?.body).toContain("until you've submitted your solution here");
   });
 
   it("rules: end-test card directs ending the test here after submitting", () => {
-    const rule = testRules(true).find((r) => r.title === "End the test here when done");
+    const rule = testRules(true).find((r) => r.title === "Press End test when you're done");
     expect(rule?.body).toContain("After you submit your solution here");
     expect(rule?.body).toContain("End test");
   });
 
   it("end-test confirmation directs submitting the solution here", () => {
-    expect(endTestConfirmation(true)).toContain("after submitting your solution here");
+    expect(endTestConfirmation(true)).toContain("after you've submitted your solution here");
   });
 
   it("tab audit asks to keep only this proctor session open", () => {
@@ -77,7 +77,7 @@ describe("own-editor copy (ownEditor=true)", () => {
   // M2 (PII disclosure): Slice 1 records every keystroke (full text + timing) to
   // GCS. The candidate must see this disclosed in the own-editor rules.
   it("rules: discloses that editor keystrokes (text + timing) are recorded", () => {
-    const rule = testRules(true).find((r) => r.title === "No copy / paste or outside help");
+    const rule = testRules(true).find((r) => r.title === "Do your own work");
     expect(rule?.body).toContain("coding editor");
     expect(rule?.body).toContain(KEYSTROKE_DISCLOSURE);
   });
@@ -91,23 +91,23 @@ describe("own-editor copy (ownEditor=true)", () => {
 });
 
 describe("legacy HackerRank copy (ownEditor=false) is byte-for-byte unchanged", () => {
-  it("keeps the original rules-card strings", () => {
+  it("keeps the legacy HackerRank rule-card BODIES byte-for-byte", () => {
     const rules = testRules(false);
     expect(rules.map((r) => r.title)).toContain("Stay on HackerRank and this tab");
-    expect(rules.find((r) => r.title === "Keep recording running")?.body).toBe(
+    expect(rules.find((r) => r.title === "Keep your screen shared")?.body).toBe(
       "Screen recording is mandatory and continues even when this tab is hidden. Do not stop sharing until you have fully submitted on HackerRank."
     );
     expect(rules.find((r) => r.title === "Keep your camera visible")?.body).toBe(
       "If a camera is available, keep the self-view (or its pop-out) visible while you work in HackerRank. Microphone is captured when available."
     );
-    expect(rules.find((r) => r.title === "End the test here when done")?.body).toBe(
+    expect(rules.find((r) => r.title === "Press End test when you're done")?.body).toBe(
       "After you submit on HackerRank, return and press End test. Closing the tab early is logged as an incomplete session."
     );
   });
 
-  it("keeps the original end-test confirmation", () => {
+  it("keeps the legacy end-test confirmation (HackerRank wording, no 'no code needed')", () => {
     expect(endTestConfirmation(false)).toBe(
-      "End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. No code is needed — just confirm the assurance below."
+      "End the proctoring session only after submitting HackerRank. Closing the tab before this step is logged as an incomplete session. Confirm below to finish."
     );
   });
 

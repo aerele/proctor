@@ -6,7 +6,7 @@
 // panel that could sit scrolled out of view while the candidate worked deep in
 // the workspace — "the alert doesn't show up"). Same episode semantics as
 // before: lists the episode's friendly reason(s) with timestamps; exactly ONE
-// primary action ("I have fixed this") that stays disabled until every restore
+// primary action ("I have fixed it — continue my test") that stays disabled until every restore
 // precondition holds. Re-enter fullscreen gets its own button (a fresh click
 // is always a valid gesture). Share-restart is NEVER offered here — that stays
 // with ScreenShareErrorPanel (no duplicate CTA).
@@ -57,7 +57,7 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
           </ul>
           <p className="mt-1 text-xs leading-5 text-red-100">
             {ready
-              ? "All clear — press “I have fixed this” to continue."
+              ? "All set — press “I have fixed it — continue my test” to resume."
               : `To continue: ${pending.join(" · ")}.`}
           </p>
           {fsError ? <p className="text-xs font-semibold text-red-100">{fsError}</p> : null}
@@ -79,10 +79,10 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
             disabled={!ready}
             onClick={onRestore}
           >
-            I have fixed this
+            I have fixed it — continue my test
           </button>
-          {/* ALERT-1: the quieter dispute option. "I have fixed this" above is
-              the acknowledge path; this raises a flag for a GENUINE software
+          {/* ALERT-1: the quieter dispute option. "I have fixed it — continue my
+              test" above is the acknowledge path; this raises a flag for a GENUINE software
               fault. It never clears the banner. */}
           {onReportDispute && !disputeSent ? (
             <button
