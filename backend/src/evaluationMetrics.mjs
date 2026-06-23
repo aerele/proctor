@@ -9,50 +9,23 @@
 import {
   REPLAY,
   collapseWs,
-  normalizedLineDistance,
   replaySession,
   trimTrailingEmpty,
 } from "./evaluationReplay.mjs";
 import {
   makeHardness,
   coreExact,
-  artifacts,
-  provenance,
   analyzeClones,
 } from "./evaluationClone.mjs";
+import { DEFAULT_RULE_CONFIG, THRESHOLDS } from "./evalRules/config.mjs";
+import { runRegistry } from "./evalRules/engine.mjs";
 
 export const EVALUATOR_VERSION = "4";
 
-export const THRESHOLDS = {
-  // D3 — switch-away → paste correlation window (paste/burst within 10s of episode end).
-  AWAY_PASTE_WINDOW_MS: 10000,
-  // D4 — typing cadence.
-  SUPERHUMAN_CPS: 14, // ≥14 chars/s sustained ⇒ superhuman
-  SUPERHUMAN_RUN: 25, // over a run of ≥25 consecutive single-char inserts
-  METRONOMIC_CV: 0.15, // coefficient-of-variation < 0.15 ⇒ metronomic (replayer tell)
-  METRONOMIC_MIN_KEYS: 40, // over ≥40 keystrokes
-  // D10 — zero-effort solve.
-  ZERO_EFFORT_ACTIVE_MS: 120000, // active_ms < 120s
-  ZERO_EFFORT_TYPED_FRAC: 0.15, // typed_chars < 0.15 × |code|
-  // D1 — overall paste ratio flag across scoring problems.
-  PASTE_RATIO_FLAG: 0.6,
-  // D12 — stub-delta partial gamer.
-  STUB_DELTA_LINES: 10,
-  // D13 — honest reach.
-  REACH_MIN_SUBMITS: 2,
-  REACH_MIN_ACTIVE_MS: 600000, // ≥10 min
-  REACH_MAX_PASTE: 0.3,
-  // D6 — inter-candidate paste-content matching minimum length.
-  FOREIGN_PASTE_MATCH_MIN: 80,
-  // D2/integrity-confirmed — full-solution foreign paste length.
-  FULL_SOLUTION_PASTE_LEN: 300,
-  // D16a — silent editor gap while session active (coverage; lowers confidence).
-  SILENT_GAP_MS: 300000, // 5 min
-  // D16b — replay-vs-submission normalized line distance mismatch.
-  MISMATCH: 0.15,
-  // D15 — premeditated clipboard: foreign-paste match length.
-  CLIPBOARD_MATCH_MIN: 40,
-};
+// THRESHOLDS now lives in evalRules/config.mjs (DATA, EVAL-1 / F14) and is
+// re-exported here unchanged so every existing importer — and the explicit-value
+// test at evaluationMetrics.test.mjs:87-105 — keeps working byte-for-byte.
+export { THRESHOLDS };
 
 // ---------------------------------------------------------------------------
 // identity
@@ -253,7 +226,13 @@ function rawLineLevenshtein(a, b) {
 // ---------------------------------------------------------------------------
 // buildScorecard — the per-candidate assembly
 // ---------------------------------------------------------------------------
-export function buildScorecard(input) {
+// extractFeatures — the shared feature bundle, built ONCE (EVAL-1 / F14). This
+// is the top of the old buildScorecard body, MINUS the inline detectors that are
+// now registry rules. It replays the session, computes the per-problem table and
+// all per-problem rule inputs (problemDetail), and assembles the session-level
+// features the rules read. The math is the relocated math — nothing here changed
+// behaviorally. The engine consumes this bundle; buildScorecard assembles the doc.
+function extractFeatures(input) {
   const {
     contest_slug,
     identity = {},
@@ -290,20 +269,16 @@ export function buildScorecard(input) {
   const replay = replaySession(editorEvents, { stubs: allStubs, extraSelfTexts });
 
   // AVAILABILITY GATES (missing-data, 2026-06-19). A detector that needs a signal
-  // must verify the signal is PRESENT; absent ⇒ inconclusive, never a flag. These
-  // are hoisted here so the per-problem loop (zero-effort) and the later tamper
-  // detector share one definition.
+  // must verify the signal is PRESENT; absent ⇒ inconclusive, never a flag. The
+  // registry's engine.buildAvail() formalizes these (editor_coverage,
+  // per_problem_events, paste_inference) from the replay; the two below are also
+  // surfaced on the feature bundle because the zero-effort rule's per-problem gate
+  // and the replay_tamper rule read them directly.
   // editorCoveragePresent: any editor events at all? (mirrors the tamper gate.)
   const editorCoveragePresent = replay.events_n > 0;
   // problemsWithEvents: problems that actually have editor events (per-problem
   // zero-coverage exclusion, mirroring the tamper logic).
   const problemsWithEvents = new Set(Object.keys(replay.problems));
-  // pasteInferenceAvailable: did the session emit ANY paste/selection telemetry?
-  // When false, the "large unpaired insert ⇒ pasted" inference was suppressed in
-  // the replay (so pasted_chars/foreign-unpaired are clean), and the paste-ratio
-  // flag below is suppressed too — absence of paste markers is inconclusive on the
-  // paste axis, never a high-paste-ratio violation.
-  const pasteInferenceAvailable = replay.paste_inference_available === true;
 
   // ---- away episodes + correlations + cadence ----
   const episodes = awayEpisodes(shellEvents);
@@ -360,23 +335,21 @@ export function buildScorecard(input) {
   for (const pid of Object.keys(replay.problems)) allPids.add(pid);
 
   const per_problem = {};
-  const zero_effort_solves = [];
-  const honest_reach = [];
-  const first_attempt_solves = [];
+  // problemDetail: per-problem rule INPUTS the registry's per-problem rules read
+  // (zeroEffort/isPartial/honestReach/firstAttempt predicates + the values their
+  // evidence strings need). Internal to the engine — NOT serialized (the
+  // scorecard's per_problem table keeps its exact shape).
+  const problemDetail = {};
   const languagesSet = new Set();
-  const flags = [];
 
   let total_score = 0;
   // D12 (widened 2026-06-20): partial credit earned on ANY non-genuine partial.
   // Every partial (best_score>0 && effMax>0 && best_score<effMax) has
   // genuine_arc=false (genuine_arc requires solvedFull), so partial points are
   // never talent evidence — discount the FULL partial total from the composite,
-  // not just the near-stub (stub_delta<10) subset. Honest partial progress is
-  // still credited separately via honest_reach/reach_frac, so this is
-  // calibration-positive and demote-only-by-rank (recommendFor buckets on tiers,
-  // never composite). The narrower near-stub subset still gets the surfaced
-  // partial_gamer info flag below (a specific signal), but the DISCOUNT is wide.
-  let discountedPartialPoints = 0;
+  // not just the near-stub (stub_delta<10) subset. The discount accumulation now
+  // lives in the partial_discount registry rule; honest partial progress is still
+  // credited separately via honest_reach/reach_frac.
   let n_solved_full = 0;
   let n_medplus_solved = 0;
   let hardestRank = 0; // 0 none,1 easy,2 med,3 hard
@@ -468,52 +441,20 @@ export function buildScorecard(input) {
       !zeroEffort &&
       (wrong_before_solve >= 1 || runs >= 2 || typedMajority);
 
-    if (zeroEffort) {
-      zero_effort_solves.push(pid);
-      flags.push({
-        code: "zero_effort_solve",
-        severity: "critical",
-        problem_id: pid,
-        evidence: `Accepted ${tier} solve with only ${active_ms}ms active editing and ${typed} typed chars (code ${codeLen} chars).`,
-      });
-    }
-
-    // D12 partial-credit discount (widened 2026-06-20). EVERY partial is a
-    // non-genuine partial (genuine_arc requires solvedFull; a partial has
-    // best_score<effMax so solvedFull=false), so its points are not talent
-    // evidence — discount the FULL partial total from the composite. The
-    // accumulator below is subtracted from score_frac in computeComposite. This
-    // is a single accumulation per problem (no double-count with the near-stub
-    // info flag, which only EMITS a surfaced signal and no longer adds points).
+    // D12 partial: EVERY partial (best_score>0 && effMax>0 && best_score<effMax)
+    // is a non-genuine partial. The discount accumulation (rule partial_discount)
+    // and the near-stub partial_gamer info flag (rule partial_gamer) both read
+    // problemDetail.isPartial below.
     const isPartial = best_score > 0 && effMax > 0 && best_score < effMax;
-    if (isPartial) {
-      discountedPartialPoints += best_score;
-    }
-    // D12 partial gamer flag. Severity "info" (v1 default, from real-data
-    // review): gaming partial credit off a near-stub submit is a TALENT honesty
-    // signal (a real gem-gamer case taught this) — kept as a specific surfaced signal on
-    // the near-stub (stub_delta<10) subset. It is not cheating evidence, so it
-    // must not drag the orthogonal integrity axis to "watch" on its own. The
-    // composite discount is now wider (all partials, above); this flag stays
-    // scoped to the near-stub subset and adds NO additional discount.
-    if (isPartial && stub_delta_lines != null && stub_delta_lines < THRESHOLDS.STUB_DELTA_LINES) {
-      flags.push({
-        code: "partial_gamer",
-        severity: "info",
-        problem_id: pid,
-        evidence: `Partial score ${best_score}/${effMax} with only ${stub_delta_lines} lines changed from stub.`,
-      });
-    }
-
-    // D13 honest reach (unsolved problem, real reach)
-    if (!solvedFull && submits >= THRESHOLDS.REACH_MIN_SUBMITS && active_ms >= THRESHOLDS.REACH_MIN_ACTIVE_MS && paste_ratio < THRESHOLDS.REACH_MAX_PASTE) {
-      honest_reach.push(pid);
-    }
-
-    // D14 first-attempt solves: first submit accepted with no prior failed run/submit.
-    if (firstAcceptIdx === 0 && wrong_before_solve === 0 && (subs[0] && subs[0].verdict === "accepted")) {
-      first_attempt_solves.push(pid);
-    }
+    // D13 honest reach predicate (unsolved problem, real reach).
+    const honestReach =
+      !solvedFull &&
+      submits >= THRESHOLDS.REACH_MIN_SUBMITS &&
+      active_ms >= THRESHOLDS.REACH_MIN_ACTIVE_MS &&
+      paste_ratio < THRESHOLDS.REACH_MAX_PASTE;
+    // D14 first-attempt solve predicate (first submit accepted, no prior fail).
+    const firstAttempt =
+      firstAcceptIdx === 0 && wrong_before_solve === 0 && !!(subs[0] && subs[0].verdict === "accepted");
 
     if (solvedFull) {
       n_solved_full += 1;
@@ -521,6 +462,24 @@ export function buildScorecard(input) {
       if (tierRank[tier] > hardestRank) hardestRank = tierRank[tier];
     }
     total_score += best_score;
+
+    // Per-problem rule inputs (internal). Carries the predicates and the values
+    // the rules' evidence strings reference. Keyed by pid; `pid` is on the object
+    // so a per_problem rule can self-identify (and the per_problem_events gate).
+    problemDetail[pid] = {
+      pid,
+      tier,
+      best_score,
+      effMax,
+      active_ms,
+      typed,
+      codeLen,
+      stub_delta_lines,
+      zeroEffort,
+      isPartial,
+      honestReach,
+      firstAttempt,
+    };
 
     per_problem[pid] = {
       best_score,
@@ -553,151 +512,7 @@ export function buildScorecard(input) {
   const overallScoringPasteRatio = scoringPasted / Math.max(1, scoringTyped + scoringPasted);
   const paste_ratio = totalPasted / Math.max(1, totalTyped + totalPasted);
 
-  // AVAILABILITY GATE (missing-data, 2026-06-19): the paste-ratio flag is only
-  // meaningful when the session emitted paste/selection telemetry. With no
-  // markers, the replay already suppressed the "large unpaired insert ⇒ pasted"
-  // inference (so this ratio should be ~0), but we ALSO gate the flag here so a
-  // session that never captured paste signals can never produce a high-paste
-  // critical flag — that axis is inconclusive, never a violation.
-  if (pasteInferenceAvailable && overallScoringPasteRatio > THRESHOLDS.PASTE_RATIO_FLAG) {
-    flags.push({
-      code: "high_paste_ratio",
-      severity: "critical",
-      problem_id: null,
-      evidence: `Overall paste ratio ${round2(overallScoringPasteRatio)} across scoring problems exceeds ${THRESHOLDS.PASTE_RATIO_FLAG}.`,
-    });
-  }
-
-  // ---- D2 foreign-paste flags ----
-  for (const fp of foreign_pastes) {
-    const afterAway = fp.after_away_ms != null;
-    if (afterAway) {
-      flags.push({
-        code: "foreign_paste_after_away",
-        severity: "critical",
-        problem_id: fp.problem_id,
-        evidence: `Foreign paste of ${fp.len} chars ${fp.after_away_ms}ms after a switch-away episode.`,
-      });
-    } else {
-      flags.push({
-        code: "foreign_paste",
-        severity: "warning",
-        problem_id: fp.problem_id,
-        evidence: `Foreign paste of ${fp.len} chars not seen earlier in this session.`,
-      });
-    }
-  }
-
-  // ---- D4 cadence flags ----
-  if (cadence.superhuman_bursts.length) {
-    const b = cadence.superhuman_bursts[0];
-    flags.push({
-      code: "superhuman_cadence",
-      severity: "warning",
-      problem_id: b.problem_id,
-      evidence: `Run of ${b.run_len} typed characters at ${b.cps} chars/s (≥${THRESHOLDS.SUPERHUMAN_CPS}).`,
-    });
-  }
-  if (cadence.metronomic) {
-    flags.push({
-      code: "metronomic_cadence",
-      severity: "warning",
-      problem_id: null,
-      evidence: `Inter-character timing gaps show CV<${THRESHOLDS.METRONOMIC_CV} over ≥${THRESHOLDS.METRONOMIC_MIN_KEYS} characters (replayer-like).`,
-    });
-  }
-
-  // ---- D9 artifacts + provenance over submission sources ----
-  const artifactsAgg = {};
-  const provenanceHits = [];
-  for (const s of submissions) {
-    const code = s.source_code || "";
-    if (!code) continue;
-    for (const a of artifacts(code)) artifactsAgg[a] = (artifactsAgg[a] || 0) + 1;
-    for (const p of provenance(code)) provenanceHits.push({ problem_id: s.problem_id, name: p });
-  }
-
-  // ---- D16b replay-vs-submission mismatch ----
-  const replay_mismatches = [];
-  let telemetry_tampered = false;
-  // editorCoveragePresent + problemsWithEvents are hoisted above (shared with the
-  // zero-effort gate); the per-problem zero-coverage exclusion uses them below.
-  for (const s of submissions) {
-    const pid = s.problem_id;
-    const src = s.source_code || "";
-    if (!src) continue;
-    const subTs = Date.parse(s.created_at || 0);
-    // nearest snapshot for this problem within ±120s
-    let best = null;
-    for (const snap of replay.submit_snapshots) {
-      if (snap.problem_id !== pid) continue;
-      if (snap.ts == null) continue;
-      const dt = Math.abs(snap.ts - subTs);
-      if (dt <= 120000 && (best == null || dt < best.dt)) best = { snap, dt };
-    }
-    if (!best) continue;
-    // accept exact collapsed equality
-    const snapCollapsed = collapseWs(best.snap.content);
-    if (snapCollapsed === collapseWs(src)) continue;
-    const dist = normalizedLineDistance(best.snap.content, src);
-    if (dist > THRESHOLDS.MISMATCH) {
-      // EMPTY-SNAPSHOT GUARD (real-data hardening): a near-empty replayed buffer
-      // means the base content (the pre-seeded stub) was never captured — the
-      // candidate barely touched this problem and the capture has no base to
-      // replay. Telemetry suppression cannot produce this shape (suppression
-      // removes the events; here the events exist but the base doesn't), so a
-      // mismatch against a near-empty snapshot is coverage, never tamper.
-      const substantive = snapCollapsed.length >= 30;
-      replay_mismatches.push({ problem_id: pid, submission_id: s._id || null, distance: round4(dist), ts: tsIso(best.snap.ts), snapshot_empty: !substantive });
-    }
-  }
-  // ≥1 mismatch with editor coverage present ⇒ telemetry_tampered (critical).
-  // BUT no mismatch flag when the problem has zero editor events.
-  // GLITCH GATE (real-data hardening): some sessions never
-  // capture the initial stub load (Monaco init race / mid-session reload
-  // restoring a draft without events), so the replay reconstructs keystroke
-  // deltas over the wrong base — every snapshot then "mismatches" at 0.85+
-  // while the candidate did nothing wrong. Those replays self-identify via
-  // glitches > 0 (range/deletedLen disagreement during apply). A mismatch is
-  // TAMPER EVIDENCE only when this problem's replay was glitch-free; glitchy
-  // mismatches degrade coverage/confidence instead (plan D16c: telemetry
-  // problems lower confidence, never raise a cheat flag alone).
-  const glitchFree = (pid) => (replay.problems[pid]?.glitches || 0) === 0;
-  const realMismatches = replay_mismatches.filter((m) => problemsWithEvents.has(m.problem_id) && glitchFree(m.problem_id) && !m.snapshot_empty);
-  if (realMismatches.length && editorCoveragePresent) {
-    telemetry_tampered = true;
-    flags.push({
-      code: "telemetry_tampered",
-      severity: "critical",
-      problem_id: realMismatches[0].problem_id,
-      evidence: `Submitted code differs from replayed editor state (line-distance ${realMismatches[0].distance}>${THRESHOLDS.MISMATCH}).`,
-    });
-  }
-
-  // ---- D15 premeditated clipboard ----
-  let premeditated_clipboard = false;
-  const firstForeign = replay.pastes.find((p) => p.foreign && collapseWs(p.text).length >= THRESHOLDS.CLIPBOARD_MATCH_MIN);
-  if (firstForeign) {
-    const fc = collapseWs(firstForeign.text);
-    for (const entry of clipboardEntries || []) {
-      const ce = collapseWs(entry);
-      if (ce.length < THRESHOLDS.CLIPBOARD_MATCH_MIN) continue;
-      if (ce.includes(fc) || fc.includes(ce)) {
-        premeditated_clipboard = true;
-        break;
-      }
-    }
-  }
-  if (premeditated_clipboard) {
-    flags.push({
-      code: "premeditated_clipboard",
-      severity: "critical",
-      problem_id: firstForeign ? firstForeign.problem_id : null,
-      evidence: `Entry-clipboard snapshot matches the first foreign paste (premeditated).`,
-    });
-  }
-
-  // ---- integrity rollups (D17) ----
+  // ---- integrity rollups (D17) — engine/assembly steps, not rules ----
   const tab_away_total_ms = episodes.reduce((a, e) => a + Math.max(0, e.t1 - e.t0), 0);
   const away_episode_count = episodes.length;
   let fullscreen_violations = countFullscreenViolations(shellEvents);
@@ -705,19 +520,6 @@ export function buildScorecard(input) {
     fullscreen_violations = Math.max(0, ...sessions.map((s) => num(s.fullscreen_exit_count)), 0);
   }
   const ip_change_count = Math.max(0, ...sessions.map((s) => num(s.ip_change_count)), 0);
-
-  // ---- talent composite + tiers ----
-  const composite = computeComposite({
-    total_score,
-    discountedPartialPoints,
-    maxTotal,
-    per_problem,
-    problemPoints,
-    hardness,
-    allPids,
-    n_solved_full,
-    honest_reach,
-  });
 
   // away_paste_correlations output (D3) for integrity block.
   const away_paste_correlations = awayCorr.map((c) => ({
@@ -728,84 +530,170 @@ export function buildScorecard(input) {
     kind: c.kind,
   }));
 
-  // ---- coverage / confidence ----
-  const coverage = computeCoverage({
+  return {
+    // identity / context
+    contest_slug,
+    identity,
+    identity_key,
+    session_ids,
+    sessions,
+    submissions,
     editorEvents,
     shellEvents,
-    submissions,
-    sessions,
-    replay,
+    problemPoints,
+    stubsByProblem,
+    hardness,
+    maxTotal,
+    clipboardEntries,
     evidenceReadFailed,
+
+    // replay-derived (shared, unchanged)
+    replay,
+    episodes,
+    cadence,
+    awayCorr,
+    foreign_pastes,
+    away_paste_correlations,
+
+    // availability inputs (consumed by engine.buildAvail + replay_tamper rule)
+    editorCoveragePresent,
+    problemsWithEvents,
+
+    // per-problem table + internal rule inputs
+    allPids,
+    per_problem,
+    problemDetail,
+
+    // session-level rule inputs + aggregates
+    typedByProblem,
+    pastedByProblem,
+    totalTyped,
+    totalPasted,
+    paste_ratio,
+    overallScoringPasteRatio,
+    total_score,
+    n_solved_full,
+    n_medplus_solved,
+    hardest_tier,
+    languagesSet,
+
+    // integrity rollups (D17)
+    tab_away_total_ms,
+    away_episode_count,
+    fullscreen_violations,
+    ip_change_count,
+  };
+}
+
+// buildScorecard — thin orchestrator (EVAL-1 / F14). Build the feature bundle
+// once, run the data-driven registry (which produces the flags/integrity/talent
+// signals the inline detectors used to push), then assemble the SAME scorecard
+// doc and call computeComposite + deriveTiers exactly as before. The output is
+// byte-identical to the pre-refactor straight-line body.
+export function buildScorecard(input) {
+  const f = extractFeatures(input);
+
+  // Run the registry. config defaults to DEFAULT_RULE_CONFIG; input.ruleConfig is
+  // optional per-contest override plumbing — absent ⇒ today's behavior.
+  const collected = runRegistry(f, { config: input.ruleConfig || DEFAULT_RULE_CONFIG });
+
+  const flags = collected.flags;
+  const zero_effort_solves = collected.integrity.zero_effort_solves;
+  const honest_reach = collected.talent.honest_reach;
+  const first_attempt_solves = collected.talent.first_attempt_solves;
+  const discountedPartialPoints = collected.accumulators.discountedPartialPoints || 0;
+  const artifactsAgg = collected.integrity.artifacts || {};
+  const provenanceHits = collected.integrity.provenance_hits || [];
+  const replay_mismatches = collected.integrity.replay_mismatches || [];
+  const telemetry_tampered = collected.integrity.telemetry_tampered === true;
+
+  // ---- talent composite ----
+  const composite = computeComposite({
+    total_score: f.total_score,
+    discountedPartialPoints,
+    maxTotal: f.maxTotal,
+    per_problem: f.per_problem,
+    problemPoints: f.problemPoints,
+    hardness: f.hardness,
+    allPids: f.allPids,
+    n_solved_full: f.n_solved_full,
+    honest_reach,
   });
-  // Glitch-gated mismatches (see D16b above): replay base was wrong for these
-  // problems — record as coverage gaps so confidence drops instead of a flag.
-  const glitchyMismatchPids = [...new Set(replay_mismatches
-    .filter((m) => (replay.problems[m.problem_id]?.glitches || 0) > 0 || m.snapshot_empty)
-    .map((m) => m.problem_id))];
-  for (const pid of glitchyMismatchPids) {
-    coverage.gaps.push(`replay_base_unreliable:${pid}`);
-  }
+
+  // ---- coverage / confidence ----
+  const coverage = computeCoverage({
+    editorEvents: f.editorEvents,
+    shellEvents: f.shellEvents,
+    submissions: f.submissions,
+    sessions: f.sessions,
+    replay: f.replay,
+    evidenceReadFailed: f.evidenceReadFailed,
+  });
+  // Glitch-gated mismatches (from the replay_tamper rule): replay base was wrong
+  // for these problems — record as coverage gaps so confidence drops, not a flag.
+  for (const gap of collected.coverage_gaps) coverage.gaps.push(gap);
   if (coverage.gaps.length > 2) coverage.confidence = "low";
   else if (coverage.gaps.length > 0 && coverage.confidence === "high") coverage.confidence = "medium";
 
-  // ---- tiers ----
+  // ---- integrity / talent blocks (same shape deriveTiers consumes) ----
   const integrity = {
-    typed_chars: totalTyped,
-    pasted_chars: totalPasted,
-    paste_ratio: round4(paste_ratio),
-    foreign_pastes,
-    away_paste_correlations,
-    cadence,
+    typed_chars: f.totalTyped,
+    pasted_chars: f.totalPasted,
+    paste_ratio: round4(f.paste_ratio),
+    foreign_pastes: f.foreign_pastes,
+    away_paste_correlations: f.away_paste_correlations,
+    cadence: f.cadence,
     zero_effort_solves,
     clone_cluster_refs: [],
     recurring_pair_refs: [],
     paste_match_edges: [],
     artifacts: artifactsAgg,
     provenance_hits: provenanceHits,
-    tab_away_total_ms,
-    away_episode_count,
-    fullscreen_violations,
-    ip_change_count,
+    tab_away_total_ms: f.tab_away_total_ms,
+    away_episode_count: f.away_episode_count,
+    fullscreen_violations: f.fullscreen_violations,
+    ip_change_count: f.ip_change_count,
     replay_mismatches,
     telemetry_tampered,
   };
 
   const talent = {
     composite,
-    total_score,
-    max_total: maxTotal,
-    n_solved_full,
-    n_medplus_solved,
-    hardest_tier,
-    per_problem,
+    total_score: f.total_score,
+    max_total: f.maxTotal,
+    n_solved_full: f.n_solved_full,
+    n_medplus_solved: f.n_medplus_solved,
+    hardest_tier: f.hardest_tier,
+    per_problem: f.per_problem,
     honest_reach,
     first_attempt_solves,
-    languages: [...languagesSet],
+    languages: [...f.languagesSet],
   };
 
   // cross_inputs for the cross-candidate pass (kept small & bounded).
   const cross_inputs = buildCrossInputs({
-    foreign_pastes: replay.pastes.filter((p) => p.foreign),
-    replay,
-    sessions,
-    submissions,
-    allPids,
-    stubsByProblem,
+    foreign_pastes: f.replay.pastes.filter((p) => p.foreign),
+    replay: f.replay,
+    sessions: f.sessions,
+    submissions: f.submissions,
+    allPids: f.allPids,
+    stubsByProblem: f.stubsByProblem,
   });
 
   const derived = deriveTiers({ flags, talent, integrity, coverage });
 
+  const identity = f.identity;
   return {
     schema_version: 1,
     evaluator_version: EVALUATOR_VERSION,
     computed_at: new Date().toISOString(),
-    contest_slug,
+    contest_slug: f.contest_slug,
     person_id: identity.person_id != null ? identity.person_id : null,
     username_norm: identity.username_norm || null,
     candidate_id: identity.candidate_id || null,
     name: identity.name || null,
-    identity_key,
-    session_ids,
+    identity_key: f.identity_key,
+    session_ids: f.session_ids,
     coverage,
     talent: { ...talent, composite: derived.composite },
     integrity,
