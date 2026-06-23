@@ -2,7 +2,7 @@
   {
     "origin": ["*"],
     "method": ["PUT", "GET", "HEAD"],
-    "responseHeader": ["Content-Type", "ETag"],
+    "responseHeader": ["Content-Type", "ETag", "x-goog-content-length-range"],
     "maxAgeSeconds": 3600
   }
 ]
