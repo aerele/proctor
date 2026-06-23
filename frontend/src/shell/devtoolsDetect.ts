@@ -134,7 +134,7 @@ export function consoleGetterOpen(consoleObj: Console = console): boolean {
 // statement pauses execution; the wall-clock across it spikes. We DON'T enable
 // this by default — it FREEZES the tab whenever DevTools is open, which is a
 // terrible experience for the (logged) candidate we are only WARNING. Exposed so
-// the integration can opt in if Karthi wants a stronger-but-jarring signal.
+// the integration can opt in for a stronger-but-jarring signal.
 //
 // Implemented with a literal `debugger` statement (NOT new Function/eval — no
 // dynamic code, no injection surface, CSP-safe). When DevTools is closed the

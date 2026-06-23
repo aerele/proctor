@@ -7,7 +7,7 @@
 // reads/sec funneled at TWO documents. A short TTL collapses that to near-zero
 // Firestore reads with a staleness bound of at most the TTL.
 //
-// CORRECTNESS over cleverness (Karthi's decision #5 — "CORRECT invalidation"):
+// CORRECTNESS over cleverness (product decision — "CORRECT invalidation"):
 //   1. Bounded TTL: an entry older than ttlMs is a miss (re-read). So even if an
 //      invalidation is somehow missed, staleness self-heals within ttlMs.
 //   2. EXPLICIT invalidation: every WRITE to a cached doc calls invalidate(key)

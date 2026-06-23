@@ -16,7 +16,7 @@
 // The scopingLint allowlist is re-pinned to { "routes/session.mjs": 1,
 // "routes/adminSessions.mjs": 3 } in the SAME commit as this move (the count bump
 // IS the review flag). These stay RAW deliberately (move-with-pin) — migrating
-// them through scopedQuery to an empty allowlist is a separate, Karthi-gated
+// them through scopedQuery to an empty allowlist is a separate, operator-gated
 // decision, not part of this behavior-preserving move.
 //
 // SHARED helper RETURNED for single-source reuse by code outside this module
