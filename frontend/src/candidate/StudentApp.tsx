@@ -966,6 +966,26 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       if (status !== "recording" && status !== "ending" && status !== "ending_draining") return;
       const key = event.key.toLowerCase();
       const isReloadShortcut = key === "f5" || ((event.metaKey || event.ctrlKey) && key === "r");
+      // FLOW-1 (v1.1): best-effort Escape guard. The native Esc that exits
+      // fullscreen CANNOT be vetoed by JS (a hard browser fact) — preventDefault
+      // here does nothing for the fullscreen exit itself, and the enforcement
+      // overlay's humane recovery window (REC-3) is the real safety net. But SOME
+      // browsers deliver a cancelable keydown for Esc BEFORE the exit; on those we
+      // suppress it so an accidental tap never drops fullscreen. We never throw if
+      // it isn't cancelable, so nothing breaks on browsers that ignore it.
+      if (key === "escape") {
+        // Don't swallow Escape while the candidate is typing in a field (the
+        // EnforcementOverlay dispute note + any input use Escape to cancel) —
+        // only guard the bare fullscreen-exit tap.
+        const target = event.target as HTMLElement | null;
+        const tag = target?.tagName;
+        const typing = tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable === true;
+        if (!typing && event.cancelable) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
       if (!isReloadShortcut) return;
 
       event.preventDefault();
@@ -1138,6 +1158,16 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           // Recoverable: the session is still active server-side; the student can
           // re-share their screen inline (no reload) to resume recording.
           setStatus("idle");
+          // FLOW-1 (v1.1): a MANUAL screen-share stop pauses recording — drop the
+          // candidate out of fullscreen INTENTIONALLY so they aren't trapped in a
+          // fullscreen idle/share-error screen with no chrome to re-share. Arm the
+          // exit as EXPECTED first so the enforcement ladder does NOT treat this
+          // self-initiated exit as a violation (status is already idle, so the
+          // reducer ignores it anyway — this belt-and-braces keeps the event
+          // tagged {expected:true} for the audit). retryScreenShare then leads
+          // cleanly back through the fullscreen gate → recording, no reload.
+          shell.markExpectedExit();
+          if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
           setStartError({
             kind: "share_cancelled",
             message: "Screen sharing stopped, so recording is paused. This is logged. Press Resume screen share and choose your Entire Screen to continue — do not close this tab."
@@ -1457,6 +1487,33 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     setStartError(null);
     if (gate === "running" && sessionConfig) void resumeRecording();
     else void start();
+  };
+
+  // FLOW-1 (v1.1): in-UI "Refresh data" — re-fetch the live exam config / state
+  // WITHOUT a full page reload (reload is blocked during proctoring, and a real
+  // reload tears down the recorder + re-prompts permissions). This re-pulls the
+  // session over the SAME resume endpoint the heartbeat uses, then re-applies
+  // exam time (T0/end), the server status, and the enforcement/take-home knobs
+  // via applyServerStatus — so a candidate who suspects their question set or
+  // timer is stale can self-refresh in place. Recording is untouched; a server
+  // status change (locked/ended) is honored exactly as the blocked-screen
+  // refreshStatus path does. Guarded to the live recording window.
+  const [refreshingData, setRefreshingData] = useState(false);
+  const refreshExamData = async () => {
+    if (!sessionConfig || refreshingData) return;
+    if (status !== "recording" && status !== "ending" && status !== "ending_draining") return;
+    setRefreshingData(true);
+    setError("");
+    try {
+      const session = await resumeSession(sessionConfig.session_id, undefined, personPinned ? { contest: pinnedSlug } : undefined);
+      applyExamTime(session.end_at, session.server_now);
+      applyExamStart(session.start_at, session.server_now);
+      applyServerStatus(session);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRefreshingData(false);
+    }
   };
 
   // Re-poll the server status from a blocked screen (pending/locked) so the
@@ -1991,6 +2048,17 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
           hideStageHint
           actions={
             <span className="flex items-center gap-2">
+              {/* FLOW-1 (v1.1): in-UI data refresh — re-pulls exam config / timer /
+                  state without a page reload (reload is blocked + would tear down
+                  recording). Additive; never blocks or ends the session. */}
+              <button
+                className="focus-ring flex items-center gap-1 rounded-md border border-white/25 px-2.5 py-1 text-xs font-medium text-white/85 hover:bg-white/10 disabled:opacity-50"
+                disabled={refreshingData}
+                title="Re-fetch the exam questions and timer without reloading the page"
+                onClick={() => void refreshExamData()}
+              >
+                <RefreshCw size={13} className={refreshingData ? "animate-spin" : ""} /> {refreshingData ? "Refreshing…" : "Refresh data"}
+              </button>
               <button
                 className="focus-ring flex items-center gap-1 rounded-md border border-white/25 px-2.5 py-1 text-xs font-medium text-white/85 hover:bg-white/10"
                 aria-expanded={proctorPanelOpen}

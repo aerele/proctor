@@ -9,6 +9,7 @@ import {
   matchesAckPhrase,
   FULLSCREEN_ACK_PHRASE,
   REPORT_RETRY_MS,
+  MIN_RECOVERY_SECONDS,
   alertHoldMessage,
   enforcementHeadline,
   enforcementSubline,
@@ -301,6 +302,118 @@ describe("enforcementReducer — K-exit escalation (L2)", () => {
     expect(effects).toEqual([
       { kind: "report_violation", phase: "exit_limit", exitCount: 1 }
     ]);
+  });
+});
+
+// REC-3 (v1.1) — the humane recovery FLOOR. A fresh blocking episode's deadline
+// is floored at MIN_RECOVERY_SECONDS so a contest configured below the floor
+// still leaves a realistic window to re-enter fullscreen + ack before the lock.
+// The floor must NOT weaken any part of the ladder: exitCount still increments,
+// the exit-limit hard-lock still trips, the deadline is NOT extended on a
+// re-exit, and the lock still fires at the (floored) deadline.
+describe("enforcementReducer — REC-3 humane recovery floor", () => {
+  it("the floor constant is 15 seconds", () => {
+    expect(MIN_RECOVERY_SECONDS).toBe(15);
+  });
+
+  it("reentrySeconds BELOW the floor (≈5s contest) is raised to MIN_RECOVERY_SECONDS", () => {
+    const short: EnforcementConfig = { ...config, reentrySeconds: 5 };
+    const { state } = exit(initialEnforcementState, T0, short);
+    expect(state.phase).toBe("blocking");
+    // 5s would have been T0+5000; the floor lifts it to T0+15000.
+    expect(state.deadlineMs).toBe(T0 + MIN_RECOVERY_SECONDS * 1000);
+  });
+
+  it("reentrySeconds AT the floor stays exactly the floor (no double-apply)", () => {
+    const atFloor: EnforcementConfig = { ...config, reentrySeconds: 15 };
+    const { state } = exit(initialEnforcementState, T0, atFloor);
+    expect(state.deadlineMs).toBe(T0 + 15_000);
+  });
+
+  it("reentrySeconds ABOVE the floor (the 20s default) is byte-identical — floor never shortens", () => {
+    // config.reentrySeconds is 20 → the default contest is unchanged.
+    const { state } = exit(initialEnforcementState, T0, config);
+    expect(state.deadlineMs).toBe(T0 + 20_000);
+    // an explicitly larger value is also untouched.
+    const longCfg: EnforcementConfig = { ...config, reentrySeconds: 45 };
+    expect(exit(initialEnforcementState, T0, longCfg).state.deadlineMs).toBe(T0 + 45_000);
+  });
+
+  it("INVARIANT: exitCount still increments on every exit under a sub-floor config", () => {
+    const short: EnforcementConfig = { ...config, reentrySeconds: 5 };
+    const first = exit(initialEnforcementState, T0, short).state;
+    expect(first.exitCount).toBe(1);
+    const reentered = enforcementReducer(first, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 1000 }, short).state;
+    const second = exit(reentered, T0 + 2000, short).state;
+    expect(second.exitCount).toBe(2);
+  });
+
+  it("INVARIANT: the exit-limit hard-lock ladder is UNCHANGED under a sub-floor config (no enforcement hole)", () => {
+    // exitLimit 2: the 3rd exit must still hard-lock regardless of the floor.
+    const short: EnforcementConfig = { ...config, reentrySeconds: 5 };
+    let state = exit(initialEnforcementState, T0, short).state;
+    state = exit(state, T0 + 1000, short).state;
+    const third = exit(state, T0 + 2000, short);
+    expect(third.state.phase).toBe("locking");
+    expect(third.effects).toEqual([
+      { kind: "report_violation", phase: "exit_limit", exitCount: 3 }
+    ]);
+  });
+
+  it("INVARIANT: the deadline is NOT extended on a re-exit while blocking (floor applies only to a fresh episode)", () => {
+    const short: EnforcementConfig = { ...config, reentrySeconds: 5 };
+    const first = exit(initialEnforcementState, T0, short).state;
+    expect(first.deadlineMs).toBe(T0 + 15_000); // floored fresh deadline
+    // re-enter, then exit AGAIN before the deadline — the original (floored)
+    // deadline must survive; the floor must not re-stamp a NEW later deadline.
+    const reentered = enforcementReducer(first, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 3000 }, short).state;
+    const second = exit(reentered, T0 + 6000, short);
+    expect(second.state.phase).toBe("blocking");
+    expect(second.state.exitCount).toBe(2);
+    expect(second.state.deadlineMs).toBe(T0 + 15_000); // NOT extended, NOT re-floored from T0+6000
+  });
+
+  it("INVARIANT: the lock STILL fires at the floored deadline if the candidate never re-enters", () => {
+    const short: EnforcementConfig = { ...config, reentrySeconds: 5 };
+    const blocking = exit(initialEnforcementState, T0, short).state;
+    // just before the floored deadline: no escalation.
+    const early = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 15_000 - 1 }, short);
+    expect(early.state.phase).toBe("blocking");
+    expect(early.effects).toEqual([]);
+    // at the floored deadline: the lock fires.
+    const { state, effects } = enforcementReducer(blocking, { kind: "tick", nowMs: T0 + 15_000 }, short);
+    expect(state.phase).toBe("locking");
+    expect(effects).toEqual([
+      { kind: "report_violation", phase: "countdown_expired", exitCount: 1 }
+    ]);
+  });
+});
+
+// FLOW-1 (v1.1) — the recovery copy reassures the candidate the test is PAUSED,
+// not locked, on an accidental EXIT (out-of-fullscreen blocking phase).
+describe("enforcementSubline — FLOW-1 'paused, not locked' recovery reassurance", () => {
+  it("blocking + out of fullscreen: leads with 'paused, not locked' and keeps the exit/steps wording", () => {
+    const sub = enforcementSubline("blocking", false, 1);
+    expect(sub).toContain("paused, not locked");
+    expect(sub).toContain("exit #1");
+    expect(sub).toContain("Complete BOTH steps"); // wave-5 wording preserved
+  });
+
+  it("blocking + out of fullscreen, simplified: still leads with 'paused, not locked', single action", () => {
+    const sub = enforcementSubline("blocking", false, 1, true);
+    expect(sub).toContain("paused, not locked");
+    expect(sub).toContain("Return to fullscreen");
+    expect(sub).not.toMatch(/both steps/i);
+  });
+
+  it("alert_hold + out of fullscreen: does NOT claim 'not locked' (the violation already fired)", () => {
+    const sub = enforcementSubline("alert_hold", false, 2);
+    expect(sub).not.toContain("paused, not locked");
+    expect(sub).toContain("exit #2");
+  });
+
+  it("back in fullscreen: the reassurance lead is absent (the candidate already recovered fullscreen)", () => {
+    expect(enforcementSubline("blocking", true, 1)).not.toContain("paused, not locked");
   });
 });
 

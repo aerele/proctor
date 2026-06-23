@@ -34,6 +34,18 @@ export function matchesAckPhrase(text: string): boolean {
 // server still shows a healthy session.
 export const REPORT_RETRY_MS = 5_000;
 
+// REC-3 (v1.1): the humane recovery FLOOR. A native Esc cannot be vetoed by JS
+// (browser fact), so the only kindness available on an accidental fullscreen
+// exit is enough time to re-enter fullscreen AND complete the ack before the
+// lock fires. A contest configured with a very short reentry (one had ≈5 s) gave
+// the candidate no realistic chance. The fresh-episode deadline is therefore
+// floored at MIN_RECOVERY_SECONDS. This is the ONLY change to the ladder:
+//   • below the 20 s default → byte-identical (Math.max picks reentrySeconds);
+//   • the exitCount increment, the exit-limit hard-lock path, the
+//     deadline-not-extended-on-re-exit rule, and the lock-on-expiry are ALL
+//     unchanged. The floor rescues a sub-15 s contest; it never weakens the gate.
+export const MIN_RECOVERY_SECONDS = 15;
+
 export type EnforcementMode = "block" | "alert_first";
 
 export type EnforcementConfig = {
@@ -209,10 +221,15 @@ export function enforcementReducer(
       return violate({ ...state, exitCount }, "exit_limit", config, action.nowMs);
     }
     // New episode keeps an EXISTING deadline (an exit while already blocking
-    // must not extend the countdown); a fresh episode starts one.
+    // must not extend the countdown); a fresh episode starts one. REC-3: a
+    // fresh deadline is floored at MIN_RECOVERY_SECONDS so a contest configured
+    // below the floor still leaves a humane window to recover. The floor is ONLY
+    // applied to a fresh episode — re-using the existing deadline (re-exit while
+    // blocking) is untouched, so the "deadline not extended on re-exit" invariant
+    // holds exactly as before.
     const deadlineMs = state.phase === "blocking" && state.deadlineMs != null
       ? state.deadlineMs
-      : action.nowMs + config.reentrySeconds * 1000;
+      : action.nowMs + Math.max(config.reentrySeconds, MIN_RECOVERY_SECONDS) * 1000;
     return noop({
       ...state,
       phase: "blocking",
@@ -322,9 +339,17 @@ export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean,
   if (fullscreen) {
     return `Fullscreen exit #${exitCount} was recorded. You are back in fullscreen — finish the remaining step below to continue your exam.`;
   }
+  // FLOW-1 (v1.1): on an accidental fullscreen EXIT the candidate is still in the
+  // recoverable "blocking" window — a native Esc can't be vetoed, so reassure them
+  // up front that the test is PAUSED, not locked, before the recovery steps. Only
+  // on "blocking" (alert_hold means the violation already fired / proctor alerted,
+  // so "not locked" would mislead). The "exit #N" + steps wording is preserved.
+  const recoverable = phase === "blocking"
+    ? "You left full screen. Your test is paused, not locked — "
+    : "";
   return simplifiedRecovery
-    ? `Fullscreen exit #${exitCount} was recorded. Return to fullscreen below to continue your exam.`
-    : `Fullscreen exit #${exitCount} was recorded. Complete BOTH steps below to continue your exam.`;
+    ? `${recoverable}Fullscreen exit #${exitCount} was recorded. Return to fullscreen below to continue your exam.`
+    : `${recoverable}Fullscreen exit #${exitCount} was recorded. Complete BOTH steps below to continue your exam.`;
 }
 
 // Wave-3 fix: the alert_hold banner used to claim "Time expired" even when the

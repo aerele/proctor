@@ -64,10 +64,15 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   // (inputRef) is NOT rendered, so focusing it was a no-op and keyboard/SR users
   // never landed in the dialog. Focus the "Re-enter fullscreen" button instead —
   // it is the only action in that mode. The typed-ack path is unchanged.
+  // FLOW-1 (v1.1): on an accidental EXIT (candidate is OUT of fullscreen), the
+  // first recovery action is re-entering fullscreen — the "Enter full screen"
+  // button is rendered (only while !fullscreen) and is auto-focused so a keyboard
+  // user lands directly on it. Once back in fullscreen the button unmounts and
+  // focus falls to the typed-ack input (the remaining step) as before.
   useEffect(() => {
-    if (simplifiedRecovery) reenterButtonRef.current?.focus();
+    if (simplifiedRecovery || !fullscreen) reenterButtonRef.current?.focus();
     else inputRef.current?.focus();
-  }, [simplifiedRecovery]);
+  }, [simplifiedRecovery, fullscreen]);
 
   // ALERT-1 a11y: when the dispute confirm opens, move focus into the note field
   // (mirrors the modal-focus discipline above). The confirm is a nested dialog.

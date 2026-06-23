@@ -68,6 +68,11 @@ export type ExamShellApi = {
   preconditions: RestorePreconditions;
   enterFullscreen: () => Promise<void>;
   restoreBar: () => void;
+  // FLOW-1 (v1.1): arm the NEXT fullscreen exit as EXPECTED so it rides the event
+  // pipeline tagged {expected:true} and is NOT classified as a violation. Used by
+  // the clean re-share flow (manual screen-share stop intentionally drops
+  // fullscreen) — mirrors the end-of-test exitFullscreen's expectedExitRef arming.
+  markExpectedExit: () => void;
   // Tap point: StudentApp's addEvent funnel calls this for EVERY event.
   onShellEvent: (event: ProctorEvent) => void;
 };
@@ -237,6 +242,15 @@ export function useExamShell(opts: {
     };
   }, []);
 
+  // FLOW-1: arm the next fullscreen exit as expected. The single
+  // fullscreenchange listener consumes-and-clears expectedExitRef on the next
+  // exit, so this is one-shot (a real later violation still flags). Idempotent.
+  const markExpectedExit = useMemo(() => {
+    return () => {
+      expectedExitRef.current = true;
+    };
+  }, []);
+
   // Panel acknowledge — preconditions are sampled live from the DOM and
   // re-checked inside the pure reducer (no restore unless all hold).
   const restoreBar = useMemo(() => {
@@ -262,6 +276,7 @@ export function useExamShell(opts: {
     preconditions: { fullscreen, visible: pageVisible, recording: status === "recording" },
     enterFullscreen,
     restoreBar,
+    markExpectedExit,
     onShellEvent
   };
 }
