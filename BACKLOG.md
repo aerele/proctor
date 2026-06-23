@@ -28,16 +28,22 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   actual stored chunks. *(B6)*
 - ☐ **REC-5** — Surface pending-upload count in admin session details, so a proctor
   can see when a recording isn't flushing (pairs with REC-4). *(F1)*
-- ☐ **TEST-1** — Why didn't tests / system-health catch REC-1? Analysis + harden:
-  add a real check that actually PUTs a chunk through the bucket-CORS path. *(R1)*
+- ✅ **TEST-1** — Why tests/health missed REC-1 + a regression guard. Diagnosed
+  (`docs/proposed/recording-upload-healthcheck.md`); added
+  `backend/test/corsHeaderParity.test.mjs` — asserts every header the backend signs
+  on the chunk PUT is in `gcs-cors.json`'s CORS allowlist (fails loudly on drift).
+  Verified: 1007/1007 backend tests pass; regression-proven. *(R1; Layer B live
+  preflight probe = optional follow-up.)*
 
 ## Fixes — candidate UI
 - ☐ **CAM-1** — Auto-collapse the camera widget when the camera is unavailable
   (today it shows a blue "not available" panel with manual collapse/expand). The
   pop-out button that caused false "switched-away" alerts is already removed. *(B5)*
-- ☐ **STUB-1** — Identify which problem stubs return `none` (the 2–3 bad questions
-  from the 06-19 dry-run). Run **all** stubs through Judge0, list the offenders, fix
-  them. Diagnosis task, not a release blocker. *(B4)*
+- ◑ **STUB-1** — Offenders identified (`docs/proposed/stub-return-none-audit.md`):
+  **0626-8, 0626-9, challenge-7** (all return `none`). Also: every JS stub in
+  challenge-3..9 returns `undefined`; challenge-1/2 are fully broken (not in the
+  06-19 dry-run). Fix = re-author the stub bodies (data-only, no code). **Pending
+  the owner's OK to apply** + whether to also fix the JS stubs. *(B4)*
 
 ## Candidate exam flow + copy (consolidated)
 - ☐ **FLOW-1** — Permission persistence + clean re-share + fullscreen gating
@@ -86,8 +92,8 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   ⚠️ confirm vs F13 auto-verify, see Open decisions.)*
 
 ## Process (the anti-slip backbone — in progress)
-- ◑ **PROC-1** — Unified `ROADMAP.md` + this `BACKLOG.md` + `AGENTS.md`/`CLAUDE.md`
-  + `docs/proposed/` convention + cleanup of redundant tracking docs. *(M1 + M3)*
+- ✅ **PROC-1** — Unified `ROADMAP.md` + `BACKLOG.md` + `AGENTS.md`/`CLAUDE.md` +
+  `docs/proposed/` convention + redundant tracking docs removed. *(M1 + M3)*
 
 ---
 
