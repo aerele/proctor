@@ -91,11 +91,15 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
 - ◑ **BANK-1** — Bulk export/import of problems + templates: multi-select, select a
   template → all its questions; upload them back; handle dedup + cross-instance
   versioning. Spec: `docs/proposed/bulk-problem-template-io.md`. *(F11 — the
-  originally-dropped request.)* Backend in build (Wave 2a); admin UI = Wave 2b.
-- ◑ **EVAL-1** — Data-driven eval rule registry: one function per rule so a rule
-  can be added/removed without a code change. Spec:
-  `docs/proposed/eval-rule-registry.md` (build on `eval-logic-and-logs/`).
-  *(F14 — confirmed v1.1 on 2026-06-23; F13 auto-verify → v2.)* In build (Wave 2a).
+  originally-dropped request.)* **Backend done + committed (`8b21ea7`)** — 3 admin
+  endpoints, content-hash dedup, preview/commit, fork-to-`-2`, 23 tests. **Admin UI
+  = Wave 2b** (multi-select export + import dialog; browser-verified on :9222).
+- ✅ **EVAL-1** — Data-driven eval rule registry: one function per rule so a rule
+  can be added/removed/retuned without a code change. *Done (Wave 2a, `034491d`):
+  12 detectors → registry, thresholds → config data, behaviour-preserving
+  (EVALUATOR_VERSION `4`); golden-parity 45/45 byte-identical vs pre-refactor + full
+  suite 1035/1035.* Phase 2 cross-candidate analysis → v2. Spec:
+  `docs/proposed/eval-rule-registry.md`. *(F14.)*
 
 ## Process (the anti-slip backbone — in progress)
 - ✅ **PROC-1** — Unified `ROADMAP.md` + `BACKLOG.md` + `AGENTS.md`/`CLAUDE.md` +
