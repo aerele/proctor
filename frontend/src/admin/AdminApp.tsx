@@ -7,7 +7,7 @@
 // (GROUP_ICONS/VIEW_ICONS/GroupTab/AdminTab).
 import { useEffect, useRef, useState } from "react";
 import { Activity, Award, Bell, BrainCircuit, ClipboardList, Download, Film, LayoutTemplate, ListChecks, Lock, Network, Search, ShieldCheck, UserCheck, Users } from "lucide-react";
-import { adjustContestExamTime, adminPassword, adminPasswordHash, alertAction, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAllReviews, fetchContests, fetchIpReport, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, saveAlertSettings, saveReviewRoster, sessionAction, sha256Hex } from "../api";
+import { adjustContestExamTime, adminPassword, adminPasswordHash, alertAction, alertSuppression, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAlertSuppressions, fetchAllReviews, fetchContests, fetchIpReport, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, saveAlertSettings, saveReviewRoster, sessionAction, sha256Hex } from "../api";
 import { RecordingReview } from "../RecordingReview";
 import { addAllToSelection, removeFromSelection, toggleId } from "../alertSelection";
 import { alertJoinState, joinableSessions } from "./alertActions";
@@ -23,7 +23,7 @@ import { defaultContestSelection, searchWithContestParam } from "./contestAdmin"
 import { ADMIN_NAV_GROUPS, groupOfView, type AdminView } from "./adminNav";
 import { cameraRecordingFromForm } from "../cameraRecording";
 import { enforcementSettingsFromForm } from "../enforcementSettings";
-import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, ContestSummary, EnforcementExemptions, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorSettings, RecordingSession, ReviewRosterSummary, SessionAction } from "../types";
+import type { AdminStats, AdminStatsResponse, Alert, AlertFilters, AlertSettings, AlertSuppressionEntry, AlertSuppressionRequest, ContestSummary, EnforcementExemptions, ExamTimeRequest, IpReportCandidate, IpReportResponse, IpReportScope, ProctorSettings, RecordingSession, ReviewRosterSummary, SessionAction } from "../types";
 import { candidateIdOf } from "../identity";
 import { Field } from "../ui/Field";
 import { Shell } from "../ui/Shell";
@@ -146,6 +146,22 @@ export function AdminApp() {
   // no join data to keep, rows degrade to archive-only + a "session status
   // unavailable" note (alertJoinState) instead of guessing at actions.
   const [alertSessionsFailed, setAlertSessionsFailed] = useState(false);
+  // ALERT-1: the shared per-(user, test, type) suppression list (for the
+  // Suppressed panel + per-row state). null = not loaded / endpoint absent —
+  // loaded alongside the alerts, refreshed after a suppress/unsuppress.
+  const [suppressions, setSuppressions] = useState<AlertSuppressionEntry[] | null>(null);
+
+  // ALERT-1: refresh the suppression list. Decoupled like the join fetch — a
+  // failing/absent endpoint must never blank the alerts console (null → the
+  // panel says "unavailable", rows still render their Suppress button).
+  const loadSuppressions = async () => {
+    try {
+      const response = await fetchAlertSuppressions(password);
+      setSuppressions(response.entries);
+    } catch {
+      setSuppressions(null);
+    }
+  };
 
   // F6 review: the join fetch is DECOUPLED from the alerts load — a failing
   // sessions-list must never blank the alerts console (the join is an
@@ -165,6 +181,25 @@ export function AdminApp() {
       setAlertsLoading(false);
     }
     await loadAlertSessions(filters);
+    await loadSuppressions();
+  };
+
+  // ALERT-1: one-click suppress/unsuppress. The entry is derived on the row (or
+  // the panel) and POSTed; on success we refresh both the alerts (a now-suppressed
+  // type won't re-raise) and the suppression list.
+  const suppressAlert = async (request: AlertSuppressionRequest) => {
+    setError("");
+    setActionMessage("");
+    try {
+      const response = await alertSuppression(password, request);
+      setSuppressions(response.entries);
+      setActionMessage(request.action === "suppress"
+        ? `Suppressing ${request.alert_type} for ${request.candidate_id || request.username_norm}${request.contest_slug ? ` in ${request.contest_slug}` : ""}.`
+        : `Resumed ${request.alert_type} for ${request.candidate_id || request.username_norm}.`);
+      await loadAlerts();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   };
 
   // F6.4: refresh the status-join data for the alerts console. Errors are
@@ -1122,6 +1157,8 @@ export function AdminApp() {
           onAction={runAction}
           onArchive={(ids, action) => void archiveAlerts(ids, action)}
           onApproveArchive={(alert, targetSessionId) => void approveAndArchive(alert, targetSessionId)}
+          suppressions={suppressions}
+          onSuppress={(request) => void suppressAlert(request)}
         />
       ) : null}
 

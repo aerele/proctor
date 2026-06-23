@@ -316,6 +316,10 @@ const SESSIONS_LIST_PAGE_LIMIT = 500;
 // Settings doc id for the per-type proctor alert configuration (enabled +
 // severity). Lives in SETTINGS_COLLECTION under a distinct doc id.
 const ALERT_SETTINGS_ID = "alert_settings";
+// ALERT-1: doc id for the SHARED alert-suppression list (one doc in
+// SETTINGS_COLLECTION, mirroring ALERT_SETTINGS_ID). Holds the per-(user, test,
+// alert-type) suppression entries checked at every alert raise.
+const ALERT_SUPPRESSIONS_DOC_ID = "alert_suppressions";
 // A session whose status is still active but whose last liveness signal
 // (heartbeat or beacon) is older than this many milliseconds is treated as a
 // derived "disconnected" signal for the console. Configurable via env
@@ -465,7 +469,10 @@ const proctorAlerts = makeProctorAlerts({
   settingsCollection: SETTINGS_COLLECTION,
   alertsCollection: ALERTS_COLLECTION,
   alertSettingsId: ALERT_SETTINGS_ID,
+  // ALERT-1: the shared suppression-list doc id (by value, like alertSettingsId).
+  alertSuppressionsDocId: ALERT_SUPPRESSIONS_DOC_ID,
   // v1.1 G3 (#5): the hot-path alert-settings read cache (null when disabled).
+  // ALERT-1 rides the same instance under a distinct key for the suppression list.
   alertSettingsCache
 });
 const {
@@ -476,6 +483,11 @@ const {
   ALERT_SEVERITIES,
   ALERT_VERDICT_STATUSES,
   ALERT_REQUIRED_FIELDS,
+  SUPPRESSIBLE_ALERT_TYPES,
+  sanitizeSuppressionEntry,
+  isAlertSuppressed,
+  getAlertSuppressions,
+  invalidateAlertSuppressionsCache,
   getAlertSettings,
   mergeAlertSettings,
   alertTypeConfig,
@@ -556,6 +568,10 @@ const alertRoutes = makeAlertRoutes({
   alertRef,
   getAlertSettings,
   mergeAlertSettings,
+  // ALERT-1: suppression-list helpers (by reference, single source).
+  sanitizeSuppressionEntry,
+  getAlertSuppressions,
+  invalidateAlertSuppressionsCache,
   allContests: ALL_CONTESTS,
   alertsCollection: ALERTS_COLLECTION,
   alertsQueryLimit: ALERTS_QUERY_LIMIT,
@@ -563,11 +579,14 @@ const alertRoutes = makeAlertRoutes({
   sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
   settingsCollection: SETTINGS_COLLECTION,
   alertSettingsId: ALERT_SETTINGS_ID,
+  // ALERT-1: the shared suppression-list doc id (by value, like alertSettingsId).
+  alertSuppressionsDocId: ALERT_SUPPRESSIONS_DOC_ID,
   // v1.1 G3 (#5): invalidate the alert-settings read cache on a settings write.
   invalidateAlertSettingsCache
 });
 const {
-  ingestAlerts, adminAlerts, adminAlertAction, adminGetAlertSettings, adminSaveAlertSettings
+  ingestAlerts, adminAlerts, adminAlertAction, adminGetAlertSettings, adminSaveAlertSettings,
+  adminGetAlertSuppressions, adminAlertSuppression
 } = alertRoutes;
 
 // Factory seam (decomp B1, A2): the invigilator route domain. ctx closes over
@@ -640,10 +659,13 @@ const sessionGateRoutes = makeSessionGateRoutes({
   enforcementConfigFor,
   applyEnforcementViolation,
   getAlertSettings,
+  // ALERT-1: the dispute route raises a dispute_raised alert via the same chokepoint.
+  alertTypeConfig,
+  upsertProctorAlert,
   gateAttemptLimit: GATE_ATTEMPT_LIMIT,
   enforcementLockReason: ENFORCEMENT_LOCK_REASON
 });
-const { sessionRoomGate, sessionEnforcementViolation, sessionUnlockGate } = sessionGateRoutes;
+const { sessionRoomGate, sessionEnforcementViolation, sessionUnlockGate, sessionDisputeAlert } = sessionGateRoutes;
 
 // Factory seam (decomp B12a): the candidate-side session TELEMETRY routes (chunk
 // upload-url + events + editor-events + review-file + heartbeat + beacon) — the
@@ -1437,6 +1459,7 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/session/end") return send(res, 200, await endSession(req));
     if (req.method === "POST" && path === "/api/session/room-gate") return send(res, 200, await sessionRoomGate(req));
     if (req.method === "POST" && path === "/api/session/enforcement-violation") return send(res, 200, await sessionEnforcementViolation(req));
+    if (req.method === "POST" && path === "/api/session/dispute-alert") return send(res, 200, await sessionDisputeAlert(req));
     if (req.method === "POST" && path === "/api/session/unlock-gate") return send(res, 200, await sessionUnlockGate(req));
     if (req.method === "GET" && path === "/api/admin/contests") return send(res, 200, await adminListContests(req));
     if (req.method === "POST" && path === "/api/admin/contests") return send(res, 200, await adminCreateContest(req));
@@ -1489,6 +1512,8 @@ export const api = async (req, res) => {
     if (req.method === "POST" && path === "/api/admin/alert-action") return send(res, 200, await adminAlertAction(req));
     if (req.method === "GET" && path === "/api/admin/alert-settings") return send(res, 200, await adminGetAlertSettings(req));
     if (req.method === "POST" && path === "/api/admin/alert-settings") return send(res, 200, await adminSaveAlertSettings(req));
+    if (req.method === "GET" && path === "/api/admin/alert-suppressions") return send(res, 200, await adminGetAlertSuppressions(req));
+    if (req.method === "POST" && path === "/api/admin/alert-suppression") return send(res, 200, await adminAlertSuppression(req));
     if (req.method === "POST" && path === "/api/admin/review-roster") return send(res, 200, await adminSetReviewRoster(req));
     if (req.method === "GET" && path === "/api/admin/review-roster") return send(res, 200, await adminGetReviewRoster(req));
     if (req.method === "POST" && path === "/api/admin/review-next") return send(res, 200, await adminReviewNext(req));

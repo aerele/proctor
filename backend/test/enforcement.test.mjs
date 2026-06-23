@@ -1034,3 +1034,176 @@ test("heartbeat: a legacy client WITHOUT the fullscreen field still gets the eve
   assert.equal(res.body.status, "locked");
   assert.equal(sessionDoc(firestore, "hb-fs-7").status, "locked");
 });
+
+// ---- ALERT-1: candidate dispute + per-(user, test, type) alert suppression --
+//
+// The dispute POST is a candidate-authed self-report (sibling of
+// enforcement-violation) that raises a distinct info-severity dispute_raised
+// alert. The admin suppression list is the per-(user, test, alert-type)
+// generalization of the per-session enforcement_exemption: a suppressed tuple is
+// skipped at the upsertProctorAlert chokepoint, survives a fresh session, and is
+// contest-scoped so it cannot bleed across tests.
+
+function suppressionsDoc(firestore) {
+  return firestore._collections.get(process.env.SETTINGS_COLLECTION)?.get("alert_suppressions");
+}
+
+async function suppress(body) {
+  return call(makeReq({ method: "POST", path: "/api/admin/alert-suppression", headers: adminHeaders, body }));
+}
+
+test("dispute-alert raises a DISTINCT dispute_raised alert (info), idempotent per type per day", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "d-1");
+  const res = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "d-1", disputed_type: "fullscreen_enforcement", note: "screen reader pulled focus" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.raised, true);
+  const alerts = alertsIn(firestore);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].type, "dispute_raised");
+  assert.equal(alerts[0].severity, "info");
+  assert.equal(alerts[0].session_id, "d-1");
+  assert.equal(alerts[0].data.disputed_type, "fullscreen_enforcement");
+  assert.equal(alerts[0].data.note, "screen reader pulled focus");
+  // Idempotent: a second click the same day collapses to ONE alert.
+  await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "d-1", disputed_type: "fullscreen_enforcement", note: "again" } }));
+  assert.equal(alertsIn(firestore).length, 1, "same type+day dedupes to one dispute alert");
+});
+
+test("dispute-alert requires a valid writable session (candidate-token auth, not admin)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const missing = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "nope", disputed_type: "tab_away" } }));
+  assert.equal(missing.statusCode, 404);
+});
+
+test("dispute-alert honours the GLOBAL dispute_raised disable (spam control) — raises nothing", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "d-2");
+  // Disable the dispute_raised type globally via alert-settings.
+  const save = await call(makeReq({ method: "POST", path: "/api/admin/alert-settings", headers: adminHeaders,
+    body: { proctor: { dispute_raised: { enabled: false, severity: "info" } } } }));
+  assert.equal(save.statusCode, 200);
+  const res = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "d-2", disputed_type: "tab_away" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.raised, false);
+  assert.equal(alertsIn(firestore).length, 0);
+});
+
+test("admin suppress + list round-trip; a suppressed (user,test,type) is NOT raised at the chokepoint", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore); // enforcement mode "block" by default
+
+  // 401 without admin auth (auth-first).
+  const noAuth = await call(makeReq({ method: "POST", path: "/api/admin/alert-suppression",
+    body: { action: "suppress", username_norm: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement" } }));
+  assert.equal(noAuth.statusCode, 401);
+
+  // Suppress fullscreen_enforcement for alice in THIS contest.
+  const s = await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement", reason: "VPN flagged as IP change" });
+  assert.equal(s.statusCode, 200);
+  assert.equal(s.body.ok, true);
+  assert.equal(s.body.entries.length, 1);
+  assert.equal(s.body.entries[0].username_norm, "alice");
+  assert.equal(s.body.entries[0].alert_type, "fullscreen_enforcement");
+  assert.equal(s.body.entries[0].contest_slug, CONTEST_SLUG);
+
+  // The list endpoint returns the same entry.
+  const list = await call(makeReq({ method: "GET", path: "/api/admin/alert-suppressions", headers: adminHeaders }));
+  assert.equal(list.statusCode, 200);
+  assert.equal(list.body.entries.length, 1);
+
+  // Now an enforcement violation that WOULD raise fullscreen_enforcement raises
+  // NO alert (the chokepoint guard short-circuits) — but the lock still applies
+  // (suppression hides the alert, never the enforcement: design §6).
+  seedSession(firestore, "sup-1");
+  const res = await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: "sup-1", phase: "countdown_expired", exit_count: 2 } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.locked, true, "lock still applies; suppression hides the ALERT only");
+  assert.equal(sessionDoc(firestore, "sup-1").status, "locked");
+  assert.equal(alertsIn(firestore).length, 0, "the fullscreen_enforcement alert is suppressed");
+
+  // Unsuppress restores the alert on the NEXT raise.
+  const u = await suppress({ action: "unsuppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement" });
+  assert.equal(u.body.entries.length, 0);
+  seedSession(firestore, "sup-2");
+  await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: "sup-2", phase: "countdown_expired", exit_count: 2 } }));
+  assert.equal(alertsIn(firestore).length, 1, "after unsuppress the alert is raised again");
+  assert.equal(alertsIn(firestore)[0].type, "fullscreen_enforcement");
+});
+
+test("suppress is idempotent and contest-scoped — cannot bleed across tests", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+
+  // Double-suppress the same tuple → ONE entry (idempotent).
+  await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement" });
+  const again = await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement" });
+  assert.equal(again.body.entries.length, 1, "re-suppressing the same tuple does not duplicate");
+
+  // A suppression scoped to a DIFFERENT contest must NOT suppress this contest's
+  // alert. alice is suppressed only in "other-contest".
+  await suppress({ action: "unsuppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement" });
+  await suppress({ action: "suppress", candidate_id: "alice", contest_slug: "other-contest", alert_type: "fullscreen_enforcement" });
+  seedSession(firestore, "scope-1"); // session is in CONTEST_SLUG (kec-2026)
+  await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: "scope-1", phase: "countdown_expired", exit_count: 2 } }));
+  assert.equal(alertsIn(firestore).length, 1, "a suppression for another contest does NOT bleed into this one");
+  assert.equal(alertsIn(firestore)[0].contest_slug, CONTEST_SLUG);
+});
+
+test("dispute_raised is NEVER suppressed at raise time — the dispute channel stays open", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "d-3");
+  // An admin CAN add dispute_raised to the suppression list (it is a suppressible
+  // type for list management), but the raise-time guard ALWAYS skips it: even with
+  // a stale dispute_raised entry, a candidate can still flag a genuine mistake
+  // (design §4.3). Suppressing it must NOT silence the dispute channel.
+  const onList = await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "dispute_raised" });
+  assert.equal(onList.statusCode, 200, "dispute_raised is a valid suppressible type for the list");
+  const res = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "d-3", disputed_type: "tab_away" } }));
+  assert.equal(res.body.raised, true, "the dispute still raises despite a dispute_raised suppression entry");
+  assert.equal(alertsIn(firestore).filter((a) => a.type === "dispute_raised").length, 1);
+});
+
+test("suppression POST rejects an unknown alert_type and a missing user (sanitizer allow-list)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  const badType = await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "not_a_real_type" });
+  assert.equal(badType.statusCode, 400);
+  const noUser = await suppress({ action: "suppress", alert_type: "tab_away", contest_slug: CONTEST_SLUG });
+  assert.equal(noUser.statusCode, 400);
+  const badAction = await suppress({ action: "delete", candidate_id: "alice", alert_type: "tab_away" });
+  assert.equal(badAction.statusCode, 400);
+  assert.equal(suppressionsDoc(firestore), undefined, "no doc written on a rejected payload");
+});
+
+test("suppression survives a fresh session (per user+test, not per session doc)", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "fullscreen_enforcement" });
+  // A brand-new session doc for the same candidate+contest is still suppressed.
+  seedSession(firestore, "fresh-session-id");
+  await call(makeReq({ method: "POST", path: "/api/session/enforcement-violation",
+    body: { session_id: "fresh-session-id", phase: "countdown_expired", exit_count: 2 } }));
+  assert.equal(alertsIn(firestore).length, 0, "suppression carries across a new session (unlike a per-session exemption)");
+});

@@ -7,7 +7,7 @@
 // its props-driven leaf children were extracted (candidate/panels/*, F2).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Clock, Copy, Lock, MonitorUp, RefreshCw, ShieldCheck, Square } from "lucide-react";
-import { endSession, fetchContestExamConfig, pollRoomGate, reportPreflightBlock, resumeSession, rosterLookup, sendEvents, sendSessionBeacon, startSession, uploadReviewFile, validateEndSession } from "../api";
+import { endSession, fetchContestExamConfig, pollRoomGate, reportAlertDispute, reportPreflightBlock, resumeSession, rosterLookup, sendEvents, sendSessionBeacon, startSession, uploadReviewFile, validateEndSession } from "../api";
 import type { ApiError } from "../api";
 import { normalizeCameraRecording } from "../cameraRecording";
 import { clearChunkBuffer } from "../chunkBuffer";
@@ -569,7 +569,13 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     // to the proctor phone for remote candidates; both shell-chrome call sites
     // spread shellChromeProps so this covers them in one place.
     takeHome,
-    proctorPhone
+    proctorPhone,
+    // ALERT-1: the AnomalyPanel banner's dispute button raises a dispute_raised
+    // alert for the proctor. Fire-and-forget; never clears the banner. The
+    // disputed type is the surfaced anomaly reason (AnomalyPanel derives it).
+    onReportDispute: (disputedType: string, note: string) => {
+      if (sessionId) void reportAlertDispute(sessionId, disputedType, note).catch(() => undefined);
+    }
   };
   // #135 take-home (D4b / §5b-4): the persistent "Need help? Call your proctor"
   // strip — rendered with the shell chrome so it shows on BOTH the WaitingRoom
@@ -601,6 +607,13 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       proctorPhone={proctorPhone}
       onAckChange={enforcement.submitAck}
       onEnterFullscreen={shell.enterFullscreen}
+      // ALERT-1: candidate flags this fullscreen-enforcement alert as a software
+      // mistake/unfair. Fire-and-forget — it raises a dispute_raised alert for the
+      // proctor and NEVER unlocks/bypasses the recovery (the overlay's steps stay
+      // required). Errors are swallowed: a failed dispute must not block recovery.
+      onReportDispute={(disputedType, note) => {
+        if (sessionId) void reportAlertDispute(sessionId, disputedType, note).catch(() => undefined);
+      }}
     />
   ) : null;
   // OMR P1 (design §5.1/§5.2): the screen-marker fiducial layer, mounted in

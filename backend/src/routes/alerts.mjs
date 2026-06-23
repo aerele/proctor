@@ -57,6 +57,10 @@ export function makeAlertRoutes(ctx) {
     alertRef,
     getAlertSettings,
     mergeAlertSettings,
+    // ALERT-1: suppression-list helpers (by reference, single source).
+    sanitizeSuppressionEntry,
+    getAlertSuppressions,
+    invalidateAlertSuppressionsCache = () => {},
     // identity sentinel from contests.mjs (by reference — === comparison)
     allContests,
     // env-captured collection names / caps / settings id (by value at handler load)
@@ -66,6 +70,11 @@ export function makeAlertRoutes(ctx) {
     sessionsQueryLimit,
     settingsCollection,
     alertSettingsId,
+    // ALERT-1: the shared suppression-list doc id (by value, like alertSettingsId).
+    alertSuppressionsDocId,
+    // ALERT-1: cap the suppression list (same order as ALERTS_QUERY_LIMIT) so the
+    // single hot-path doc stays small (by value).
+    suppressionsMax = 2000,
     // v1.1 G3 (#5): invalidate the hot-path alert-settings read cache after a
     // settings write (by reference). No-op fallback when no cache is configured.
     invalidateAlertSettingsCache = () => {}
@@ -227,6 +236,49 @@ export function makeAlertRoutes(ctx) {
     return merged;
   }
 
+  // ---- ALERT-1: alert suppression list (admin) -------------------------------
+  //
+  // The shared per-(user, test, alert-type) suppression list. GET returns every
+  // entry (the "Suppressed alerts" admin panel); POST adds/removes one entry,
+  // sanitized + deduped + capped, then invalidates the hot-path read cache so the
+  // raise-time guard in upsertProctorAlert sees it immediately. Both auth-first
+  // requireAdmin (routesAuthLint). This mirrors adminAlertAction's validate→
+  // mutate→report shape and adminSaveAlertSettings's sanitize-then-set shape.
+  async function adminGetAlertSuppressions(req) {
+    requireAdmin(req);
+    const entries = await getAlertSuppressions();
+    return { entries };
+  }
+
+  async function adminAlertSuppression(req) {
+    requireAdmin(req);
+    const body = parseBody(req);
+    const action = String(body.action || "");
+    if (!["suppress", "unsuppress"].includes(action)) {
+      return badRequest("action must be suppress or unsuppress");
+    }
+    const now = new Date().toISOString();
+    // The match key (username_norm, contest_slug "" / "_" → "" bucket, alert_type)
+    // — the same equivalence isAlertSuppressed uses, so add/remove agree with the
+    // raise-time guard. The sanitizer normalizes username + allow-lists the type.
+    const created_by = req.query?.actor ? String(req.query.actor).slice(0, 200) : "admin";
+    const entry = sanitizeSuppressionEntry(body, { createdBy: created_by, now });
+    if (!entry) return badRequest("a valid alert_type and username_norm/candidate_id are required");
+    const keyOf = (e) => JSON.stringify([e.username_norm, String(e.contest_slug || "") === "_" ? "" : String(e.contest_slug || ""), e.alert_type]);
+    const wantKey = keyOf(entry);
+
+    const ref = getFirestore().collection(settingsCollection).doc(alertSuppressionsDocId);
+    const doc = await ref.get();
+    const existing = doc.exists && Array.isArray(doc.data()?.entries) ? doc.data().entries : [];
+    // Drop any entry matching the key (idempotent add; removal for unsuppress).
+    const kept = existing.filter((e) => e && keyOf(e) !== wantKey);
+    const entries = action === "suppress" ? [...kept, entry].slice(-suppressionsMax) : kept;
+
+    await ref.set({ entries, updated_at: now });
+    invalidateAlertSuppressionsCache();
+    return { ok: true, action, entries };
+  }
+
   return {
     // route handlers — names match the dispatch table exactly so handler.mjs's
     // dispatch lines stay byte-identical (canaryIsolation). adminAlerts /
@@ -236,6 +288,9 @@ export function makeAlertRoutes(ctx) {
     adminAlerts,
     adminAlertAction,
     adminGetAlertSettings,
-    adminSaveAlertSettings
+    adminSaveAlertSettings,
+    // ALERT-1: suppression list (auth-first requireAdmin).
+    adminGetAlertSuppressions,
+    adminAlertSuppression
   };
 }

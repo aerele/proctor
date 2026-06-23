@@ -73,11 +73,29 @@ export const SESSION_ACTION_INFO: Record<SessionAction, SessionActionInfo> = {
   }
 };
 
-/** Alert-level actions (archive/unarchive) — separate group from session actions. */
+/** Alert-level actions (archive/unarchive + ALERT-1 suppress/unsuppress) —
+ * separate group from session actions. */
 export const ALERT_ACTION_INFO = {
   archive: { label: "Archive", tooltip: "Hide this alert from the default list; it stays stored and reachable via “Show archived”." },
-  unarchive: { label: "Unarchive", tooltip: "Restore this archived alert to the default list." }
+  unarchive: { label: "Unarchive", tooltip: "Restore this archived alert to the default list." },
+  // ALERT-1: per-(user, test, alert-type) suppression. Hides the ALERT only — it
+  // does NOT exempt the candidate from enforcement (the lock still applies; use
+  // the session's Fullscreen exemption for that) and never deletes evidence.
+  suppress: { label: "Suppress", tooltip: "Stop raising THIS alert type for THIS candidate in THIS test. Hides the alert only — does not exempt them from enforcement or delete evidence." },
+  unsuppress: { label: "Stop suppressing", tooltip: "Resume raising this alert type for this candidate in this test." }
 } as const;
+
+// ALERT-1: which alert TYPE does a row's Suppress button target? For a
+// dispute_raised alert the admin almost always wants to hush the DISPUTED type
+// (e.g. tab_away), not the dispute itself — so suppress data.disputed_type when
+// present (and a real string), else the alert's own type.
+export function suppressionTypeForAlert(alert: { type: string; data?: Record<string, unknown> }): string {
+  if (alert.type === "dispute_raised") {
+    const disputed = alert.data?.disputed_type;
+    if (typeof disputed === "string" && disputed) return disputed;
+  }
+  return alert.type;
+}
 
 /**
  * The session actions that are VALID (meaningful) for a session in the given

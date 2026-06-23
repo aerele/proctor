@@ -94,6 +94,14 @@ export type EnforcementViolationResponse = {
   mode?: EnforcementMode;
 };
 
+// ALERT-1: POST /api/session/dispute-alert — the candidate flagged an alert as a
+// software mistake/unfair. `raised` is false only when the dispute_raised type is
+// globally disabled (spam control). The dispute NEVER unlocks/bypasses anything.
+export type DisputeAlertResponse = {
+  ok: boolean;
+  raised: boolean;
+};
+
 export type SessionStartResponse = {
   session_id: string;
   status?: ServerSessionStatus;
@@ -617,7 +625,8 @@ export type Alert = {
   id: string;
   source: AlertSource;
   /**
-   * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected | fullscreen_enforcement
+   * proctor: recording_stopped | screen_share_stopped | recording_error | ip_changed | tab_hidden | tab_away | disconnected | fullscreen_enforcement | dispute_raised
+   *   (ALERT-1: dispute_raised is the candidate-flagged "this alert looks wrong" report.)
    *   (legacy, no longer raised but may still appear in stored data: invalid_share_surface)
    * Legacy contest-eval types (peer_copy_cluster | recurring_pair | web_paste |
    *   first_attempt_solve | tough_first_attempt | fast_solve) are no longer
@@ -688,6 +697,44 @@ export type AlertActionResponse = {
   archived: boolean;
   updated: string[];
   missing: string[];
+};
+
+// ALERT-1: one entry on the shared per-(user, test, alert-type) suppression list.
+export type AlertSuppressionEntry = {
+  username_norm: string;
+  /** "" = unscoped/orphaned bucket; otherwise the contest slug ("test"). */
+  contest_slug: string;
+  alert_type: string;
+  /** Display label for the admin list. */
+  candidate_id: string;
+  reason: string;
+  created_by: string;
+  created_at: string;
+  source_alert_id?: string;
+};
+
+// GET /api/admin/alert-suppressions → the whole shared list.
+export type AlertSuppressionsResponse = {
+  entries: AlertSuppressionEntry[];
+};
+
+// POST /api/admin/alert-suppression — add ("suppress") or remove ("unsuppress")
+// one (user, test, alert-type) entry. candidate_id OR username_norm identifies
+// the candidate; alert_type must be a suppressible type.
+export type AlertSuppressionRequest = {
+  action: "suppress" | "unsuppress";
+  username_norm?: string;
+  candidate_id?: string;
+  contest_slug?: string;
+  alert_type: string;
+  reason?: string;
+  source_alert_id?: string;
+};
+
+export type AlertSuppressionActionResponse = {
+  ok: boolean;
+  action: "suppress" | "unsuppress";
+  entries: AlertSuppressionEntry[];
 };
 
 // Per-type proctor alert configuration (GET/POST /api/admin/alert-settings).

@@ -56,3 +56,35 @@ describe("EnforcementOverlay — focus target structure (FIX 3)", () => {
     expect(html).not.toContain('placeholder="Type the sentence here"');
   });
 });
+
+// ALERT-1: the second ("dispute") feedback button + its unambiguous copy.
+describe("EnforcementOverlay — candidate dispute feedback (ALERT-1)", () => {
+  it("renders the dispute button ONLY when onReportDispute is provided", () => {
+    const without = render({});
+    expect(without).not.toContain("Report a problem with this alert");
+    const withDispute = render({ onReportDispute: () => {} });
+    expect(withDispute).toContain("Report a problem with this alert");
+  });
+
+  it("frames the acknowledge path AND offers the dispute as a distinct, quieter option", () => {
+    const html = render({ onReportDispute: () => {} });
+    // Option A (acknowledge) is the recovery steps; the copy nudges completing them.
+    expect(html).toContain("Acknowledge by completing the steps above");
+    // Option B is a secondary, non-primary button (not the red primary action).
+    expect(html).toContain("Report a problem with this alert");
+  });
+
+  it("the button label is NOT a reflexive 'dispute / unfair / make this go away' label", () => {
+    const html = render({ onReportDispute: () => {} });
+    // The deliberately careful label — the confirm copy carries the warning, not
+    // the button text (which an honest candidate must not feel invited to press).
+    expect(html).toContain("Report a problem with this alert");
+    expect(html).not.toContain("This is unfair");
+    expect(html).not.toContain("Make this go away");
+  });
+
+  it("is not shown in the locking phase (no recovery/feedback controls once locked)", () => {
+    const html = render({ phase: "locking", onReportDispute: () => {} });
+    expect(html).not.toContain("Report a problem with this alert");
+  });
+});

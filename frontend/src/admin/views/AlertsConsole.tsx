@@ -1,12 +1,12 @@
 // frontend/src/admin/views/AlertsConsole.tsx
 // Live alerts console + alert row, extracted verbatim from App.tsx (F3).
 import { useMemo, useState } from "react";
-import { AlertTriangle, Archive, ArchiveRestore, Bell, ChevronDown, ChevronRight, ExternalLink, RefreshCw, Video, X } from "lucide-react";
+import { AlertTriangle, Archive, ArchiveRestore, Bell, BellOff, ChevronDown, ChevronRight, ExternalLink, RefreshCw, Undo2, Video, X } from "lucide-react";
 import { isAllSelected, usernamesForSelection } from "../../alertSelection";
 import { groupAlerts, type AlertGroupBy } from "../../alertGrouping";
-import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, validSessionActionsFor, type AlertJoinState } from "../alertActions";
+import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, suppressionTypeForAlert, validSessionActionsFor, type AlertJoinState } from "../alertActions";
 import { candidateIdOf } from "../../identity";
-import type { Alert, AlertFilters, AlertSeverity, RecordingSession, SessionAction } from "../../types";
+import type { Alert, AlertFilters, AlertSeverity, AlertSuppressionEntry, AlertSuppressionRequest, RecordingSession, SessionAction } from "../../types";
 import { FilterSelect } from "../../ui/FilterSelect";
 import { SeverityPill } from "../../ui/SeverityPill";
 import { Metric } from "../../ui/Metric";
@@ -15,7 +15,7 @@ import { ActionGroup, BulkActionButtons, SessionActionButton } from "../actions"
 import { RoomFilter } from "./RoomFilter";
 import { AlertField } from "./AlertField";
 
-export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive }: {
+export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive, suppressions, onSuppress }: {
   alerts: Alert[];
   /** F6.4 status-join data; null = not loaded / 404 / truncated (see alertJoinState). */
   sessions: RecordingSession[] | null;
@@ -42,6 +42,12 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
   onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
   onArchive: (ids: string[], action?: "archive" | "unarchive") => void;
   onApproveArchive: (alert: Alert, targetSessionId?: string) => void;
+  /** ALERT-1: the shared per-(user, test, type) suppression list (for the panel
+   *  + per-row "already suppressed" state). null = not loaded / endpoint absent. */
+  suppressions: AlertSuppressionEntry[] | null;
+  /** ALERT-1: suppress/unsuppress one entry. From a row, derive the entry from
+   *  the alert; from the panel, pass the entry's own fields. */
+  onSuppress: (request: AlertSuppressionRequest) => void;
 }) {
   // F6.3: the rendered list — the candidate filter is CLIENT-side (the alerts
   // API has no username filter), matched on normalized usernames the same way
@@ -81,6 +87,9 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
   // reset when the mode changes (candidate keys and type keys could collide).
   const [groupBy, setGroupBy] = useState<AlertGroupBy>("none");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  // ALERT-1: the "Suppressed alerts" disclosure (like "Show archived").
+  const [showSuppressed, setShowSuppressed] = useState(false);
+  const suppressionCount = suppressions?.length ?? 0;
   const groups = useMemo(
     () => (groupBy === "none" ? null : groupAlerts(visibleAlerts, groupBy)),
     [groupBy, visibleAlerts]
@@ -106,6 +115,8 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
       onAction={onAction}
       onArchive={onArchive}
       onApproveArchive={onApproveArchive}
+      suppressions={suppressions}
+      onSuppress={onSuppress}
     />
   );
 
@@ -120,10 +131,26 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
               <p className="mt-1 text-sm text-muted">Proctoring signals across all rooms, newest first. Auto-refreshes every 5s. Click a clip to open the recorded evidence.</p>
             </div>
           </div>
-          <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
-            <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
-          </button>
+          <div className="flex items-center gap-2">
+            {/* ALERT-1: the shared Suppressed-alerts list — every (user, test,
+                type) suppression lives behind this one disclosure. */}
+            <button
+              type="button"
+              className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-3 text-sm font-medium text-ink hover:border-ink/40"
+              onClick={() => setShowSuppressed((value) => !value)}
+              aria-expanded={showSuppressed}
+            >
+              <BellOff size={16} /> Suppressed ({suppressionCount})
+            </button>
+            <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white disabled:opacity-50" onClick={onRefresh} disabled={loading}>
+              <RefreshCw size={16} className={loading ? "animate-spin" : undefined} /> {loading ? "Refreshing" : "Refresh"}
+            </button>
+          </div>
         </div>
+
+        {showSuppressed ? (
+          <SuppressedPanel suppressions={suppressions} onSuppress={onSuppress} />
+        ) : null}
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
           {/* HR-poller removal: the Source filter was dropped — "proctor" is now
@@ -297,7 +324,64 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
   );
 }
 
-function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void }) {
+// ALERT-1: the shared "Suppressed alerts" list — every (user, test, type)
+// suppression (dispute-driven or proactive admin) lives here. Each row carries a
+// "Stop suppressing" button (POST unsuppress). null = not loaded / endpoint
+// absent (the panel says so instead of implying "none suppressed").
+function SuppressedPanel({ suppressions, onSuppress }: { suppressions: AlertSuppressionEntry[] | null; onSuppress: (request: AlertSuppressionRequest) => void }) {
+  if (suppressions === null) {
+    return <p className="mt-4 rounded-md border border-line bg-white/50 p-4 text-sm text-muted">Suppressed list unavailable.</p>;
+  }
+  if (!suppressions.length) {
+    return <p className="mt-4 rounded-md border border-line bg-white/50 p-4 text-sm text-muted">No alerts are suppressed. Use the <span className="font-medium">Suppress</span> button on a row to stop raising a specific alert type for a candidate in a test.</p>;
+  }
+  return (
+    <div className="mt-4 overflow-x-auto rounded-md border border-line">
+      <table className="min-w-full text-sm">
+        <thead className="bg-white/60 text-left text-xs uppercase tracking-wide text-muted">
+          <tr>
+            <th className="px-3 py-2 font-medium">Candidate</th>
+            <th className="px-3 py-2 font-medium">Test</th>
+            <th className="px-3 py-2 font-medium">Alert type</th>
+            <th className="px-3 py-2 font-medium">Reason</th>
+            <th className="px-3 py-2 font-medium">By / when</th>
+            <th className="px-3 py-2 font-medium" />
+          </tr>
+        </thead>
+        <tbody>
+          {suppressions.map((entry) => (
+            <tr key={`${entry.username_norm}:${entry.contest_slug}:${entry.alert_type}`} className="border-t border-line">
+              <td className="px-3 py-2 font-mono">{entry.candidate_id || entry.username_norm}</td>
+              <td className="px-3 py-2 font-mono">{entry.contest_slug || "—"}</td>
+              <td className="px-3 py-2 font-mono">{entry.alert_type}</td>
+              <td className="px-3 py-2 text-muted">{entry.reason || "—"}</td>
+              <td className="px-3 py-2 text-xs text-muted">{entry.created_by}{entry.created_at ? ` · ${new Date(entry.created_at).toLocaleString()}` : ""}</td>
+              <td className="px-3 py-2">
+                <ActionTooltip tip={ALERT_ACTION_INFO.unsuppress.tooltip}>
+                  <button
+                    type="button"
+                    onClick={() => onSuppress({
+                      action: "unsuppress",
+                      username_norm: entry.username_norm,
+                      candidate_id: entry.candidate_id,
+                      ...(entry.contest_slug ? { contest_slug: entry.contest_slug } : {}),
+                      alert_type: entry.alert_type
+                    })}
+                    className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+                  >
+                    <Undo2 size={14} /> {ALERT_ACTION_INFO.unsuppress.label}
+                  </button>
+                </ActionTooltip>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive, suppressions, onSuppress }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void; suppressions: AlertSuppressionEntry[] | null; onSuppress: (request: AlertSuppressionRequest) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
   // F6.4: join the alert to the session its actions would target (the alert's
@@ -319,6 +403,27 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
       ? { sessionId: alert.session_id }
       : { usernames: [candidateIdOf(alert)] };
   const archiveInfo = alert.archived ? ALERT_ACTION_INFO.unarchive : ALERT_ACTION_INFO.archive;
+  // ALERT-1: which (user, test, type) this row's Suppress button targets (a
+  // dispute_raised row suppresses the DISPUTED type) + whether it is already
+  // suppressed. The contest_slug "" / "_" pair is one unscoped bucket, matching
+  // the backend's isAlertSuppressed equivalence.
+  const suppressType = suppressionTypeForAlert(alert);
+  const suppressUserNorm = alert.username_norm || normalizeJoinUsername(candidateIdOf(alert));
+  const suppressSlug = alert.contest_slug && alert.contest_slug !== "_" ? alert.contest_slug : "";
+  const alreadySuppressed = (suppressions ?? []).some(
+    (entry) => entry.username_norm === suppressUserNorm
+      && entry.alert_type === suppressType
+      && (entry.contest_slug === "_" ? "" : entry.contest_slug) === suppressSlug
+  );
+  const suppressInfo = alreadySuppressed ? ALERT_ACTION_INFO.unsuppress : ALERT_ACTION_INFO.suppress;
+  const suppressRequest: AlertSuppressionRequest = {
+    action: alreadySuppressed ? "unsuppress" : "suppress",
+    candidate_id: candidateIdOf(alert),
+    username_norm: suppressUserNorm,
+    ...(suppressSlug ? { contest_slug: suppressSlug } : {}),
+    alert_type: suppressType,
+    source_alert_id: alert.id
+  };
   return (
     <div className={`rounded-lg border bg-panel p-5 shadow-subtle ${alert.archived ? "opacity-70" : ""} ${alert.severity === "critical" ? "border-danger/40" : selected ? "border-ink/50" : "border-line"}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -426,6 +531,18 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
                 className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
               >
                 {alert.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />} {archiveInfo.label}
+              </button>
+            </ActionTooltip>
+            {/* ALERT-1: one-click Suppress derived from the row's own fields
+                (no typing). For a dispute_raised row this hushes the DISPUTED
+                type. Suppresses the alert only — never the lock/evidence. */}
+            <ActionTooltip tip={`${suppressInfo.tooltip}${suppressType !== alert.type ? ` (type: ${suppressType})` : ""}`}>
+              <button
+                type="button"
+                onClick={() => onSuppress(suppressRequest)}
+                className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs font-medium text-ink hover:border-ink/40"
+              >
+                {alreadySuppressed ? <Undo2 size={14} /> : <BellOff size={14} />} {suppressInfo.label}
               </button>
             </ActionTooltip>
           </ActionGroup>

@@ -18,7 +18,7 @@ import { PermissionsGate, type PermissionsGateProps } from "./PermissionsGate";
 import type { ExamShellApi } from "./useExamShell";
 import type { ReactNode } from "react";
 
-export function ExamShellChrome({ shell, gate, status, identity, contestName, elapsedSeconds, examReleased, permissionsReady, permissionsGate, ownEditor, remainingLabel, timeUp, actions, hideStageHint, takeHome = false, proctorPhone = "" }: {
+export function ExamShellChrome({ shell, gate, status, identity, contestName, elapsedSeconds, examReleased, permissionsReady, permissionsGate, ownEditor, remainingLabel, timeUp, actions, hideStageHint, takeHome = false, proctorPhone = "", onReportDispute }: {
   shell: ExamShellApi;
   gate: ShellGate;
   status: SessionStatus;
@@ -44,6 +44,9 @@ export function ExamShellChrome({ shell, gate, status, identity, contestName, el
   // defaults — in-venue chrome is unchanged.
   takeHome?: boolean;
   proctorPhone?: string;
+  /** ALERT-1: candidate dispute callback, threaded into the AnomalyPanel banner.
+   *  Absent ⇒ the dispute affordance is not rendered. */
+  onReportDispute?: (disputedType: string, note: string) => void | Promise<void>;
 }) {
   const headerMode = shellHeaderMode(shell.barHidden, gate);
   // While an anomaly episode is active the AnomalyPanel owns fullscreen
@@ -75,6 +78,7 @@ export function ExamShellChrome({ shell, gate, status, identity, contestName, el
           preconditions={shell.preconditions}
           onRestore={shell.restoreBar}
           onEnterFullscreen={shell.enterFullscreen}
+          onReportDispute={onReportDispute}
         />
       ) : null}
       {headerMode === "strip" && !hideStageHint ? (

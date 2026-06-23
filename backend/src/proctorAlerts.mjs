@@ -63,13 +63,20 @@ export function makeProctorAlerts(ctx) {
     settingsCollection,
     alertsCollection,
     alertSettingsId,
+    // ALERT-1: the doc id for the shared alert-suppression list (one Firestore
+    // doc in settingsCollection, mirroring alertSettingsId). Captured at handler
+    // load by value, exactly like alertSettingsId (env-lint).
+    alertSuppressionsDocId,
     // v1.1 G3 (#5): optional hot-path read cache for the alert-settings doc
     // (read on every heartbeat/events/beacon/room-gate). A single shared key.
     // Null when disabled → every read hits Firestore (prior behavior). The
     // alert-settings WRITE path (routes/alerts.mjs) invalidates it.
+    // ALERT-1 rides the SAME cache instance under a distinct key for the
+    // suppression list (read on the same hot path inside upsertProctorAlert).
     alertSettingsCache = null
   } = ctx;
   const ALERT_SETTINGS_CACHE_KEY = "proctor_alert_settings";
+  const ALERT_SUPPRESSIONS_CACHE_KEY = "proctor_alert_suppressions";
 
   // ---- Sure-shot proctor alerts (Phase 2, 2.3 / Epic 4) ---------------------
 
@@ -123,8 +130,82 @@ export function makeProctorAlerts(ctx) {
     ip_changed: { enabled: true, severity: "warning", show_to_invigilator: false },
     tab_hidden: { enabled: true, severity: "warning", show_to_invigilator: false },
     tab_away: { enabled: true, severity: "warning", show_to_invigilator: false, threshold_seconds: TAB_AWAY_DEFAULT_THRESHOLD_SECONDS },
-    disconnected: { enabled: true, severity: "warning", show_to_invigilator: false }
+    disconnected: { enabled: true, severity: "warning", show_to_invigilator: false },
+    // ALERT-1: the candidate clicked "report a problem with this alert" on an
+    // alert overlay. Severity `info` — a dispute is a candidate flag for admin
+    // review, not a proctoring violation. Riding mergeAlertSettings gives the
+    // admin a GLOBAL type toggle (disable it if a contest spams disputes) that is
+    // distinct from the per-(user, test) suppression list.
+    dispute_raised: { enabled: true, severity: "info", show_to_invigilator: false }
   };
+
+  // ALERT-1: alert types an admin may suppress per (user, test). The alerting
+  // catalog (the keys of DEFAULT_PROCTOR_ALERT_SETTINGS) PLUS dispute_raised —
+  // an admin can suppress a noisy dispute too. NOTE: suppressing
+  // fullscreen_enforcement gates the ALERTING only; it never gates the LOCK (the
+  // lock is policy via enforcement_mode + the per-session exemption, exactly as
+  // the F5.3 comment above notes) — see the design doc §6.
+  const SUPPRESSIBLE_ALERT_TYPES = Object.keys(DEFAULT_PROCTOR_ALERT_SETTINGS);
+
+  // ALERT-1: the sanitizeExemptions analogue (enforcement.mjs) — allow-list every
+  // field, coerce/clamp, drop anything unknown so an admin payload can never
+  // stash arbitrary data or suppress an unknown type. Returns null for a payload
+  // that does not resolve to a valid (username_norm, alert_type) pair.
+  function sanitizeSuppressionEntry(input, { createdBy, now } = {}) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    const alert_type = String(input.alert_type || "");
+    if (!SUPPRESSIBLE_ALERT_TYPES.includes(alert_type)) return null;
+    const username_norm = normalizeUsername(String(input.username_norm || input.candidate_id || ""));
+    if (!username_norm || username_norm === "_") return null;
+    return {
+      username_norm,
+      contest_slug: input.contest_slug ? String(input.contest_slug).slice(0, 200) : "",
+      alert_type,
+      candidate_id: input.candidate_id ? String(input.candidate_id).slice(0, 200) : username_norm,
+      reason: input.reason ? String(input.reason).slice(0, 500) : "",
+      created_by: String(createdBy || "admin").slice(0, 200),
+      created_at: now || new Date().toISOString(),
+      ...(input.source_alert_id ? { source_alert_id: String(input.source_alert_id).slice(0, 300) } : {})
+    };
+  }
+
+  // ALERT-1: the suppression-key match predicate (the chokepoint test). True when
+  // (this user, this test, this alert type) is on the suppression list. The
+  // contest_slug match is EXACT but treats "" and "_" as the SAME unscoped bucket
+  // (upsertProctorAlert stores "_" for an orphaned session), so a suppression can
+  // never bleed across contests — a per-contest entry only matches that contest.
+  function isAlertSuppressed(suppressions, { usernameNorm, contestSlug, type }) {
+    if (!Array.isArray(suppressions) || !suppressions.length) return false;
+    const slug = contestSlug && contestSlug !== "_" ? contestSlug : "";
+    return suppressions.some((e) =>
+      e && e.username_norm === usernameNorm &&
+      e.alert_type === type &&
+      (String(e.contest_slug || "") === slug)
+    );
+  }
+
+  // ALERT-1: read the shared suppression-list doc through the SAME TTL cache as
+  // getAlertSettings (one cached read per request on the hot path; the
+  // suppress/unsuppress writes invalidate it via invalidateAlertSuppressionsCache).
+  // A subcollection query per raise would be a per-heartbeat read storm; the
+  // single doc is bounded by SUPPRESSIONS_MAX. Absent doc → empty list.
+  async function getAlertSuppressions() {
+    if (alertSettingsCache) {
+      const hit = alertSettingsCache.get(ALERT_SUPPRESSIONS_CACHE_KEY);
+      if (hit !== undefined) return hit;
+    }
+    const doc = await getFirestore().collection(settingsCollection).doc(alertSuppressionsDocId).get();
+    const entries = doc.exists && Array.isArray(doc.data()?.entries) ? doc.data().entries : [];
+    if (alertSettingsCache) alertSettingsCache.set(ALERT_SUPPRESSIONS_CACHE_KEY, entries);
+    return entries;
+  }
+
+  // ALERT-1: invalidate ONLY the suppression-list cache key (the suppress/
+  // unsuppress write path calls this). Sibling of invalidateAlertSettingsCache,
+  // scoped to its own key so a suppression write does not drop the settings cache.
+  function invalidateAlertSuppressionsCache() {
+    alertSettingsCache?.invalidate?.(ALERT_SUPPRESSIONS_CACHE_KEY);
+  }
 
   // The HackerRank contest-eval poller was removed (proctor moved to its own
   // in-app contest platform). `proctor` is now the ONLY accepted alert source;
@@ -363,6 +444,24 @@ export function makeProctorAlerts(ctx) {
   async function upsertProctorAlert(session, { type, severity, timestamp, title, detail, dedupe, data, screenshotKey }) {
     const usernameNorm = session.username_norm;
     const contestSlug = session.contest_slug || "_";
+
+    // ALERT-1: per-(user, test, type) suppression at the SINGLE chokepoint every
+    // internally-raised alert flows through (sure-shots, switch-away, fullscreen
+    // enforcement). Read through the same TTL cache as getAlertSettings (one
+    // cached read/request; the suppress/unsuppress writes invalidate it). A
+    // suppressed tuple writes NO doc and returns null — every current caller
+    // ignores the return except the dispute route, which checks it. The raw
+    // events that WOULD have produced the alert still land in evidence storage
+    // (recordEvents wrote them already) — suppression hushes the alert only.
+    // dispute_raised is NEVER suppressed here even if a stale entry exists: the
+    // candidate must always be able to flag a genuine mistake (design doc §4.3).
+    if (type !== "dispute_raised") {
+      const suppressions = await getAlertSuppressions();
+      if (isAlertSuppressed(suppressions, { usernameNorm, contestSlug, type })) {
+        return null;
+      }
+    }
+
     const id = `proctor:${type}:${usernameNorm}:${contestSlug}:${dedupe}`;
     const now = new Date().toISOString();
 
@@ -512,6 +611,13 @@ export function makeProctorAlerts(ctx) {
     ALERT_SEVERITIES,
     ALERT_VERDICT_STATUSES,
     ALERT_REQUIRED_FIELDS,
+    // ALERT-1: suppression catalog + helpers (consumed by the admin suppression
+    // routes + the upsert chokepoint guard)
+    SUPPRESSIBLE_ALERT_TYPES,
+    sanitizeSuppressionEntry,
+    isAlertSuppressed,
+    getAlertSuppressions,
+    invalidateAlertSuppressionsCache,
     // settings + projection helpers
     getAlertSettings,
     mergeAlertSettings,

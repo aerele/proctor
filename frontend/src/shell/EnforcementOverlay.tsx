@@ -15,7 +15,7 @@ import { AlertTriangle, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { FULLSCREEN_ACK_PHRASE, alertHoldMessage, enforcementHeadline, enforcementSubline, type EnforcementPhase, type ViolationPhase } from "./enforcement";
 
-export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, takeHome = false, proctorPhone = "", onAckChange, onEnterFullscreen }: {
+export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCount, ackOk, fullscreen, simplifiedRecovery = false, takeHome = false, proctorPhone = "", onAckChange, onEnterFullscreen, onReportDispute }: {
   phase: EnforcementPhase;
   /** The violation that tripped the hold — words the alert_hold banner (wave-3). */
   violation: ViolationPhase | null;
@@ -36,6 +36,11 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   /** Called on every keystroke — the hook matches against the exact phrase. */
   onAckChange: (text: string) => void;
   onEnterFullscreen: () => Promise<void>;
+  /** ALERT-1: the candidate flagged this alert as a software mistake/unfair via
+   *  "Report a problem with this alert". Raises a dispute_raised alert for the
+   *  proctor; it NEVER unlocks/bypasses recovery. Absent ⇒ the dispute button is
+   *  not rendered (back-compat / surfaces without a dispute channel). */
+  onReportDispute?: (disputedType: string, note: string) => void | Promise<void>;
 }) {
   // #135: the remote copy options threaded into the pure copy fns (C-8). Absent
   // takeHome ⇒ byte-identical in-venue copy (D3).
@@ -44,6 +49,14 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
   const [fsError, setFsError] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const reenterButtonRef = useRef<HTMLButtonElement | null>(null);
+  // ALERT-1: the "Report a problem with this alert" disclosure. `disputeOpen`
+  // gates the inline confirm panel; `disputeNote` is the optional one-line note;
+  // `disputeSent` flips to the calm "Reported" confirmation. Local state only —
+  // disputing changes NOTHING about the recovery requirement.
+  const [disputeOpen, setDisputeOpen] = useState(false);
+  const [disputeNote, setDisputeNote] = useState("");
+  const [disputeSent, setDisputeSent] = useState(false);
+  const disputeNoteRef = useRef<HTMLInputElement | null>(null);
 
   // A11y (mirrors the M10 FullscreenGate fix): focus moves into the dialog so
   // keyboard/screen-reader users land on the required control immediately.
@@ -55,6 +68,12 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
     if (simplifiedRecovery) reenterButtonRef.current?.focus();
     else inputRef.current?.focus();
   }, [simplifiedRecovery]);
+
+  // ALERT-1 a11y: when the dispute confirm opens, move focus into the note field
+  // (mirrors the modal-focus discipline above). The confirm is a nested dialog.
+  useEffect(() => {
+    if (disputeOpen) disputeNoteRef.current?.focus();
+  }, [disputeOpen]);
 
   // A resolved episode unmounts this overlay, so a NEW episode always mounts
   // with an empty box (the phrase is per-episode by construction).
@@ -213,6 +232,80 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
                 )}
                 {fsError ? <p className="mt-2 text-sm font-semibold text-red-200">{fsError}</p> : null}
               </div>
+
+              {/* ALERT-1: candidate feedback. Completing the recovery steps above
+                  IS the "I understand — I won't repeat" (acknowledge) path. The
+                  second, deliberately quieter option lets a candidate hitting a
+                  GENUINE software fault flag it — worded so an honest candidate who
+                  simply doesn't want the flag will NOT press it. */}
+              {onReportDispute ? (
+                <div className="rounded-lg border border-red-400/60 bg-red-950/40 p-4">
+                  {disputeSent ? (
+                    <p className="text-sm font-semibold text-red-100" aria-live="polite">
+                      Reported. Your proctor will review this. Normal exam rules still apply — please complete the steps above to continue.
+                    </p>
+                  ) : !disputeOpen ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm text-red-200">
+                        Acknowledge by completing the steps above. Believe this alert is a software mistake?
+                      </p>
+                      <button
+                        type="button"
+                        className="focus-ring inline-flex h-9 items-center rounded-md border border-red-300/70 px-3 text-sm font-semibold text-red-100 hover:bg-red-800/50"
+                        onClick={() => { setDisputeOpen(true); setFsError(""); }}
+                      >
+                        Report a problem with this alert
+                      </button>
+                    </div>
+                  ) : (
+                    <div role="dialog" aria-modal="false" aria-labelledby="dispute-confirm-title">
+                      <h2 id="dispute-confirm-title" className="text-base font-bold text-red-100">
+                        Only report a genuine technical problem
+                      </h2>
+                      <p className="mt-2 text-sm leading-6 text-red-200">
+                        Use this only if you believe this alert is a <span className="font-semibold">software mistake</span> — for
+                        example the app flagged you while you did nothing wrong, a button didn&rsquo;t work, or the screen behaved
+                        incorrectly.
+                      </p>
+                      <p className="mt-2 text-sm leading-6 text-red-200">
+                        This is <span className="font-semibold">not</span> a way to dismiss a warning you caused. Your proctor will
+                        see this report alongside the recording of what actually happened, and normal exam rules still apply. Misuse
+                        may itself be flagged.
+                      </p>
+                      <input
+                        ref={disputeNoteRef}
+                        className="focus-ring mt-3 h-10 w-full rounded-md border border-red-300 bg-white px-3 text-sm text-ink"
+                        value={disputeNote}
+                        maxLength={500}
+                        placeholder="Optional: what went wrong? (one line)"
+                        autoComplete="off"
+                        onChange={(event) => setDisputeNote(event.target.value)}
+                        onKeyDown={(event) => { if (event.key === "Escape") { setDisputeOpen(false); setDisputeNote(""); } }}
+                      />
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="focus-ring inline-flex h-9 items-center rounded-md bg-white px-4 text-sm font-bold text-red-900"
+                          onClick={() => {
+                            void Promise.resolve(onReportDispute("fullscreen_enforcement", disputeNote.trim()));
+                            setDisputeSent(true);
+                            setDisputeOpen(false);
+                          }}
+                        >
+                          Send report
+                        </button>
+                        <button
+                          type="button"
+                          className="focus-ring inline-flex h-9 items-center rounded-md border border-red-300/70 px-4 text-sm font-semibold text-red-100 hover:bg-red-800/50"
+                          onClick={() => { setDisputeOpen(false); setDisputeNote(""); }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </div>
           </>
         ) : null}

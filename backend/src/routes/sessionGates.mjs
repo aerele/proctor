@@ -58,6 +58,10 @@ export function makeSessionGateRoutes(ctx) {
     applyEnforcementViolation,
     // proctorAlerts domain (src/proctorAlerts.mjs), by reference
     getAlertSettings,
+    // ALERT-1: the dispute route raises a dispute_raised alert through the SAME
+    // single-source upsert chokepoint + type-config resolver (by reference).
+    alertTypeConfig,
+    upsertProctorAlert,
     // env-captured caps / non-env const (by value at handler load)
     gateAttemptLimit,
     enforcementLockReason
@@ -155,6 +159,43 @@ export function makeSessionGateRoutes(ctx) {
     return { ok: true, locked: true, locked_reason: enforcementLockReason, mode: "block" };
   }
 
+  // ALERT-1: POST /api/session/dispute-alert — the candidate clicked "report a
+  // problem with this alert" on an alert overlay. Auth = the unguessable session
+  // token (like /api/events), never admin auth. Raises ONE info-severity
+  // dispute_raised alert onto the admin console; it is idempotent per (user,
+  // contest, day, disputed-type) so a double-click collapses. disputed_type is
+  // the alert the candidate is disputing (e.g. "tab_away"); it is ECHOED into
+  // data for the admin's one-click Suppress, but never trusted as anything but a
+  // label (slice-capped, server-derived everything else). The dispute NEVER
+  // unlocks or bypasses anything — it raises a flag for humans (design doc §5.2).
+  async function sessionDisputeAlert(req) {
+    const body = parseBody(req);
+    requireFields(body, ["session_id"]);
+    const session = requireWritableSession(await getSession(String(body.session_id)));
+    const disputedType = String(body.disputed_type || "").slice(0, 64);
+    const note = body.note ? String(body.note).slice(0, 500) : "";
+    const alertSettings = await getAlertSettings();
+    const cfg = alertTypeConfig(alertSettings, "dispute_raised", "info");
+    // The admin can disable the dispute_raised TYPE globally (spam control) —
+    // distinct from per-user suppression. A disabled type raises nothing.
+    if (!cfg.enabled) return { ok: true, raised: false };
+    const raised = await upsertProctorAlert(session, {
+      type: "dispute_raised",
+      severity: cfg.severity,
+      timestamp: new Date().toISOString(),
+      title: "Candidate disputes an alert",
+      detail: disputedType
+        ? `Disputed: ${disputedType}${note ? ` — ${note}` : ""}`
+        : (note || "Candidate flagged an alert as incorrect"),
+      // Per type per day (SERVER date, not the client timestamp): a double-click
+      // collapses, distinct disputed types each surface. Spam surface = one
+      // dispute per type per day per candidate.
+      dedupe: `${disputedType || "any"}:${new Date().toISOString().slice(0, 10)}`,
+      data: { disputed_type: disputedType, note }
+    });
+    return { ok: true, raised: Boolean(raised) };
+  }
+
   // POST /api/session/unlock-gate — candidate-side release of an ENFORCEMENT
   // lock using the room's dedicated UNLOCK code (gate.unlock_otp, minted via
   // /api/invigilator/unlock-code — "call your room proctor"). Wave-2 review fix:
@@ -212,6 +253,8 @@ export function makeSessionGateRoutes(ctx) {
     // (not admin), so outside routesAuthLint's admin*/invigilator* scope.
     sessionRoomGate,
     sessionEnforcementViolation,
-    sessionUnlockGate
+    sessionUnlockGate,
+    // ALERT-1: candidate-token auth (not admin), same as the siblings above.
+    sessionDisputeAlert
   };
 }

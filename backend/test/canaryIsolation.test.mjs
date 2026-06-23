@@ -96,6 +96,7 @@ const EXEMPT_GETS = {
   "/api/admin/templates": "global template library (S-I §1.1) — blueprints, not contest data; contests SNAPSHOT from them",
   "/api/admin/template": "global template library (S-I §1.1)",
   "/api/admin/alert-settings": "GLOBAL alert-type config (F8 decision 5)",
+  "/api/admin/alert-suppressions": "ALERT-1: the SHARED (user,test,alert-type) suppression list — ONE global settings doc spanning all contests by design (it is the cross-contest admin triage surface, modeled on the global alert-settings doc, NOT a per-contest read). Each entry IS scoped to its own contest_slug, but the list itself is intentionally cross-contest like alert-settings.",
   "/api/admin/sessions": "username search across contests BY DESIGN (F9 D10); person norms are contest-distinct so person data cannot collide",
   "/api/admin/session-detail": "keyed by unguessable session_id (the bearer token)",
   "/api/admin/session-events": "keyed by unguessable session_id",

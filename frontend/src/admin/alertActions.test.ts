@@ -7,6 +7,7 @@ import {
   bulkSessionActionsFor,
   joinableSessions,
   sessionForAlert,
+  suppressionTypeForAlert,
   validSessionActionsFor
 } from "./alertActions";
 
@@ -179,5 +180,36 @@ describe("SESSION_ACTION_INFO", () => {
     }
     expect(ALERT_ACTION_INFO.archive.tooltip.length).toBeGreaterThan(10);
     expect(ALERT_ACTION_INFO.unarchive.tooltip.length).toBeGreaterThan(10);
+  });
+});
+
+// ALERT-1: suppression action info + per-row suppression-type resolution.
+describe("ALERT_ACTION_INFO suppression", () => {
+  it("has suppress + unsuppress with one-line tooltips that name the per-(user,test,type) scope", () => {
+    expect(ALERT_ACTION_INFO.suppress.label).toBe("Suppress");
+    expect(ALERT_ACTION_INFO.unsuppress.label).toBe("Stop suppressing");
+    expect(ALERT_ACTION_INFO.suppress.tooltip.length).toBeGreaterThan(10);
+    expect(ALERT_ACTION_INFO.unsuppress.tooltip.length).toBeGreaterThan(10);
+    // The tooltip must call out that it hides the alert ONLY (not enforcement /
+    // evidence) — the load-bearing layering caveat.
+    expect(ALERT_ACTION_INFO.suppress.tooltip.toLowerCase()).toContain("does not exempt");
+  });
+});
+
+describe("suppressionTypeForAlert", () => {
+  it("returns the alert's own type for a normal alert", () => {
+    expect(suppressionTypeForAlert({ type: "tab_away" })).toBe("tab_away");
+    expect(suppressionTypeForAlert({ type: "fullscreen_enforcement", data: {} })).toBe("fullscreen_enforcement");
+  });
+
+  it("returns the DISPUTED type for a dispute_raised alert (so one click hushes the noisy type)", () => {
+    expect(suppressionTypeForAlert({ type: "dispute_raised", data: { disputed_type: "tab_away" } })).toBe("tab_away");
+  });
+
+  it("falls back to dispute_raised when the disputed_type is missing/blank/non-string", () => {
+    expect(suppressionTypeForAlert({ type: "dispute_raised", data: {} })).toBe("dispute_raised");
+    expect(suppressionTypeForAlert({ type: "dispute_raised", data: { disputed_type: "" } })).toBe("dispute_raised");
+    expect(suppressionTypeForAlert({ type: "dispute_raised", data: { disputed_type: 42 as unknown as string } })).toBe("dispute_raised");
+    expect(suppressionTypeForAlert({ type: "dispute_raised" })).toBe("dispute_raised");
   });
 });

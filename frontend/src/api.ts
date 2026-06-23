@@ -6,8 +6,13 @@ import type {
   AlertActionResponse,
   AlertFilters,
   AlertSettings,
+  AlertSuppressionEntry,
+  AlertSuppressionRequest,
+  AlertSuppressionActionResponse,
+  AlertSuppressionsResponse,
   AlertsResponse,
   BeaconKind,
+  DisputeAlertResponse,
   CaptureState,
   EditorEvent,
   EnforcementConfigPayload,
@@ -150,6 +155,7 @@ const demoSessionsKey = "aerele-proctor-demo-sessions";
 // statuses behind every alert) — the key bump discards stale v1 stores.
 const demoAlertsKey = "aerele-proctor-demo-alerts-v3";
 const demoAlertSettingsKey = "aerele-proctor-demo-alert-settings";
+const demoAlertSuppressionsKey = "aerele-proctor-demo-alert-suppressions"; // ALERT-1
 const demoReviewRosterKey = "aerele-proctor-demo-review-roster";
 const demoReviewVerdictsKey = "aerele-proctor-demo-review-verdicts";
 const demoRosterKey = "aerele-proctor-demo-roster";
@@ -2622,6 +2628,80 @@ export async function alertAction(password: string, body: AlertActionRequest): P
   });
 }
 
+// ALERT-1: demo store for the shared suppression list (localStorage so the panel
+// reflects suppress/unsuppress across reloads, matching the demo alert store).
+function readDemoSuppressions(): AlertSuppressionEntry[] {
+  const raw = window.localStorage.getItem(demoAlertSuppressionsKey);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as AlertSuppressionEntry[];
+    } catch {
+      // fall through to empty
+    }
+  }
+  return [];
+}
+
+function writeDemoSuppressions(entries: AlertSuppressionEntry[]) {
+  window.localStorage.setItem(demoAlertSuppressionsKey, JSON.stringify(entries));
+}
+
+function demoSuppressionKey(e: { username_norm?: string; candidate_id?: string; contest_slug?: string; alert_type: string }): string {
+  const user = normalizeUsername(String(e.username_norm || e.candidate_id || ""));
+  const slug = e.contest_slug && e.contest_slug !== "_" ? e.contest_slug : "";
+  return JSON.stringify([user, slug, e.alert_type]);
+}
+
+// GET /api/admin/alert-suppressions — the shared per-(user, test, type) list.
+export async function fetchAlertSuppressions(password: string): Promise<AlertSuppressionsResponse> {
+  if (demoMode) {
+    await wait(80);
+    assertDemoAdmin(password);
+    return { entries: readDemoSuppressions() };
+  }
+  return request<AlertSuppressionsResponse>("/api/admin/alert-suppressions", {
+    method: "GET",
+    headers: { "x-admin-password": password }
+  });
+}
+
+// POST /api/admin/alert-suppression — add ("suppress") / remove ("unsuppress")
+// one (user, test, alert-type) entry. Demo mode mutates the persisted list so the
+// console + panel visibly change after the action.
+export async function alertSuppression(password: string, body: AlertSuppressionRequest): Promise<AlertSuppressionActionResponse> {
+  if (demoMode) {
+    await wait(120);
+    assertDemoAdmin(password);
+    const now = new Date().toISOString();
+    const user = normalizeUsername(String(body.username_norm || body.candidate_id || ""));
+    if (!user || user === "_") throw demoApiError(400, "a valid candidate id is required");
+    const wantKey = demoSuppressionKey(body);
+    const kept = readDemoSuppressions().filter((e) => demoSuppressionKey(e) !== wantKey);
+    let entries = kept;
+    if (body.action === "suppress") {
+      const entry: AlertSuppressionEntry = {
+        username_norm: user,
+        contest_slug: body.contest_slug && body.contest_slug !== "_" ? body.contest_slug : "",
+        alert_type: body.alert_type,
+        candidate_id: body.candidate_id ? String(body.candidate_id) : user,
+        reason: body.reason ? String(body.reason) : "",
+        created_by: "admin",
+        created_at: now,
+        ...(body.source_alert_id ? { source_alert_id: body.source_alert_id } : {})
+      };
+      entries = [...kept, entry];
+    }
+    writeDemoSuppressions(entries);
+    return { ok: true, action: body.action, entries };
+  }
+  return request<AlertSuppressionActionResponse>("/api/admin/alert-suppression", {
+    method: "POST",
+    headers: { "x-admin-password": password },
+    body: JSON.stringify(body)
+  });
+}
+
 function filterDemoAlerts(alerts: Alert[], filters?: AlertFilters): Alert[] {
   return alerts.filter((alert) => {
     if (filters?.source && alert.source !== filters.source) return false;
@@ -4947,6 +5027,26 @@ export async function reportEnforcementViolation(
   return request<EnforcementViolationResponse>("/api/session/enforcement-violation", {
     method: "POST",
     body: JSON.stringify({ session_id: sessionId, phase, exit_count: exitCount })
+  });
+}
+
+// ALERT-1: the candidate flagged the alert overlay as a software mistake/unfair
+// ("Report a problem with this alert"). Raises a dispute_raised alert on the
+// admin console; it NEVER unlocks or bypasses the overlay's recovery (that still
+// needs the proctor). Demo mode no-ops (returns raised:true) like the other
+// candidate self-reports.
+export async function reportAlertDispute(
+  sessionId: string,
+  disputedType: string,
+  note: string
+): Promise<DisputeAlertResponse> {
+  if (demoMode) {
+    await wait(120);
+    return { ok: true, raised: true };
+  }
+  return request<DisputeAlertResponse>("/api/session/dispute-alert", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, disputed_type: disputedType, note })
   });
 }
 
