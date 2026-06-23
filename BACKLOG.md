@@ -94,11 +94,13 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   - **Confirm-on-Escape** guard so fullscreen isn't exited by mistake.
   - *Why recording stops on lock* is part of this — keep recording while locked
     where possible; gate questions behind fullscreen.
-- ☐ **COPY-1** — Consolidated user-facing copy pass (merges U2 + U3 + U5): reword
-  the rules page ("keep your screen shared / don't stop", mention the red top bar,
-  relevant rules only); reword the "I have fixed this" unlock button (it can fire by
-  accident); remove "no code is needed"; **audit ALL user-facing strings** for sense
-  and "nothing the user doesn't need to see."
+- ✅ **COPY-1** — Consolidated user-facing copy pass. *Done (`af4761b`): D5 tone
+  (clear/calm/respectful/non-accusatory/action-first). Rules page reworded + red-bar
+  mention; "I have fixed this" → "I have fixed it — continue my test"; removed "No
+  code is needed"; integrity notices de-alarmed to factual "recorded for the proctor
+  to review" (stakes kept); share-stop message aligned to FLOW-1. Copy-only; tests
+  updated; 1071/1071.* Final strings logged in the night-run log. **Maintainer: sanity-
+  check the softened "violation" tone in the morning if you want more deterrence.**
 
 ## Features pulled into v1.1
 - ✅ **ALERT-1** — Candidate alert feedback + per-user alert suppression. *Fixed
