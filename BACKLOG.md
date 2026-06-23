@@ -20,8 +20,12 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   completion can only say "safe to exit" when the buffer is provably empty, else a
   loud "recording NOT saved — keep tab open, contact invigilator" + Retry. Branch
   `fix/recording-drain-gate` (6dfa081).*
-- ☐ **REC-3** — Escape → instant-lock race. Pressing Esc exits fullscreen, then the
-  session locks within ~5s **before** the unlock code can be entered. *(triage B3)*
+- ✅ **REC-3** — Escape → instant-lock race. *Fixed (`496af04`): humane recovery
+  FLOOR on the blocking deadline (`max(reentrySeconds, 15s)`) so an accidental
+  fullscreen exit always leaves time to re-enter before the lock; default (20s)
+  unchanged, exit-limit ladder unchanged (no enforcement hole, invariant-tested).
+  Note: JS can't veto the native Esc → fix is the recovery window + "paused, not
+  locked" UX, not a keypress veto. (triage B3)* **Needs a maintainer browser test.**
 - ✅ **REC-4** — Admin "chunks uploaded" count is wrong. *Fixed (`6741a58`): admin
   session-detail now reports the ground-truth stored count from a paginated GCS
   prefix listing (`countStoredChunks`), not the over-counting mint counter; mint
@@ -41,9 +45,12 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   preflight probe = optional follow-up.)*
 
 ## Fixes — candidate UI
-- ☐ **CAM-1** — Auto-collapse the camera widget when the camera is unavailable
-  (today it shows a blue "not available" panel with manual collapse/expand). The
-  pop-out button that caused false "switched-away" alerts is already removed. *(B5)*
+- ✅ **CAM-1** — Auto-collapse the camera widget when the camera is unavailable.
+  *Fixed (`8feeeb9`): edge-triggered `shouldAutoCollapseCameraDock(prev,next)` →
+  collapses to the minimal pill on the transition into "unavailable", respects a
+  manual re-expand, available-state behaviour unchanged. CameraDock 3/3. (B5)*
+  (Note: current dock has no blue panel — expanded = self-view tile, collapsed =
+  pill; auto-collapse drops the dead tile to the pill.)
 - ✅ **STUB-1 — PATCHED (live dev bank, 2026-06-24 night-run).** All 3 approved
   offenders **0626-8, 0626-9, challenge-7** written back via the admin API (HTTP 200,
   round-trip-verified all 4 langs; `status`/`hiddenTests` preserved → no live-edit
@@ -64,7 +71,16 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   *(B4)*
 
 ## Candidate exam flow + copy (consolidated)
-- ☐ **FLOW-1** — Permission persistence + clean re-share + fullscreen gating
+- ✅ **FLOW-1** — *Fixed (`496af04`):* clean re-share on manual screen-share stop
+  (intentional expected fullscreen-exit via `shell.markExpectedExit` + workspace
+  hidden → re-share back through the gate, no reload / no re-prompt for granted
+  camera+mic); recovery overlay "paused, not locked" + auto-focused Enter-fullscreen;
+  best-effort Escape guard (preserves ALERT-1 dispute-note cancel); in-UI "Refresh
+  data" (re-pull config/timer without reload); F5/Ctrl+R + beforeunload kept.
+  Permission-drop audit: no rogue drop (streams persist today). **DEFERRED (need
+  the maintainer):** record-THROUGH-lock (backend upload-auth policy) — recorder still stops
+  on lock. **Needs a maintainer browser test.** Original requirements below:
+- ☑ **FLOW-1** — Permission persistence + clean re-share + fullscreen gating
   (merges U1 + U6 + U4). One coherent flow:
   - Once screen + camera + permissions are granted at the start, **never re-ask**
     for the whole session — keep them running.
