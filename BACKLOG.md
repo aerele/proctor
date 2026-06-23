@@ -22,12 +22,17 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   `fix/recording-drain-gate` (6dfa081).*
 - ☐ **REC-3** — Escape → instant-lock race. Pressing Esc exits fullscreen, then the
   session locks within ~5s **before** the unlock code can be entered. *(triage B3)*
-- ☐ **REC-4** — Admin "chunks uploaded" count is wrong. It increments on every
-  upload-URL mint (incl. retries) before the PUT (`sessionTelemetry.mjs`), so it
-  counts URL requests, not stored objects — inflated/misleading. Make it reflect
-  actual stored chunks. *(B6)*
-- ☐ **REC-5** — Surface pending-upload count in admin session details, so a proctor
-  can see when a recording isn't flushing (pairs with REC-4). *(F1)*
+- ✅ **REC-4** — Admin "chunks uploaded" count is wrong. *Fixed (`6741a58`): admin
+  session-detail now reports the ground-truth stored count from a paginated GCS
+  prefix listing (`countStoredChunks`), not the over-counting mint counter; mint
+  counter kept verbatim for the picker filter + hwm. Spec
+  `docs/proposed/admin-upload-telemetry.md`. Backend 1041/1041; card headline reads
+  stored count. (B6)* **Card needs the maintainer's morning browser confirm post-deploy.**
+- ✅ **REC-5** — Surface pending-upload count in admin session details. *Fixed
+  (`6741a58`): `pending_upload_count` = client-reported `buffer_pending_chunks`
+  (NOT mints − stored, which is retry inflation — caught + regression-guarded), plus
+  raw backlog fields + `last_heartbeat_at`; warning banner + Pending metric when >0
+  on an active session. sessionDetail vitest 40/40. (F1)*
 - ✅ **TEST-1** — Why tests/health missed REC-1 + a regression guard. Diagnosed
   (`docs/proposed/recording-upload-healthcheck.md`); added
   `backend/test/corsHeaderParity.test.mjs` — asserts every header the backend signs
@@ -84,8 +89,13 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
     platform-improvement.
 - ☐ **ALERT-2** — Per-alert screenshot — capture the last frame (incl. when
   recording has stopped); jump-to-chunk already exists. **Build now.** *(F6)*
-- ☐ **EVID-1** — Filter notable paste/keystroke events and surface them as
-  clickable timeline markers in the recording Evidence tab. *(F10)*
+- ✅ **EVID-1** — Filter notable paste/keystroke events and surface them as
+  clickable timeline markers in the recording Evidence tab. *Fixed (`11e2965`): new
+  admin `GET /api/admin/session-editor-events` (requireAdmin, text blobs excluded,
+  8000-cap) + pure `notableEditorMarkers.ts` classifier (large_paste/paste/
+  keystroke_burst, thresholds mirrored from eval REPLAY) → amber marker lane in the
+  Evidence tab, click-to-seek via existing primitive. Backend 1046/1046; markers
+  19 tests. (F10)* **Needs the maintainer's morning browser confirm (Evidence tab) post-deploy.**
 - ◑ **BANK-1** — Bulk export/import of problems + templates: multi-select, select a
   template → all its questions; upload them back; handle dedup + cross-instance
   versioning. Spec: `docs/proposed/bulk-problem-template-io.md`. *(F11 — the
