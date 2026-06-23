@@ -84,8 +84,10 @@ ships it moves from there into "Done" below.
 
 ### Evaluation / talent
 - **Automatic AI verification after every test** — re-check the whole record
-  (selections/exceptions) automatically, not just admin-triggered. In progress
-  (task #144). *(F13)*
+  (selections/exceptions) automatically, not just admin-triggered (task #144).
+  **Confirmed v2 on 2026-06-23** — distinct from the v1.1 **F14** rule-registry
+  refactor (EVAL-1 in `BACKLOG.md`): F13 is the new auto-run + judgment capability.
+  *(F13)*
 - **Multi-round** — select a subset of / append to a previous round's roster,
   link rounds by college + unique-ID, show combined scores. Spec:
   `docs/design-history/specs/2026-06-10-f10-product-vision.md`. *(F15)*
@@ -117,8 +119,8 @@ ships it moves from there into "Done" below.
 
 ### Housekeeping / open
 - **Candidate-visible leaderboard** (optional, per-contest toggle, HackerRank-style)
-  — ⚠️ **NEEDS DECISION**: was agreed (TG 2026-06-12) then deleted with
-  `PRODUCT-BACKLOG.md`; the live tree now reads it as *"not adopting"* (f10 §8).
-  Re-decide before building. *(M2)*
+  — **v2** (agreed TG 2026-06-12; re-confirmed 2026-06-23). Was briefly read as
+  *"not adopting"* after `PRODUCT-BACKLOG.md` was deleted; resolved — it's a v2
+  feature. *(M2)*
 - **Prune excessive tests** (~914 backend / ~853 frontend — remove repetitive /
   pointless). *(M4)*

@@ -42,8 +42,8 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
 - ◑ **STUB-1** — Offenders identified (`docs/proposed/stub-return-none-audit.md`):
   **0626-8, 0626-9, challenge-7** (all return `none`). Also: every JS stub in
   challenge-3..9 returns `undefined`; challenge-1/2 are fully broken (not in the
-  06-19 dry-run). Fix = re-author the stub bodies (data-only, no code). **Pending
-  the owner's OK to apply** + whether to also fix the JS stubs. *(B4)*
+  06-19 dry-run). **Approved 2026-06-23: re-author the stub bodies (data-only, no
+  code) AND fix the JS-`undefined` stubs.** In build (Wave 2a). *(B4)*
 
 ## Candidate exam flow + copy (consolidated)
 - ☐ **FLOW-1** — Permission persistence + clean re-share + fullscreen gating
@@ -82,14 +82,14 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   recording has stopped); jump-to-chunk already exists. **Build now.** *(F6)*
 - ☐ **EVID-1** — Filter notable paste/keystroke events and surface them as
   clickable timeline markers in the recording Evidence tab. *(F10)*
-- ☐ **BANK-1** — Bulk export/import of problems + templates: multi-select, select a
+- ◑ **BANK-1** — Bulk export/import of problems + templates: multi-select, select a
   template → all its questions; upload them back; handle dedup + cross-instance
   versioning. Spec: `docs/proposed/bulk-problem-template-io.md`. *(F11 — the
-  originally-dropped request.)*
-- ☐ **EVAL-1** — Data-driven eval rule registry: one function per rule so a rule
+  originally-dropped request.)* Backend in build (Wave 2a); admin UI = Wave 2b.
+- ◑ **EVAL-1** — Data-driven eval rule registry: one function per rule so a rule
   can be added/removed without a code change. Spec:
-  `docs/proposed/eval-rule-registry.md` (build on `eval-logic-and-logs/`). *(F14 —
-  ⚠️ confirm vs F13 auto-verify, see Open decisions.)*
+  `docs/proposed/eval-rule-registry.md` (build on `eval-logic-and-logs/`).
+  *(F14 — confirmed v1.1 on 2026-06-23; F13 auto-verify → v2.)* In build (Wave 2a).
 
 ## Process (the anti-slip backbone — in progress)
 - ✅ **PROC-1** — Unified `ROADMAP.md` + `BACKLOG.md` + `AGENTS.md`/`CLAUDE.md` +
@@ -97,10 +97,9 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
 
 ---
 
-## Open decisions (need the owner)
-- **F13 vs F14:** EVAL-1 above = data-driven rule registry (F14, as instructed). If
-  you meant **F13 — automatic AI verification after every test** (task #144, in
-  progress), say so and I'll pull that into v1.1 too / instead.
-- **M2 — candidate-visible leaderboard:** undecided; sits in `ROADMAP.md` v2 as
-  ⚠️ NEEDS DECISION (was agreed, then a doc deletion left the tree reading it as
-  "rejected").
+## Decisions — resolved (2026-06-23)
+- **F13 vs F14:** EVAL-1 = the **F14** rule-registry refactor → **v1.1** (in build).
+  **F13** (automatic AI verification after every test, task #144) → **v2** (see
+  `ROADMAP.md`). They are disjoint: F14 is the behaviour-preserving eval-math
+  refactor; F13 is a new auto-run + LLM-judgment capability.
+- **M2 — candidate-visible leaderboard:** → **v2** (`ROADMAP.md`).
