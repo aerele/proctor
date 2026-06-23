@@ -35,7 +35,7 @@ import { Field } from "../ui/Field";
 import { Shell } from "../ui/Shell";
 import { StatusPill } from "../ui/StatusPill";
 import { BlockedScreen } from "./panels/BlockedScreen";
-import { CameraDock } from "./panels/CameraDock";
+import { CameraDock, shouldAutoCollapseCameraDock } from "./panels/CameraDock";
 import { CameraSelfView } from "./panels/CameraSelfView";
 import { ComeBackLaterPanel } from "./panels/ComeBackLaterPanel";
 import { EndRetryPanel } from "./panels/EndRetryPanel";
@@ -158,6 +158,20 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // camera dock's minimized state (the <video> host stays mounted in both).
   const [proctorPanelOpen, setProctorPanelOpen] = useState(false);
   const [cameraDockCollapsed, setCameraDockCollapsed] = useState(false);
+  // CAM-1: auto-collapse the camera dock to its minimal pill the moment the
+  // camera goes unavailable, so a dead self-view tile doesn't sit expanded on
+  // screen. We act ONLY on the transition edge into "unavailable" (tracked via
+  // a ref of the previous value), never on every render — so if the candidate
+  // manually re-expands the dock afterward we don't keep forcing it shut. When
+  // the camera is available the dock's collapsed state is entirely the
+  // candidate's (manual toggle), exactly as before.
+  const prevCameraStateRef = useRef(mediaCapture.camera);
+  useEffect(() => {
+    if (shouldAutoCollapseCameraDock(prevCameraStateRef.current, mediaCapture.camera)) {
+      setCameraDockCollapsed(true);
+    }
+    prevCameraStateRef.current = mediaCapture.camera;
+  }, [mediaCapture.camera]);
   // S3 room gate: whether THIS session has been released into the exam (room
   // OTP / invigilator start-now / gate disabled). Starts false when the gate is
   // enabled; the poll effect corrects it (also after reload/resume).

@@ -5,6 +5,22 @@ import { Camera, ChevronDown } from "lucide-react";
 import * as studentCopy from "../../studentCopy";
 import type { MediaCaptureState } from "../../useProctorRecorder";
 
+// CAM-1: when the camera is unavailable the expanded dock is just a dead 224px
+// tile that the candidate has to collapse by hand — wasted space and a poor
+// signal. Instead we auto-collapse the dock to its minimal pill the moment
+// availability flips to "unavailable". Pure transition predicate so it can be
+// unit-tested without a DOM: true only on the EDGE into "unavailable" (any
+// non-unavailable previous state → "unavailable"), never while it stays
+// unavailable. Keeping it edge-only is what avoids fighting the candidate — a
+// manual re-expand after the collapse is respected because a steady-state
+// "unavailable" → "unavailable" render returns false.
+export function shouldAutoCollapseCameraDock(
+  prev: MediaCaptureState["camera"],
+  next: MediaCaptureState["camera"]
+): boolean {
+  return next === "unavailable" && prev !== "unavailable";
+}
+
 // W1 — the floating camera dock for the exam view: a small bottom-right tile
 // (HackerRank-style) that keeps the rule-mandated self-view visible without
 // stealing layout space. The <video> host stays MOUNTED in BOTH visual states
