@@ -382,6 +382,22 @@ export type SessionCardDetail = {
   chunk_count: number;
   /** F10.1: separate camera-stream chunk counter (absent on older backends). */
   camera_chunk_count?: number;
+  /** REC-4: ground-truth stored chunk count from the GCS listing (absent on
+   * older backends — fall back to chunk_count). This, not chunk_count, is the
+   * truthful number of objects actually in storage. */
+  stored_chunk_count?: number;
+  stored_camera_chunk_count?: number;
+  /** REC-5: pending-upload count — chunks the candidate produced but hasn't
+   * provably stored, from the client's last-reported IndexedDB backlog
+   * (buffer_pending_chunks; NOT mints − stored, which is retry inflation).
+   * > 0 on an active session means a recording may not be flushing. */
+  pending_upload_count?: number;
+  /** REC-5: the client's last-reported IndexedDB backlog + in-flight depth,
+   * surfaced raw so a stale count (see last_heartbeat_at) is distinguishable. */
+  buffer_pending_chunks?: number;
+  buffer_pending_bytes?: number;
+  upload_queue_depth?: number;
+  last_heartbeat_at?: string;
   event_count: number;
   clipboard_event_count: number;
   focus_event_count: number;

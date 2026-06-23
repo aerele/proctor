@@ -430,6 +430,132 @@ test("admin session-detail: includes camera_chunk_count", async () => {
   assert.equal(res.body.session.camera_chunk_count, 4);
 });
 
+// ---- REC-4: ground-truth stored chunk counts (GCS listing) ------------------
+
+// The regression that proves REC-4: 3 screen URLs minted (chunk_count===3) but
+// only ONE screen object actually stored in GCS → stored_chunk_count===1. The
+// mint counter must be UNCHANGED (still 3 — it feeds the picker + hwm).
+test("admin session-detail: stored_chunk_count is the real GCS object count, not the mint counter", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // chunk_count: 3 simulates 3 mint requests (retries/drains over-counting).
+  seedSession(firestore, "s-stored-1", { chunk_count: 3, camera_chunk_count: 2 });
+  // Place ONLY ONE screen object + ONE camera object under the session prefix.
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-1/screen/chunk-00000.webm").save("x");
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-1/camera/chunk-00000.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-stored-1" } }));
+  assert.equal(res.statusCode, 200);
+  // Mint counter UNCHANGED (back-compat, picker filter, hwm).
+  assert.equal(res.body.session.chunk_count, 3);
+  assert.equal(res.body.session.camera_chunk_count, 2);
+  // Ground truth: exactly what is stored.
+  assert.equal(res.body.session.stored_chunk_count, 1);
+  assert.equal(res.body.session.stored_camera_chunk_count, 1);
+});
+
+// stored == mints (a clean session, no retries) → pending 0.
+test("admin session-detail: stored count matches mints when every PUT stored (pending 0)", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSession(firestore, "s-stored-2", { chunk_count: 2, camera_chunk_count: 0 });
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-2/screen/chunk-00000.webm").save("x");
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-2/screen/chunk-00001.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-stored-2" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.session.stored_chunk_count, 2);
+  assert.equal(res.body.session.stored_camera_chunk_count, 0);
+  // no client-reported backlog (buffer_pending_chunks unset) → pending 0.
+  assert.equal(res.body.session.pending_upload_count, 0);
+});
+
+// Counting must ignore non-chunk objects (events/, manifest.json) under the prefix.
+test("admin session-detail: stored count ignores non-chunk objects under the prefix", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSession(firestore, "s-stored-3", { chunk_count: 1, camera_chunk_count: 0 });
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-3/screen/chunk-00000.webm").save("x");
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-3/events/2026.jsonl").save("x");
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-stored-3/manifest.json").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-stored-3" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.session.stored_chunk_count, 1);
+  assert.equal(res.body.session.stored_camera_chunk_count, 0);
+});
+
+// ---- REC-5: pending-upload count + raw backlog fields -----------------------
+
+// pending_upload_count reflects the client-reported backlog (buffer_pending_chunks),
+// NOT the mint inflation, and the raw heartbeat fields round-trip.
+test("admin session-detail: pending_upload_count reflects the client-reported backlog", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSession(firestore, "s-pending-1", {
+    chunk_count: 5, camera_chunk_count: 0,
+    buffer_pending_chunks: 4, buffer_pending_bytes: 2048, upload_queue_depth: 2,
+    last_heartbeat_at: "2026-06-09T10:00:00.000Z"
+  });
+  // Client last reported 4 buffered chunks → pending 4. (mints=5 vs stored=1 is
+  // retry inflation, NOT pending — pending tracks the client's backlog only.)
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-pending-1/screen/chunk-00000.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-pending-1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.session.stored_chunk_count, 1);
+  assert.equal(res.body.session.pending_upload_count, 4);
+  assert.equal(res.body.session.buffer_pending_chunks, 4);
+  assert.equal(res.body.session.buffer_pending_bytes, 2048);
+  assert.equal(res.body.session.upload_queue_depth, 2);
+  assert.equal(res.body.session.last_heartbeat_at, "2026-06-09T10:00:00.000Z");
+});
+
+// REGRESSION — the REC-5 false-alarm guard: retries mint many URLs per stored
+// object (here 5 mints for 1 produced-and-stored chunk) with NO client-reported
+// backlog. pending MUST be 0. Deriving it from mints − stored would falsely
+// scream "4 pending" on a session that stored everything it produced.
+test("admin session-detail: pending_upload_count does NOT false-alarm on retry/mint inflation", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // 5 mints (4 retries) for 1 produced chunk, that chunk IS stored, no backlog.
+  seedSession(firestore, "s-pending-2", { chunk_count: 5, buffer_pending_chunks: 0 });
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-pending-2/screen/chunk-00000.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-pending-2" } }));
+  assert.equal(res.statusCode, 200);
+  // Inflation is visible via chunk_count vs stored_chunk_count...
+  assert.equal(res.body.session.chunk_count, 5);
+  assert.equal(res.body.session.stored_chunk_count, 1);
+  // ...but pending stays 0 because the client reported no buffered backlog.
+  assert.equal(res.body.session.pending_upload_count, 0);
+});
+
+// A legacy doc with no buffer/heartbeat fields and no stored objects → the
+// pending fields default cleanly (0/0/0/""), and stored counts are 0.
+test("admin session-detail: legacy doc (no buffer fields, no stored objects) defaults pending to 0", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // chunk_count 0 → no mints, nothing stored → no pending.
+  seedSession(firestore, "s-legacy-1", { chunk_count: 0, camera_chunk_count: 0, last_heartbeat_at: undefined });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-legacy-1" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.session.stored_chunk_count, 0);
+  assert.equal(res.body.session.stored_camera_chunk_count, 0);
+  assert.equal(res.body.session.pending_upload_count, 0);
+  assert.equal(res.body.session.buffer_pending_chunks, 0);
+  assert.equal(res.body.session.buffer_pending_bytes, 0);
+  assert.equal(res.body.session.upload_queue_depth, 0);
+  assert.equal(res.body.session.last_heartbeat_at, "");
+});
+
 test("admin recording-sessions: rows include camera_chunk_count (0 for legacy docs)", async () => {
   const firestore = makeFakeFirestore();
   __setClientsForTest({ firestore, storage: makeFakeStorage() });

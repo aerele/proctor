@@ -956,6 +956,15 @@ export async function fetchSessionCardDetail(password: string, sessionId: string
       ip_change_count,
       chunk_count: row.chunk_count,
       camera_chunk_count: row.camera_chunk_count ?? 0,
+      // REC-4/REC-5: demo mode never over-mints, so stored == mints and there
+      // is no pending backlog — plausible "healthy" values for the card.
+      stored_chunk_count: row.chunk_count,
+      stored_camera_chunk_count: row.camera_chunk_count ?? 0,
+      pending_upload_count: 0,
+      buffer_pending_chunks: 0,
+      buffer_pending_bytes: 0,
+      upload_queue_depth: 0,
+      last_heartbeat_at: row.created_at,
       // Deterministic activity counters: scale off the recording length so a
       // longer demo session also "did more" (heartbeats every 15s ≈ 2/chunk).
       event_count: row.chunk_count * 3 + 4,

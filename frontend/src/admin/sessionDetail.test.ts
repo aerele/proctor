@@ -5,6 +5,9 @@ import {
   captureSourceLabel,
   describeRecordingContents,
   formatApproxDuration,
+  pendingUploadAffordance,
+  storedCameraChunkCount,
+  storedChunkCount,
   viewEventsAffordance,
   viewRecordingAffordance
 } from "./sessionDetail";
@@ -199,5 +202,74 @@ describe("viewEventsAffordance", () => {
     const a = viewEventsAffordance(false);
     expect(a.disabled).toBe(true);
     expect(a.tip).toContain("Demo mode");
+  });
+});
+
+// REC-4 — the headline chunk count must read the GROUND-TRUTH stored count
+// (GCS-listed objects), NOT the over-counting mint counter chunk_count.
+describe("storedChunkCount", () => {
+  it("prefers stored_chunk_count over the mint counter chunk_count", () => {
+    // The exact REC-4 regression: 3 mints, 1 stored → headline shows 1.
+    expect(storedChunkCount({ stored_chunk_count: 1, chunk_count: 3 })).toBe(1);
+  });
+
+  it("falls back to chunk_count when an older backend omits the stored field", () => {
+    expect(storedChunkCount({ chunk_count: 7 })).toBe(7);
+  });
+
+  it("falls back to the list-row count when there is no detail at all", () => {
+    expect(storedChunkCount(null, 4)).toBe(4);
+    expect(storedChunkCount(undefined, 4)).toBe(4);
+  });
+
+  it("is 0 when nothing is available", () => {
+    expect(storedChunkCount(null)).toBe(0);
+    expect(storedChunkCount({})).toBe(0);
+  });
+
+  it("a stored count of 0 wins over a positive mint counter (not falsy-coalesced away)", () => {
+    expect(storedChunkCount({ stored_chunk_count: 0, chunk_count: 3 })).toBe(0);
+  });
+});
+
+describe("storedCameraChunkCount", () => {
+  it("prefers stored_camera_chunk_count over camera_chunk_count", () => {
+    expect(storedCameraChunkCount({ stored_camera_chunk_count: 2, camera_chunk_count: 5 })).toBe(2);
+  });
+
+  it("falls back to camera_chunk_count, then the list row, then 0", () => {
+    expect(storedCameraChunkCount({ camera_chunk_count: 3 })).toBe(3);
+    expect(storedCameraChunkCount(null, 6)).toBe(6);
+    expect(storedCameraChunkCount(null)).toBe(0);
+  });
+});
+
+// REC-5 — pending-upload affordance: shown only when > 0; warning while the
+// session is active (recording may not be flushing), muted once ended.
+describe("pendingUploadAffordance", () => {
+  it("is hidden when there is no pending backlog", () => {
+    expect(pendingUploadAffordance({ pending_upload_count: 0 }, "active")).toEqual({ show: false });
+    expect(pendingUploadAffordance(null, "active")).toEqual({ show: false });
+    expect(pendingUploadAffordance({}, "active")).toEqual({ show: false });
+  });
+
+  it("warns while the session is still active (may not be flushing)", () => {
+    const a = pendingUploadAffordance({ pending_upload_count: 4 }, "active");
+    expect(a).toEqual({ show: true, count: 4, tone: "warning", label: "4 chunks not yet uploaded" });
+  });
+
+  it("is muted once the session has ended (a frozen post-mortem number)", () => {
+    const a = pendingUploadAffordance({ pending_upload_count: 2 }, "ended");
+    expect(a).toEqual({ show: true, count: 2, tone: "muted", label: "2 chunks not yet uploaded" });
+  });
+
+  it("singularizes a count of one", () => {
+    const a = pendingUploadAffordance({ pending_upload_count: 1 }, "active");
+    expect(a.show && a.label).toBe("1 chunk not yet uploaded");
+  });
+
+  it("ignores a non-finite / negative count", () => {
+    expect(pendingUploadAffordance({ pending_upload_count: Number.NaN }, "active")).toEqual({ show: false });
+    expect(pendingUploadAffordance({ pending_upload_count: -3 }, "active")).toEqual({ show: false });
   });
 });

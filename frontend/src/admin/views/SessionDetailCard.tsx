@@ -2,11 +2,11 @@
 // Session detail modal card, extracted verbatim from App.tsx (F3).
 import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertTriangle, Bell, Camera, CheckCircle2, Clock, Film, Lock, Mic, MonitorUp, RefreshCw, Video, X } from "lucide-react";
+import { Activity, AlertTriangle, Bell, Camera, CheckCircle2, Clock, Film, Lock, Mic, MonitorUp, RefreshCw, UploadCloud, Video, X } from "lucide-react";
 import { fetchSessionCardDetail, fetchSubmissionEvents, recordingDataAvailable } from "../../api";
 import { candidateIdOf } from "../../identity";
 import { validSessionActionsFor } from "../alertActions";
-import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, viewEventsAffordance, viewRecordingAffordance } from "../sessionDetail";
+import { alertsForSession, approxRecordingSeconds, captureSourceLabel, formatApproxDuration, pendingUploadAffordance, storedCameraChunkCount, storedChunkCount, viewEventsAffordance, viewRecordingAffordance } from "../sessionDetail";
 import type { Alert, EnforcementExemptions, RecordingSession, SessionAction, SessionCardDetail, SubmissionEvent } from "../../types";
 import { Metric } from "../../ui/Metric";
 import { ActionTooltip } from "../../ui/ActionTooltip";
@@ -70,10 +70,15 @@ export function SessionDetailCard({ password, session, alerts, alertsLoaded, onC
 
   // The truthful status: the refetched detail wins over the click-time row.
   const status = detail?.status || session.status;
-  const chunkCount = detail?.chunk_count ?? session.chunk_count;
+  // REC-4: the headline "Chunks" + duration math read the GROUND-TRUTH stored
+  // count (GCS-listed objects that actually exist), not the over-counting mint
+  // counter. Falls back to chunk_count / the list-row value for an older backend.
+  const chunkCount = storedChunkCount(detail, session.chunk_count);
   // F10.1: the separate camera stream's chunk counter (0 for legacy sessions /
-  // older backends). Drives the camera metric + the recorded-camera labels.
-  const cameraChunkCount = detail?.camera_chunk_count ?? session.camera_chunk_count ?? 0;
+  // older backends). REC-4: prefer the stored count here too.
+  const cameraChunkCount = storedCameraChunkCount(detail, session.camera_chunk_count);
+  // REC-5: chunks the candidate produced but the server can't prove are stored.
+  const pending = pendingUploadAffordance(detail, status);
   const actions = validSessionActionsFor(status);
   const sessionAlerts = useMemo(() => alertsForSession(alerts, session), [alerts, session]);
   const sortedSubmissions = useMemo(
@@ -195,6 +200,13 @@ export function SessionDetailCard({ password, session, alerts, alertsLoaded, onC
             <AlertTriangle size={14} /> IP changed {detail.ip_change_count} time{detail.ip_change_count === 1 ? "" : "s"} mid-exam.
           </p>
         ) : null}
+        {/* REC-5: a pending backlog on a STILL-ACTIVE session is the loud
+            "recording may not be flushing" signal a proctor needs to catch. */}
+        {pending.show && pending.tone === "warning" ? (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <UploadCloud size={14} /> {pending.count} chunk{pending.count === 1 ? "" : "s"} not yet uploaded — recording may not be flushing.
+          </p>
+        ) : null}
 
         {/* F5.3: locked-by-enforcement context — the candidate self-locked via
             the fullscreen ladder; the room's UNLOCK code (invigilator portal)
@@ -241,6 +253,15 @@ export function SessionDetailCard({ password, session, alerts, alertsLoaded, onC
           {/* F10.1: the separate camera stream's own chunk counter (only shown
               when this session actually uploaded camera chunks). */}
           {cameraChunkCount > 0 ? <Metric icon={<Camera size={16} />} label="Camera chunks" value={String(cameraChunkCount)} /> : null}
+          {/* REC-5: pending-upload backlog — only meaningful when > 0 (chunks
+              produced but not provably stored). Warning tone while active. */}
+          {pending.show ? (
+            <Metric
+              icon={<UploadCloud size={16} className={pending.tone === "warning" ? "text-warning" : "text-muted"} />}
+              label="Pending upload"
+              value={`${pending.count} chunk${pending.count === 1 ? "" : "s"}`}
+            />
+          ) : null}
           <Metric icon={<Bell size={16} />} label="Alerts" value={alertsLoaded ? String(sessionAlerts.length) : "…"} />
           <Metric icon={<CheckCircle2 size={16} />} label="Submissions" value={submissions === null ? "…" : String(sortedSubmissions.length)} />
           {detail ? <Metric icon={<Activity size={16} />} label="Events" value={`${detail.event_count} (${detail.clipboard_event_count} clipboard · ${detail.focus_event_count} focus)`} /> : null}

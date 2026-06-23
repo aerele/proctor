@@ -162,3 +162,46 @@ export function viewEventsAffordance(dataAvailable: boolean): DeepLinkAffordance
     tip: "Open this session's activity log on the Recordings tab (events, alerts, submission times) — available even when nothing was recorded."
   };
 }
+
+// ---- REC-4/REC-5: stored-chunk count + pending-upload affordance -------------
+// REC-4: the card's headline "Chunks" + duration math must read the GROUND-TRUTH
+// stored count (objects that actually exist in GCS), NOT the mint counter
+// chunk_count (which over-counts retries/drains/failed PUTs). Prefer the new
+// stored_chunk_count; fall back to the mint counter only for an older backend
+// that doesn't send the stored field, then to the list-row value.
+
+/** The stored (ground-truth) screen-chunk count to show as the headline. */
+export function storedChunkCount(
+  detail: { stored_chunk_count?: number; chunk_count?: number } | null | undefined,
+  fallbackChunkCount?: number
+): number {
+  return Number(detail?.stored_chunk_count ?? detail?.chunk_count ?? fallbackChunkCount ?? 0);
+}
+
+/** The stored (ground-truth) camera-chunk count to show as the headline. */
+export function storedCameraChunkCount(
+  detail: { stored_camera_chunk_count?: number; camera_chunk_count?: number } | null | undefined,
+  fallbackChunkCount?: number
+): number {
+  return Number(detail?.stored_camera_chunk_count ?? detail?.camera_chunk_count ?? fallbackChunkCount ?? 0);
+}
+
+// REC-5: a pending-upload count > 0 means the candidate produced chunks the
+// server can't prove are stored. It is LOUD (warning) when the session is still
+// active — the recording may not be flushing — and MUTED once ended (a frozen
+// post-mortem number, not a live problem). A 0 count shows no affordance.
+
+export type PendingUploadAffordance =
+  | { show: false }
+  | { show: true; count: number; tone: "warning" | "muted"; label: string };
+
+export function pendingUploadAffordance(
+  detail: { pending_upload_count?: number } | null | undefined,
+  status: string
+): PendingUploadAffordance {
+  const count = Number(detail?.pending_upload_count ?? 0);
+  if (!Number.isFinite(count) || count <= 0) return { show: false };
+  const tone = status === "active" ? "warning" : "muted";
+  const label = `${count} chunk${count === 1 ? "" : "s"} not yet uploaded`;
+  return { show: true, count, tone, label };
+}

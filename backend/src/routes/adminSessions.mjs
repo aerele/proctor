@@ -291,6 +291,37 @@ async function adminSessionsList(req) {
   return { sessions, truncated };
 }
 
+// REC-4 — GROUND-TRUTH stored chunk counts from the GCS listing, NOT the
+// mint-time chunk_count counter (which over-counts: it increments on every
+// signed-URL mint, including retries/drains/failed PUTs that store nothing —
+// see docs/proposed/admin-upload-telemetry.md §1). We list the session prefix
+// and count the real screen/chunk-* and camera/chunk-* objects that exist.
+//
+// Paginated MANUALLY (autoPaginate:false + follow nextQuery, mirroring the
+// per-contest tally in handler.mjs:~2067-2078) so a session over the 1000-object
+// page cap (~8h of recording) still counts exactly across pages rather than
+// silently truncating. getFiles destructures to [files, nextQuery]; a storage
+// client that returns only [files] (no nextQuery) ends the loop after one page.
+// A hard page ceiling guards against a runaway listing.
+async function countStoredChunks(session) {
+  const prefix = sessionPrefix(session);
+  const screenPrefix = `${prefix}screen/chunk-`;
+  const cameraPrefix = `${prefix}camera/chunk-`;
+  let screen = 0;
+  let camera = 0;
+  let query = { prefix, autoPaginate: false, maxResults: 1000 };
+  for (let page = 0; page < 1000 && query; page++) {
+    const [files, nextQuery] = await bucket().getFiles(query);
+    for (const file of files || []) {
+      const name = file?.name || "";
+      if (name.startsWith(screenPrefix)) screen += 1;
+      else if (name.startsWith(cameraPrefix)) camera += 1;
+    }
+    query = nextQuery || null;
+  }
+  return { screen, camera };
+}
+
 // Session detail (admin) — F6.3: ONE session doc for the Sessions detail card,
 // projected to the least-privilege fields the card actually shows: identity
 // (incl. the roster id the candidate verified against), status, the IP block
@@ -298,12 +329,27 @@ async function adminSessionsList(req) {
 // (events/heartbeats/chunks — all already maintained on the doc, zero extra
 // reads). Deliberately NO email, NO storage_prefix/keys, NO evidence/signed
 // URLs (the recordings view resolves those itself when the admin jumps there).
+//
+// REC-4/REC-5 EXCEPTION to "zero GCS reads": this route now does ONE
+// admin-initiated, prefix-scoped getFiles per open (countStoredChunks) to
+// return the ground-truth stored-chunk count. It is on-open, not a poll; if
+// detail is ever auto-polled, gate the listing behind a query flag or cache it.
 async function adminSessionDetail(req) {
   requireAdmin(req);
   const sessionId = String(req.query?.session_id || "");
   if (!sessionId) return badRequest("session_id required");
   const session = await getSessionOrNull(sessionId);
   if (!session) throw httpError(404, "Session not found");
+  // REC-4: count the objects that actually exist in GCS (ground truth).
+  const stored = await countStoredChunks(session);
+  // REC-5: pending = chunks the candidate produced but hasn't provably stored,
+  // from the client's last heartbeat (its durable IndexedDB backlog —
+  // docs/proposed/admin-upload-telemetry.md §3). Deliberately NOT mints − stored:
+  // that delta is retry/drain inflation (exactly what REC-4 exposes) and is
+  // non-zero even when every chunk uploaded cleanly, so using it would
+  // false-alarm "pending" on any retried session. The mint-vs-stored gap is
+  // already visible to the admin as chunk_count vs stored_chunk_count.
+  const reportedPending = Number(session.buffer_pending_chunks || 0);
   return {
     session: {
       session_id: session.session_id,
@@ -326,8 +372,24 @@ async function adminSessionDetail(req) {
       start_ip: session.start_ip || "",
       current_ip: session.current_ip || session.start_ip || "",
       ip_change_count: Number(session.ip_change_count || 0),
+      // Mint counter (legacy, back-compat): increments on every signed-URL mint,
+      // so it OVER-counts stored objects. Kept verbatim for the picker filter +
+      // high-water-mark; the UI no longer presents it as "stored chunks".
       chunk_count: Number(session.chunk_count || 0),
       camera_chunk_count: Number(session.camera_chunk_count || 0),
+      // REC-4: GROUND-TRUTH stored chunk counts from the GCS listing above.
+      // These are what the card's headline + duration math should read.
+      stored_chunk_count: stored.screen,
+      stored_camera_chunk_count: stored.camera,
+      // REC-5: pending-upload signal — chunks the candidate produced but hasn't
+      // provably stored, from the client's last heartbeat (durable IndexedDB
+      // backlog). The raw fields are surfaced alongside so a STALE count (see
+      // last_heartbeat_at) is distinguishable from a live one.
+      pending_upload_count: reportedPending,
+      buffer_pending_chunks: reportedPending,
+      buffer_pending_bytes: Number(session.buffer_pending_bytes || 0),
+      upload_queue_depth: Number(session.upload_queue_depth || 0),
+      last_heartbeat_at: session.last_heartbeat_at || "",
       event_count: Number(session.event_count || 0),
       clipboard_event_count: Number(session.clipboard_event_count || 0),
       focus_event_count: Number(session.focus_event_count || 0),
