@@ -22,7 +22,7 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
+import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEditorEvents, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
 import { describeRecordingContents } from "./admin/sessionDetail";
 import { DateTimeField } from "./admin/DateTimeField";
 import { candidateIdOf } from "./identity";
@@ -49,7 +49,8 @@ import {
   type TimelineLogFilters,
   type TypeFacet
 } from "./recordingTimeline";
-import type { AdminSessionDetail, Alert, AlertSeverity, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SubmissionEvent } from "./types";
+import { buildNotableEditorMarkers, type NotableEditorMarker } from "./notableEditorMarkers";
+import type { AdminSessionDetail, Alert, AlertSeverity, EditorEventItem, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SubmissionEvent } from "./types";
 
 // localStorage key for the reviewer's own name so a refresh keeps them reviewing.
 const REVIEWER_NAME_KEY = "proctor_reviewer_name";
@@ -220,6 +221,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // F6 review: true when the backend capped the event stream (the activity log
   // shows a "first N events" note instead of presenting a partial log as full).
   const [sessionEventsTruncated, setSessionEventsTruncated] = useState(false);
+  // EVID-1: the active session's EDITOR event stream (paste/keystroke), classified
+  // client-side into the notable paste/keystroke marker lane. Degrades to empty
+  // (no markers) when the endpoint/data is absent — never blocks playback.
+  const [editorEvents, setEditorEvents] = useState<EditorEventItem[]>([]);
   const [candidateAlerts, setCandidateAlerts] = useState<Alert[]>([]);
   // Activity-log filter state — everything on by default (usability bar).
   const [logFilters, setLogFilters] = useState<TimelineLogFilters>(DEFAULT_LOG_FILTERS);
@@ -444,6 +449,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
     if (!sessionId) {
       setSessionEvents([]);
       setSessionEventsTruncated(false);
+      setEditorEvents([]);
       setCandidateAlerts([]);
       return;
     }
@@ -461,6 +467,15 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
           setSessionEventsTruncated(false);
         }
       }
+      // EVID-1: the editor stream (paste/keystroke) for the notable-marker lane.
+      // Independent of session-events: a 404 (old backend) or error just yields
+      // an empty stream → no editor markers, never blocking the rest.
+      try {
+        const editorResult = await fetchSessionEditorEvents(password, sessionId);
+        if (!cancelled) setEditorEvents(editorResult?.events ?? []);
+      } catch {
+        if (!cancelled) setEditorEvents([]);
+      }
       try {
         const response = await fetchAlerts(password, {
           contest_slug: session?.contest_slug || undefined,
@@ -477,19 +492,36 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.session_id, password]);
 
-  // The merged, time-ordered activity entries (alerts + events + submissions)
-  // on the SAME test-relative scale, blackout-tagged via the gap spans — then
-  // the filtered view + the per-kind marker lists the overlay renders.
+  // EVID-1: the NOTABLE editor paste/keystroke markers on the SAME test-relative
+  // scale (offsetSecFor) + blackout-tagged via the same gap spans. Recomputed when
+  // the editor stream OR the test-start anchor / gaps change, exactly like markers
+  // / logEntries — so they stay aligned when the test-start input is edited.
+  const notableEditorMarkers = useMemo<NotableEditorMarker[]>(
+    () => buildNotableEditorMarkers({ events: editorEvents, testStartMs, gaps }),
+    [editorEvents, testStartMs, gaps]
+  );
+
+  // The merged, time-ordered activity entries (alerts + events + submissions +
+  // notable editor markers) on the SAME test-relative scale, blackout-tagged via
+  // the gap spans — then the filtered view + the per-kind marker lists the overlay
+  // renders. The editor markers fold in as event-kind rows (EVID-1 lighter path).
   const logEntries = useMemo(
-    () => buildTimelineLog({ alerts: candidateAlerts, events: sessionEvents, submissions: submissionEvents, testStartMs, gaps }),
-    [candidateAlerts, sessionEvents, submissionEvents, testStartMs, gaps]
+    () => buildTimelineLog({ alerts: candidateAlerts, events: sessionEvents, submissions: submissionEvents, testStartMs, gaps, editorMarkers: notableEditorMarkers }),
+    [candidateAlerts, sessionEvents, submissionEvents, testStartMs, gaps, notableEditorMarkers]
   );
   const visibleLog = useMemo(() => filterTimelineLog(logEntries, logFilters), [logEntries, logFilters]);
   const alertMarkers = useMemo(() => visibleLog.filter((entry) => entry.kind === "alert"), [visibleLog]);
   // Event ticks CLUSTER when closer than ~0.8% of the span (min 2s) so a dense
-  // stream stays individually hoverable instead of smearing into a blob.
+  // stream stays individually hoverable instead of smearing into a blob. The
+  // EVID-1 notable editor markers (notable_paste/notable_burst) are excluded here
+  // — they get their OWN dedicated lane below — but stay in the activity log +
+  // event-type facets via logEntries, so the subdued event lane doesn't duplicate
+  // the dedicated paste/keystroke lane on the scrubber.
   const eventClusters = useMemo(
-    () => clusterMarkers(visibleLog.filter((entry) => entry.kind === "event"), Math.max(spanDuration * 0.008, 2)),
+    () => clusterMarkers(
+      visibleLog.filter((entry) => entry.kind === "event" && entry.type !== "notable_paste" && entry.type !== "notable_burst"),
+      Math.max(spanDuration * 0.008, 2)
+    ),
     [visibleLog, spanDuration]
   );
   const logCounts = useMemo(
@@ -498,6 +530,13 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
       events: logEntries.filter((entry) => entry.kind === "event").length,
       submissions: logEntries.filter((entry) => entry.kind === "submission").length
     }),
+    [logEntries]
+  );
+  // The subdued event-lane legend counts ONLY the proctor events (the notable
+  // editor markers are event-kind in the log for searchability but render in
+  // their OWN amber lane, so subtract them to keep the lane legend honest).
+  const laneEventCount = useMemo(
+    () => logEntries.filter((entry) => entry.kind === "event" && entry.type !== "notable_paste" && entry.type !== "notable_burst").length,
     [logEntries]
   );
   // The DISTINCT event-type / alert-type facets actually present in this log,
@@ -1660,6 +1699,47 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       );
                     })}
 
+                    {/* NOTABLE EDITOR MARKERS (EVID-1) — paste / keystroke-burst
+                        markers riding the track, visually DISTINCT from the alert
+                        dots / submission ticks / event lane: an AMBER ROTATED
+                        SQUARE (diamond) for a large paste, a smaller amber tick for
+                        a smaller paste, and a HOLLOW amber square for a typing
+                        burst. Hover gives the label + time (+ "during blackout");
+                        click seeks the recording there (the SAME seekToTestTime
+                        primitive the alert / submission markers use). */}
+                    {notableEditorMarkers.map((marker) => {
+                      const clamped = Math.max(span.start, Math.min(marker.offsetSec, span.end));
+                      const left = ((clamped - span.start) / spanDuration) * 100;
+                      const label = `${marker.label}${marker.problemId ? ` · ${marker.problemId}` : ""} · ${formatClock(marker.offsetSec)}${marker.duringGap ? " · during blackout" : ""}`;
+                      // Shape per kind: large_paste = solid amber diamond,
+                      // keystroke_burst = hollow amber square, paste = thin amber tick.
+                      const shape =
+                        marker.kind === "large_paste"
+                          ? "h-2.5 w-2.5 rotate-45 rounded-[1px] bg-amber-500 ring-2 ring-white"
+                          : marker.kind === "keystroke_burst"
+                            ? "h-2.5 w-2.5 rounded-[1px] border-2 border-amber-500 bg-white"
+                            : "h-3 w-0.5 rounded-sm bg-amber-400";
+                      return (
+                        <button
+                          key={marker.id}
+                          type="button"
+                          title={label}
+                          aria-label={label}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            seekToTestTime(clamped, wantPlaying());
+                          }}
+                          className="group absolute top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 cursor-pointer"
+                          style={{ left: `${left}%` }}
+                        >
+                          {/* Invisible widened hit-area for easy hover at density. */}
+                          <span className="absolute -inset-1.5" />
+                          <span className={`block ${shape} transition-transform group-hover:scale-125`} />
+                        </button>
+                      );
+                    })}
+
                     {/* DRAGGABLE PLAYHEAD with a live readout (shown while dragging). */}
                     <div className="pointer-events-none absolute bottom-0 top-0 z-30" style={{ left: `${playheadPct}%` }}>
                       <div className="absolute top-1/2 h-7 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-ink" />
@@ -1726,7 +1806,7 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                   {/* MARKER LEGEND — submissions (ticks above/below), alerts
                       (severity dots on the track) and events (subdued lane
                       below). Hidden entirely when nothing is overlaid. */}
-                  {markers.length || alertMarkers.length || eventClusters.length ? (
+                  {markers.length || alertMarkers.length || eventClusters.length || notableEditorMarkers.length ? (
                     <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-xs text-muted">
                       <span className="font-medium text-ink">On the timeline:</span>
                       {markers.length ? (
@@ -1758,8 +1838,15 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       {eventClusters.length ? (
                         <span className="inline-flex items-center gap-1.5">
                           <span className="inline-block h-2.5 w-0.5 bg-muted/60" />
-                          <span className="font-medium text-ink">{logCounts.events} event{logCounts.events > 1 ? "s" : ""}</span>
+                          <span className="font-medium text-ink">{laneEventCount} event{laneEventCount > 1 ? "s" : ""}</span>
                           in the lane below
+                        </span>
+                      ) : null}
+                      {notableEditorMarkers.length ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="inline-block h-2.5 w-2.5 rotate-45 rounded-[1px] bg-amber-500 ring-2 ring-white" />
+                          <span className="font-medium text-ink">{notableEditorMarkers.length} paste/keystroke marker{notableEditorMarkers.length > 1 ? "s" : ""}</span>
+                          on the track
                         </span>
                       ) : null}
                       <span className="text-muted/70">Hover a marker for details · click to jump the recording there.</span>

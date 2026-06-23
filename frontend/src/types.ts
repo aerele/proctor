@@ -511,6 +511,26 @@ export type SessionEventsResponse = {
   truncated?: boolean;
 };
 
+// EVID-1 — one EDITOR event from GET /api/admin/session-editor-events: the
+// least-privilege projection of the session's stored editor-event stream (GCS
+// NDJSON, paste/insert/replace/keystroke). `detail` is a SMALL flat scalar object
+// with the inserted-source `text`/`text_preview` blobs DROPPED server-side — the
+// marker lane only needs counts (`len`/`insertedLen`). `problem_id` names the
+// problem the event landed in (stamped per-record on ingest).
+export type EditorEventItem = {
+  type: string;
+  /** ISO 8601 timestamp of when the editor event fired on the candidate's machine. */
+  timestamp: string;
+  problem_id?: string | null;
+  detail?: Record<string, string | number | boolean>;
+};
+
+export type EditorEventsResponse = {
+  events: EditorEventItem[];
+  /** True when the editor-event list was capped server-side. */
+  truncated?: boolean;
+};
+
 // F6.6 — the last-reported per-source capture state, parsed server-side from
 // the composite heartbeat recording_state. The recorded webm is the DIRECT
 // screen stream + mixed microphone audio; the camera is live-monitor only and

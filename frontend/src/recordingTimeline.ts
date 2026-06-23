@@ -6,6 +6,7 @@
 // and the simple offset-clustering the dense event lane uses. No React, no IO —
 // everything here is vitest-covered.
 import type { Alert, AlertSeverity, SessionEventItem, SubmissionEvent } from "./types";
+import type { NotableEditorMarker } from "./notableEditorMarkers";
 
 export type TimelineLogKind = "alert" | "event" | "submission";
 
@@ -253,8 +254,13 @@ export function buildTimelineLog(params: {
   submissions: SubmissionEvent[];
   testStartMs: number;
   gaps: TimelineGapSpan[];
+  // EVID-1: notable editor paste/keystroke markers, folded into the log as
+  // event-kind rows so they appear in the activity log + the event-type filter
+  // WITHOUT a new TimelineLogKind/toggle. The dedicated timeline lane (rendered
+  // in RecordingReview) is what makes them prominent; the log is secondary.
+  editorMarkers?: NotableEditorMarker[];
 }): TimelineLogEntry[] {
-  const { alerts, events, submissions, testStartMs, gaps } = params;
+  const { alerts, events, submissions, testStartMs, gaps, editorMarkers = [] } = params;
   const entries: TimelineLogEntry[] = [];
 
   for (const alert of alerts) {
@@ -334,6 +340,25 @@ export function buildTimelineLog(params: {
       detail,
       valid: submission.valid,
       duringGap: isDuringGap(offsetSec, gaps)
+    });
+  }
+
+  // EVID-1: fold the notable editor markers in as event-kind rows. They already
+  // carry their offsetSec / duringGap (computed off the SAME testStartMs + gaps),
+  // so we reuse them verbatim. A keystroke_burst maps to the `notable_burst` type,
+  // pastes to `notable_paste` — distinct event-type keys so the event-type filter
+  // can isolate them, and the existing "events" toggle covers them.
+  for (const marker of editorMarkers) {
+    const type = marker.kind === "keystroke_burst" ? "notable_burst" : "notable_paste";
+    entries.push({
+      kind: "event",
+      id: `editor:${marker.id}`,
+      type,
+      offsetSec: marker.offsetSec,
+      timestamp: marker.timestamp,
+      label: marker.label,
+      detail: marker.problemId ? `problem: ${marker.problemId}` : "",
+      duringGap: marker.duringGap
     });
   }
 

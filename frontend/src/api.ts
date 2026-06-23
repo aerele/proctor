@@ -65,6 +65,8 @@ import type {
   SessionConsent,
   ContestDataSizeResponse,
   SessionCardDetail,
+  EditorEventItem,
+  EditorEventsResponse,
   SessionCardDetailResponse,
   SessionDetail,
   SessionDetailsResponse,
@@ -1201,6 +1203,37 @@ export async function fetchSessionEvents(password: string, sessionId: string): P
   }
 }
 
+// EVID-1 — GET /api/admin/session-editor-events?session_id= : the candidate's
+// EDITOR event stream (paste/insert/replace/keystroke) for the recording
+// Evidence-tab notable-paste/keystroke marker lane. A direct clone of
+// fetchSessionEvents (same admin header, same graceful 404 → null so an OLDER
+// backend without the endpoint just renders NO editor markers instead of erroring).
+// In demo mode it returns canned per-session editor events so the lane is
+// demoable offline (small canned sets — never truncated).
+export type EditorEventsResult = { events: EditorEventItem[]; truncated: boolean };
+
+export async function fetchSessionEditorEvents(password: string, sessionId: string): Promise<EditorEventsResult | null> {
+  if (demoMode) {
+    await wait(100);
+    assertDemoAdmin(password);
+    return { events: DEMO_SESSION_EDITOR_EVENTS[sessionId] ?? [], truncated: false };
+  }
+
+  const query = new URLSearchParams();
+  query.set("session_id", sessionId);
+  try {
+    const response = await request<EditorEventsResponse>(
+      `/api/admin/session-editor-events?${query.toString()}`,
+      { method: "GET", headers: { "x-admin-password": password } }
+    );
+    return { events: response.events, truncated: response.truncated === true };
+  } catch (cause) {
+    // Endpoint not deployed yet → no editor markers (graceful), not a hard error.
+    if ((cause as ApiError)?.status === 404) return null;
+    throw cause;
+  }
+}
+
 // ---- Demo recording dataset ----------------------------------------------
 // A small, self-contained set of fake students whose sessions carry screen
 // chunks so the recording-playback UI (search → timeline → player → auto-advance)
@@ -1415,6 +1448,42 @@ const DEMO_SESSION_EVENTS: Record<string, SessionEventItem[]> = {
     { type: "visibility_change", timestamp: "2026-06-05T10:38:20.000Z", detail: { state: "hidden" } },
     { type: "visibility_change", timestamp: "2026-06-05T10:38:30.000Z", detail: { state: "visible" } },
     { type: "session_stop_requested", timestamp: "2026-06-05T10:57:20.000Z" }
+  ]
+};
+
+// ---- Demo session EDITOR events (EVID-1) ---------------------------------
+// Canned per-session editor-event streams placed ON each demo recording's
+// timeline so the notable paste/keystroke marker lane renders offline. Each one
+// carries a large paste (≥ FOREIGN_PASTE_LEN), a small paste, and a fast run of
+// single-char inserts that crosses the keystroke-burst floor — so all three
+// marker kinds (large_paste / paste / keystroke_burst) are demoable. The scalar
+// counts (len / insertedLen) are exactly what the backend projection keeps; the
+// inserted-text blobs are intentionally absent (the endpoint drops them). Keyed
+// by session_id. Helper builds a fast single-char typing run inside one window.
+function demoTypingRun(startIso: string, count: number, stepMs: number, problemId: string): EditorEventItem[] {
+  const base = Date.parse(startIso);
+  return Array.from({ length: count }, (_unused, i) => ({
+    type: "editor_insert",
+    timestamp: new Date(base + i * stepMs).toISOString(),
+    problem_id: problemId,
+    detail: { insertedLen: 1 }
+  }));
+}
+
+const DEMO_SESSION_EDITOR_EVENTS: Record<string, EditorEventItem[]> = {
+  // Asha: a 412-char paste at 09:02:18 (lines up with her clipboard_activity),
+  // a small 12-char paste, and a ~100-stroke typing burst.
+  "rec-asha-9f2a": [
+    { type: "editor_paste", timestamp: "2026-06-05T09:02:18.000Z", problem_id: "two-sum", detail: { len: 412 } },
+    { type: "editor_paste", timestamp: "2026-06-05T09:03:10.000Z", problem_id: "two-sum", detail: { len: 12 } },
+    ...demoTypingRun("2026-06-05T09:03:40.000Z", 100, 15, "two-sum")
+  ],
+  // Vikram (real-scale): a 312-char paste at 09:24:10 (his paste clipboard
+  // event), a long fast typing burst, and a programmatic 140-char replace.
+  "rec-vikram-load": [
+    { type: "editor_paste", timestamp: "2026-06-05T09:24:10.000Z", problem_id: "n-queens", detail: { len: 312 } },
+    ...demoTypingRun("2026-06-05T09:30:00.000Z", 120, 12, "n-queens"),
+    { type: "editor_replace", timestamp: "2026-06-05T10:05:40.000Z", problem_id: "n-queens", detail: { insertedLen: 140 } }
   ]
 };
 

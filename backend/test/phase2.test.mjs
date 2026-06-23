@@ -2369,3 +2369,113 @@ test("session-events: caps the merged list and flags truncation", async () => {
   assert.equal(res.body.events.length, 2000, "capped at 2000");
   assert.equal(res.body.truncated, true);
 });
+
+// =====================================================================
+// EVID-1 — GET /api/admin/session-editor-events (paste/keystroke markers)
+// =====================================================================
+// The candidate's EDITOR events (paste/insert/replace/keystroke) live as NDJSON
+// objects under the session's `editor-events/` prefix (sessionTelemetry ingest).
+// This endpoint lists + parses them for the recording Evidence-tab marker lane:
+// admin-only, least-privilege scalar-detail projection that DROPS the text blobs
+// (only counts like len/insertedLen are needed), ordered by time, capped.
+
+test("session-editor-events: requires admin", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore(), storage: makeFakeStorage() });
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/session-editor-events", query: { session_id: "s1" } }));
+  assert.equal(res.statusCode, 401);
+});
+
+test("session-editor-events: session_id required → 400; unknown session → 404", async () => {
+  __setClientsForTest({ firestore: makeFakeFirestore(), storage: makeFakeStorage() });
+  const missing = await call(makeReq({ method: "GET", path: "/api/admin/session-editor-events", headers: ADMIN_HEADERS }));
+  assert.equal(missing.statusCode, 400);
+  const unknown = await call(makeReq({
+    method: "GET", path: "/api/admin/session-editor-events", headers: ADMIN_HEADERS, query: { session_id: "nope" }
+  }));
+  assert.equal(unknown.statusCode, 404);
+});
+
+test("session-editor-events: missing editor-events/ prefix → empty, not an error", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  // No editor-events objects written — the session has session-events but no
+  // editor telemetry. The endpoint must degrade to an empty (non-truncated) list.
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-editor-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.events, []);
+  assert.equal(res.body.truncated, false);
+});
+
+test("session-editor-events: parses every NDJSON object, time-ordered, drops text blobs", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // Two NDJSON batches written OUT OF ORDER so the read must sort. Each record is
+  // shaped exactly as the ingest writes it: {type, timestamp, detail, session_id,
+  // problem_id}. detail carries the inserted `text`/`text_preview` blob (must be
+  // dropped) alongside the scalar counts the marker lane needs (len/insertedLen).
+  storage._saved.set(
+    `${prefix}editor-events/2026-06-05T10-05-00-bbb.ndjson`,
+    [
+      JSON.stringify({ type: "editor_paste", timestamp: "2026-06-05T10:05:00.000Z", problem_id: "sum-two", detail: { len: 412, text: "x".repeat(2000), text_preview: "x".repeat(80) }, session_id: sessionId }),
+      JSON.stringify({ type: "editor_insert", timestamp: "2026-06-05T10:04:00.000Z", problem_id: "sum-two", detail: { insertedLen: 1, line: 4, col: 9, text: "a" }, session_id: sessionId })
+    ].join("\n") + "\n"
+  );
+  storage._saved.set(
+    `${prefix}editor-events/2026-06-05T10-01-00-aaa.ndjson`,
+    JSON.stringify({ type: "editor_replace", timestamp: "2026-06-05T10:01:00.000Z", problem_id: "n-queens", detail: { insertedLen: 50, deletedLen: 3, text: "blob" }, session_id: sessionId }) + "\nnot-json {\n"
+  );
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-editor-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.truncated, false);
+
+  const events = res.body.events;
+  assert.equal(events.length, 3, JSON.stringify(events.map((e) => e.type)));
+  const stamps = events.map((e) => e.timestamp);
+  assert.deepEqual(stamps, [...stamps].sort(), "editor events must be time-ordered ascending");
+
+  // Least-privilege projection: exactly {type, timestamp, problem_id, detail}.
+  for (const event of events) {
+    assert.deepEqual(Object.keys(event).sort(), ["detail", "problem_id", "timestamp", "type"]);
+  }
+  const paste = events.find((e) => e.type === "editor_paste");
+  assert.equal(paste.problem_id, "sum-two", "problem_id surfaced for the marker label");
+  assert.equal(paste.detail.len, 412, "numeric paste length kept");
+  assert.equal(paste.detail.text, undefined, "inserted text blob must be dropped");
+  assert.equal(paste.detail.text_preview, undefined, "text_preview blob must be dropped");
+  const insert = events.find((e) => e.type === "editor_insert");
+  assert.equal(insert.detail.insertedLen, 1, "numeric insertedLen kept");
+  assert.equal(insert.detail.text, undefined, "insert text blob dropped");
+});
+
+test("session-editor-events: caps the merged list and flags truncation", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // 8100 single-char inserts in one ndjson (the editor cap is 8000). A keystroke
+  // stream is far denser than the proctor event stream, hence its own larger cap.
+  // Stamp each one zero-padded-monotonic so the lexicographic sort is stable.
+  const lines = [];
+  for (let i = 0; i < 8100; i += 1) {
+    const base = new Date("2026-06-05T10:00:00.000Z").getTime() + i * 10;
+    lines.push(JSON.stringify({ type: "editor_insert", timestamp: new Date(base).toISOString(), detail: { insertedLen: 1 } }));
+  }
+  storage._saved.set(`${prefix}editor-events/bulk.ndjson`, lines.join("\n") + "\n");
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-editor-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.events.length, 8000, "capped at 8000");
+  assert.equal(res.body.truncated, true);
+});

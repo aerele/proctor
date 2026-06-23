@@ -1077,11 +1077,14 @@ const adminSessionsRoutes = makeAdminSessionsRoutes({
   sessionsQueryLimit: SESSIONS_QUERY_LIMIT,
   sessionsListPageLimit: SESSIONS_LIST_PAGE_LIMIT,
   rosterLimit: ROSTER_LIMIT,
-  reviewRosterLimit: REVIEW_ROSTER_LIMIT
+  reviewRosterLimit: REVIEW_ROSTER_LIMIT,
+  // EVID-1: the editor-events GCS sub-prefix label, so adminSessionEditorEvents
+  // lists `${prefix}editor-events/` (same value as editorEventsCollection/Label).
+  editorEventsLabel: EDITOR_EVENTS_COLLECTION
 });
 const {
   adminSessions, adminRecordingSessions, adminSessionsList, adminSessionDetail,
-  adminSessionEvents, adminIpReport, adminAttendance, adminSessionAction, adminSessionDetails,
+  adminSessionEvents, adminSessionEditorEvents, adminIpReport, adminAttendance, adminSessionAction, adminSessionDetails,
   // end-now sweep RETURNED for single-source reuse by the adminContests end_now
   // path (B4 ctx) — passed by reference below; never forked.
   endAllLiveSessions
@@ -1451,6 +1454,7 @@ export const api = async (req, res) => {
     if (req.method === "GET" && path === "/api/admin/sessions-list") return send(res, 200, await adminSessionsList(req));
     if (req.method === "GET" && path === "/api/admin/session-detail") return send(res, 200, await adminSessionDetail(req));
     if (req.method === "GET" && path === "/api/admin/session-events") return send(res, 200, await adminSessionEvents(req));
+    if (req.method === "GET" && path === "/api/admin/session-editor-events") return send(res, 200, await adminSessionEditorEvents(req));
     if (req.method === "GET" && path === "/api/admin/submission-events") return send(res, 200, await adminSubmissionEvents(req));
     if (req.method === "GET" && path === "/api/admin/stats") return send(res, 200, await adminStats(req));
     if (req.method === "GET" && path === "/api/admin/ip-report") return send(res, 200, await adminIpReport(req));

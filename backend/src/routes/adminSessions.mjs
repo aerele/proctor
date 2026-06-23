@@ -99,7 +99,10 @@ export function makeAdminSessionsRoutes(ctx) {
     sessionsQueryLimit,
     sessionsListPageLimit,
     rosterLimit,
-    reviewRosterLimit
+    reviewRosterLimit,
+    // EVID-1: the editor-events GCS sub-prefix label (default "editor-events",
+    // backend/src/config.mjs:53) — the prefix adminSessionEditorEvents lists.
+    editorEventsLabel
   } = ctx;
 
 async function adminSessions(req) {
@@ -414,13 +417,16 @@ const SESSION_EVENT_DETAIL_EXCLUDED_KEYS = new Set(["storage_key"]);
 
 // Project a stored event detail to a SMALL flat object: scalar values only
 // (strings truncated), excluded keys dropped, bounded key count. Never throws.
-function projectSessionEventDetail(detail) {
+// The excluded-keys set is a parameter (default = the session-event set) so the
+// editor-events route can pass a wider set that also drops the text/text_preview
+// blobs without forking this projection (EVID-1).
+function projectSessionEventDetail(detail, excludedKeys = SESSION_EVENT_DETAIL_EXCLUDED_KEYS) {
   const out = {};
   if (!detail || typeof detail !== "object" || Array.isArray(detail)) return out;
   let kept = 0;
   for (const [key, value] of Object.entries(detail)) {
     if (kept >= SESSION_EVENT_DETAIL_KEY_MAX) break;
-    if (SESSION_EVENT_DETAIL_EXCLUDED_KEYS.has(key)) continue;
+    if (excludedKeys.has(key)) continue;
     if (typeof value === "string") out[key] = value.slice(0, SESSION_EVENT_DETAIL_STRING_MAX);
     else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
     else continue; // nested objects/arrays/null: dropped, scalars only
@@ -471,6 +477,77 @@ async function adminSessionEvents(req) {
   return {
     events: events.slice(0, SESSION_EVENTS_LIMIT),
     truncated: events.length > SESSION_EVENTS_LIMIT
+  };
+}
+
+// EVID-1: editor-event keystroke streams are far denser than the proctor event
+// stream (one record per insert/paste), so they get their OWN, larger cap — the
+// client classifier needs enough of the raw stream to sum keystroke bursts before
+// the server clips it. Mirrors SESSION_EVENTS_LIMIT's slice + truncated discipline.
+const EDITOR_EVENTS_READ_LIMIT = 8000;
+// detail.text / detail.text_preview carry the actual inserted source (up to 2000
+// chars, sanitizeEditorDetail). The marker lane only needs scalar counts
+// (len/insertedLen), so we EXCLUDE the text blobs from this projection to keep the
+// admin payload small and avoid shipping pasted source to the timeline.
+const EDITOR_EVENT_DETAIL_EXCLUDED_KEYS = new Set([
+  ...SESSION_EVENT_DETAIL_EXCLUDED_KEYS,
+  "text",
+  "text_preview"
+]);
+
+// EVID-1 — GET /api/admin/session-editor-events?session_id= : the candidate's
+// per-session EDITOR event stream (paste/insert/replace/keystroke), stored as
+// NDJSON under the session's `editor-events/` prefix. Modeled VERBATIM on
+// adminSessionEvents (same admin auth, 404-on-missing, bounded-concurrency
+// download, per-line parse, scalar-only least-privilege projection, cap +
+// truncated), differing only in the prefix and the text-excluding projection.
+// The recording Evidence tab classifies this stream into notable paste/keystroke
+// markers client-side (docs/proposed/evidence-keystroke-markers.md).
+async function adminSessionEditorEvents(req) {
+  requireAdmin(req);
+  const sessionId = String(req.query?.session_id || "");
+  if (!sessionId) return badRequest("session_id required");
+  const session = await getSessionOrNull(sessionId);
+  if (!session) throw httpError(404, "Session not found");
+
+  const prefix = `${sessionPrefix(session)}${editorEventsLabel}/`;
+  const [files] = await bucket().getFiles({ prefix, maxResults: 1000 });
+  // Download + parse with bounded concurrency (same rationale as the evidence
+  // listing). A malformed line or unreadable object is skipped, never fatal.
+  const batches = await mapWithConcurrency(files, 12, async (file) => {
+    try {
+      const [contents] = await file.download();
+      return String(contents)
+        .split("\n")
+        .filter((line) => line.trim())
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter((record) => record && typeof record === "object");
+    } catch {
+      return [];
+    }
+  });
+
+  const events = batches
+    .flat()
+    .map((record) => ({
+      type: String(record.type || "unknown"),
+      timestamp: String(record.timestamp || ""),
+      // problem_id is stamped per-record on ingest (sessionTelemetry.mjs:238) —
+      // surfaced so a marker can name which problem the paste/burst landed in.
+      problem_id: record.problem_id == null ? null : String(record.problem_id).slice(0, 64),
+      detail: projectSessionEventDetail(record.detail, EDITOR_EVENT_DETAIL_EXCLUDED_KEYS)
+    }))
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  return {
+    events: events.slice(0, EDITOR_EVENTS_READ_LIMIT),
+    truncated: events.length > EDITOR_EVENTS_READ_LIMIT
   };
 }
 
@@ -979,6 +1056,7 @@ async function adminSessionDetails(req) {
     adminSessionsList,
     adminSessionDetail,
     adminSessionEvents,
+    adminSessionEditorEvents,
     adminIpReport,
     adminAttendance,
     adminSessionAction,

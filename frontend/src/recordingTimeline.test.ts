@@ -347,6 +347,34 @@ describe("buildTimelineLog", () => {
     expect(entries[0].type).toBe(`${"z".repeat(EVENT_TYPE_MAX)}…`);
     expect(entries[0].label.length).toBeLessThanOrEqual(EVENT_TYPE_MAX + 1);
   });
+
+  // EVID-1: the notable editor markers fold in as event-kind rows (lighter path),
+  // carrying their own type (notable_paste / notable_burst) + label + offset/gap.
+  it("folds notable editor markers in as event-kind entries (EVID-1)", () => {
+    const entries = buildTimelineLog({
+      alerts: [],
+      events: [],
+      submissions: [],
+      testStartMs: T0,
+      gaps: [],
+      editorMarkers: [
+        { kind: "large_paste", id: "large_paste:two-sum:0@2026-06-05T09:05:00.000Z", timestamp: "2026-06-05T09:05:00.000Z", offsetSec: 300, chars: 412, problemId: "two-sum", duringGap: false, label: "Large paste · 412 chars" },
+        { kind: "keystroke_burst", id: "keystroke_burst:two-sum:9@2026-06-05T09:06:00.000Z", timestamp: "2026-06-05T09:06:00.000Z", offsetSec: 360, chars: 90, problemId: "two-sum", duringGap: true, label: "Typing burst · 90 chars" }
+      ]
+    });
+    expect(entries).toHaveLength(2);
+    expect(entries.every((e) => e.kind === "event")).toBe(true);
+    expect(entries.map((e) => e.type)).toEqual(["notable_paste", "notable_burst"]);
+    expect(entries[0].label).toBe("Large paste · 412 chars");
+    expect(entries[0].detail).toBe("problem: two-sum");
+    expect(entries[1].duringGap).toBe(true);
+    // They survive the event-type filter the same way other event types do.
+    const onlyBurst = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, eventTypes: ["notable_burst"] });
+    expect(onlyBurst.map((e) => e.type)).toEqual(["notable_burst"]);
+    // And the "events" kind toggle hides them with the rest of the event stream.
+    const noEvents = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, events: false });
+    expect(noEvents).toHaveLength(0);
+  });
 });
 
 describe("filterTimelineLog", () => {
