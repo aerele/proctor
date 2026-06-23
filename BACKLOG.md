@@ -44,7 +44,16 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
 - ☐ **CAM-1** — Auto-collapse the camera widget when the camera is unavailable
   (today it shows a blue "not available" panel with manual collapse/expand). The
   pop-out button that caused false "switched-away" alerts is already removed. *(B5)*
-- ☐ **STUB-1 — APPROVED 2026-06-23 (night-run).** Offenders confirmed
+- ✅ **STUB-1 — PATCHED (live dev bank, 2026-06-24 night-run).** All 3 approved
+  offenders **0626-8, 0626-9, challenge-7** written back via the admin API (HTTP 200,
+  round-trip-verified all 4 langs; `status`/`hiddenTests` preserved → no live-edit
+  409). 0626-8 default now prints `0`, 0626-9 + challenge-7 print `NO`; java fixed to
+  `class Main`. challenge-7 cpp corrected to `return "NO"` (string), NOT the spec's
+  `0` (expected output is YES/NO). **Same-root-cause but DEFERRED (need the maintainer's OK):
+  challenge-3,4,5,6,8,9 JS-`undefined` legs (1-liner each) + challenge-1/2 fully
+  broken (unadapted OUTPUT_PATH, not in active use)** — see night-run log. Original
+  approved scope below.
+- ☑ **STUB-1 — APPROVED 2026-06-23 (night-run).** Offenders confirmed
   (`docs/proposed/stub-return-none-audit.md`): **0626-8, 0626-9, challenge-7** (the
   Python stub crashes with `IndentationError`; JS `solve(){}` → `undefined`;
   JS-`undefined` spans challenge-3..9). Problem stubs are **not version-controlled** —
@@ -114,7 +123,9 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   versioning. Spec: `docs/proposed/bulk-problem-template-io.md`. *(F11 — the
   originally-dropped request.)* **Backend done + committed (`8b21ea7`)** — 3 admin
   endpoints, content-hash dedup, preview/commit, fork-to-`-2`, 23 tests. **Admin UI
-  in progress (night-run).**
+  DONE (`3838e97`)** — multi-select export + upload→preview→commit dialog wired to
+  the live contracts, per-row disposition + override, Apply-gated on dangling refs;
+  26 new tests. **Needs the maintainer's morning browser confirm (export/import) post-deploy.**
 - ✅ **EVAL-1** — Data-driven eval rule registry: one function per rule so a rule
   can be added/removed/retuned without a code change. *Done (Wave 2a, `034491d`):
   12 detectors → registry, thresholds → config data, behaviour-preserving
