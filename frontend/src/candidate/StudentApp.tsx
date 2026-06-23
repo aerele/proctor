@@ -15,6 +15,7 @@ import { chunkIndexBase, clearChunkContinuity, mergeManifest, readChunkHwm, read
 import { MultiProblemWorkspace } from "../coding/MultiProblemWorkspace";
 import { clearSessionDrafts } from "../coding/problemSwitch";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, recordingPreExamState, remainingMs, sessionElapsedAnchorMs, waitingRoomGate } from "../examTime";
+import { canShowSafeExit as computeSafeExit, drainBuffer, endPlanForDrain } from "./drainGate";
 import { candidateIdOf } from "../identity";
 import { normalizeOtpInput } from "../invigilator/gateLogic";
 import { MarkerLayer } from "../markers/MarkerLayer";
@@ -55,6 +56,7 @@ import { resolveRetentionDays } from "../admin/dataLifecycle";
 import { BrowserPreflightGate } from "./panels/BrowserPreflightGate";
 import { useDevtoolsWatch } from "../shell/useDevtoolsWatch";
 import type { PreflightVerdict, ProbeResult } from "../shell/browserPreflight";
+import { RecordingNotSavedPanel } from "./panels/RecordingNotSavedPanel";
 import { ScreenShareErrorPanel } from "./panels/ScreenShareErrorPanel";
 import { UnlockCodePanel } from "./panels/UnlockCodePanel";
 import { WaitingRoomPanel } from "./panels/WaitingRoomPanel";
@@ -140,6 +142,12 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // Recording already stopped but the final end/manifest submit failed — show an
   // inline "Retry submitting" instead of dead-ending in the error state.
   const [endFailed, setEndFailed] = useState(false);
+  // Release-blocker (Tier-1 drain gate): the end path drained but chunks are
+  // STILL pending (the wait aborted before the buffer reached empty — e.g. a
+  // candidate resume click or a server status flip mid-wait). The durable buffer
+  // is intentionally KEPT; we must NOT paint "safe to exit". This drives the
+  // explicit "Your recording is NOT fully saved" state with a kickDrain Retry.
+  const [endNotSaved, setEndNotSaved] = useState(false);
   const [assuranceAccepted, setAssuranceAccepted] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   // Mirror for the attachCameraVideo callback ref (same pattern as statusRef).
@@ -659,8 +667,14 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     const serverStatus: ServerSessionStatus = session.status || "active";
     if (serverStatus === "pending_approval") setGate("pending_approval");
     else if (serverStatus === "locked") setGate("locked");
-    else if (serverStatus === "ended") setGate("ended");
-    else setGate("running");
+    else if (serverStatus === "ended") {
+      // Tier-1: a server "ended" with a live local buffer that still has pending
+      // chunks must NOT flip to the "safe to exit" completion — show the "NOT
+      // saved" state instead and keep the buffer. (On a fresh reload there is no
+      // live recorder yet → canShowSafeExit() is true → today's behavior.)
+      if (canShowSafeExit()) setGate("ended");
+      else enterEndNotSaved(bufferStatus.pendingCount);
+    } else setGate("running");
     // F5 (e2e finding): the warning strip must reflect LIVE state. The server
     // reporting ACTIVE invalidates any lock-episode message ("Your test has
     // been locked…") that would otherwise sit stale over a recovered session.
@@ -734,7 +748,11 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         const serverStatus = applyServerStatus(session);
         setStartIp(session.start_ip || "unavailable");
         setCurrentIp(session.start_ip || "unavailable");
-        if (serverStatus === "ended") {
+        // On a fresh reload there is no live recorder yet, so canShowSafeExit() is
+        // true and this stays today's behavior. applyServerStatus already gated
+        // the gate transition (and would enter "NOT saved" if a live buffer were
+        // somehow pending), so we only mirror the status flip when safe.
+        if (serverStatus === "ended" && canShowSafeExit()) {
           setStatus("ended");
           window.localStorage.removeItem(sessionKey);
           clearSessionDrafts(stored, window.localStorage);
@@ -1127,6 +1145,15 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         // later teardown/end re-collects and fills in any still-in-flight tail).
         collectStintManifest(recorderRef.current?.getManifest(), session.session_id);
         if (serverStatus === "ended") {
+          if (!canShowSafeExit()) {
+            // The server ended the session but the durable buffer still has
+            // pending chunks. Do NOT paint "safe to exit / fully uploaded" — keep
+            // the buffer intact and show the loud "NOT saved" state so the
+            // candidate keeps the tab open. The drainer keeps running; the Retry
+            // control re-checks.
+            enterEndNotSaved(bufferStatus.pendingCount);
+            return;
+          }
           setStatus("ended");
           setGate("ended");
           window.localStorage.removeItem(sessionKey);
@@ -1428,7 +1455,10 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       const session = await resumeSession(sessionConfig.session_id, undefined, personPinned ? { contest: pinnedSlug } : undefined);
       applyExamTime(session.end_at, session.server_now);
       const serverStatus = applyServerStatus(session);
-      if (serverStatus === "ended") {
+      if (serverStatus === "ended" && canShowSafeExit()) {
+        // applyServerStatus already gated the gate; mirror the status flip only
+        // when safe-exit is allowed (no live pending buffer). Otherwise it has
+        // already entered the "NOT saved" state — leave it there.
         setStatus("ended");
         window.localStorage.removeItem(sessionKey);
         clearSessionDrafts(sessionConfig.session_id, window.localStorage);
@@ -1512,48 +1542,82 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     });
   };
 
+  // The single safe-exit predicate (delegates to the pure drainGate module). The
+  // "Done — safe to exit / fully uploaded" completion may render ONLY when this
+  // is true: the recorder is NOT buffering (fallback has no durable buffer, so
+  // today's behavior) OR the live pending-chunk count is exactly zero. EVERY
+  // transition to the "ended" completion is gated on this — including the
+  // status-driven paths — so the UI can never claim "saved" with chunks pending.
+  const canShowSafeExit = () =>
+    computeSafeExit({ bufferMode: recorderRef.current?.getBufferMode(), pendingCount: bufferStatus.pendingCount });
+
+  // Shared handling when the end path drained but chunks are STILL pending. The
+  // durable buffer is intentionally KEPT (no clearBuffer), we do NOT submit the
+  // end / show the completion, and we drop into the explicit "NOT saved" state.
+  // Emits end_blocked_pending so admin telemetry can later surface it.
+  const enterEndNotSaved = (pending: number) => {
+    const event = createUiEvent("end_blocked_pending", { pending_count: pending });
+    addEvent(event);
+    if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
+    setEndNotSaved(true);
+    setEndFailed(false);
+    setEndRequested(false);
+    // Drop out of the transient "ending"/"ending_draining" status back to a
+    // recoverable error surface so the running view's "NOT saved" panel renders
+    // (and the End panel is gone). The buffer + recorder handle stay intact.
+    setStatus("error");
+    setError("Your recording is not fully saved yet — some screen footage has not finished uploading.");
+  };
+
   // Tier-1 END-OF-TEST WAIT GATE: in buffering mode, BLOCK close while the
   // session's pending buffer is non-empty. The recorder's drainer keeps running
   // after recorder.stop() (it is gated by its own dispose flag, not stopping),
   // so we just kick it and poll until pendingCount hits 0 — onBufferChange live-
-  // updates the overlay counters meanwhile. Returns when drained (or the buffer
-  // degraded to fallback mid-wait, in which case the gate releases = floor).
-  // FALLBACK mode never enters here (caller checks mode first), so the end path
-  // stays exactly today's behavior when buffering is off.
-  const waitForBufferDrain = async () => {
+  // updates the overlay counters meanwhile. Returns {drained,pending}: drained
+  // is true ONLY when the buffer truly reached empty (or degraded to fallback,
+  // the floor); if the wait aborts (status flipped away mid-wait with chunks
+  // still pending), drained is false so callers never claim "saved".
+  // FALLBACK mode never enters the wait (returns drained:true up front), so the
+  // end path stays exactly today's behavior when buffering is off.
+  const waitForBufferDrain = async (): Promise<{ drained: boolean; pending: number }> => {
     const recorder = recorderRef.current;
-    if (!recorder || recorder.getBufferMode() !== "buffering") return;
-    let initial = await recorder.getBufferStatus();
-    if (initial.mode !== "buffering" || initial.pendingCount <= 0) return;
+    // No recorder / fallback mode never had a durable buffer — drained by the
+    // floor, identical to today's pre-Tier-1 end path (callers proceed normally).
+    if (!recorder || recorder.getBufferMode() !== "buffering") return { drained: true, pending: 0 };
+    const initial = await recorder.getBufferStatus();
+    // Already empty at entry → drained, no wait, no overlay flicker.
+    if (initial.mode !== "buffering" || initial.pendingCount <= 0) {
+      return { drained: true, pending: Math.max(0, initial.pendingCount) };
+    }
     setStatus("ending_draining");
     {
       const event = createUiEvent("end_wait_for_drain", { pending_count: initial.pendingCount, pending_bytes: initial.pendingBytes });
       addEvent(event);
       if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
     }
-    try {
-      // Poll until empty. The drainer (online + 12s timer + post-success kicks)
-      // owns the actual uploads; we kick once per poll as a belt-and-braces wake.
-      // The wait is intentionally long (the candidate must not close while
-      // footage is still pending — the overlay says "tell your invigilator"),
-      // but it BREAKS if a proctor admin-ends/locks the session mid-wait (the
-      // recorder self-stops + onStatusChange flips status away from
-      // ending_draining), so we never orphan an endless poll after the UI moved on.
-      for (let guard = 0; guard < 100_000; guard += 1) {
-        if (statusRef.current !== "ending_draining") break;
-        recorder.kickDrain();
-        const current = await recorder.getBufferStatus();
-        if (current.mode !== "buffering" || current.pendingCount <= 0) {
-          initial = current;
-          break;
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      }
-    } finally {
-      const event = createUiEvent("end_drain_complete", { pending_count: initial.pendingCount });
-      addEvent(event);
-      if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
-    }
+    // The drain loop lives in the pure drainGate module so the "abort on status
+    // change ⇒ drained:false" decision is unit-tested in isolation. It kicks the
+    // recorder's drainer (online + 12s timer + post-success kicks own the actual
+    // uploads) and polls until empty. It ABORTS — drained:false — if status flips
+    // away from "ending_draining" mid-wait while chunks are still pending: a
+    // proctor admin-end/lock self-stops the recorder + flips status, but so does
+    // a candidate "try again"/resume click (resumeRecording) or a server status
+    // flip — and NONE of those mean the footage was saved.
+    const result = await drainBuffer(recorder, {
+      getStatus: () => statusRef.current,
+      sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+    });
+    // Emit the end-of-wait event reflecting REALITY: end_drain_complete only when
+    // the buffer truly drained (or fell back to the floor); end_drain_aborted —
+    // carrying the real residual pending count — when it did not. Callers gate on
+    // result.drained, never on this event firing.
+    const event = createUiEvent(result.drained ? "end_drain_complete" : "end_drain_aborted", {
+      pending_count: result.pending,
+      drained: result.drained
+    });
+    addEvent(event);
+    if (sessionId) void sendEvents(sessionId, [event]).catch(() => undefined);
+    return result;
   };
 
   const stop = async () => {
@@ -1564,6 +1628,7 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     setStatus("ending");
     setError("");
     setEndFailed(false);
+    setEndNotSaved(false);
     let recorderStopped = false;
     try {
       if (sessionId) {
@@ -1574,7 +1639,16 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       // Tier-1: BLOCK on the buffer drain BEFORE endSession (buffering mode
       // only; no-op in fallback). The final chunks landed in `pending` during
       // recorder.stop(); we do not call endSession until they are all in GCS.
-      await waitForBufferDrain();
+      const drain = await waitForBufferDrain();
+      const plan = endPlanForDrain(drain);
+      if (plan.enterNotSaved) {
+        // The drain ABORTED with chunks still pending (status flipped mid-wait —
+        // e.g. a candidate resume click or a server flip). The plan says: do NOT
+        // submit the end, do NOT clear the buffer, do NOT paint "safe to exit".
+        // Keep the durable buffer and drop into the loud "NOT saved" state.
+        enterEndNotSaved(plan.pending);
+        return;
+      }
       // F1: the submitted manifest covers EVERY stint of this session — the
       // banked prior stints merged with the final recorder's own list. After the
       // drain wait the recorder's manifest includes the drained chunks too.
@@ -1618,11 +1692,21 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   const retryEnd = async () => {
     setStatus("ending");
     setError("");
+    // Wake the recorder's drainer immediately so a stuck-but-now-uploadable chunk
+    // gets a shove before we re-poll (the "NOT saved" Retry control's kick).
+    recorderRef.current?.kickDrain();
     try {
       // Tier-1: re-drain BEFORE re-submitting end (buffering mode only). The
       // durable buffer survived the failed first attempt, so a stuck chunk gets
       // another chance and the gate releases only at empty.
-      await waitForBufferDrain();
+      const drain = await waitForBufferDrain();
+      const plan = endPlanForDrain(drain);
+      if (plan.enterNotSaved) {
+        // Still not drained — re-enter the "NOT saved" state. Buffer stays intact,
+        // end is NOT submitted, completion is NOT shown.
+        enterEndNotSaved(plan.pending);
+        return;
+      }
       if (sessionId) {
         await endSession({ sessionId, manifest, assuranceAccepted });
       }
@@ -1635,6 +1719,7 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
         await clearChunkBuffer(sessionId);
       }
       setEndFailed(false);
+      setEndNotSaved(false);
       setStatus("ended");
       setGate("ended");
       setEndRequested(false);
@@ -1727,19 +1812,35 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   }
 
   if (gate === "ended" || status === "ended") {
+    // INVARIANT backstop: the "safe to exit / fully uploaded" reassurance renders
+    // ONLY when the buffer is provably empty (or fallback). If we somehow reached
+    // the ended branch with a live buffer still holding pending chunks (any path),
+    // paint the loud "NOT saved" state instead — never a green checkmark.
+    const safeExit = canShowSafeExit();
     return (
       <Shell padTop={shellPadTop}>
         {shellChrome}
         {identity ? <IdentityCard identity={identity} /> : null}
-        <section className="mx-auto max-w-xl rounded-lg border border-accent/30 bg-accent/5 p-6 text-center shadow-subtle">
-          <CheckCircle2 size={28} className="mx-auto text-accent" />
-          <h1 className="mt-3 text-2xl font-semibold text-ink">Done — it&rsquo;s safe to exit</h1>
-          <p className="mt-2 text-sm leading-6 text-muted">
-            Your proctoring session is complete and the recording has been fully uploaded for review. It is now
-            safe to exit fullscreen and close this tab.
-          </p>
-          {manifest.length ? <p className="mt-3 text-xs text-muted">{manifest.length} recording segment(s) uploaded.</p> : null}
-        </section>
+        {safeExit ? (
+          <section className="mx-auto max-w-xl rounded-lg border border-accent/30 bg-accent/5 p-6 text-center shadow-subtle">
+            <CheckCircle2 size={28} className="mx-auto text-accent" />
+            <h1 className="mt-3 text-2xl font-semibold text-ink">Done — it&rsquo;s safe to exit</h1>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              Your proctoring session is complete and the recording has been fully uploaded for review. It is now
+              safe to exit fullscreen and close this tab.
+            </p>
+            {manifest.length ? <p className="mt-3 text-xs text-muted">{manifest.length} recording segment(s) uploaded.</p> : null}
+          </section>
+        ) : (
+          <section className="mx-auto max-w-xl">
+            <RecordingNotSavedPanel
+              pendingCount={bufferStatus.pendingCount}
+              busy={status === "ending" || status === "ending_draining"}
+              onRetry={() => void retryEnd()}
+              proctorPhone={takeHome ? proctorPhone : undefined}
+            />
+          </section>
+        )}
       </Shell>
     );
   }
@@ -2155,14 +2256,26 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
             />
           ) : null}
 
-          {error && !endFailed ? (
+          {error && !endFailed && !endNotSaved ? (
             <div className="mt-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
               {error}
             </div>
           ) : null}
 
+          {/* Release-blocker (Tier-1 drain gate): the end drained but chunks are
+              STILL pending — loud "NOT saved" state, durable buffer kept, Retry
+              re-kicks the drainer. Takes precedence over the endFailed panel. */}
+          {endNotSaved ? (
+            <RecordingNotSavedPanel
+              pendingCount={bufferStatus.pendingCount}
+              busy={status === "ending" || status === "ending_draining"}
+              onRetry={() => void retryEnd()}
+              proctorPhone={takeHome ? proctorPhone : undefined}
+            />
+          ) : null}
+
           {/* Recording stopped but the final submit failed — inline retry, no reload. */}
-          {endFailed ? (
+          {endFailed && !endNotSaved ? (
             <EndRetryPanel error={error} busy={status === "ending" || status === "ending_draining"} onRetry={() => void retryEnd()} />
           ) : null}
 
