@@ -39,7 +39,7 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
 - ☐ **CAM-1** — Auto-collapse the camera widget when the camera is unavailable
   (today it shows a blue "not available" panel with manual collapse/expand). The
   pop-out button that caused false "switched-away" alerts is already removed. *(B5)*
-- ☐ **STUB-1 — BLOCKED, needs the owner.** Offenders confirmed
+- ☐ **STUB-1 — BLOCKED, needs owner sign-off.** Offenders confirmed
   (`docs/proposed/stub-return-none-audit.md`): **0626-8, 0626-9, challenge-7** (the
   Python stub actually crashes with `IndentationError`; JS `solve(){}` → `undefined`;
   JS-`undefined` spans challenge-3..9). **Wave-2a finding:** problem stubs are **not

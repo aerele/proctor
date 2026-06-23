@@ -1,9 +1,9 @@
 # ALERT-1 — Candidate alert feedback + per-user/test alert suppression
 
 **Status:** Proposed (code-grounded design). Roadmap item **ALERT-1** (v1.1).
-**Source intent:** the owner, 2026-06-23 — "on an alert shown to the candidate, add
-a SECOND button (Option A: I understand / I won't repeat; Option B: this alert is
-wrong / unfair / a bug). Option B raises a NEW dispute alert on the admin
+**Source intent:** owner request, 2026-06-23 — "on an alert shown to the candidate,
+add a SECOND button (Option A: I understand / I won't repeat; Option B: this alert
+is wrong / unfair / a bug). Option B raises a NEW dispute alert on the admin
 dashboard. The admin can SUPPRESS that alert for that user for that test, using
 the SAME suppression machinery as the existing fullscreen/anomaly exemptions. It
 also feeds platform improvement."
@@ -561,7 +561,7 @@ lines are additive and byte-stable).
 
 ---
 
-## 10. Open questions for the owner
+## 10. Open questions for the maintainer
 
 1. **Suppress vs. enforcement layering (§6)** — confirmed-intended that
    suppressing `fullscreen_enforcement` alerts does NOT stop the lock (admin must

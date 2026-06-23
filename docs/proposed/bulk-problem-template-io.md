@@ -1,7 +1,7 @@
 # BANK-1 — Bulk export/import of problems + templates
 
 **Status:** Proposed (code-grounded design). Roadmap item **BANK-1** (v1.1).
-**Source intent:** the owner voice memo 2026-06-19 17:18Z (captured plan:
+**Source intent:** owner request 2026-06-19 (captured plan:
 `junk/nightrun-archive/feature-bulk-export-import-plan.md`).
 **Author:** the agent, 2026-06-23.
 
@@ -184,9 +184,9 @@ huge we revisit, but JSON is correct for v1.
 When the export selection includes a template, the bundle **embeds the full
 content of every problem that template references** (resolved through the
 template's `problems[]` → each `problem_id` → `getBankProblem`). This realizes
-the owner's "select a template, all its questions download too." A problem already
-present in the bundle from a direct selection is embedded once (dedupe by
-`portable_id` during bundle assembly). the owner can also export problems alone
+the "select a template, all its questions download too" requirement. A problem
+already present in the bundle from a direct selection is embedded once (dedupe by
+`portable_id` during bundle assembly). Problems can also be exported alone
 (no template) — the `templates` array is then empty.
 
 ### 2.2 Why templates reference problems by `portable_id`
@@ -210,7 +210,7 @@ would 400 anyway; we surface it cleanly in the preview instead).
 
 ## 3. Dedup + cross-instance versioning (the conflict model)
 
-This is the heart of the owner's ask: *"download from A → change on B → download
+This is the heart of the request: *"download from A → change on B → download
 again → upload back to A. Probably a key and a -1, or it asks. Take that decision
 and go ahead."*
 
@@ -231,7 +231,7 @@ For each incoming item, find the local doc with the same `portable_id`
 | **A. New** | No local doc with this `portable_id` | **create** | Nothing to conflict with. |
 | **B. Identical** | Local exists, `content_hash` equal | **skip (dedup)** | True no-op. This is "handle duplications" — re-importing an unchanged round-trip does nothing. |
 | **C. Incoming differs, local unchanged-since-export** | Local exists, differs, and the bundle says it was exported FROM a state equal to the local content | **update in place** (default yes) | The importer is strictly newer; A never touched it. Safe to advance. |
-| **D. Divergent** | Local exists, differs, and the local content is NOT what the bundle was forked from | **fork** → import as a NEW problem with a fresh slug (`<id>-2`, `-3`…) and a fresh `portable_id`, annotated "forked from `<portable_id>`" | Both sides edited since the fork — overwriting would lose A's edits. This is the owner's "-1 kind of thing." |
+| **D. Divergent** | Local exists, differs, and the local content is NOT what the bundle was forked from | **fork** → import as a NEW problem with a fresh slug (`<id>-2`, `-3`…) and a fresh `portable_id`, annotated "forked from `<portable_id>`" | Both sides edited since the fork — overwriting would lose A's edits. This is the "-1 kind of thing" from the request. |
 
 ### 3.2 How we tell C from D without a stored version/lineage
 
@@ -255,7 +255,7 @@ fork). With no stored lineage, we use a **base-hash carried in the bundle**:
       bundle forked from → **C (update)**. Otherwise → **D (fork)**.
 
 > **Honest simplification for v1 (recommended):** one-deep `parent_hash` covers
-> the exact scenario the owner described (A→B→A) correctly: B's bundle carries
+> the exact scenario described above (A→B→A) correctly: B's bundle carries
 > `parent_hash` = the hash B imported from A; if A is untouched, `local_hash` on A
 > equals that `parent_hash` → C (update A in place); if A *also* changed,
 > `local_hash != parent_hash` → D (fork). It does **not** attempt full multi-hop
@@ -318,7 +318,7 @@ Import is **two-phase**:
    commit can detect a changed bundle and refuse). Applies the resolved actions.
 
 The preview is the "it asks." The default plan is the "automatic and safe." This
-satisfies both halves of the owner's "-1 or it asks" in one flow.
+satisfies both halves of the "-1 or it asks" requirement in one flow.
 
 ### 3.6 What the default is, stated plainly
 
@@ -416,8 +416,8 @@ A new `frontend/src/admin/BankImportDialog.tsx`:
 4. Apply → `bankImportCommit(password, {bundle, overrides, preview_token})` →
    show the applied result, then `load()` both panels.
 
-This dialog IS the owner's "it asks." Default plan shown; he clicks Apply to take
-the automatic-safe path, or tweaks any row first.
+This dialog IS the "it asks" path. Default plan shown; the admin clicks Apply to
+take the automatic-safe path, or tweaks any row first.
 
 ### 5.4 `frontend/src/api.ts`
 
@@ -505,8 +505,8 @@ Each phase: build → `npm test` (backend + frontend) → orchestrator verifies 
 - **Phase 4 — frontend.** Multi-select on both panels, export download,
   `BankImportDialog` with the override table, `api.ts` fns + demo stubs,
   `types.ts`. Vitest for the client resolver-display mapping + a render test of
-  the dialog. Then the mandated browser E2E (per
-  `proctor_e2e_test_docs_mandate`): export a real template, re-import to a
+  the dialog. Then the mandated browser E2E (the project's persona-driven,
+  screenshot-documented E2E pass): export a real template, re-import to a
   scratch instance, screenshot the preview + applied result.
 
 - **Phase 5 — docs + triple review.** `docs/features/` reference page; mark this
@@ -516,7 +516,7 @@ Each phase: build → `npm test` (backend + frontend) → orchestrator verifies 
 
 ---
 
-## 8. Open questions for the owner
+## 8. Open questions for the maintainer
 
 1. **Multi-hop lineage:** v1 uses one-deep `parent_hash` (A→B→A is exact;
    deeper chains degrade to *fork*, which is safe). Acceptable, or do you want

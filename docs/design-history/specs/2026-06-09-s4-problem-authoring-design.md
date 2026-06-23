@@ -1,7 +1,7 @@
 # S4 — Problem Authoring (question bank + tests + limits + scoring) — Design
 
 **Status:** READY (night-run stretch item 4; scope locked in `night-run/MORNING-NOTES.md`).
-**Author:** Ram. **Date:** 2026-06-09.
+**Author:** design subagent. **Date:** 2026-06-09.
 **Parent design:** `docs/design-history/specs/2026-06-09-own-editor-design.md` (§3 Slice 2, §8 backlog item 4).
 **Paired plan:** `docs/design-history/plans/2026-06-09-s4-problem-authoring.md`.
 

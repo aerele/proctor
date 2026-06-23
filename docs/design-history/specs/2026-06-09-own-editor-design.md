@@ -1,7 +1,7 @@
 # Own Editor — self-hosted coding-contest platform (design)
 
 **Status:** DRAFT — awaiting the operator's review (the operator stepped away 2026-06-09; this is the restartable source of truth).
-**Author:** Ram. **Date:** 2026-06-09.
+**Author:** design subagent. **Date:** 2026-06-09.
 **Related:** `RESUME.md`, `TODO-admin-polish.md`, the hiring-round notes (`hiring-round-software-developer-internship-summary-2026-06-06.md`).
 
 ---

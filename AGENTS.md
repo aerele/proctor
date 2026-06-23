@@ -9,17 +9,17 @@ hire-evaluation platform. Candidates take coding exams in an in-app own-editor
 (no external HackerRank); the platform records screen + camera + keystrokes,
 enforces anti-cheat (fullscreen, tab/focus, devtools heuristics), and runs a
 deterministic talent + integrity **evaluation** to shortlist genuine candidates
-for a pen-and-paper round. Public repo: `github.com/aerele/proctor`. GCP project
-`your-gcp-project-id` (region `asia-south1`/Mumbai, currency INR).
+for a pen-and-paper round. Public repo: `github.com/aerele/proctor`. Deploys to an
+isolated GCP project (`your-gcp-project-id`; region `asia-south1` is an example).
 
 Stack: `backend/` (Node ESM API, Cloud Run `proctor-api`), `frontend/`
 (React/Vite/TS, nginx static `proctor-web` — build runs LOCALLY, image just
 serves `dist`), `eval` (deterministic talent+integrity engine). npm workspace.
 
 ## People
-- **the owner** (`the owner`) — owner / product. Decides scope and gives
-  the verdict on what ships. Often directs by voice; capture precisely.
-- **the agent** — the agent (you). Orchestrate, build, verify. You **stand in the owner's
+- **The project owner / maintainer** — owner / product. Decides scope and gives
+  the verdict on what ships.
+- **The agent** (you). Orchestrate, build, verify. You **stand in the owner's
   place**: the bar is "it actually works end-to-end," not "tasks were dispatched."
 
 ## Where to read (in order)
@@ -33,14 +33,14 @@ serves `dist`), `eval` (deterministic talent+integrity engine). npm workspace.
    for work not yet built.
 
 ## Session start
-1. `cd the repo` — shell discipline, first tool call.
+1. Work from the repo root.
 2. Read this file, then `ROADMAP.md` + `BACKLOG.md`.
 3. **Deploys:** proctor serves LIVE exams. Never a blind deploy — staged
    `--no-traffic --tag` canary + preflight, verify on the tag URL, then cut
    traffic; keep the prior revision at 0% for instant rollback. See `docs/DEPLOY.md`.
-4. **Before any GitHub push:** run the PII audit (`the workspace/pii-audit/scan.sh
-   the repo`) and review the report. Push only if clean / findings
-   understood. (Standing rule in `the workspace/AGENTS.md`.)
+4. **Before any GitHub push:** run your PII-audit tooling over the working tree
+   and full history, and review the report. Push only if clean / findings
+   understood.
 
 ---
 
@@ -56,7 +56,7 @@ doc, and nothing reconciles it). This discipline is non-negotiable:
    - Do **not** track work anywhere else: no scratch TODO/triage/backlog files, no
      "it's in the chat," and never claim "tracked as GitHub issues" unless a real
      issue exists.
-2. **Capture-on-ask.** The moment the owner asks for something, write it into the
+2. **Capture-on-ask.** The moment a request lands, write it into the
    right doc immediately — a real edit, not a mental note. Context is lost on
    compaction; that is exactly how things slip. A big request gets a spec under
    `docs/proposed/` and a link.
@@ -71,9 +71,8 @@ doc, and nothing reconciles it). This discipline is non-negotiable:
 
 ---
 
-## HOW THIS AGENT WORKS — operating model (the owner's standing instruction)
-This is how the owner wants the agent to run **every** substantial task here (stated
-2026-06-23; he may later adopt it across all projects):
+## HOW THIS AGENT WORKS — operating model
+This is the operating model for **every** substantial task here:
 
 1. **Orchestrate; don't do all the work in the main context.** The main loop
    plans, dispatches, and verifies. Push as much actual work as possible to
@@ -88,21 +87,18 @@ This is how the owner wants the agent to run **every** substantial task here (st
    units over a few big ones.
 4. **Verify everything — don't rubber-stamp.** Read the diffs, run the
    build/tests yourself, and check behaviour. For UI/behavioural work, verify in a
-   real browser: the owner keeps a **debug Chrome on port 9222** (chrome-devtools
-   MCP) for this — use it to confirm sub-agent work end-to-end. Green-by-assertion
-   is not green; evidence is.
+   real browser: use a debug browser on port 9222 (chrome-devtools MCP) to confirm
+   sub-agent work end-to-end. Green-by-assertion is not green; evidence is.
 5. **Keep the orchestrator's context clear.** Delegate reading/coding/testing to
    sub-agents; keep only conclusions in the main context. When things are in order
-   and rolling, **proactively remind the owner to compact** so context stays clean
-   and durable state is written down first.
+   and rolling, **compact proactively** so context stays clean and durable state is
+   written down first.
 6. **Durability first.** Decisions, plans, and progress live in the canonical docs
    (above), not only in context — so a fresh session can resume from disk.
 
-(This generalises `the workspace/AGENTS.md`'s operating model + build pipeline; that
-file holds the full design→harden→build→review pipeline and the right-sized-model
-guidance. Read it for substantial features.)
+(For substantial features, follow a full design→harden→build→review pipeline and
+right-size the model per task — the orchestrator stays in the loop between phases
+and owns the end-to-end result.)
 
 ## Project protocols
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- Output mode: CLI by default; Telegram is input-only. Never auto-switch modes.
-- Multi-part replies & handoff: follow `the workspace/AGENTS.md`.

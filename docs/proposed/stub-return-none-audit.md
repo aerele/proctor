@@ -1,9 +1,9 @@
 # Stub "returns none" audit — STUB-1 diagnostic (2026-06-23)
 
-**Question (the owner):** of the stubs we ship, which return `none` vs which return `zero` when run against their sample test(s)? The 2-3 bad questions from the 2026-06-19 dry-run are the ones that return **none**.
+**Question:** of the stubs we ship, which return `none` vs which return `zero` when run against their sample test(s)? The 2-3 bad questions from the 2026-06-19 dry-run are the ones that return **none**.
 
 **Method.** Pulled every published problem (31) from the live dev bank via
-`GET /api/admin/problem?id=<id>` (`your-gcp-project-id`, `proctor_problems`
+`GET /api/admin/problem?id=<id>` (the dev project, `proctor_problems`
 collection). 16 carry per-language stubs. Executed each stub **exactly as the
 exec harness does** — `backend/src/routes/exec.mjs:239` `buildExecItems` runs the
 candidate source as-is with the test's `input` on stdin (SQL composes
@@ -62,7 +62,7 @@ contest — still broken, flagged below.)
    output is a STRING ("YES"), the author seeded `return ""` rather than `return 0`,
    so the placeholder *is* none. **NONE in python, js, java.**
 
-That's the **2-3 bad questions** the owner remembers: **0626-8, 0626-9, challenge-7**.
+That's the **2-3 bad questions** flagged from the dry-run: **0626-8, 0626-9, challenge-7**.
 
 ## Why "none" vs "zero" (root cause)
 

@@ -1,7 +1,7 @@
 # S2 — Roster upload + unique-ID-confirm login + room dropdown (design)
 
 **Status:** READY — night-run stretch item 2 (see `night-run/MORNING-NOTES.md` §Scope).
-**Author:** Ram. **Date:** 2026-06-09.
+**Author:** design subagent. **Date:** 2026-06-09.
 **Parent design:** `docs/design-history/specs/2026-06-09-own-editor-design.md` §6 + §8 ("Compulsory roster upload + unique-ID-confirm login", "Room number = pre-fed dropdown + Other").
 **Plan:** `docs/design-history/plans/2026-06-09-s2-roster-login.md`.
 

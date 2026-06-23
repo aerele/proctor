@@ -476,13 +476,13 @@ self-contained slice.
 
 ---
 
-## 9. ⚠️ OPEN QUESTION FOR THE OWNER — F14 vs F13
+## 9. ⚠️ OPEN QUESTION — F14 vs F13
 
 This work is **F14 (EVAL-1: data-driven rule registry)** — the refactor specced
-above. the owner said "**F14 done now**," but the backlog flags a real ambiguity
-(`BACKLOG.md:94-97`, `ROADMAP.md:86-88`): he may have meant **F13 — automatic AI
+above. The directive was "**F14 done now**," but the backlog flags a real ambiguity
+(`BACKLOG.md:94-97`, `ROADMAP.md:86-88`): it may have meant **F13 — automatic AI
 verification after every test (task #144)**, a *different* feature. Scoping both so
-he can confirm which one to pull into v1.1:
+the maintainer can confirm which one to pull into v1.1:
 
 - **F14 / EVAL-1 (this spec).** Refactor the deterministic eval into a rule
   registry so rules are add/remove-able as data. Behavior-preserving. ~Phase 0+1.
