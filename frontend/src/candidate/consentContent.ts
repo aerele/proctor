@@ -2,7 +2,7 @@
 //
 // ┌─────────────────────────────────────────────────────────────────────────┐
 // │  SINGLE SWAPPABLE SOURCE OF TRUTH for the candidate Terms & Conditions    │
-// │  and Privacy Policy copy. Karthi: to bless / update the wording, edit     │
+// │  and Privacy Policy copy. To update the wording, edit                     │
 // │  ONLY this file. Nothing else needs to change.                            │
 // └─────────────────────────────────────────────────────────────────────────┘
 //
@@ -28,10 +28,10 @@
 //                    invigilator". Empty-safe.
 //
 // Content draft source: internal design notes (privacy/T&C drafts).
-// Karthi-approved factual values filled 2026-06-22 (legal entity, governing
+// Approved factual values filled 2026-06-22 (legal entity, governing
 // law / jurisdiction, effective date). The grievance/privacy contact is set to
-// the RECOMMENDED address privacy@aerele.in — pending Karthi's confirmation of
-// the live mailbox at sign-off. One optional disclosure (storage region) is
+// the grievance/privacy address privacy@aerele.in.
+// One optional disclosure (storage region) is
 // left as a clearly-marked fill-field; any remaining [SQUARE BRACKET] renders
 // verbatim so a missed placeholder is impossible to miss.
 

@@ -8,7 +8,7 @@
 // create unbounded GCS objects, and amplify Firestore writes. This limiter caps
 // each session's per-endpoint request rate.
 //
-// TUNING PRINCIPLE (Karthi's decision #4): a sane DEFAULT that NEVER throttles
+// TUNING PRINCIPLE (product decision): a sane DEFAULT that NEVER throttles
 // real candidate data, but blocks a DoS. Caps are derived from the ACTUAL client
 // emission rates with generous burst headroom, so a legitimate candidate — even
 // one reconnecting and flushing a backlog — never trips them; only a scripted

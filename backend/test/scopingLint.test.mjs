@@ -51,7 +51,7 @@ const CHOKEPOINT_FILE = "contests.mjs";
 // routes/adminSessions.mjs. Each step re-pins the allowlist IN ITS OWN COMMIT
 // (the count bump IS the review flag) via the SAFER move-with-pin default — these
 // three stay RAW (request-supplied slug semantics); migrating them through
-// scopedQuery to an empty allowlist is a separate, Karthi-gated decision.
+// scopedQuery to an empty allowlist is a separate, operator-gated decision.
 const RAW_FILTER_ALLOWLIST = { "routes/session.mjs": 1, "routes/adminSessions.mjs": 3 };
 
 test("scoping lint: contest_slug filters = pinned legacy sites + exactly one chokepoint", () => {
