@@ -114,6 +114,38 @@ describe("buildNotableEditorMarkers — keystroke bursts", () => {
     expect(markers.filter((m) => m.kind === "keystroke_burst")).toHaveLength(0);
     expect(markers.filter((m) => m.kind === "large_paste")).toHaveLength(1);
   });
+
+  it("M1: mixed problem_id keystrokes inside one window do NOT make a cross-problem burst", () => {
+    // 40 strokes on problem A then 40 on problem B, all 20ms apart so all 80 fall
+    // inside ONE 2000ms window (~1580ms). A GLOBAL window would sum 40+40=80 and
+    // emit a FAKE burst mis-attributed to A. Partitioned per problem_id, neither
+    // bucket reaches BURST_MIN_CHARS (80), so there must be ZERO bursts — matching
+    // the backend addToBurst per-pid partitioning (evaluationReplay.mjs).
+    const half = NOTABLE.BURST_MIN_CHARS / 2; // 40
+    const events: EditorEventItem[] = [];
+    for (let i = 0; i < half; i += 1) {
+      events.push(ev({ type: "editor_insert", problem_id: "prob-A", timestamp: at(10, i * 20), detail: { insertedLen: 1 } }));
+    }
+    for (let i = 0; i < half; i += 1) {
+      events.push(ev({ type: "editor_insert", problem_id: "prob-B", timestamp: at(10, (half + i) * 20), detail: { insertedLen: 1 } }));
+    }
+    const markers = build(events);
+    expect(markers.filter((m) => m.kind === "keystroke_burst")).toHaveLength(0);
+  });
+
+  it("M1: per-problem windows still each fire — two problems each typing a full burst → two bursts", () => {
+    // Each problem gets BURST_MIN_CHARS strokes within its own window, the two
+    // runs interleaved in time. Per-problem partitioning yields one burst PER
+    // problem (and labels each with its own problem_id).
+    const events: EditorEventItem[] = [];
+    for (let i = 0; i < NOTABLE.BURST_MIN_CHARS; i += 1) {
+      events.push(ev({ type: "editor_insert", problem_id: "prob-A", timestamp: at(10, i * 10), detail: { insertedLen: 1 } }));
+      events.push(ev({ type: "editor_insert", problem_id: "prob-B", timestamp: at(10, i * 10 + 5), detail: { insertedLen: 1 } }));
+    }
+    const bursts = build(events).filter((m) => m.kind === "keystroke_burst");
+    expect(bursts).toHaveLength(2);
+    expect(new Set(bursts.map((b) => b.problemId))).toEqual(new Set(["prob-A", "prob-B"]));
+  });
 });
 
 describe("buildNotableEditorMarkers — placement, ordering, gaps, ids", () => {
@@ -205,5 +237,34 @@ describe("buildNotableEditorMarkers — degenerate inputs + cap", () => {
       ev({ type: "editor_paste", timestamp: at(i), detail: { len: 100 + i } })
     );
     expect(build(events).length).toBeLessThanOrEqual(MAX_NOTABLE_MARKERS);
+  });
+
+  it("M2: at the cap, pastes are retained over bursts despite bursts' larger char counts", () => {
+    // MAX small pastes (31 chars each — the STRONGER signal) PLUS many keystroke
+    // bursts (each summing 80 chars, far more than a paste). A naive chars-only
+    // cap would evict EVERY paste in favour of the higher-char bursts. The tiered
+    // cap must keep all MAX pastes and drop the bursts.
+    const events: EditorEventItem[] = [];
+    // MAX large_pastes at distinct times, each a single 31-char foreign paste.
+    for (let i = 0; i < MAX_NOTABLE_MARKERS; i += 1) {
+      events.push(ev({ type: "editor_paste", problem_id: `p${i}`, timestamp: at(i), detail: { len: 31 } }));
+    }
+    // 5 full bursts on a separate problem, well after the pastes: each is 80
+    // single-char strokes 10ms apart (one burst per BURST_MIN_CHARS-worth).
+    for (let b = 0; b < 5; b += 1) {
+      for (let k = 0; k < NOTABLE.BURST_MIN_CHARS; k += 1) {
+        events.push(ev({
+          type: "editor_insert",
+          problem_id: "burst-prob",
+          timestamp: at(1000 + b * 5, k * 10),
+          detail: { insertedLen: 1 }
+        }));
+      }
+    }
+    const markers = build(events);
+    expect(markers).toHaveLength(MAX_NOTABLE_MARKERS);
+    // Every kept marker is a paste; not a single burst survived the cap.
+    expect(markers.every((m) => m.kind === "large_paste")).toBe(true);
+    expect(markers.filter((m) => m.kind === "keystroke_burst")).toHaveLength(0);
   });
 });

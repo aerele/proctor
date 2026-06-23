@@ -73,6 +73,15 @@ function problemIdOf(event: EditorEventItem): string | null {
   return id == null || id === "" ? null : String(id);
 }
 
+// M2: cap-ranking tier — higher wins a seat first. Pastes (foreign source
+// appearing in the editor) are the stronger integrity signal than a fast typing
+// burst, so they outrank bursts regardless of the bursts' larger summed char
+// count. large_paste and paste share a tier (char count tiebreaks within it);
+// keystroke_burst sits below both.
+function notabilityTier(kind: NotableMarkerKind): number {
+  return kind === "keystroke_burst" ? 0 : 1;
+}
+
 // Classify an editor-event stream into notable paste/keystroke markers placed on
 // the test-relative scale.
 //
@@ -143,37 +152,65 @@ export function buildNotableEditorMarkers(params: {
   // chars of single-char editor_inserts >= BURST_MIN_CHARS. Each crossing emits
   // ONE burst marker anchored at the window's FIRST keystroke, then the window
   // resets so one long typing run yields one marker per BURST_MIN_CHARS-worth.
-  const keystrokes = sorted
-    .map((event, index) => ({ event, index, ms: Date.parse(event.timestamp || "") }))
-    .filter((k) => k.event.type === "editor_insert" && insertedChars(k.event) === 1 && Number.isFinite(k.ms));
-
-  let windowStart = 0; // index into `keystrokes` of the current window's first stroke
-  let windowChars = 0;
-  let burstSeq = 0;
-  for (let i = 0; i < keystrokes.length; i += 1) {
-    // Advance the window start until [windowStart, i] fits inside BURST_WINDOW_MS.
-    while (keystrokes[i].ms - keystrokes[windowStart].ms > NOTABLE.BURST_WINDOW_MS) {
-      windowChars -= 1; // each kept stroke contributed exactly 1 char
-      windowStart += 1;
+  //
+  // M1: the window is PER-PROBLEM, matching the backend detector
+  // (evaluationReplay.mjs addToBurst — a separate burstWin array keyed by pid).
+  // A single global window would sum the tail of problem A and the head of
+  // problem B that fall within BURST_WINDOW_MS into a FAKE burst mis-attributed
+  // to A. We partition keystrokes by problem_id and walk an independent sliding
+  // window per bucket; a null/empty problem_id is its own bucket. The kept-order
+  // is preserved by anchoring each emitted burst at its real event index, then
+  // re-sorting at the end (return is by offsetSec regardless).
+  const keystrokesByProblem = new Map<string, Array<{ event: EditorEventItem; index: number; ms: number }>>();
+  sorted.forEach((event, index) => {
+    if (event.type !== "editor_insert" || insertedChars(event) !== 1) return;
+    const ms = Date.parse(event.timestamp || "");
+    if (!Number.isFinite(ms)) return;
+    // Bucket key: the problem id, or a sentinel for null/empty so unattributed
+    // keystrokes form their own window and never merge with a real problem's.
+    const key = problemIdOf(event) ?? " __no_problem__";
+    let bucket = keystrokesByProblem.get(key);
+    if (!bucket) {
+      bucket = [];
+      keystrokesByProblem.set(key, bucket);
     }
-    windowChars += 1;
-    if (windowChars >= NOTABLE.BURST_MIN_CHARS) {
-      const anchor = keystrokes[windowStart];
-      pushMarker("keystroke_burst", anchor.event, anchor.index, windowChars, "Typing burst");
-      burstSeq += 1;
-      // Reset the window AFTER the crossing stroke so a long run produces one
-      // marker per BURST_MIN_CHARS, not one per stroke past the threshold.
-      windowStart = i + 1;
-      windowChars = 0;
+    bucket.push({ event, index, ms });
+  });
+
+  for (const keystrokes of keystrokesByProblem.values()) {
+    let windowStart = 0; // index into `keystrokes` of the current window's first stroke
+    let windowChars = 0;
+    for (let i = 0; i < keystrokes.length; i += 1) {
+      // Advance the window start until [windowStart, i] fits inside BURST_WINDOW_MS.
+      while (keystrokes[i].ms - keystrokes[windowStart].ms > NOTABLE.BURST_WINDOW_MS) {
+        windowChars -= 1; // each kept stroke contributed exactly 1 char
+        windowStart += 1;
+      }
+      windowChars += 1;
+      if (windowChars >= NOTABLE.BURST_MIN_CHARS) {
+        const anchor = keystrokes[windowStart];
+        pushMarker("keystroke_burst", anchor.event, anchor.index, windowChars, "Typing burst");
+        // Reset the window AFTER the crossing stroke so a long run produces one
+        // marker per BURST_MIN_CHARS, not one per stroke past the threshold.
+        windowStart = i + 1;
+        windowChars = 0;
+      }
     }
   }
-  void burstSeq;
 
   // ---- Cap (keep the most notable) + final ordering -------------------------
+  // M2: rank by a NOTABILITY TIER before char count. A keystroke burst's summed
+  // chars dwarf a single paste's (80+ vs one ~30-char paste), so a pure
+  // `b.chars - a.chars` cap would evict pastes — the STRONGER cheating signal
+  // (foreign source appearing) — in favour of bursts. We tier pastes above
+  // bursts and use chars only as the in-tier tiebreak, so at the cap pastes are
+  // retained first and bursts fill the remainder. (Tier-then-chars is cleaner
+  // than per-kind quotas: no share-size to tune, and it degrades gracefully when
+  // one kind is absent.)
   let kept = markers;
   if (kept.length > MAX_NOTABLE_MARKERS) {
     kept = [...markers]
-      .sort((a, b) => b.chars - a.chars)
+      .sort((a, b) => notabilityTier(b.kind) - notabilityTier(a.kind) || b.chars - a.chars)
       .slice(0, MAX_NOTABLE_MARKERS);
   }
   return kept.sort(

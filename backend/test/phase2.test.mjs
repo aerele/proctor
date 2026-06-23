@@ -2565,3 +2565,66 @@ test("session-editor-events: caps the merged list and flags truncation", async (
   assert.equal(res.body.events.length, 8000, "capped at 8000");
   assert.equal(res.body.truncated, true);
 });
+
+// EVID-1 Minor: the editor-events object listing must MANUALLY paginate
+// (autoPaginate:false + follow nextQuery), mirroring REC-4 countStoredChunks.
+// Editor-event streams are the densest objects in a session and most likely to
+// exceed the 1000-object page cap — a single-page getFiles would SILENTLY drop
+// every object past the first page. This fake hands the listing back one tiny
+// page at a time via nextQuery (the @google-cloud/storage getFiles contract);
+// the route must follow it and aggregate EVERY page, parsing all objects.
+test("session-editor-events: follows nextQuery and aggregates editor-event objects across MULTIPLE pages", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  const sessionId = await startedSession(firestore, storage);
+  const prefix = firestore._collections.get(process.env.SESSION_COLLECTION).get(sessionId).storage_prefix;
+
+  // 5 editor-events objects, each ONE editor_insert at a distinct time. A
+  // single-page listing would only see the first page (2 objects) and drop the
+  // rest; correct pagination yields all 5 events.
+  const objects = new Map(); // name -> ndjson body
+  for (let i = 0; i < 5; i += 1) {
+    const ts = new Date(Date.parse("2026-06-05T10:00:00.000Z") + i * 1000).toISOString();
+    objects.set(
+      `${prefix}editor-events/obj-${i}.ndjson`,
+      JSON.stringify({ type: "editor_insert", timestamp: ts, problem_id: "sum-two", detail: { insertedLen: 1 } }) + "\n"
+    );
+  }
+
+  // Paging storage: getFiles serves `pageSize` objects per call and returns a
+  // nextQuery (pageToken) until exhausted — the autoPaginate:false contract.
+  const all = [...objects.entries()].map(([name, body]) => ({
+    name,
+    async download() { return [body]; }
+  }));
+  let pageRequests = 0;
+  __setClientsForTest({
+    firestore,
+    storage: {
+      bucket() {
+        return {
+          async getFiles(query = {}) {
+            pageRequests += 1;
+            const pfx = query.prefix || "";
+            const matching = all.filter((f) => f.name.startsWith(pfx));
+            const start = Number(query.pageToken || 0);
+            const pageSize = 2; // tiny → forces multi-page
+            const slice = matching.slice(start, start + pageSize);
+            const nextStart = start + pageSize;
+            const nextQuery = nextStart < matching.length ? { ...query, pageToken: nextStart } : null;
+            return [slice, nextQuery];
+          },
+          file() { throw new Error("editor-events listing must only LIST + download listed objects"); }
+        };
+      }
+    }
+  });
+
+  const res = await call(makeReq({
+    method: "GET", path: "/api/admin/session-editor-events", headers: ADMIN_HEADERS, query: { session_id: sessionId }
+  }));
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.equal(res.body.events.length, 5, "every paged object was aggregated, not just the first page");
+  assert.equal(res.body.truncated, false);
+  assert.ok(pageRequests > 1, `expected multiple page requests (it followed nextQuery), got ${pageRequests}`);
+});

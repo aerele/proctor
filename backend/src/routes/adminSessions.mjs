@@ -511,7 +511,19 @@ async function adminSessionEditorEvents(req) {
   if (!session) throw httpError(404, "Session not found");
 
   const prefix = `${sessionPrefix(session)}${editorEventsLabel}/`;
-  const [files] = await bucket().getFiles({ prefix, maxResults: 1000 });
+  // MANUAL pagination (autoPaginate:false + follow nextQuery), mirroring REC-4's
+  // countStoredChunks above: editor-event streams are the densest objects in a
+  // session and the most likely to exceed the 1000-object page cap, so a
+  // single-page getFiles would SILENTLY drop later objects. A storage client
+  // that returns only [files] (no nextQuery) ends the loop after one page; a
+  // hard page ceiling guards a runaway listing.
+  const files = [];
+  let query = { prefix, autoPaginate: false, maxResults: 1000 };
+  for (let page = 0; page < 1000 && query; page++) {
+    const [pageFiles, nextQuery] = await bucket().getFiles(query);
+    for (const file of pageFiles || []) files.push(file);
+    query = nextQuery || null;
+  }
   // Download + parse with bounded concurrency (same rationale as the evidence
   // listing). A malformed line or unreadable object is skipped, never fatal.
   const batches = await mapWithConcurrency(files, 12, async (file) => {
