@@ -76,7 +76,14 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   and "nothing the user doesn't need to see."
 
 ## Features pulled into v1.1
-- ☐ **ALERT-1** — Candidate alert feedback + per-user alert suppression. *(F4)*
+- ✅ **ALERT-1** — Candidate alert feedback + per-user alert suppression. *Fixed
+  (`1e63f98`): two-button alert response (acknowledge / "Report a problem with this
+  alert" — genuine-fault-only, never unlocks recovery); dispute → server-derived
+  `dispute_raised` flag alert (`POST /api/session/dispute-alert`, candidate-token
+  auth); admin suppression as a COMMON feature — per-(user,test,type) shared list,
+  guard at the single `upsertProctorAlert` chokepoint, contest-scoped, hot-path
+  cached. Backend 1062/1062; 41 frontend tests. (F4)* **Dispute-button + admin
+  Suppress click need the maintainer's morning browser confirm (no jsdom).**
   - On an alert, a **second button**: "I understand / won't repeat" vs "This alert
     is not correct / unfair / a bug." Copy must make the complain option
     unambiguously for genuine software-mistake / unfair cases only (not for
@@ -87,8 +94,14 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
     a **common feature** (like the existing fullscreen suppression): suppressed
     alerts go to a shared list and are suppressed thereafter. Also feeds
     platform-improvement.
-- ☐ **ALERT-2** — Per-alert screenshot — capture the last frame (incl. when
-  recording has stopped); jump-to-chunk already exists. **Build now.** *(F6)*
+- ✅ **ALERT-2** — Per-alert screenshot — capture the last frame (incl. when
+  recording has stopped); jump-to-chunk already exists. *Fixed (`247341b`):
+  rolling last-good-frame cache in the recorder (works post-`ended`), distinct
+  `screenshot/` GCS prefix (no REC-4 collision, neither chunk counter bumped),
+  cross-session key guard (fail-closed), signed `screenshot_url`, admin thumbnail.
+  Backend 1054/1054; frameCapture 13. (F6)* **Candidate-capture path + admin
+  thumbnail need the maintainer's morning browser confirm (no jsdom to unit-test the
+  recorder wiring).**
 - ✅ **EVID-1** — Filter notable paste/keystroke events and surface them as
   clickable timeline markers in the recording Evidence tab. *Fixed (`11e2965`): new
   admin `GET /api/admin/session-editor-events` (requireAdmin, text blobs excluded,
@@ -101,7 +114,7 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   versioning. Spec: `docs/proposed/bulk-problem-template-io.md`. *(F11 — the
   originally-dropped request.)* **Backend done + committed (`8b21ea7`)** — 3 admin
   endpoints, content-hash dedup, preview/commit, fork-to-`-2`, 23 tests. **Admin UI
-  = Wave 2b** (multi-select export + import dialog; browser-verified on :9222).
+  in progress (night-run).**
 - ✅ **EVAL-1** — Data-driven eval rule registry: one function per rule so a rule
   can be added/removed/retuned without a code change. *Done (Wave 2a, `034491d`):
   12 detectors → registry, thresholds → config data, behaviour-preserving
