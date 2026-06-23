@@ -100,6 +100,12 @@ ships it moves from there into "Done" below.
 - **Code-driven, no-AI E2E integrated test suite** (multi-browser, all flows:
   entry, permissions, lock/unlock, recording, admin, approval). *v2+ (lower
   priority).* *(R3)*
+- **Committed problem-seed source** — problem/template definitions currently live
+  only in the live bank (admin-API-authored), so broken stubs are invisible to CI
+  and review (this is how the v1.1 STUB-1 stubs slipped). Add a committed
+  seed/export source — BANK-1's export format gives the serialization — so problem
+  changes become reviewable diffs and CI can validate stubs. Tied to R2.
+  *(prevention, agreed 2026-06-23)*
 
 ### Infra / ops
 - **Self-scoped min-instances** — the instance sets min-instances=1 before a test

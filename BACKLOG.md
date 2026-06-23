@@ -39,17 +39,15 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
 - ☐ **CAM-1** — Auto-collapse the camera widget when the camera is unavailable
   (today it shows a blue "not available" panel with manual collapse/expand). The
   pop-out button that caused false "switched-away" alerts is already removed. *(B5)*
-- ☐ **STUB-1 — BLOCKED, needs owner sign-off.** Offenders confirmed
+- ☐ **STUB-1 — APPROVED 2026-06-23 (night-run).** Offenders confirmed
   (`docs/proposed/stub-return-none-audit.md`): **0626-8, 0626-9, challenge-7** (the
-  Python stub actually crashes with `IndentationError`; JS `solve(){}` → `undefined`;
-  JS-`undefined` spans challenge-3..9). **Wave-2a finding:** problem stubs are **not
-  version-controlled** — they live only in the live problem bank (datastore, written
-  via the admin API). There is no file to edit; the real fix is a write-back to the
-  live **dev** bank. Corrected stub bodies are authored + ready; 0626-8/9 also need
-  their scaffold rebuilt from their live input signature (read from the bank first).
-  **Awaiting the owner's OK to patch the live dev bank via the admin API.** This same
-  "no committed problem source" gap is why the broken stubs were invisible to
-  tests/review (prevention idea → ROADMAP v2, tied to R2). *(B4)*
+  Python stub crashes with `IndentationError`; JS `solve(){}` → `undefined`;
+  JS-`undefined` spans challenge-3..9). Problem stubs are **not version-controlled** —
+  they live only in the live problem bank (datastore, written via the admin API) — so
+  the fix is a write-back to the live **dev** bank: read each offender, fix the stub
+  bodies, rebuild 0626-8/9 scaffold from their live input signature, verify by
+  replaying vs sample tests. Prevention (committed problem-seed source) → ROADMAP v2.
+  *(B4)*
 
 ## Candidate exam flow + copy (consolidated)
 - ☐ **FLOW-1** — Permission persistence + clean re-share + fullscreen gating
