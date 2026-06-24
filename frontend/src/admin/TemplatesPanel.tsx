@@ -20,6 +20,7 @@ import {
   type ContestTemplateSummary
 } from "../api";
 import { BankImportDialog } from "./BankImportDialog";
+import { useToast } from "./Toast";
 import { bundleFilename, downloadJson } from "./bankDownload";
 import { headerCheckboxFlags, toggleAllVisible } from "./bulkSelect";
 import {
@@ -41,8 +42,9 @@ export function TemplatesPanel({ password }: { password: string }) {
   const [bank, setBank] = useState<ProblemSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
+  // LT-10: success/error feedback goes to the floating toast (pinned in view)
+  // instead of inline banners that scrolled away above this list.
+  const toast = useToast();
   const [draft, setDraft] = useState<TemplateDraft | null>(null);
   // BANK-1: multi-select for bulk export (a selected template auto-pulls its
   // referenced problems server-side) + the upload→preview→commit dialog.
@@ -68,13 +70,12 @@ export function TemplatesPanel({ password }: { password: string }) {
   const exportSelected = async () => {
     if (!selectedSlugs.size) return;
     setExporting(true);
-    setError("");
     try {
       const bundle = await bankExport(password, { problem_ids: [], template_slugs: [...selectedSlugs] });
       downloadJson(bundle, bundleFilename());
-      setMessage(`Exported ${bundle.counts.templates} template(s) + ${bundle.counts.problems} referenced problem(s) to a downloaded bundle.`);
+      toast.showSuccess(`Exported ${bundle.counts.templates} template(s) + ${bundle.counts.problems} referenced problem(s) to a downloaded bundle.`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setExporting(false);
     }
@@ -82,7 +83,6 @@ export function TemplatesPanel({ password }: { password: string }) {
 
   const load = async () => {
     setLoading(true);
-    setError("");
     try {
       const [list, problems] = await Promise.all([
         fetchTemplates(password),
@@ -97,7 +97,7 @@ export function TemplatesPanel({ password }: { password: string }) {
         return next.size === prev.size ? prev : next;
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
@@ -109,18 +109,14 @@ export function TemplatesPanel({ password }: { password: string }) {
   }, []);
 
   const openNew = () => {
-    setMessage("");
-    setError("");
     setDraft(emptyTemplateDraft());
   };
 
   const openEdit = async (slug: string) => {
-    setMessage("");
-    setError("");
     try {
       setDraft(draftFromTemplate(await fetchTemplateDetail(password, slug)));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -128,21 +124,20 @@ export function TemplatesPanel({ password }: { password: string }) {
     if (!draft) return;
     const invalid = validateTemplateDraft(draft);
     if (invalid) {
-      setError(invalid);
+      toast.showError(invalid);
       return;
     }
     setSaving(true);
-    setError("");
     try {
       const payload = draftToSavePayload(draft);
       const saved = draft.slug
         ? await updateTemplateApi(password, { ...payload, slug: draft.slug })
         : await createTemplateApi(password, payload);
-      setMessage(`Template "${saved.name}" saved as ${saved.slug}. Instantiate it into a contest from the Contests tab.`);
+      toast.showSuccess(`Template "${saved.name}" saved as ${saved.slug}. Instantiate it into a contest from the Contests tab.`);
       setDraft(null);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSaving(false);
     }
@@ -150,17 +145,16 @@ export function TemplatesPanel({ password }: { password: string }) {
 
   const remove = async (template: ContestTemplateSummary) => {
     if (template.preset) {
-      setError("The built-in System check preset cannot be deleted. Duplicate it if you want an editable copy.");
+      toast.showError("The built-in System check preset cannot be deleted. Duplicate it if you want an editable copy.");
       return;
     }
     if (!window.confirm(`Delete template "${template.name}"? Existing contests already made from it are unaffected. This cannot be undone.`)) return;
-    setError("");
     try {
       await deleteTemplateApi(password, template.slug);
-      setMessage(`Deleted template "${template.name}".`);
+      toast.showSuccess(`Deleted template "${template.name}".`);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -168,14 +162,12 @@ export function TemplatesPanel({ password }: { password: string }) {
   // suffixed). Reuses the create path — no separate clone endpoint needed here,
   // and it lets the preset be customized (clone-then-edit, the spec path).
   const duplicate = async (slug: string, name: string) => {
-    setMessage("");
-    setError("");
     try {
       const detail = await fetchTemplateDetail(password, slug);
       const next = draftFromTemplate(detail);
       setDraft({ ...next, slug: "", preset: false, name: `Copy of ${name}` });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -207,7 +199,7 @@ export function TemplatesPanel({ password }: { password: string }) {
             </button>
             <button
               className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium"
-              onClick={() => { setShowImport(true); setMessage(""); setError(""); }}
+              onClick={() => { setShowImport(true); }}
             >
               <UploadCloud size={16} /> Import bundle…
             </button>
@@ -218,8 +210,8 @@ export function TemplatesPanel({ password }: { password: string }) {
         ) : null}
       </div>
 
-      {error ? <div className="mb-4 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
-      {message ? <div className="mb-4 rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{message}</div> : null}
+      {/* LT-10: error/success feedback is raised as a floating toast (pinned in
+          view) instead of inline banners that scrolled away. */}
 
       {draft ? (
         <TemplateEditor
@@ -228,7 +220,7 @@ export function TemplatesPanel({ password }: { password: string }) {
           saving={saving}
           onChange={setDraft}
           onSave={() => void save()}
-          onCancel={() => { setDraft(null); setError(""); }}
+          onCancel={() => { setDraft(null); }}
         />
       ) : (
         <div className="space-y-2">

@@ -13,6 +13,7 @@ import { addAllToSelection, removeFromSelection, toggleId } from "../alertSelect
 import { alertJoinState, joinableSessions } from "./alertActions";
 import { computeClockSkewMs } from "../examTime";
 import { ProblemBankSection } from "./ProblemBank";
+import { ToastProvider, useToast } from "./Toast";
 import { ContestsPanel } from "./ContestsPanel";
 import { TemplatesPanel } from "./TemplatesPanel";
 import { SystemHealthPanel } from "./SystemHealthPanel";
@@ -43,7 +44,25 @@ import { CandidateRosterSection, ProctorAlertTypesSection, ReviewRosterSection }
 // Auto-poll interval for the admin Live stats / Live alerts views.
 const ADMIN_POLL_INTERVAL_MS = 5000;
 
+// LT-10: the admin console is wrapped in a ToastProvider so AdminApp and every
+// panel below it can raise the floating (scroll-pinned) error/success toast via
+// useToast(). AdminApp itself must therefore live INSIDE the provider — hence the
+// thin wrapper + AdminAppInner split.
 export function AdminApp() {
+  return (
+    <ToastProvider>
+      <AdminAppInner />
+    </ToastProvider>
+  );
+}
+
+function AdminAppInner() {
+  // LT-10: floating toast for the admin-body error/success messages that used to
+  // scroll out of view. The existing error/actionMessage STATE is kept (the
+  // locked-screen login error still renders from it, and clearing it mid-flow
+  // stays cheap); a small effect mirrors any non-empty value into the toast and
+  // then clears the state so the same message isn't ALSO shown inline.
+  const toast = useToast();
   const [view, setView] = useState<AdminView>("stats");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -511,6 +530,22 @@ export function AdminApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, view, password, alertFilters]);
+
+  // LT-10: mirror the admin-body error/actionMessage into the floating toast and
+  // clear the inline state, so a blocked action or a success confirmation stays
+  // pinned in view instead of scrolling away above a long list. Gated on
+  // `unlocked` so the locked-screen login error keeps rendering inline on its
+  // (short, non-scrolling) card — that one is not a scroll-away case.
+  useEffect(() => {
+    if (!unlocked || !error) return;
+    toast.showError(error);
+    setError("");
+  }, [unlocked, error, toast]);
+  useEffect(() => {
+    if (!actionMessage) return;
+    toast.showSuccess(actionMessage);
+    setActionMessage("");
+  }, [actionMessage, toast]);
 
   // C1: when VITE_ADMIN_PASSWORD_HASH is set, verify the typed password by hashing
   // it (sha256 hex via crypto.subtle) and comparing to the embedded hash — the
@@ -1032,8 +1067,9 @@ export function AdminApp() {
         ) : null}
       </div>
 
-      {error ? <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
-      {actionMessage ? <div className="mb-5 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">{actionMessage}</div> : null}
+      {/* LT-10: the admin-body error / actionMessage banners are now raised as a
+          floating toast (ToastProvider, mirrored from state above) so they stay
+          pinned in view instead of scrolling away above a long list. */}
 
       {view === "stats" ? (
         <>

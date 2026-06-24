@@ -38,6 +38,7 @@ import {
   testCodeIssue
 } from "./contestAdmin";
 import { DateTimeField } from "./DateTimeField";
+import { useToast } from "./Toast";
 import { formatBytes, lifecyclePhase, purgeGateState, retentionStatus } from "./dataLifecycle";
 import type { ContestDataSizeResponse, ContestExportResponse, ContestStatus, ContestSummary, ProblemSummary } from "../types";
 
@@ -130,8 +131,10 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
   const [templates, setTemplates] = useState<ContestTemplateSummary[]>([]);
   const [bank, setBank] = useState<ProblemSummary[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
+  // LT-10: contest list/detail is a long page; success/error feedback now goes to
+  // the floating toast (pinned in view) instead of inline banners that scrolled
+  // away above the detail card the operator was acting on.
+  const toast = useToast();
   const [detailSlug, setDetailSlug] = useState("");
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -147,7 +150,6 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
 
   const load = async () => {
     setLoading(true);
-    setError("");
     try {
       const [list, templateList, problems] = await Promise.all([
         fetchContests(password, showArchived),
@@ -159,7 +161,7 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
       setBank(problems);
       onContestsChanged?.(list);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
@@ -176,13 +178,11 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
 
   const runMutation = async (fn: () => Promise<void>) => {
     setBusy(true);
-    setError("");
-    setMessage("");
     try {
       await fn();
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(false);
     }
@@ -195,7 +195,7 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
       ...(newStartAt ? { start_at: localInputToIso(newStartAt) } : {}),
       ...(newEndAt ? { end_at: localInputToIso(newEndAt) } : {})
     });
-    setMessage(`Contest "${created.name}" created as ${created.slug} (draft). Open it when it is ready for candidates.`);
+    toast.showSuccess(`Contest "${created.name}" created as ${created.slug} (draft). Open it when it is ready for candidates.`);
     setCreating(false);
     setNewName("");
     setNewTemplate("");
@@ -265,8 +265,8 @@ export function ContestsPanel({ password, renderRoster, onContestsChanged }: {
           </div>
         ) : null}
 
-        {error ? <div className="mb-3 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
-        {message ? <div className="mb-3 rounded-md border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{message}</div> : null}
+        {/* LT-10: error/success feedback is raised as a floating toast (pinned in
+            view) instead of inline banners that scrolled away above the detail. */}
 
         {contests === null ? (
           <p className="text-sm text-muted">{loading ? "Loading contests…" : "No contests loaded."}</p>

@@ -9,6 +9,7 @@
 import { AlertTriangle, ArrowLeft, Award, Download, Flag, RefreshCw, Search, ShieldAlert, Users } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { fetchPeople, fetchPersonScorecard } from "../api";
+import { useToast } from "./Toast";
 import {
   buildScorecardCsv, filterDirectoryRows, rowSourceLabel, scorecardSummary,
   type DirectoryPerson, type PeopleDirectoryResponse, type PersonScorecardResponse,
@@ -42,7 +43,9 @@ export function PeoplePanel({ password }: { password: string }) {
   const [directory, setDirectory] = useState<PeopleDirectoryResponse | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  // LT-10: error feedback goes to the floating toast (pinned in view) instead of
+  // an inline banner that scrolled away above the directory / scorecard.
+  const toast = useToast();
   const [search, setSearch] = useState("");
   const [college, setCollege] = useState("");
 
@@ -52,14 +55,13 @@ export function PeoplePanel({ password }: { password: string }) {
 
   const loadDirectory = async () => {
     setLoading(true);
-    setError("");
     try {
       const next = await fetchPeople(password, { search, college });
       if (next === null) { setUnavailable(true); setDirectory(null); return; }
       setUnavailable(false);
       setDirectory(next);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
@@ -74,11 +76,10 @@ export function PeoplePanel({ password }: { password: string }) {
     setSelectedPerson(person);
     setScorecard(null);
     setCardLoading(true);
-    setError("");
     try {
       setScorecard(await fetchPersonScorecard(password, person.person_id));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setCardLoading(false);
     }
@@ -128,7 +129,8 @@ export function PeoplePanel({ password }: { password: string }) {
         </div>
       </div>
 
-      {error ? <div className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-sm text-danger">{error}</div> : null}
+      {/* LT-10: error feedback is raised as a floating toast (pinned in view)
+          instead of an inline banner that scrolled away. */}
 
       {unavailable ? (
         <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm text-warning">

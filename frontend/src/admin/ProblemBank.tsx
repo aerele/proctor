@@ -11,6 +11,7 @@ import { BankImportDialog } from "./BankImportDialog";
 import { bundleFilename, downloadJson } from "./bankDownload";
 import { headerCheckboxFlags, toggleAllVisible } from "./bulkSelect";
 import { liveContestsReferencingProblem, liveEditConfirmMessage, liveEditGuardFromError, liveEditRetryBody, liveSaveConfirmMessage, shouldConfirmLiveSave } from "./saveGuard";
+import { useToast } from "./Toast";
 import type { ContestSummary, ProblemLanguage, ProblemSummary, ProblemTest } from "../types";
 
 export function ProblemBankSection({ password }: { password: string }) {
@@ -19,8 +20,10 @@ export function ProblemBankSection({ password }: { password: string }) {
   // referenced by an OPEN (running/active) contest and confirm before committing.
   const [contests, setContests] = useState<ContestSummary[]>([]);
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  // LT-10: success/error feedback now goes to the floating toast (pinned in view)
+  // instead of inline banners that scrolled away above this long list — most
+  // visibly the "Problem referenced" guard on a blocked delete.
+  const toast = useToast();
   const [draft, setDraft] = useState<ProblemDraft | null>(null);
   const [editingExisting, setEditingExisting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -47,13 +50,12 @@ export function ProblemBankSection({ password }: { password: string }) {
   const exportSelected = async () => {
     if (!selectedIds.size) return;
     setExporting(true);
-    setError("");
     try {
       const bundle = await bankExport(password, { problem_ids: [...selectedIds], template_slugs: [] });
       downloadJson(bundle, bundleFilename());
-      setMessage(`Exported ${bundle.counts.problems} problem(s) to a downloaded bundle.`);
+      toast.showSuccess(`Exported ${bundle.counts.problems} problem(s) to a downloaded bundle.`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setExporting(false);
     }
@@ -61,7 +63,6 @@ export function ProblemBankSection({ password }: { password: string }) {
 
   const load = async () => {
     setLoading(true);
-    setError("");
     try {
       const [list, contestList] = await Promise.all([
         fetchProblems(password),
@@ -78,7 +79,7 @@ export function ProblemBankSection({ password }: { password: string }) {
         return next.size === prev.size ? prev : next;
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
@@ -90,13 +91,11 @@ export function ProblemBankSection({ password }: { password: string }) {
   }, []);
 
   const openEdit = async (id: string) => {
-    setError("");
-    setMessage("");
     try {
       setDraft(draftFromDoc(await fetchProblemDetail(password, id)));
       setEditingExisting(true);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -104,7 +103,7 @@ export function ProblemBankSection({ password }: { password: string }) {
     if (!draft) return;
     const invalid = validateProblemDraft(draft);
     if (invalid) {
-      setError(invalid);
+      toast.showError(invalid);
       return;
     }
     // D1 (product-owner decision): warn-on-save. When the edited problem is referenced
@@ -116,7 +115,6 @@ export function ProblemBankSection({ password }: { password: string }) {
       if (!window.confirm(liveSaveConfirmMessage(draft.id, live))) return;
     }
     setSaving(true);
-    setError("");
     const doc = draftToDoc(draft);
     try {
       // W7 guard-aware save (ContestsPanel saveProblems pattern): hidden-test
@@ -135,11 +133,11 @@ export function ProblemBankSection({ password }: { password: string }) {
         if (!window.confirm(liveEditConfirmMessage(doc.id, guard))) return;
         await saveProblem(password, liveEditRetryBody(doc));
       }
-      setMessage(`Saved "${draft.id}".`);
+      toast.showSuccess(`Saved "${draft.id}".`);
       setDraft(null);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setSaving(false);
     }
@@ -147,13 +145,14 @@ export function ProblemBankSection({ password }: { password: string }) {
 
   const remove = async (id: string) => {
     if (!window.confirm(`Delete problem "${id}"? This cannot be undone.`)) return;
-    setError("");
     try {
       await deleteProblem(password, id);
-      setMessage(`Deleted "${id}".`);
+      toast.showSuccess(`Deleted "${id}".`);
       await load();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      // LT-10: the headline scroll-away case — a referenced problem 409s
+      // ("Problem referenced by contest …") and the message must stay pinned.
+      toast.showError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -185,19 +184,19 @@ export function ProblemBankSection({ password }: { password: string }) {
             </button>
             <button
               className="focus-ring inline-flex h-10 items-center gap-2 rounded-md border border-line px-4 text-sm font-medium"
-              onClick={() => { setShowImport(true); setMessage(""); setError(""); }}
+              onClick={() => { setShowImport(true); }}
             >
               <UploadCloud size={16} /> Import bundle…
             </button>
-            <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={() => { setDraft(emptyProblemDraft()); setEditingExisting(false); setMessage(""); }}>
+            <button className="focus-ring inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white" onClick={() => { setDraft(emptyProblemDraft()); setEditingExisting(false); }}>
               <Plus size={16} /> New problem
             </button>
           </div>
         ) : null}
       </div>
 
-      {error ? <div className="mb-4 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
-      {message ? <div className="mb-4 rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{message}</div> : null}
+      {/* LT-10: error/success feedback is now raised as a floating toast
+          (pinned in view) instead of inline banners that scrolled away. */}
 
       {draft ? (
         <ProblemEditor
