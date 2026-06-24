@@ -220,7 +220,7 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
 ### Admin — authoring / global UX
 - ◑ **LT-9** (code-complete `3e8eb17` — needs browser eyeball) — Select-all / deselect-all checkbox atop the bulk-select lists for
   BOTH problems and templates. (BANK-1.)
-- ☐ **LT-10** — Floating toast for error/success messages. Today they render at the
+- ◑ **LT-10** (code-complete `2452fea` — core pages done; ResultsPanel/Settings/AttendancePanel/SystemHealthPanel/BankImportDialog still inline + tracked; needs browser eyeball) — Floating toast for error/success messages. Today they render at the
   top of the list and scroll out of view (e.g. "Problem referenced" on a blocked
   delete; long contest page). Replace with a pinned/floating toast that stays in
   view; rework the notification element platform-wide.
@@ -254,7 +254,7 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
   on lock with no fullscreen precondition). Record-through-lock = LT-4.
 - ☐ **T10** — Admin + invigilator copy never audited (COPY-1 swept candidate-side
   only). Sweep those strings.
-- ☐ **S5** — The anti-slip auditor is manual-only (`AGENTS.md` "reconcile at every
+- ✅ **S5** (`0de7d3f`) — The anti-slip auditor is manual-only (`AGENTS.md` "reconcile at every
   release cut"). Build the **scripted reconcile gate**: diff prior IDs vs the docs,
   fail on any ID with no terminal disposition (BUILT/DEFERRED/DROPPED/FOLDED). This
   is what would have caught T1.
