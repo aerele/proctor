@@ -62,6 +62,10 @@ export function makeSessionGateRoutes(ctx) {
     // single-source upsert chokepoint + type-config resolver (by reference).
     alertTypeConfig,
     upsertProctorAlert,
+    // LT-11: normalize the candidate's raw disputed_type (a client event reason like
+    // window_blur) to the CANONICAL catalog alert type the alert was raised under
+    // (tab_away), so the dispute row + one-click Suppress key on a real catalog type.
+    canonicalDisputedType,
     // env-captured caps / non-env const (by value at handler load)
     gateAttemptLimit,
     enforcementLockReason
@@ -180,7 +184,12 @@ export function makeSessionGateRoutes(ctx) {
     // getSession() already 404s a missing session.
     const session = await getSession(String(body.session_id));
     if (session?.status === "ended") throw httpError(409, "session_ended");
-    const disputedType = String(body.disputed_type || "").slice(0, 64);
+    // LT-11: the candidate sends the RAW client event reason (e.g. window_blur);
+    // canonicalize it to the catalog alert type the proctor actually saw raised
+    // (tab_away) BEFORE it is echoed into data.disputed_type / the dedupe key, so
+    // the admin's one-click Suppress sends a valid catalog alert_type and the
+    // resulting suppression key matches the raise at the upsert chokepoint.
+    const disputedType = canonicalDisputedType(String(body.disputed_type || "").slice(0, 64));
     const note = body.note ? String(body.note).slice(0, 500) : "";
     const alertSettings = await getAlertSettings();
     const cfg = alertTypeConfig(alertSettings, "dispute_raised", "info");

@@ -1236,3 +1236,79 @@ test("suppression survives a fresh session (per user+test, not per session doc)"
     body: { session_id: "fresh-session-id", phase: "countdown_expired", exit_count: 2 } }));
   assert.equal(alertsIn(firestore).length, 0, "suppression carries across a new session (unlike a per-session exemption)");
 });
+
+// ---- LT-11: the canonical alert_type round-trip (raise → dispute → suppress →
+// match all key on ONE type). The live bug: the candidate AnomalyPanel disputes
+// with the RAW client reason "window_blur", but the alert the proctor saw was
+// raised as "tab_away" (the switch-away episode). The dispute used to store the
+// raw reason, so the admin's one-click Suppress sent a NON-catalog alert_type
+// (rejected) and even a matching entry never hit the tab_away raise. We now
+// canonicalize server-side so the candidate client is untouched.
+
+// (i) Round-trip: a dispute raised with the raw client reason stores the CANONICAL
+// catalog type the alert was actually raised under (window_blur → tab_away).
+test("LT-11 (a): dispute window_blur is canonicalized to tab_away in data.disputed_type + dedupe", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  seedSession(firestore, "lt11-1");
+  const res = await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "lt11-1", disputed_type: "window_blur", note: "I only alt-tabbed to the clock" } }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.raised, true);
+  const dispute = alertsIn(firestore).find((a) => a.type === "dispute_raised");
+  assert.ok(dispute, "a dispute_raised alert was raised");
+  assert.equal(dispute.data.disputed_type, "tab_away", "raw window_blur is stored as the canonical tab_away");
+  assert.ok(dispute.id.includes("tab_away"), `dedupe key keys on the canonical type (got ${dispute.id})`);
+  // page_hide → tab_hidden, fullscreen_exit → fullscreen_enforcement, and an
+  // already-canonical / unknown type passes through unchanged.
+  seedSession(firestore, "lt11-1b");
+  await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "lt11-1b", disputed_type: "page_hide" } }));
+  assert.equal(alertsIn(firestore).find((a) => a.session_id === "lt11-1b").data.disputed_type, "tab_hidden");
+  seedSession(firestore, "lt11-1c");
+  await call(makeReq({ method: "POST", path: "/api/session/dispute-alert",
+    body: { session_id: "lt11-1c", disputed_type: "fullscreen_enforcement" } }));
+  assert.equal(alertsIn(firestore).find((a) => a.session_id === "lt11-1c").data.disputed_type, "fullscreen_enforcement");
+});
+
+// (ii) Suppress payload contract: the alert_type the admin console now sends for a
+// window_blur dispute (the canonicalized tab_away) is a VALID catalog type and is
+// accepted — where the raw client reason was rejected with the live error.
+test("LT-11 (b): the canonical tab_away suppress payload is accepted; the raw window_blur was rejected", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  // What the console used to send (the disputed_type echoed raw) → 400, the live bug.
+  const rawReason = await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "window_blur" });
+  assert.equal(rawReason.statusCode, 400, "a raw client reason is NOT a suppressible catalog type");
+  // What it sends now (server canonicalized disputed_type → tab_away) → accepted.
+  const canonical = await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "tab_away" });
+  assert.equal(canonical.statusCode, 200);
+  assert.equal(canonical.body.entries.length, 1);
+  assert.equal(canonical.body.entries[0].alert_type, "tab_away");
+  assert.equal(canonical.body.entries[0].username_norm, "alice", "the user resolves from candidate_id");
+});
+
+// (iii) Match drop at the chokepoint: a (user, test, tab_away) suppression — the
+// natural product of disputing a window_blur and clicking Suppress — actually
+// drops the tab_away alert the switch-away episode raises. (iv) control: an
+// un-suppressed candidate in the SAME contest still fires.
+test("LT-11 (c)+(d): a tab_away suppression drops the switch-away raise; a non-suppressed candidate still fires", async () => {
+  const firestore = makeFakeFirestore();
+  __setClientsForTest({ firestore, storage: makeFakeStorage() });
+  seedSettings(firestore);
+  // Suppress tab_away for alice in this contest (what the fixed dispute→Suppress
+  // flow produces from a window_blur dispute).
+  await suppress({ action: "suppress", candidate_id: "alice", contest_slug: CONTEST_SLUG, alert_type: "tab_away" });
+  // A long switch-away episode for alice WOULD raise tab_away — but it is dropped.
+  seedSession(firestore, "lt11-sup", { candidate_id: "alice", username_norm: "alice" });
+  await postEpisode("lt11-sup", { count: 1, duration_ms: 13_000 });
+  assert.equal(alertsIn(firestore).filter((a) => a.type === "tab_away").length, 0, "the suppressed tab_away is dropped at the upsert chokepoint");
+  // (iv) A DIFFERENT candidate in the same contest is NOT suppressed → still fires.
+  seedSession(firestore, "lt11-other", { candidate_id: "bob", username_norm: "bob", hackerrank_username: "Bob",
+    storage_prefix: `contests/${CONTEST_SLUG}/sessions/bob/lt11-other/` });
+  await postEpisode("lt11-other", { count: 1, duration_ms: 13_000 });
+  assert.equal(alertsIn(firestore).filter((a) => a.type === "tab_away" && a.username_norm === "bob").length, 1,
+    "a non-suppressed candidate's tab_away still fires");
+});

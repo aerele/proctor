@@ -485,6 +485,7 @@ const {
   ALERT_REQUIRED_FIELDS,
   SUPPRESSIBLE_ALERT_TYPES,
   sanitizeSuppressionEntry,
+  canonicalDisputedType,
   isAlertSuppressed,
   getAlertSuppressions,
   invalidateAlertSuppressionsCache,
@@ -662,6 +663,9 @@ const sessionGateRoutes = makeSessionGateRoutes({
   // ALERT-1: the dispute route raises a dispute_raised alert via the same chokepoint.
   alertTypeConfig,
   upsertProctorAlert,
+  // LT-11: canonicalize the candidate's raw disputed_type to the catalog alert type
+  // so the dispute/suppress key matches the type the alert was actually raised under.
+  canonicalDisputedType,
   gateAttemptLimit: GATE_ATTEMPT_LIMIT,
   enforcementLockReason: ENFORCEMENT_LOCK_REASON
 });

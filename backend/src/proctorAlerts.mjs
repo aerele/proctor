@@ -147,6 +147,40 @@ export function makeProctorAlerts(ctx) {
   // the F5.3 comment above notes) — see the design doc §6.
   const SUPPRESSIBLE_ALERT_TYPES = Object.keys(DEFAULT_PROCTOR_ALERT_SETTINGS);
 
+  // LT-11 (ALERT-1 bug): the candidate-side AnomalyPanel disputes an alert using
+  // the RAW client event reason (examShell.anomalyFromEvent: window_blur,
+  // visibility_change, page_hide, fullscreen_exit, ip_address_changed, …), but the
+  // alert the proctor actually SAW was raised under a CANONICAL catalog type
+  // (window_blur/visibility → tab_away switch-away episode; page_hide → tab_hidden
+  // beacon; fullscreen_exit → fullscreen_enforcement; ip_address_changed →
+  // ip_changed). Storing the raw reason as data.disputed_type broke the whole
+  // dispute→suppress→match loop three ways: (a) the row showed a type that never
+  // matches the raised alert, (b) the one-click Suppress sent a non-catalog
+  // alert_type → sanitizeSuppressionEntry rejected it ("a valid alert_type … is
+  // required"), and (c) even a hand-typed suppression keyed on the raw reason never
+  // matched the canonical raise at the chokepoint. We canonicalize SERVER-SIDE (the
+  // candidate client is untouched) so raise → dispute → suppress → match all key on
+  // ONE type. Anything not in the map is already canonical (or an
+  // EnforcementOverlay dispute, which already sends "fullscreen_enforcement") and
+  // passes through unchanged.
+  const DISPUTE_TYPE_CANONICAL_MAP = {
+    window_blur: "tab_away",
+    visibility_change: "tab_away",
+    page_hide: "tab_hidden",
+    fullscreen_exit: "fullscreen_enforcement",
+    ip_address_changed: "ip_changed"
+  };
+
+  // LT-11: normalize a candidate-supplied disputed_type to the canonical alert
+  // type the alert was actually raised under. A raw reason maps via the table; an
+  // already-canonical type (or any unknown label) is returned unchanged so the
+  // dispute still records SOMETHING truthful. Empty in → empty out.
+  function canonicalDisputedType(type) {
+    const raw = String(type || "");
+    if (!raw) return "";
+    return DISPUTE_TYPE_CANONICAL_MAP[raw] || raw;
+  }
+
   // ALERT-1: the sanitizeExemptions analogue (enforcement.mjs) — allow-list every
   // field, coerce/clamp, drop anything unknown so an admin payload can never
   // stash arbitrary data or suppress an unknown type. Returns null for a payload
@@ -615,6 +649,9 @@ export function makeProctorAlerts(ctx) {
     // routes + the upsert chokepoint guard)
     SUPPRESSIBLE_ALERT_TYPES,
     sanitizeSuppressionEntry,
+    // LT-11: canonical disputed-type normalizer (raw client reason → catalog type),
+    // consumed by the dispute route so raise/dispute/suppress/match share ONE type.
+    canonicalDisputedType,
     isAlertSuppressed,
     getAlertSuppressions,
     invalidateAlertSuppressionsCache,
