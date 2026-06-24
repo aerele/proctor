@@ -21,6 +21,7 @@ import {
 } from "../api";
 import { BankImportDialog } from "./BankImportDialog";
 import { bundleFilename, downloadJson } from "./bankDownload";
+import { headerCheckboxFlags, toggleAllVisible } from "./bulkSelect";
 import {
   TEMPLATE_ENFORCEMENT_MODES,
   TEMPLATE_FORM_BOUNDS,
@@ -57,6 +58,12 @@ export function TemplatesPanel({ password }: { password: string }) {
       return next;
     });
   };
+
+  // LT-9: header select-all over the visible templates (currently the full
+  // fetched list — these rows are exactly what export sends).
+  const visibleSlugs = (templates ?? []).map((t) => t.slug);
+  const headerFlags = headerCheckboxFlags(visibleSlugs, selectedSlugs);
+  const toggleAll = () => setSelectedSlugs((prev) => toggleAllVisible(visibleSlugs, prev));
 
   const exportSelected = async () => {
     if (!selectedSlugs.size) return;
@@ -228,6 +235,23 @@ export function TemplatesPanel({ password }: { password: string }) {
           {loading ? <p className="text-sm text-muted">Loading…</p> : null}
           {!loading && templates && !templates.length ? (
             <p className="text-sm text-muted">No templates yet. Create one to reuse a problem set and settings across contests.</p>
+          ) : null}
+          {/* LT-9: select-all / deselect-all header for the bulk-export list.
+              Checked when every template is selected, indeterminate when only
+              some are; toggling selects/deselects them all. */}
+          {visibleSlugs.length ? (
+            <label className="flex items-center gap-3 rounded-md px-3 py-1 text-xs font-medium text-muted">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-accent"
+                checked={headerFlags.checked}
+                ref={(el) => { if (el) el.indeterminate = headerFlags.indeterminate; }}
+                onChange={toggleAll}
+                aria-label="Select all templates for export"
+              />
+              {headerFlags.checked ? "Deselect all" : "Select all"}
+              {selectedSlugs.size ? ` · ${selectedSlugs.size} selected` : ""}
+            </label>
           ) : null}
           {(templates ?? []).map((template) => (
             <div key={template.slug} className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-3 text-sm">
