@@ -63,9 +63,15 @@ doc, and nothing reconciles it). This discipline is non-negotiable:
 3. **Discussion ≠ done.** A request is handled only when it is (a) in a doc and
    (b) for active work, checked off **with evidence** (build/tests green, or a
    browser-verified behaviour).
-4. **Reconcile at every release cut and handoff.** Sweep recent requests against
-   the two docs — nothing dropped. When an item ships, move it from `BACKLOG.md`
-   to `ROADMAP.md` → Done.
+4. **Reconcile at every release cut and handoff — with the gate, not by hand.**
+   Sweep recent requests against the two docs — nothing dropped. When an item
+   ships, move it from `BACKLOG.md` to `ROADMAP.md` → Done. **Enforce it with
+   `node scripts/reconcile-tracking.mjs [baseRef]`** (defaults to `HEAD`; pass a
+   release tag at a cut): it fails if any tracking ID present in the base
+   `BACKLOG.md`/`ROADMAP.md` has vanished from the current docs with no terminal
+   disposition (BUILT/DEFERRED/DROPPED/FOLDED) — the exact slip that dropped T1. A
+   dropped item must be left behind with an explicit disposition, never deleted.
+   Wire it into CI for any commit touching `BACKLOG.md`/`ROADMAP.md`.
 5. **Right place:** active-version work → `BACKLOG.md`; future/deferred →
    `ROADMAP.md` (v2/Future); a fleshed-out design → `docs/proposed/` + a link.
 
