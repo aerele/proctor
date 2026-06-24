@@ -69,7 +69,7 @@ export function BrowserPreflightGate({ onPass, onResult, takeHome, proctorPhone 
         <div>
           <h1 className="text-2xl font-semibold text-ink">Browser check</h1>
           <p className="mt-1 text-sm leading-6 text-muted">
-            Before you start, we make sure your browser can record the test. This actually tries to share your screen and use your camera — it does not just read your browser name (which can be faked).
+            Before you start, we make sure your browser can record the test. This actually tries to share your screen and use your camera.
           </p>
         </div>
       </div>
