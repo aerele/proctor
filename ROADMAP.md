@@ -106,6 +106,10 @@ ships it moves from there into "Done" below.
   seed/export source — BANK-1's export format gives the serialization — so problem
   changes become reviewable diffs and CI can validate stubs. Tied to R2.
   *(prevention, agreed 2026-06-23)*
+- **DSL-driven stub generation for authoring** — author writes one DSL stub (e.g.
+  function signature + I/O shape) and per-language stubs are generated automatically,
+  instead of hand-writing each language. *(triage T9 — silently dropped in the
+  2026-06-23 BACKLOG rewrite, never built; recovered 2026-06-24.)*
 
 ### Infra / ops
 - **Self-scoped min-instances** — the instance sets min-instances=1 before a test

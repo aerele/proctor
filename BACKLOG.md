@@ -163,3 +163,109 @@ Status: `☐` todo · `◑` in progress · `✅` done. When an item ships it mov
   `ROADMAP.md`). They are disjoint: F14 is the behaviour-preserving eval-math
   refactor; F13 is a new auto-run + LLM-judgment capability.
 - **M2 — candidate-visible leaderboard:** → **v2** (`ROADMAP.md`).
+
+---
+
+## Live-test review — 2026-06-24 (maintainer's own exam run on the deployed build)
+Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
+**before** any build (THE ROADMAP RULE / capture-on-ask) so none can slip again.
+
+### Candidate flow — lock / fullscreen / recording (one connected redesign)
+- ☐ **LT-1** (BUG) — Coding screen renders while NOT in fullscreen. After a manual
+  stop-share → re-share, the workspace/questions showed without fullscreen. **Hard
+  rule:** code must NEVER render unless in fullscreen AND recording. (FLOW-1/T7 — the
+  gate overlay exists but doesn't gate the re-share render path.)
+- ☐ **LT-2** — No-countdown re-entry state. When a candidate returns from an
+  exception (re-share, post-lock, came-from-another-state), show a fullscreen block
+  "enter full screen to continue" with **no countdown** — don't count them into a
+  surprise lock. Countdown applies only to a genuine mid-exam fullscreen exit.
+- ☐ **LT-3** (BUG) — Fullscreen-exit lock timer doesn't RESET on re-entry. First
+  exit recovers fine; re-enter fullscreen; the *next* exit locks immediately — the
+  deadline isn't reset when fullscreen is regained (enforcement.ts: phase not
+  returning to idle / deadline reused across episodes).
+- ☐ **LT-4** — Don't give up screen-share when LOCKED. Preferred: keep recording AND
+  uploading while locked (we most want to see what they do during a lock); at minimum
+  keep the screen-share stream alive (upload may pause). Today the recorder stops on
+  lock. **This was yesterday's T7 ask — investigate why it was missed.** (FLOW-1
+  record-through-lock, was deferred → pull in.)
+- ☐ **LT-5** — Re-express the WHOLE lock/fullscreen/recording flow as a simple,
+  explicit state machine: enumerate the few screen states + the exact transition
+  conditions. Umbrella over LT-1..LT-4. Design-first.
+
+### Alerts (candidate + admin)
+- ☐ **LT-6** — Optional comments field on the in-session red-bar alert (the dispute
+  "report a problem" panel has one; the red-bar alert doesn't). (ALERT-1.)
+- ⚠ **LT-11** (BUG, HIGH) — Dispute + suppression broken in the live build:
+  (a) dispute records `window_blur` while the alert shown is `tab_away` — alert_type
+  mismatch; (b) Suppress in the dispute → error "a valid alert type, user name and
+  candidate ID are required"; (c) suppressed alerts still fire (red bar + new alerts
+  keep generating). **ALERT-1 passes unit tests but does NOT work end-to-end —
+  REOPEN ALERT-1, fix the live integration, browser-verify.**
+- ☐ **LT-12** — Alert → jump to the relevant chunk/playback at that exact timestamp.
+  Ideal: a playback popup that jumps to the chunk with front/back scrubbing;
+  acceptable fallback: deep-link to the evidence screen at that timestamp.
+  Long-standing ask (≈ old #61; ALERT-2 claims "jump-to-chunk exists" — verify, it
+  isn't usable from an alert today).
+
+### Admin — recordings / evidence
+- ☐ **LT-7** (BUG) — Chunk-count mismatch in LIST views. A session shows 587 chunks
+  in the session list AND the evidence/recordings (find-students) list, but the
+  detail view shows 0. REC-4 fixed the DETAIL view to the GCS ground-truth count;
+  the **list views still read the stale mint count** — point them at the same source.
+- ☐ **LT-8** (BUG) — Recording review opens the wrong session. Clicking a student in
+  the left list always loads that student's LATEST session, not the specific row
+  clicked (multiple attempts per student). The session dropdown above the player
+  works; the left-list click must target the clicked session.
+
+### Admin — authoring / global UX
+- ☐ **LT-9** — Select-all / deselect-all checkbox atop the bulk-select lists for
+  BOTH problems and templates. (BANK-1.)
+- ☐ **LT-10** — Floating toast for error/success messages. Today they render at the
+  top of the list and scroll out of view (e.g. "Problem referenced" on a blocked
+  delete; long contest page). Replace with a pinned/floating toast that stays in
+  view; rework the notification element platform-wide.
+
+### Admin — evaluation
+- ☐ **LT-13** (BUG) — "Run evaluation" on the result page errors `VITE_API_BASE_URL
+  is not configured.` The run-evaluation call's API base URL isn't baked into the
+  deployed frontend build (cf. the build-config bake guard — every `VITE_*` the prod
+  build needs must be baked, else the call has no base). Find which `VITE_*` var the
+  run-evaluation path reads and make the deploy bake it (extend the bake guard).
+- ☐ **LT-14** (BUG) — The contest **Evaluation tab** loads the CANDIDATE screen in
+  its iframe instead of the eval UI. Eval was split into a separate `proctor-eval`
+  service serving `/eval-ui`; the tab's iframe `src` / eval-UI base URL is wrong or
+  unset, so it falls back to the candidate origin. Point the iframe at `proctor-eval`
+  `/eval-ui` and bake its base URL (likely same root cause as LT-13).
+
+## Forensic audit — 2026-06-24 (reconciliation of the 2026-06-23 morning triage)
+28-agent sweep of the morning triage (T1–T11, S1–S6) vs the consolidated docs +
+live code, after T1 (page-merge) was found silently dropped in the `e4ca2b9`
+from-scratch BACKLOG rewrite. Only the gaps are listed; everything else is BUILT or
+legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
+- ☐ **T1 (page-merge half)** — DROPPED + unbuilt. Merge browser-check + permission
+  setup into ONE onboarding screen; acquire screen-share/cam/mic ONCE and carry the
+  live streams forward instead of stop-and-re-ask (today BrowserPreflightGate grabs
+  then stops the screen stream, PermissionsGate re-prompts). Copy-half fixed
+  (`3f26a58`). Overlaps LT-1/LT-2/LT-5.
+- ☐ **T3** — Unlock-button still presumes fault ("I have fixed it"). Reword to a
+  no-fault action ("Return to exam"/"Dismiss"); accidental triggers shouldn't admit
+  fault. ~1-line in `AnomalyPanel.tsx` + test.
+- ☐ **T7** — Gate the unlock-code panel behind being in fullscreen (today it renders
+  on lock with no fullscreen precondition). Record-through-lock = LT-4.
+- ☐ **T10** — Admin + invigilator copy never audited (COPY-1 swept candidate-side
+  only). Sweep those strings.
+- ☐ **S5** — The anti-slip auditor is manual-only (`AGENTS.md` "reconcile at every
+  release cut"). Build the **scripted reconcile gate**: diff prior IDs vs the docs,
+  fail on any ID with no terminal disposition (BUILT/DEFERRED/DROPPED/FOLDED). This
+  is what would have caught T1.
+- ⚠ **STUB-1 — overclaim.** Marked ✅ but only 3 of 11 known-bad stubs were patched
+  (live bank, repo-unverifiable self-report); challenge-1/2 + JS-undefined legs of
+  challenge-3..9 are DEFERRED. Verify via a live GET of the 3 offenders; decide the 8.
+- → **T9** → `ROADMAP.md` v2 (DSL-driven stub generation — silently dropped, never
+  built).
+
+### Reopened (was ✅, but live-test/audit shows incomplete)
+- ⚠ **ALERT-1** — dispute/suppress broken end-to-end (LT-11).
+- ⚠ **FLOW-1 / T7** — fullscreen render-gate + recovery-state issues (LT-1..LT-5);
+  record-through-lock pulled in (LT-4).
+- ⚠ **REC-4** — list-view chunk counts still stale (LT-7).
