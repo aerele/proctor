@@ -147,6 +147,57 @@ export function EnforcementOverlay({ phase, violation, remainingSeconds, exitCou
     );
   }
 
+  // LT-5 (v1.1): the NO-COUNTDOWN re-entry block (fs_block). Shown after an
+  // exception we already handled (post-unlock, post re-share) where the candidate
+  // must return to fullscreen but is NOT in a violation episode. A DEDICATED
+  // early-return branch placed ABOVE the red alertdialog body (modelled on the
+  // calm "soft" branch above) so it is CALM, no-fault: an Enter-fullscreen button,
+  // NO countdown, NO typed-ack, NO "test will be locked", NO dispute block. The
+  // shared red body below — and its ALERT-1 dispute Escape-cancel + REC-3 floor —
+  // is left byte-identical (Invariant 9).
+  if (phase === "fs_block") {
+    return (
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="enforcement-fsblock-title"
+        className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-ink/80 p-6"
+      >
+        <div className="w-full max-w-lg rounded-xl border border-line bg-white p-8 text-ink shadow-2xl">
+          <div className="flex items-start gap-4">
+            <Maximize2 size={32} className="mt-1 shrink-0 text-accent" />
+            <div>
+              <h1 id="enforcement-fsblock-title" className="text-2xl font-bold">
+                {enforcementHeadline(phase, fullscreen, simplifiedRecovery)}
+              </h1>
+              <p className="mt-2 text-base text-muted">
+                {enforcementSubline(phase, fullscreen, exitCount, simplifiedRecovery)}
+              </p>
+            </div>
+          </div>
+          <div className="mt-6">
+            <button
+              ref={reenterButtonRef}
+              className="focus-ring inline-flex h-11 items-center gap-2 rounded-md bg-ink px-5 text-sm font-bold text-white"
+              onClick={() => {
+                setFsError("");
+                void onEnterFullscreen().catch(() => setFsError("Your browser blocked fullscreen. Click again to retry."));
+              }}
+            >
+              <Maximize2 size={16} /> Enter full screen
+            </button>
+            {fsError ? <p className="mt-2 text-sm font-semibold text-red-600">{fsError}</p> : null}
+          </div>
+          {proctorPhone ? (
+            <p className="mt-4 text-sm text-muted">
+              Trouble with fullscreen? Call your proctor at <a className="font-medium text-accent underline" href={`tel:${proctorPhone}`}>{proctorPhone}</a>.
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       role="alertdialog"

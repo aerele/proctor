@@ -389,6 +389,236 @@ describe("enforcementReducer — REC-3 humane recovery floor", () => {
   });
 });
 
+// LT-3 (v1.1) — CONFIRMED LIVE BUG: the fullscreen-exit lock timer must RESET
+// across episodes. The first exit recovers fine; on a LATER genuine exit the
+// stale (already-expired) deadline used to be reused, locking the candidate
+// IMMEDIATELY on the next tick. Root cause: in the DEFAULT (non-simplified) flow
+// a candidate who re-enters fullscreen WITHOUT typing the ack leaves the episode
+// in "blocking" with the original deadline armed; tryResolve never settled it to
+// idle, so that expired deadline was reused by the next exit. The fix reuses the
+// existing deadline ONLY while it is still in the future, so a later exit arms a
+// FRESH, floored countdown — while the anti-farming invariant (re-exit inside the
+// live window does NOT extend the deadline) and the cumulative exitCount ladder
+// are preserved.
+describe("enforcementReducer — LT-3 fullscreen-exit timer resets across episodes", () => {
+  // Use a generous exit limit so we exercise the DEADLINE path, not the
+  // exit-limit hard-lock, across several exits.
+  const cfg: EnforcementConfig = { ...config, exitLimit: 10 };
+
+  it("FAILING-REPRO: re-enter fullscreen WITHOUT ack, then a much-later exit must arm a FRESH deadline (not reuse the stale one)", () => {
+    // Episode 1: exit at T0 → blocking, deadline T0+20s.
+    const first = exit(initialEnforcementState, T0, cfg).state;
+    expect(first.phase).toBe("blocking");
+    expect(first.deadlineMs).toBe(T0 + 20_000);
+    // Candidate re-enters fullscreen but does NOT type the ack (default flow):
+    // the episode stays blocking with the SAME deadline (tryResolve needs ack).
+    const backInFs = enforcementReducer(first, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 3000 }, cfg).state;
+    expect(backInFs.phase).toBe("blocking");
+    expect(backInFs.deadlineMs).toBe(T0 + 20_000);
+    // Much LATER (the original deadline is long gone) the candidate exits again.
+    // BEFORE the fix this reused the stale T0+20_000 deadline; the very next tick
+    // then locked immediately. AFTER the fix it arms a fresh floored countdown.
+    const NOW = T0 + 100_000;
+    const second = exit(backInFs, NOW, cfg).state;
+    expect(second.phase).toBe("blocking");
+    expect(second.deadlineMs).toBe(NOW + 20_000); // FRESH — not the stale T0+20_000
+    // The next tick must NOT lock immediately — the fresh window is live.
+    const tick = enforcementReducer(second, { kind: "tick", nowMs: NOW + 1 }, cfg);
+    expect(tick.state.phase).toBe("blocking");
+    expect(tick.effects).toEqual([]);
+  });
+
+  it("a resolved episode (ack + fullscreen → idle) followed by a later exit arms a fresh deadline", () => {
+    const first = exit(initialEnforcementState, T0, cfg).state;
+    const resolved = enforcementReducer(first, { kind: "ack", matched: true, fullscreen: true, nowMs: T0 + 2000 }, cfg).state;
+    expect(resolved.phase).toBe("idle");
+    expect(resolved.deadlineMs).toBeNull();
+    const NOW = T0 + 100_000;
+    const second = exit(resolved, NOW, cfg).state;
+    expect(second.deadlineMs).toBe(NOW + 20_000);
+  });
+
+  it("PRESERVED: a re-exit WITHIN the still-live window does NOT extend the deadline (anti-farming)", () => {
+    // This is the existing anti-farming invariant — re-exit while the deadline is
+    // still in the FUTURE must keep the original deadline (no farming extra time).
+    const first = exit(initialEnforcementState, T0, cfg).state;
+    expect(first.deadlineMs).toBe(T0 + 20_000);
+    const backInFs = enforcementReducer(first, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 2000 }, cfg).state;
+    const second = exit(backInFs, T0 + 4000, cfg); // still inside the T0+20s window
+    expect(second.state.phase).toBe("blocking");
+    expect(second.state.deadlineMs).toBe(T0 + 20_000); // NOT extended
+  });
+
+  it("PRESERVED: the cumulative exitCount ladder is never reset by an episode resolving or re-entry", () => {
+    let state = exit(initialEnforcementState, T0, cfg).state; // exitCount 1
+    state = enforcementReducer(state, { kind: "ack", matched: true, fullscreen: true, nowMs: T0 + 1000 }, cfg).state; // resolve
+    expect(state.exitCount).toBe(1);
+    state = exit(state, T0 + 100_000, cfg).state; // exitCount 2 (fresh deadline)
+    expect(state.exitCount).toBe(2);
+    state = enforcementReducer(state, { kind: "fullscreen_change", fullscreen: true, nowMs: T0 + 101_000 }, cfg).state; // re-enter, no ack
+    state = exit(state, T0 + 200_000, cfg).state; // exitCount 3
+    expect(state.exitCount).toBe(3);
+  });
+});
+
+// LT-5 (v1.1) — the NO-COUNTDOWN re-entry block (fs_block) + the require_fullscreen
+// action. Shown after an exception we already handled (post-unlock, post re-share):
+// the candidate must return to fullscreen but is NOT in a violation episode — no
+// deadline, no exitCount increment, no report. It is a REDUCER INVARIANT that
+// require_fullscreen only ever moves idle↔fs_block, never touching the violation
+// ladder, and is a no-op under softMode.
+describe("enforcementReducer — require_fullscreen / fs_block (LT-5)", () => {
+  // Spec test 8: require_fullscreen with !fullscreen → fs_block (no deadline,
+  // exitCount unchanged); with fullscreen → idle.
+  it("require_fullscreen !fullscreen → fs_block: no deadline, exitCount unchanged, no effects", () => {
+    const { state, effects } = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config);
+    expect(state.phase).toBe("fs_block");
+    expect(state.deadlineMs).toBeNull();
+    expect(state.exitCount).toBe(0);
+    expect(state.violation).toBeNull();
+    expect(state.reportPending).toBe(false);
+    expect(effects).toEqual([]);
+  });
+
+  it("require_fullscreen fullscreen=true from fs_block → idle", () => {
+    const blocked = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config).state;
+    expect(blocked.phase).toBe("fs_block");
+    const { state, effects } = enforcementReducer(blocked, { kind: "require_fullscreen", fullscreen: true, nowMs: T0 + 1000 }, config);
+    expect(state.phase).toBe("idle");
+    expect(state.deadlineMs).toBeNull();
+    expect(effects).toEqual([]);
+  });
+
+  it("require_fullscreen fullscreen=true while already idle is a no-op", () => {
+    const { state, effects } = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: true, nowMs: T0 }, config);
+    expect(state).toBe(initialEnforcementState);
+    expect(effects).toEqual([]);
+  });
+
+  it("idempotent: a second require_fullscreen !fullscreen keeps fs_block, still no deadline / no exitCount change", () => {
+    const once = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config).state;
+    const twice = enforcementReducer(once, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 + 500 }, config).state;
+    expect(twice.phase).toBe("fs_block");
+    expect(twice.deadlineMs).toBeNull();
+    expect(twice.exitCount).toBe(0);
+  });
+
+  // Spec test 9 (MI-2): require_fullscreen is a NO-OP under softMode — a soft/pre-T0
+  // candidate must never be forced into fs_block.
+  it("MI-2: require_fullscreen is a no-op when softMode is true (idle candidate stays idle)", () => {
+    const soft: EnforcementConfig = { ...config, softMode: true };
+    const { state, effects } = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, soft);
+    expect(state).toBe(initialEnforcementState);
+    expect(state.phase).toBe("idle");
+    expect(effects).toEqual([]);
+  });
+
+  it("MI-2: require_fullscreen does not disturb an existing soft nudge under softMode", () => {
+    const soft: EnforcementConfig = { ...config, softMode: true };
+    const softState = exit(initialEnforcementState, T0, soft).state;
+    expect(softState.phase).toBe("soft");
+    const { state } = enforcementReducer(softState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 + 1000 }, soft);
+    expect(state).toBe(softState); // untouched
+    expect(state.phase).toBe("soft");
+  });
+
+  // The invariant: require_fullscreen NEVER clobbers a live violation episode. It
+  // only transitions idle↔fs_block — bouncing through it can never farm a free
+  // exit or reset the cumulative exitCount.
+  it("require_fullscreen does NOT clobber a live blocking episode (no free escape from the countdown)", () => {
+    const blocking = exit(initialEnforcementState, T0, config).state;
+    expect(blocking.phase).toBe("blocking");
+    const { state } = enforcementReducer(blocking, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 + 1000 }, config);
+    expect(state).toBe(blocking); // still blocking, deadline intact
+    expect(state.phase).toBe("blocking");
+    expect(state.deadlineMs).toBe(T0 + 20_000);
+  });
+
+  it("require_fullscreen does NOT clobber alert_hold or locking", () => {
+    const cfg: EnforcementConfig = { ...config, mode: "alert_first" };
+    const hold = enforcementReducer(exit(initialEnforcementState, T0, cfg).state, { kind: "tick", nowMs: T0 + 20_000 }, cfg).state;
+    expect(hold.phase).toBe("alert_hold");
+    expect(enforcementReducer(hold, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 + 21_000 }, cfg).state).toBe(hold);
+    const locking = enforcementReducer(exit(initialEnforcementState, T0, config).state, { kind: "tick", nowMs: T0 + 20_000 }, config).state;
+    expect(locking.phase).toBe("locking");
+    expect(enforcementReducer(locking, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 + 21_000 }, config).state).toBe(locking);
+  });
+
+  // fs_block carries no countdown — enforcementRemainingSeconds is null for it.
+  it("fs_block has no countdown — enforcementRemainingSeconds is null", () => {
+    const blocked = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config).state;
+    expect(enforcementRemainingSeconds(blocked, T0 + 5000)).toBeNull();
+  });
+
+  // The overlay is visible for fs_block (non-idle) except on locked/ended gates.
+  it("fs_block is overlay-visible while running, hidden on locked/ended", () => {
+    const blocked = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config).state;
+    expect(enforcementOverlayVisible(blocked, "running")).toBe(true);
+    expect(enforcementOverlayVisible(blocked, "locked")).toBe(false);
+    expect(enforcementOverlayVisible(blocked, "ended")).toBe(false);
+  });
+
+  // A genuine exit FROM fs_block becomes a real blocking episode (fresh deadline).
+  it("a genuine fullscreen_exit from fs_block arms a real blocking episode with a fresh deadline", () => {
+    const blocked = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config).state;
+    const { state } = exit(blocked, T0 + 5000, config);
+    expect(state.phase).toBe("blocking");
+    expect(state.exitCount).toBe(1);
+    expect(state.deadlineMs).toBe(T0 + 5000 + 20_000);
+  });
+});
+
+// LT-5 copy (BL-2b): the fs_block headline/subline arms must sit ABOVE the
+// `!fullscreen` checks so they are NOT shadowed by the accusatory "You left
+// fullscreen" — fs_block is a calm, no-fault return-to-fullscreen prompt.
+describe("enforcementHeadline / enforcementSubline — fs_block calm copy (LT-5 / BL-2b)", () => {
+  it("fs_block headline is the calm return prompt, NOT 'You left fullscreen', even though !fullscreen", () => {
+    expect(enforcementHeadline("fs_block", false)).toBe("Enter full screen to continue");
+    expect(enforcementHeadline("fs_block", false)).not.toContain("You left fullscreen");
+    // simplifiedRecovery flag does not change the calm copy.
+    expect(enforcementHeadline("fs_block", false, true)).toBe("Enter full screen to continue");
+  });
+
+  it("fs_block subline is calm, no-fault: no 'exit #N', no 'test will be locked'", () => {
+    const sub = enforcementSubline("fs_block", false, 3);
+    expect(sub).toContain("return to fullscreen");
+    expect(sub).not.toMatch(/exit #/i);
+    expect(sub).not.toMatch(/locked/i);
+    expect(sub).not.toMatch(/both steps/i);
+    expect(sub).not.toContain("paused, not locked");
+  });
+});
+
+// MI-3 (LT-5): fs_block is EPHEMERAL — serialized AS idle, never restored
+// (mirrors the soft ephemerality precedent at the soft tests above).
+describe("fs_block ephemerality (MI-3) — serialize AS idle, never restored", () => {
+  it("a fs_block phase serializes AS 'idle' and round-trips to idle (never restored)", () => {
+    const blocked = enforcementReducer(initialEnforcementState, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 }, config).state;
+    expect(blocked.phase).toBe("fs_block");
+    const serialized = serializeEnforcementState(blocked);
+    expect(JSON.parse(serialized).phase).toBe("idle"); // serialized AS idle
+    const restored = deserializeEnforcementState(serialized);
+    expect(restored.phase).toBe("idle");
+  });
+
+  it("a tampered/forced { phase: 'fs_block' } payload falls back to the initial state (fs_block not in allowlist)", () => {
+    expect(deserializeEnforcementState(JSON.stringify({ phase: "fs_block", exitCount: 4, deadlineMs: null })))
+      .toEqual(initialEnforcementState);
+  });
+
+  it("fs_block round-trip preserves the cumulative exitCount (serialized exitCount survives even as phase coerces to idle)", () => {
+    // Build a state with a real exitCount, then layer a require_fullscreen block on.
+    let state = exit(initialEnforcementState, T0, config).state; // exitCount 1
+    state = enforcementReducer(state, { kind: "ack", matched: true, fullscreen: true, nowMs: T0 + 500 }, config).state; // resolve → idle, exitCount 1
+    const blocked = enforcementReducer(state, { kind: "require_fullscreen", fullscreen: false, nowMs: T0 + 1000 }, config).state;
+    expect(blocked.phase).toBe("fs_block");
+    expect(blocked.exitCount).toBe(1);
+    const restored = deserializeEnforcementState(serializeEnforcementState(blocked));
+    expect(restored.phase).toBe("idle"); // fs_block never restored
+    expect(restored.exitCount).toBe(1); // cumulative ladder preserved
+  });
+});
+
 // FLOW-1 (v1.1) — the recovery copy reassures the candidate the test is PAUSED,
 // not locked, on an accidental EXIT (out-of-fullscreen blocking phase).
 describe("enforcementSubline — FLOW-1 'paused, not locked' recovery reassurance", () => {

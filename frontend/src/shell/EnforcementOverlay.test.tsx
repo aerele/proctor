@@ -88,3 +88,39 @@ describe("EnforcementOverlay — candidate dispute feedback (ALERT-1)", () => {
     expect(html).not.toContain("Report a problem with this alert");
   });
 });
+
+// LT-5: the fs_block branch is a SEPARATE, CALM early-return (modelled on "soft",
+// placed ABOVE the red alertdialog body). It must render an Enter-fullscreen
+// button with NO countdown, NO typed-ack, NO violation framing, and NO dispute
+// block — and it must NOT touch the red body (preserving ALERT-1 + REC-3).
+describe("EnforcementOverlay — fs_block calm re-entry branch (LT-5)", () => {
+  it("renders the calm Enter-fullscreen card: no countdown, no typed-ack, no dispute, no red-violation copy", () => {
+    const html = render({ phase: "fs_block", remainingSeconds: null });
+    // Calm headline/subline (no-fault), an Enter-fullscreen button.
+    expect(html).toContain("Enter full screen");
+    expect(html).toContain("<button");
+    // NOT a countdown: no "seconds left", no typed-ack input.
+    expect(html).not.toContain("seconds left");
+    expect(html).not.toContain('placeholder="Type the sentence here"');
+    expect(html).not.toContain("type this exact sentence");
+    // NOT the accusatory violation framing.
+    expect(html).not.toContain("You left fullscreen");
+    expect(html).not.toContain("Re-enter fullscreen now"); // the red body's button label
+    // Calm (non-red) container, not the red alertdialog body.
+    expect(html).not.toContain("bg-red-900");
+  });
+
+  it("renders NO dispute block even when onReportDispute is provided (ALERT-1 dispute is red-body only)", () => {
+    const html = render({ phase: "fs_block", remainingSeconds: null, onReportDispute: () => {} });
+    expect(html).not.toContain("Report a problem with this alert");
+  });
+
+  it("the red blocking branch is unchanged — still renders the countdown + dispute + typed-ack", () => {
+    const html = render({ phase: "blocking", remainingSeconds: 30, onReportDispute: () => {} });
+    expect(html).toContain("seconds left");
+    expect(html).toContain('placeholder="Type the sentence here"');
+    expect(html).toContain("Report a problem with this alert");
+    // Cancel button (Escape-cancel companion) is present in the dispute flow's static markup
+    // only after open; the disclosure button is the stable structural anchor.
+  });
+});

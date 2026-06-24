@@ -70,7 +70,13 @@ export type EnforcementConfig = {
 // persisted (serialized AS "idle"; never restored), re-derivable from the live
 // fullscreen state on the next exit. This mirrors the "ackOk deliberately not
 // persisted" precedent and kills the cross-T0 stale-overlay bug.
-export type EnforcementPhase = "idle" | "blocking" | "locking" | "alert_hold" | "soft";
+// LT-5 (v1.1): "fs_block" is the NO-COUNTDOWN re-entry block — shown after an
+// exception we already handled (post-unlock, post re-share) where the candidate
+// must return to fullscreen but is NOT in a violation episode: no deadline, no
+// exitCount increment, no report. Like "soft", it is EPHEMERAL — serialized AS
+// "idle", never restored — and is re-derived from live fullscreen on the next
+// require_fullscreen dispatch.
+export type EnforcementPhase = "idle" | "blocking" | "locking" | "alert_hold" | "soft" | "fs_block";
 
 export type ViolationPhase = "countdown_expired" | "exit_limit";
 
@@ -124,7 +130,14 @@ export type EnforcementAction =
   // does not need it — released() ignores fullscreen — so it stays optional).
   | { kind: "config_change"; nowMs: number; fullscreen?: boolean }
   | { kind: "violation_result"; locked: boolean; exempt?: boolean; nowMs: number }
-  | { kind: "session_ended"; nowMs: number };
+  | { kind: "session_ended"; nowMs: number }
+  // LT-5 (v1.1): the host demands fullscreen WITHOUT a countdown after an
+  // exception it already handled (post-unlock, post re-share). `fullscreen`
+  // carries the candidate's CURRENT fullscreen truth so the reducer can transition
+  // idle↔fs_block. It NEVER touches the violation ladder (exitCount/deadline/
+  // violation/reportPending) and is a no-op under softMode (a pre-T0 candidate must
+  // never be forced into fs_block).
+  | { kind: "require_fullscreen"; fullscreen: boolean; nowMs: number };
 
 export type EnforcementResult = { state: EnforcementState; effects: EnforcementEffect[] };
 
@@ -204,6 +217,31 @@ export function enforcementReducer(
     return noop(state);
   }
 
+  // LT-5 (v1.1): the NO-COUNTDOWN re-entry block. The host dispatches this after
+  // an exception it already handled (post-unlock, post re-share) to require
+  // fullscreen WITHOUT arming a countdown. It is a REDUCER INVARIANT (not a host
+  // convention) that this only ever moves idle↔fs_block and NEVER touches the
+  // violation ladder — so bouncing through fs_block can never farm a free exit or
+  // reset the cumulative exitCount.
+  if (action.kind === "require_fullscreen") {
+    // MI-2: a no-op under softMode — a soft/pre-T0 candidate must NEVER be forced
+    // into fs_block. Placed FIRST in this arm's ordered precedence, mirroring the
+    // fullscreen_exit softMode early-return below.
+    if (config.softMode) return noop(state);
+    if (action.fullscreen) {
+      // Back in fullscreen: clear the block. Only ever clears the fs_block we own
+      // — an active blocking/alert_hold/locking/soft episode is left untouched
+      // (require_fullscreen only transitions idle↔fs_block).
+      return state.phase === "fs_block" ? noop({ ...state, phase: "idle" }) : noop(state);
+    }
+    // Out of fullscreen: arm the no-countdown block, but ONLY from idle/fs_block —
+    // never clobber a live violation episode (blocking/alert_hold/locking) or a
+    // soft nudge. Never increments exitCount, never sets a deadline.
+    return state.phase === "idle" || state.phase === "fs_block"
+      ? noop({ ...state, phase: "fs_block" })
+      : noop(state);
+  }
+
   if (action.kind === "fullscreen_exit") {
     if (!action.recording || action.expected || config.exemptFullscreen) return noop(state);
     // #135 take-home pre-T0: RECORD the exit + show a gentle nudge, but NEVER
@@ -220,15 +258,29 @@ export function enforcementReducer(
     if (exitCount > config.exitLimit) {
       return violate({ ...state, exitCount }, "exit_limit", config, action.nowMs);
     }
-    // New episode keeps an EXISTING deadline (an exit while already blocking
-    // must not extend the countdown); a fresh episode starts one. REC-3: a
-    // fresh deadline is floored at MIN_RECOVERY_SECONDS so a contest configured
-    // below the floor still leaves a humane window to recover. The floor is ONLY
-    // applied to a fresh episode — re-using the existing deadline (re-exit while
-    // blocking) is untouched, so the "deadline not extended on re-exit" invariant
-    // holds exactly as before.
-    const deadlineMs = state.phase === "blocking" && state.deadlineMs != null
-      ? state.deadlineMs
+    // A re-exit WITHIN the SAME live blocking window keeps the EXISTING deadline
+    // (an exit while already blocking must not extend the countdown — the
+    // anti-farming invariant); a fresh episode starts a new one. REC-3: a fresh
+    // deadline is floored at MIN_RECOVERY_SECONDS so a contest configured below the
+    // floor still leaves a humane window to recover.
+    //
+    // LT-3 FIX (v1.1, CONFIRMED LIVE BUG): the existing deadline is only reused
+    // while it is STILL IN THE FUTURE. The previous code reused it for ANY
+    // phase==="blocking", so a STALE (already-expired) deadline — left behind when
+    // a candidate re-entered fullscreen in the default flow without yet typing the
+    // ack, so tryResolve never settled the episode to idle and never cleared the
+    // deadline — was reused by a much-later exit, which then locked IMMEDIATELY on
+    // the next tick (the "second exit locks immediately" symptom). Gating on
+    // `state.deadlineMs > action.nowMs` keeps the anti-farming invariant for a
+    // genuine re-exit inside the live window (deadline still future ⇒ reused, not
+    // extended) while giving a later genuine exit a FRESH, floored countdown. The
+    // cumulative exitCount ladder above is untouched — the floor/reuse change only
+    // affects the per-episode deadline, never the session exit budget.
+    const reuseExistingDeadline = state.phase === "blocking"
+      && state.deadlineMs != null
+      && state.deadlineMs > action.nowMs;
+    const deadlineMs = reuseExistingDeadline
+      ? state.deadlineMs as number
       : action.nowMs + Math.max(config.reentrySeconds, MIN_RECOVERY_SECONDS) * 1000;
     return noop({
       ...state,
@@ -314,6 +366,11 @@ export function enforcementHeadline(phase: EnforcementPhase, fullscreen: boolean
   // #135 take-home pre-T0 soft nudge — gentle, never says "exit #N" or implies
   // the limit (the exam hasn't started).
   if (phase === "soft") return "You're not in fullscreen";
+  // LT-5 (v1.1): the no-countdown re-entry block — CALM, no-fault copy. MUST sit
+  // ABOVE the `!fullscreen` line below (BL-2b): fs_block is always out-of-
+  // fullscreen, so without this it would be shadowed by the accusatory
+  // "You left fullscreen". This is a return-to-fullscreen prompt, not a violation.
+  if (phase === "fs_block") return "Enter full screen to continue";
   if (phase === "locking") return "Test disabled";
   if (!fullscreen) return "You left fullscreen";
   return simplifiedRecovery ? "Return to fullscreen to continue" : "Finish the steps to continue";
@@ -329,6 +386,13 @@ export function enforcementSubline(phase: EnforcementPhase, fullscreen: boolean,
   // imply the limit (nothing is counted yet).
   if (phase === "soft") {
     return "Your exam hasn't started yet. Please return to fullscreen — this was noted but not counted against you.";
+  }
+  // LT-5 (v1.1): the no-countdown re-entry block — CALM, no-fault copy. MUST sit
+  // ABOVE the `if (fullscreen)` and `!fullscreen` paths below (BL-2b) so it is
+  // never shadowed. No "exit #N", no "test will be locked" — this is a plain
+  // return-to-fullscreen prompt after an exception we already handled.
+  if (phase === "fs_block") {
+    return "You're not in fullscreen — return to fullscreen to continue your exam.";
   }
   if (phase === "locking") {
     // Remote (take-home): point at the proctor phone instead of "raise your hand".
@@ -388,11 +452,12 @@ export function enforcementStorageKey(sessionId: string): string {
 
 export function serializeEnforcementState(state: EnforcementState): string {
   return JSON.stringify({
-    // #135 (A2): "soft" is EPHEMERAL — it is serialized AS "idle" and never
-    // restored, so a reload (or a cross-T0 persist) never resurrects a stale
-    // pre-T0 nudge. The phase is re-derivable from live fullscreen on the next
-    // exit. Mirrors the "ackOk deliberately not persisted" precedent.
-    phase: state.phase === "soft" ? "idle" : state.phase,
+    // #135 (A2) + LT-5 (v1.1): "soft" and "fs_block" are EPHEMERAL — serialized
+    // AS "idle" and never restored, so a reload never resurrects a stale pre-T0
+    // nudge or a stale re-entry block. Both are re-derived from live fullscreen on
+    // the next exit / require_fullscreen dispatch. Mirrors the "ackOk deliberately
+    // not persisted" precedent.
+    phase: state.phase === "soft" || state.phase === "fs_block" ? "idle" : state.phase,
     exitCount: state.exitCount,
     deadlineMs: state.deadlineMs,
     // Wave-2 fix: the unanswered-report bookkeeping survives a reload so the
@@ -404,9 +469,10 @@ export function serializeEnforcementState(state: EnforcementState): string {
   });
 }
 
-// #135 (A2): "soft" is deliberately NOT in the allowlist — a persisted/tampered
-// "soft" phase is never restored (it falls back to initial), reinforcing that
-// the soft nudge is ephemeral and re-derivable on the next live exit.
+// #135 (A2) + LT-5 (v1.1): "soft" and "fs_block" are deliberately NOT in the
+// allowlist — a persisted/tampered "soft"/"fs_block" phase is never restored (it
+// falls back to initial), reinforcing that both are ephemeral and re-derivable on
+// the next live exit / require_fullscreen dispatch.
 const PHASES: EnforcementPhase[] = ["idle", "blocking", "locking", "alert_hold"];
 const VIOLATION_PHASES: ViolationPhase[] = ["countdown_expired", "exit_limit"];
 
