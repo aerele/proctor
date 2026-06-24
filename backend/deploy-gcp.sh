@@ -230,11 +230,23 @@ COMMON_RUN_ARGS=(
   --timeout 120s
 )
 
+# Staged zero-downtime option (mirrors frontend/deploy-gcp.sh): DEPLOY_NO_TRAFFIC=1
+# deploys a NEW revision WITHOUT taking traffic, tagged for verification on its tag
+# URL; promote later with `gcloud run services update-traffic "$SERVICE_NAME"
+# --to-revisions=<rev>=100` (prior revision held at 0% for instant rollback).
+# Applies to BOTH deploy modes. proctor-api serves the LIVE exam, so a staged
+# canary + explicit promote is the safe path during/near a test. Unset = the new
+# healthy revision serves 100% immediately.
+TRAFFIC_ARGS=()
+if [ -n "${DEPLOY_NO_TRAFFIC:-}" ]; then
+  TRAFFIC_ARGS=(--no-traffic --tag "${DEPLOY_TAG:-stg}")
+fi
+
 if [ "$DEPLOY_MODE" = "image-only" ]; then
   # Routine code-only redeploy: ship the new image, PRESERVE existing env +
   # secrets (no --set-env-vars / --set-secrets, which would replace them).
   echo "==> image-only deploy: preserving the service's existing env + secret mounts."
-  gcloud run deploy "$SERVICE_NAME" "${COMMON_RUN_ARGS[@]}"
+  gcloud run deploy "$SERVICE_NAME" "${COMMON_RUN_ARGS[@]}" "${TRAFFIC_ARGS[@]}"
 else
   # FULL deploy: set the COMPLETE env map + mount the signer key, atomically.
   # NOTE: --set-env-vars REPLACES the whole env map and --set-secrets REPLACES
@@ -290,7 +302,8 @@ else
   echo "==> full deploy: setting the complete env + mounting the signer key (${SIGNER_SECRET_NAME})."
   gcloud run deploy "$SERVICE_NAME" "${COMMON_RUN_ARGS[@]}" \
     --set-env-vars="$ENV_VARS" \
-    --set-secrets="${SIGNER_MOUNT_PATH}=${SIGNER_SECRET_NAME}:latest"
+    --set-secrets="${SIGNER_MOUNT_PATH}=${SIGNER_SECRET_NAME}:latest" \
+    "${TRAFFIC_ARGS[@]}"
 fi
 
 echo "Backend URL:"

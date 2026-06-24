@@ -23,13 +23,20 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REGION="${REGION:-asia-south1}"
-PROJECT="${PROJECT:-your-gcp-project-id}"
 SLUG="${1:-}"
 GCLOUD="${GCLOUD:-$HOME/google-cloud-sdk/bin/gcloud}"
 
 if [ ! -f .env.deploy.local ]; then echo "✗ .env.deploy.local not found (need ADMIN_PASSWORD)"; exit 2; fi
 ADMINPW="$(grep -E '^ADMIN_PASSWORD=' .env.deploy.local | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')"
 if [ -z "$ADMINPW" ]; then echo "✗ ADMIN_PASSWORD missing from .env.deploy.local"; exit 2; fi
+
+# Resolve the project from $PROJECT, then $PROJECT_ID (what the deploy scripts and
+# .env.deploy.local actually set), then PROJECT_ID read from .env.deploy.local, then
+# a placeholder. This removes the footgun of needing a separate `export PROJECT=...`
+# before a deploy — the frontend deploy invokes this preflight with PROJECT_ID set,
+# and a standalone run picks PROJECT_ID up straight from the deploy env file.
+ENV_PROJECT_ID="$(grep -E '^PROJECT_ID=' .env.deploy.local | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')"
+PROJECT="${PROJECT:-${PROJECT_ID:-${ENV_PROJECT_ID:-your-gcp-project-id}}}"
 
 API_URL="$("$GCLOUD" run services describe proctor-api --region "$REGION" --project "$PROJECT" --format='value(status.url)' 2>/dev/null || true)"
 if [ -z "$API_URL" ]; then echo "✗ could not resolve proctor-api URL (gcloud auth?)"; exit 2; fi
