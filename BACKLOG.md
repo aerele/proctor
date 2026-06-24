@@ -193,9 +193,9 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
   conditions. Umbrella over LT-1..LT-4. Design-first.
 
 ### Alerts (candidate + admin)
-- ☐ **LT-6** — Optional comments field on the in-session red-bar alert (the dispute
+- ◑ **LT-6** (code-complete `87457c5` — needs browser test) — Optional comments field on the in-session red-bar alert (the dispute
   "report a problem" panel has one; the red-bar alert doesn't). (ALERT-1.)
-- ⚠ **LT-11** (BUG, HIGH) — Dispute + suppression broken in the live build:
+- ◑ **LT-11** (BUG, HIGH, code-complete `a51f71a` — needs browser test) — Dispute + suppression broken in the live build:
   (a) dispute records `window_blur` while the alert shown is `tab_away` — alert_type
   mismatch; (b) Suppress in the dispute → error "a valid alert type, user name and
   candidate ID are required"; (c) suppressed alerts still fire (red bar + new alerts
@@ -208,17 +208,17 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
   isn't usable from an alert today).
 
 ### Admin — recordings / evidence
-- ☐ **LT-7** (BUG) — Chunk-count mismatch in LIST views. A session shows 587 chunks
+- ◑ **LT-7** (BUG, code-complete `46ad737` — needs browser test) — Chunk-count mismatch in LIST views. A session shows 587 chunks
   in the session list AND the evidence/recordings (find-students) list, but the
   detail view shows 0. REC-4 fixed the DETAIL view to the GCS ground-truth count;
   the **list views still read the stale mint count** — point them at the same source.
-- ☐ **LT-8** (BUG) — Recording review opens the wrong session. Clicking a student in
+- ◑ **LT-8** (BUG, code-complete `f85b897` — needs browser test) — Recording review opens the wrong session. Clicking a student in
   the left list always loads that student's LATEST session, not the specific row
   clicked (multiple attempts per student). The session dropdown above the player
   works; the left-list click must target the clicked session.
 
 ### Admin — authoring / global UX
-- ☐ **LT-9** — Select-all / deselect-all checkbox atop the bulk-select lists for
+- ◑ **LT-9** (code-complete `3e8eb17` — needs browser eyeball) — Select-all / deselect-all checkbox atop the bulk-select lists for
   BOTH problems and templates. (BANK-1.)
 - ☐ **LT-10** — Floating toast for error/success messages. Today they render at the
   top of the list and scroll out of view (e.g. "Problem referenced" on a blocked
@@ -226,12 +226,12 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
   view; rework the notification element platform-wide.
 
 ### Admin — evaluation
-- ☐ **LT-13** (BUG) — "Run evaluation" on the result page errors `VITE_API_BASE_URL
+- ◑ **LT-13** (BUG, code-complete `759062e` — needs deploy+browser) — "Run evaluation" on the result page errors `VITE_API_BASE_URL
   is not configured.` The run-evaluation call's API base URL isn't baked into the
   deployed frontend build (cf. the build-config bake guard — every `VITE_*` the prod
   build needs must be baked, else the call has no base). Find which `VITE_*` var the
   run-evaluation path reads and make the deploy bake it (extend the bake guard).
-- ☐ **LT-14** (BUG) — The contest **Evaluation tab** loads the CANDIDATE screen in
+- ◑ **LT-14** (BUG, code-complete `759062e` — needs deploy+browser; deploy MUST export EVAL_API_URL=<proctor-eval URL>) — The contest **Evaluation tab** loads the CANDIDATE screen in
   its iframe instead of the eval UI. Eval was split into a separate `proctor-eval`
   service serving `/eval-ui`; the tab's iframe `src` / eval-UI base URL is wrong or
   unset, so it falls back to the candidate origin. Point the iframe at `proctor-eval`
@@ -247,7 +247,7 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
   live streams forward instead of stop-and-re-ask (today BrowserPreflightGate grabs
   then stops the screen stream, PermissionsGate re-prompts). Copy-half fixed
   (`3f26a58`). Overlaps LT-1/LT-2/LT-5.
-- ☐ **T3** — Unlock-button still presumes fault ("I have fixed it"). Reword to a
+- ◑ **T3** (code-complete `87457c5`) — Unlock-button still presumes fault ("I have fixed it"). Reword to a
   no-fault action ("Return to exam"/"Dismiss"); accidental triggers shouldn't admit
   fault. ~1-line in `AnomalyPanel.tsx` + test.
 - ☐ **T7** — Gate the unlock-code panel behind being in fullscreen (today it renders
@@ -265,7 +265,7 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
   built).
 
 ### Reopened (was ✅, but live-test/audit shows incomplete)
-- ⚠ **ALERT-1** — dispute/suppress broken end-to-end (LT-11).
+- ◑ **ALERT-1** — dispute/suppress fix landed server-side (`a51f71a`, LT-11); needs browser test.
 - ⚠ **FLOW-1 / T7** — fullscreen render-gate + recovery-state issues (LT-1..LT-5);
   record-through-lock pulled in (LT-4).
-- ⚠ **REC-4** — list-view chunk counts still stale (LT-7).
+- ◑ **REC-4** — list-view chunk counts fixed to GCS ground-truth (`46ad737`, LT-7); needs browser test.
