@@ -320,19 +320,51 @@ function createEvent(type: string, detail?: Record<string, unknown>): ProctorEve
 // at this size so it stays fixed).
 const CAMERA_VIDEO_BITS_PER_SECOND = 250_000;
 
-// B1: map a backend write rejection (403 session_locked / waiting_for_approval,
-// 409 session_ended) to the lifecycle status the host should flip to. Returns
-// null for ordinary network/transient errors (no self-stop). Pure (no recorder
-// state) — module-scope and exported (RT-4) so the chain tests pin the EXACT
-// fatal predicate the screen upload chain composes from it.
-export function fatalStatusFromError(error: unknown): ServerSessionStatus | null {
+// B5 / LT-4 (DEC-1): a NON-FATAL sentinel for the record-through-lock case. The
+// mapper returns this (instead of "locked") for a 403 / session_locked so the
+// recorder does NOT self-stop on a lock — the screen share + upload loop stay
+// alive through the lock (the maintainer most wants to see what the candidate
+// does while locked). It is NOT a ServerSessionStatus: a lock is not a terminal
+// the recorder unwinds on; it is a "keep recording" signal. handleFatalStatus
+// treats it as a no-op, so all 5 fatalStatusFromError consumers de-fatalize on
+// lock together (see the enumeration on handleFatalStatus). `ended` /
+// `pending_approval` stay genuine ServerSessionStatus terminals (fatal).
+export type RecorderFatalStatus = ServerSessionStatus | "locked_recording";
+
+// B1: map a backend write rejection (409 session_ended / waiting_for_approval) to
+// the lifecycle status the host should flip to; B5: a lock maps to the NON-FATAL
+// "locked_recording" sentinel (record-through-lock, not a stop). Returns null for
+// ordinary network/transient errors (no self-stop). Pure (no recorder state) —
+// module-scope and exported (RT-4) so the chain tests pin the EXACT predicate the
+// screen upload chain composes from it.
+export function fatalStatusFromError(error: unknown): RecorderFatalStatus | null {
   const err = error as ApiError;
   if (err?.code === "session_ended") return "ended";
-  if (err?.code === "session_locked") return "locked";
+  // B5: lock → non-fatal record-through-lock sentinel (NOT "locked"). A 403 /
+  // session_locked now means "keep recording"; the backend bounded bypass keeps
+  // within-window uploads SUCCEEDING (no error reaches here at all), and a
+  // past-window 403 surfaces an upload_error but does NOT stop the recorder
+  // (handleFatalStatus no-ops the sentinel) — the screen stream is never dropped.
+  if (err?.code === "session_locked") return "locked_recording";
   if (err?.code === "waiting_for_approval") return "pending_approval";
   if (err?.status === 409) return "ended";
-  if (err?.status === 403) return "locked";
+  if (err?.status === 403) return "locked_recording";
   return null;
+}
+
+// BL-1 (B5 / LT-4 / DEC-1) — map the LITERAL lifecycle status reported on a
+// heartbeat-SUCCESS to the recorder action. This is the SECOND self-stop path,
+// separate from fatalStatusFromError (the success body carries a raw status
+// string, never an ApiError): "ended"/"pending_approval" stay fatal (→ stop);
+// "locked" maps to the NON-FATAL "locked_recording" sentinel so a lock keeps the
+// recorder + screen share alive (record-through-lock); "active" (and anything
+// else) is a no-op (null). Pure + exported so the BL-1 behavior is pinned in a
+// unit test without driving the whole recorder. handleFatalStatus no-ops the
+// sentinel, so this is exactly "do not stop on lock, do stop on ended/pending".
+export function recorderStatusFromHeartbeat(status: ServerSessionStatus | undefined): RecorderFatalStatus | null {
+  if (!status || status === "active") return null;
+  if (status === "locked") return "locked_recording";
+  return status; // "ended" | "pending_approval" — genuine fatal terminals
 }
 
 export function createProctorRecorder(options: RecorderOptions): RecorderControls {
@@ -519,8 +551,22 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
   // B1: stop the recorder and notify the host exactly once when the session is no
   // longer writable. Guards against the multiple concurrent writes (heartbeat +
   // chunk upload + event flush) all tripping the same 403 at the same time.
-  const handleFatalStatus = (status: ServerSessionStatus | null) => {
-    if (!status || fatalStatusHandled || stopping) return;
+  //
+  // B5 / LT-4 (DEC-1) — record-through-lock: "locked_recording" is the NON-FATAL
+  // lock sentinel. It is treated as a NO-OP here (do NOT stop, do NOT fire
+  // onStatusChange) so a lock keeps the recorder + screen share alive. This
+  // single guard de-fatalizes ALL 5 fatalStatusFromError consumers on lock at
+  // once: (1) events flush catch (flushEvents); (2) screen chunk-upload onError
+  // (enqueueUpload); (3) camera chunk-upload onError (enqueueCameraUpload);
+  // (4) heartbeat-error catch (the heartbeat loop's .catch); (5) the buffered/
+  // drain path (enqueueBufferedLiveUpload onError + drainRecord catch). The
+  // heartbeat-SUCCESS path (BL-1) does NOT route through fatalStatusFromError —
+  // it is de-fatalized separately at its call site below. `ended` /
+  // `pending_approval` stay fatal (genuine terminals → stop). exec/submit 403s
+  // are SEPARATE handlers (not the recorder) and never flow through this mapper,
+  // so they stay fatal/blocked (MA-3).
+  const handleFatalStatus = (status: RecorderFatalStatus | null) => {
+    if (!status || status === "locked_recording" || fatalStatusHandled || stopping) return;
     fatalStatusHandled = true;
     void controls.stop();
     options.onStatusChange?.(status);
@@ -1002,10 +1048,15 @@ export function createProctorRecorder(options: RecorderOptions): RecorderControl
           options.onEnforcementChange?.({ enforcement: response.enforcement, exemptions: response.enforcement_exemptions });
         }
         // B1: an active heartbeat reports the live status; if a proctor
-        // locked/ended/paused the session, self-stop the recorder.
-        if (response.status && response.status !== "active") {
-          handleFatalStatus(response.status);
-        }
+        // ended/paused the session, self-stop the recorder.
+        // BL-1 — record-through-lock (DEC-1/LT-4): this is the heartbeat-SUCCESS
+        // direct self-stop. It passes the LITERAL status string from the heartbeat
+        // body and BYPASSES fatalStatusFromError, so de-fatalizing the mapper alone
+        // would still let the first post-lock heartbeat (≤15s) stop the recorder.
+        // recorderStatusFromHeartbeat de-fatalizes "locked" → the non-fatal
+        // sentinel (handleFatalStatus no-ops it → keep recording) while keeping
+        // "ended"/"pending_approval" fatal (→ stop).
+        handleFatalStatus(recorderStatusFromHeartbeat(response.status));
       }).catch((error) => {
         const fatal = fatalStatusFromError(error);
         if (fatal) {

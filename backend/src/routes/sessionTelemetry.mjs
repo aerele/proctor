@@ -46,6 +46,12 @@ export function makeSessionTelemetryRoutes(ctx) {
     sessionRef,
     sessionPrefix,
     inAdminEndGrace,
+    // B5 / LT-4 (DEC-1): bounded record-through-lock predicate (by reference,
+    // resident in handler.mjs alongside inAdminEndGrace). status==="locked" AND
+    // within LOCK_RECORD_GRACE_MS of locked_at. The bound is the protection on
+    // this token-only path (MA-1/MA-2). A no-op fallback keeps older ctx / tests
+    // that don't inject it working (treats every locked session as past-window).
+    recordingThroughLock = () => false,
     personContestForSession,
     // http transport helpers
     parseBody,
@@ -93,7 +99,16 @@ export function makeSessionTelemetryRoutes(ctx) {
     const fetched = await getSession(body.session_id);
     // D2: an admin-ended session may still flush its in-flight final chunk for a
     // bounded window; everything else goes through the normal status gate.
-    const session = inAdminEndGrace(fetched) ? fetched : requireWritableSession(fetched);
+    // B5 / LT-4 (DEC-1): ALSO accept a LOCKED session within the bounded
+    // record-through-lock window — keep the screen recording flowing during a lock
+    // so the maintainer can see what the candidate does. The window (off locked_at)
+    // is the protection on this token-only path (MA-1/MA-2): past it, a locked /
+    // abandoned / leaked session is refused 403 again and can no longer mint
+    // signed write URLs. exec/submit are SEPARATE handlers and stay 403 while
+    // locked (requireWritableSession unchanged there).
+    const session = (inAdminEndGrace(fetched) || recordingThroughLock(fetched))
+      ? fetched
+      : requireWritableSession(fetched);
     // v1.1 G3 (#4): per-session rate limit (after the ownership gate, before the
     // expensive v4-signing path — the live-incident path). Tuned so a real
     // chunk-upload cadence (even a reconnect backlog flush) never trips it.
@@ -300,7 +315,15 @@ export function makeSessionTelemetryRoutes(ctx) {
   async function recordHeartbeat(req) {
     const body = parseBody(req);
     requireFields(body, ["session_id", "recording_state", "visibility_state"]);
-    const session = requireWritableSession(await getSession(body.session_id));
+    // B5 / LT-4 (DEC-1): the heartbeat is the recorder's liveness + live channel.
+    // A LOCKED session keeps heartbeating within the bounded record-through-lock
+    // window so the upload loop stays alive during a lock (same bound + same
+    // token-only-path reasoning as createUploadUrl above). Past the window it goes
+    // back through the normal writable gate → 403. The response `status` below
+    // stays honest (reconciledStatus || session.status, still "locked"), so the
+    // client still KNOWS it is locked even while the heartbeat is accepted.
+    const fetched = await getSession(body.session_id);
+    const session = recordingThroughLock(fetched) ? fetched : requireWritableSession(fetched);
     telemetryCheck("heartbeat", session.session_id); // v1.1 G3 (#4)
     const now = new Date().toISOString();
     const currentIp = getClientIp(req);

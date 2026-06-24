@@ -522,16 +522,16 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     addEvent,
     onLocked: (reason) => {
       setLockedReason(reason);
-      // Stop the recorder NOW (the heartbeat's 403 would catch it within one
-      // interval anyway, but the lock should be immediate and audible).
-      // F1: bank the stint's manifest once the stop has flushed its uploads.
-      const active = recorderRef.current;
-      if (active) {
-        void active.stop()
-          .then((items) => collectStintManifest(items, sessionId))
-          .catch(() => undefined);
-      }
-      setStatus("idle");
+      // B5 / LT-4 (DEC-1) — record-through-lock: do NOT stop the recorder and do
+      // NOT flip status off "recording" on a lock. The maintainer most wants to
+      // SEE what a candidate does during a lock, so the screen share + upload loop
+      // stay ALIVE: keep status === "recording" so the recorder/heartbeat loop and
+      // the bounded backend record-through path keep running (the heartbeat now
+      // tolerates a locked session within LOCK_RECORD_GRACE_MS). We still flip the
+      // gate to "locked" (BlockedScreen + UnlockCodePanel own the viewport via the
+      // gate==="locked" early return), and still speak the warning — only the
+      // recorder teardown is removed. (The previous active.stop()/setStatus("idle")
+      // dropped the stream; that is exactly what DEC-1 forbids.)
       setGate("locked");
       // #135 take-home: route the spoken lock warning to the remote proctor phone
       // instead of "raise your hand" (no invigilator in the room).

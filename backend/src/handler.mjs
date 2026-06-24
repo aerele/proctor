@@ -692,6 +692,7 @@ const sessionTelemetryRoutes = makeSessionTelemetryRoutes({
   sessionRef,
   sessionPrefix,
   inAdminEndGrace,
+  recordingThroughLock,
   personContestForSession,
   parseBody,
   requireFields,
@@ -1636,6 +1637,36 @@ function inAdminEndGrace(session) {
   if (!ADMIN_END_GRACE_REASONS.has(session.ended_reason)) return false;
   const endedMs = Date.parse(session.ended_at || "");
   return Number.isFinite(endedMs) && Date.now() - endedMs <= ADMIN_END_GRACE_MS;
+}
+
+// B5 / LT-4 (DEC-1) — record-through-lock. When a session LOCKS (an enforcement
+// lock from enforcement.mjs:104-109 or an admin lock from adminSessions.mjs:987,
+// BOTH of which stamp `status:"locked", locked_at:now`), the candidate's recorder
+// is kept ALIVE on the client (StudentApp onLocked no longer stops it) — the
+// maintainer most wants to SEE what a candidate does during a lock, so the screen
+// share keeps streaming and chunk uploads keep flowing. For that, /api/upload-url
+// and /api/heartbeat must accept a `locked` session — but ONLY within a bounded
+// window, never unconditionally.
+//
+// WHY BOUNDED (MA-1/MA-2 — the bound IS the protection): the upload path is
+// authenticated ONLY by the unguessable `session_id` token (createUploadUrl reads
+// body.session_id with NO ownership/contest-scope check — sessionTelemetry.mjs
+// :90-96). An UNBOUNDED `status==="locked"` bypass would let any locked /
+// abandoned / leaked session mint signed write URLs and create GCS objects
+// INDEFINITELY (archival cost is driven by object COUNT, not bytes). The time
+// bound off the existing `locked_at` stamp is therefore the real defense: a lock
+// episode + unlock attempt + proctor interaction realistically resolves well
+// inside the window, while an abandoned/leaked locked session stops minting
+// objects once the window lapses. 15 min is generous enough to capture a full
+// post-lock episode yet tightly bounds the token-only write surface. This bypass
+// is for chunk-upload + heartbeat ONLY — a locked session STILL cannot exec or
+// submit (those keep requireWritableSession → 403).
+const LOCK_RECORD_GRACE_MS = 15 * 60_000;
+
+function recordingThroughLock(session) {
+  if (session?.status !== "locked") return false;
+  const lockedMs = Date.parse(session.locked_at || "");
+  return Number.isFinite(lockedMs) && Date.now() - lockedMs <= LOCK_RECORD_GRACE_MS;
 }
 
 // createUploadUrl (signed chunk-write URL) + recordEvents (evidence batch +

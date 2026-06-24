@@ -12,7 +12,7 @@ import {
   uploadErrorStatus,
   type UploadRetryInfo
 } from "./chunkUploadRetry";
-import { fatalStatusFromError } from "./useProctorRecorder";
+import { fatalStatusFromError, recorderStatusFromHeartbeat } from "./useProctorRecorder";
 
 /** ApiError shape thrown by api.ts request() (getUploadUrl rejections). */
 function apiError(status: number, code: string): Error & { status: number; code: string } {
@@ -211,13 +211,17 @@ describe("runUploadWithRetry", () => {
 
 // First pin the B1 fatal classification itself (today's behavior), then drive
 // the chain with the recorder's EXACT predicate composed from it.
-describe("fatalStatusFromError (B1 — pinned)", () => {
-  it("maps lock-window / pending / ended rejections to their fatal status", () => {
-    expect(fatalStatusFromError(apiError(403, "session_locked"))).toBe("locked");
+describe("fatalStatusFromError (B1 + B5 — pinned)", () => {
+  it("maps pending / ended rejections to their fatal status; a lock maps to the NON-FATAL record-through-lock sentinel (B5/LT-4)", () => {
+    // B5 (DEC-1/LT-4): a lock no longer maps to "locked" — it maps to the
+    // non-fatal "locked_recording" sentinel so the recorder does NOT self-stop on
+    // a lock (the screen share keeps streaming through the lock). ended/pending
+    // stay genuine fatal terminals.
+    expect(fatalStatusFromError(apiError(403, "session_locked"))).toBe("locked_recording");
     expect(fatalStatusFromError(apiError(403, "waiting_for_approval"))).toBe("pending_approval");
     expect(fatalStatusFromError(apiError(409, "session_ended"))).toBe("ended");
-    // Bare statuses without a known code still classify by status.
-    expect(fatalStatusFromError(apiError(403, "other"))).toBe("locked");
+    // Bare statuses without a known code still classify by status (403 → lock).
+    expect(fatalStatusFromError(apiError(403, "other"))).toBe("locked_recording");
     expect(fatalStatusFromError(apiError(409, "other"))).toBe("ended");
   });
 
@@ -226,6 +230,29 @@ describe("fatalStatusFromError (B1 — pinned)", () => {
     expect(fatalStatusFromError(apiError(503, "x"))).toBeNull();
     expect(fatalStatusFromError(apiError(429, "x"))).toBeNull();
     expect(fatalStatusFromError(putError(403))).toBeNull();
+  });
+});
+
+// BL-1 (B5 / LT-4 / DEC-1) — the heartbeat-SUCCESS direct self-stop path. A
+// heartbeat-success body carries the LITERAL lifecycle status string and does
+// NOT go through fatalStatusFromError, so it is de-fatalized on its OWN via
+// recorderStatusFromHeartbeat. A "locked" heartbeat must NOT stop the recorder
+// (record-through-lock); "ended"/"pending_approval" must still stop it.
+describe("recorderStatusFromHeartbeat (BL-1 — pinned)", () => {
+  it("a locked heartbeat does NOT stop the recorder — maps to the non-fatal sentinel (handleFatalStatus no-ops it)", () => {
+    // The sentinel is what handleFatalStatus treats as a no-op → recorder keeps
+    // running and the screen share is never dropped on a lock.
+    expect(recorderStatusFromHeartbeat("locked")).toBe("locked_recording");
+  });
+
+  it("ended / pending_approval heartbeats STILL stop the recorder (genuine fatal terminals)", () => {
+    expect(recorderStatusFromHeartbeat("ended")).toBe("ended");
+    expect(recorderStatusFromHeartbeat("pending_approval")).toBe("pending_approval");
+  });
+
+  it("active (and missing) status is a no-op — nothing to do", () => {
+    expect(recorderStatusFromHeartbeat("active")).toBeNull();
+    expect(recorderStatusFromHeartbeat(undefined)).toBeNull();
   });
 });
 
@@ -283,16 +310,22 @@ describe("advanceUploadChain (RT-4)", () => {
     expect(log.settled).toEqual([5, 6, 7]);
   });
 
-  it("a fatal 403 keeps today's semantics: onError gets the 403, the chain STAYS rejected for stop(), and a later queued chunk is skipped with the inherited error", async () => {
+  it("a fatal-to-the-CHAIN 403 keeps today's chain semantics: onError gets the 403, the chain STAYS rejected, and a later queued chunk is skipped with the inherited error", async () => {
+    // NB (B5): a 403/session_locked is classified non-null by fatalStatusFromError
+    // (now the "locked_recording" sentinel), so `screenIsFatal` is still TRUE and
+    // the CHAIN stays rejected exactly as before — this test pins the chain's
+    // serial/inheritance behavior, which is unchanged. The recorder-level
+    // de-fatalize (handleFatalStatus no-op for the lock sentinel → no stop) is a
+    // SEPARATE concern not exercised here; this chain-rejection is consumed by
+    // stop()'s `await uploadQueue.catch(...)`, not by a recorder self-stop.
     const log = newLog();
     const locked = apiError(403, "session_locked");
     let queue: Promise<void> = Promise.resolve();
     queue = advanceUploadChain(queue, chunkSlot(log, 8, () => Promise.reject(locked)));
     queue = advanceUploadChain(queue, chunkSlot(log, 9, () => Promise.resolve()));
 
-    // stop()'s `await uploadQueue.catch(...)` sees this rejection → onFatalError.
     await expect(queue).rejects.toBe(locked);
-    expect(log.ran).toEqual([8]); // chunk 9 never attempted (the recorder is self-stopping)
+    expect(log.ran).toEqual([8]); // chunk 9 never attempted (the chain stayed rejected)
     expect(log.errors).toEqual([
       { index: 8, error: locked },
       { index: 9, error: locked } // inherited — byte-identical to pre-RT-4 fatal behavior
