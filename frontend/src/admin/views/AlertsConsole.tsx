@@ -1,7 +1,7 @@
 // frontend/src/admin/views/AlertsConsole.tsx
 // Live alerts console + alert row, extracted verbatim from App.tsx (F3).
 import { useMemo, useState } from "react";
-import { AlertTriangle, Archive, ArchiveRestore, Bell, BellOff, ChevronDown, ChevronRight, ExternalLink, RefreshCw, Undo2, Video, X } from "lucide-react";
+import { AlertTriangle, Archive, ArchiveRestore, Bell, BellOff, ChevronDown, ChevronRight, ExternalLink, Film, RefreshCw, Undo2, Video, X } from "lucide-react";
 import { isAllSelected, usernamesForSelection } from "../../alertSelection";
 import { groupAlerts, type AlertGroupBy } from "../../alertGrouping";
 import { ALERT_ACTION_INFO, SESSION_ACTION_INFO, SESSION_ACTION_ORDER, alertJoinState, bulkSessionActionsFor, normalizeJoinUsername, sessionForAlert, suppressionTypeForAlert, validSessionActionsFor, type AlertJoinState } from "../alertActions";
@@ -15,7 +15,7 @@ import { ActionGroup, BulkActionButtons, SessionActionButton } from "../actions"
 import { RoomFilter } from "./RoomFilter";
 import { AlertField } from "./AlertField";
 
-export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive, suppressions, onSuppress }: {
+export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loaded, filters, rooms, candidateFilter, onClearCandidateFilter, selected, onToggleSelected, onSelectAll, onDeselectAll, onClearSelection, onFiltersChange, onRefresh, onAction, onArchive, onApproveArchive, onJumpToRecordingAtAlert, suppressions, onSuppress }: {
   alerts: Alert[];
   /** F6.4 status-join data; null = not loaded / 404 / truncated (see alertJoinState). */
   sessions: RecordingSession[] | null;
@@ -42,6 +42,10 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
   onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void;
   onArchive: (ids: string[], action?: "archive" | "unarchive") => void;
   onApproveArchive: (alert: Alert, targetSessionId?: string) => void;
+  /** LT-12: jump to the Recordings tab for this alert's session, seeked to the
+   *  alert's exact wall-clock moment. AdminApp resolves the target session +
+   *  carries the alert timestamp; a session-less alert is a no-op. */
+  onJumpToRecordingAtAlert: (alert: Alert) => void;
   /** ALERT-1: the shared per-(user, test, type) suppression list (for the panel
    *  + per-row "already suppressed" state). null = not loaded / endpoint absent. */
   suppressions: AlertSuppressionEntry[] | null;
@@ -115,6 +119,7 @@ export function AlertsConsole({ alerts, sessions, sessionsFailed, loading, loade
       onAction={onAction}
       onArchive={onArchive}
       onApproveArchive={onApproveArchive}
+      onJumpToRecordingAtAlert={onJumpToRecordingAtAlert}
       suppressions={suppressions}
       onSuppress={onSuppress}
     />
@@ -381,7 +386,7 @@ function SuppressedPanel({ suppressions, onSuppress }: { suppressions: AlertSupp
   );
 }
 
-function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive, suppressions, onSuppress }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void; suppressions: AlertSuppressionEntry[] | null; onSuppress: (request: AlertSuppressionRequest) => void }) {
+function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAction, onArchive, onApproveArchive, onJumpToRecordingAtAlert, suppressions, onSuppress }: { alert: Alert; sessions: RecordingSession[] | null; joinState: AlertJoinState; selected: boolean; onToggleSelected: () => void; onAction: (action: SessionAction, opts: { sessionId?: string; usernames?: string[] }) => void; onArchive: (ids: string[], action?: "archive" | "unarchive") => void; onApproveArchive: (alert: Alert, targetSessionId?: string) => void; onJumpToRecordingAtAlert: (alert: Alert) => void; suppressions: AlertSuppressionEntry[] | null; onSuppress: (request: AlertSuppressionRequest) => void }) {
   const [expanded, setExpanded] = useState(false);
   const hasData = alert.data && Object.keys(alert.data).length > 0;
   // F6.4: join the alert to the session its actions would target (the alert's
@@ -392,6 +397,11 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
   // archive-only with a note. Contest-eval alerts whose candidate has no
   // session resolve to joined === null → alert actions only.
   const joined = joinState === "joined" && sessions !== null ? sessionForAlert(alert, sessions) : null;
+  // LT-12: this alert can deep-link into the recording at its exact moment when
+  // there's a session to open — the alert's own session_id, or a joined live
+  // session (a session-less contest-eval signal has no recording to jump to).
+  // AdminApp re-resolves the precise target + carries the timestamp on click.
+  const canJumpToRecording = Boolean(alert.session_id || joined);
   const sessionActions =
     joinState === "joined" ? validSessionActionsFor(joined?.status) : joinState === "fallback" ? SESSION_ACTION_ORDER : [];
   const sessionGroupLabel = joinState === "joined" ? `Session — ${joined?.status ?? "none"}` : "Session";
@@ -489,6 +499,21 @@ function AlertRow({ alert, sessions, joinState, selected, onToggleSelected, onAc
           ) : (
             <span className="text-xs text-muted">No recording attached.</span>
           )}
+          {/* LT-12: jump INTO the recording-review player for this session,
+              seeked to the alert's exact moment (front/back scrubbing + the
+              full activity timeline there) — distinct from the raw "Open
+              evidence clip" file link above. Shown whenever there's a session
+              to open. */}
+          {canJumpToRecording ? (
+            <button
+              type="button"
+              onClick={() => onJumpToRecordingAtAlert(alert)}
+              className="focus-ring inline-flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40"
+              title="Open the recording review for this session, seeked to this alert's moment"
+            >
+              <Film size={14} /> View recording at this moment
+            </button>
+          ) : null}
           {hasData ? (
             <button type="button" onClick={() => setExpanded((value) => !value)} className="focus-ring rounded-md border border-line px-3 py-2 text-xs font-medium text-ink hover:border-ink/40">
               {expanded ? "Hide details" : "Show details"}

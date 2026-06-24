@@ -24,6 +24,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAdminSessions, fetchAlerts, fetchMyReviews, fetchRecordingSessions, fetchSessionEditorEvents, fetchSessionEvents, fetchSubmissionEvents, reviewNext, submitReviewVerdict } from "./api";
 import { describeRecordingContents } from "./admin/sessionDetail";
+import { alertSeekOffsetSec } from "./admin/alertSeek";
 import { DateTimeField } from "./admin/DateTimeField";
 import { candidateIdOf } from "./identity";
 import {
@@ -197,7 +198,11 @@ type Props = {
   // later manual visit to the tab starts blank as before.
   // FIX-B1: `usernameNorm` is the session's exact stored key (person/legacy);
   // when present the player resolves by it, not the display `username`.
-  deepLink?: { username: string; usernameNorm?: string; sessionId?: string } | null;
+  // LT-12: `seekToMs` (epoch ms of an alert's moment) makes the player seek to
+  // that wall-clock time once the chosen session's playlist is loaded — resolved
+  // against the session's test-start (created_at) via alertSeekOffsetSec, then
+  // snapped to the nearest recorded chunk. Undefined ⇒ open at the start as before.
+  deepLink?: { username: string; usernameNorm?: string; sessionId?: string; seekToMs?: number } | null;
   onDeepLinkConsumed?: () => void;
 };
 
@@ -268,6 +273,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   const preloadRef = useRef<HTMLVideoElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
   const playerWrapRef = useRef<HTMLDivElement | null>(null);
+  // LT-12: a deep-link's alert moment (epoch ms) parked until the chosen
+  // session's playlist is ready — the seek can't run until chunks + the
+  // test-start anchor exist. The playlist-ready effect consumes + clears it.
+  const pendingSeekMsRef = useRef<number | null>(null);
   // Guards a single in-flight URL refresh so a burst of errors doesn't stampede.
   const refreshingRef = useRef(false);
   // Live drag flag for the window-level mousemove/up listeners (avoids re-binding).
@@ -624,6 +633,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   useEffect(() => {
     if (!deepLink) return;
     setMode("browse");
+    // LT-12: park the alert moment so the player seeks to it once the chosen
+    // session's playlist + test-start anchor exist (the playlist-ready effect
+    // applies it). A link without seekToMs clears any stale pending seek.
+    pendingSeekMsRef.current = typeof deepLink.seekToMs === "number" ? deepLink.seekToMs : null;
     void loadUser(deepLink.username, false, deepLink.sessionId, contestSlug || undefined, deepLink.usernameNorm);
     onDeepLinkConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -883,6 +896,20 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
   // (the error handler already resumed that case).
   useEffect(() => {
     if (!playlist.length) return;
+    // LT-12: a deep-link parked an alert moment — seek there NOW that the
+    // playlist + test-start anchor exist. alertSeekOffsetSec converts the alert's
+    // wall-clock ms into a test-relative offset; seekToTestTime snaps it to the
+    // nearest recorded chunk (a moment inside a recording gap lands on the closest
+    // frame). One-shot: cleared so a later refresh/session-switch doesn't re-seek.
+    const pendingSeekMs = pendingSeekMsRef.current;
+    if (pendingSeekMs !== null) {
+      pendingSeekMsRef.current = null;
+      const offsetSec = alertSeekOffsetSec(new Date(pendingSeekMs).toISOString(), testStartMs);
+      if (offsetSec !== null) {
+        seekToTestTime(Math.max(span.start, Math.min(offsetSec, span.end)), false);
+        return;
+      }
+    }
     const pos = Math.min(currentPos, playlist.length - 1);
     const chunk = playlist[pos];
     const video = videoRef.current;

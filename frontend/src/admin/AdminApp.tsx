@@ -10,7 +10,8 @@ import { Activity, Award, Bell, BrainCircuit, ClipboardList, Download, Film, Lay
 import { adjustContestExamTime, adminPassword, adminPasswordHash, alertAction, alertSuppression, fetchAdminSessions, fetchAdminStats, fetchAlertSettings, fetchAlerts, fetchAlertSuppressions, fetchAllReviews, fetchContests, fetchIpReport, fetchReviewRoster, fetchSessionDetails, fetchSessionsList, parseRosterInput, saveAlertSettings, saveReviewRoster, sessionAction, sha256Hex } from "../api";
 import { RecordingReview } from "../RecordingReview";
 import { addAllToSelection, removeFromSelection, toggleId } from "../alertSelection";
-import { alertJoinState, joinableSessions } from "./alertActions";
+import { alertJoinState, joinableSessions, sessionForAlert } from "./alertActions";
+import { buildAlertRecordingLink } from "./alertSeek";
 import { computeClockSkewMs } from "../examTime";
 import { ProblemBankSection } from "./ProblemBank";
 import { ToastProvider, useToast } from "./Toast";
@@ -142,7 +143,7 @@ function AdminAppInner() {
   // F6.3 state-based deep link Sessions → Recordings: load this candidate (and
   // prefer this exact session) when the Recordings tab mounts; one-shot (the
   // RecordingReview consumes it and we clear it).
-  const [recordingDeepLink, setRecordingDeepLink] = useState<{ username: string; usernameNorm?: string; sessionId?: string } | null>(null);
+  const [recordingDeepLink, setRecordingDeepLink] = useState<{ username: string; usernameNorm?: string; sessionId?: string; seekToMs?: number } | null>(null);
   // F6.3 one-shot client-side candidate filter for the alerts console ("View
   // alerts" on the detail card). "" = off; cleared via the chip in the console.
   const [alertCandidateFilter, setAlertCandidateFilter] = useState("");
@@ -769,6 +770,27 @@ function AdminAppInner() {
     setView("alerts");
   };
 
+  // LT-12 "View recording at this moment" — from an alert row, jump to the
+  // Recordings tab pre-scoped to this candidate/session AND seeked to the alert's
+  // wall-clock moment. We resolve the SAME target the alert's session actions use
+  // (its joined live session, else its own session_id) so the link opens the
+  // attempt the alert belongs to; the player converts seekToMs → a test-relative
+  // seek against that session's created_at once the playlist loads. No-op for a
+  // session-less alert (buildAlertRecordingLink returns null → nothing to open).
+  const jumpToRecordingAtAlert = (alert: Alert) => {
+    // alertSessions is already the post-joinableSessions value (null when the
+    // list was truncated/404/erroring) — so a non-null list is safe to join.
+    const joined = alertSessions ? sessionForAlert(alert, alertSessions) : null;
+    const target = joined
+      ? { sessionId: joined.session_id, usernameNorm: joined.username_norm || undefined }
+      : null;
+    const link = buildAlertRecordingLink(alert, target, candidateIdOf(alert));
+    if (!link) return;
+    setRecordingDeepLink(link);
+    setDetailSession(null);
+    setView("recordings");
+  };
+
   const loadAlertSettings = async () => {
     setAlertSettingsLoading(true);
     setError("");
@@ -1197,6 +1219,7 @@ function AdminAppInner() {
           onAction={runAction}
           onArchive={(ids, action) => void archiveAlerts(ids, action)}
           onApproveArchive={(alert, targetSessionId) => void approveAndArchive(alert, targetSessionId)}
+          onJumpToRecordingAtAlert={jumpToRecordingAtAlert}
           suppressions={suppressions}
           onSuppress={(request) => void suppressAlert(request)}
         />

@@ -147,7 +147,7 @@ export function normalizeJoinUsername(value: string): string {
 
 /** The candidate's latest LIVE (non-ended) session — mirrors the backend bulk
  * path (resolveActionTargets: filter ended out, newest created_at first). */
-function latestLiveSessionFor(username: string, sessions: JoinableSession[]): JoinableSession | null {
+function latestLiveSessionFor<T extends JoinableSession>(username: string, sessions: T[]): T | null {
   const norm = normalizeJoinUsername(username);
   const live = sessions
     .filter((session) => session.status !== "ended" && normalizeJoinUsername(candidateIdOf(session)) === norm)
@@ -166,7 +166,7 @@ function latestLiveSessionFor(username: string, sessions: JoinableSession[]): Jo
  * Null = no session to act on (e.g. a session-less alert for a candidate who
  * never started a proctored session).
  */
-export function sessionForAlert(alert: JoinableAlert, sessions: JoinableSession[]): JoinableSession | null {
+export function sessionForAlert<T extends JoinableSession>(alert: JoinableAlert, sessions: T[]): T | null {
   const username = alert.username_norm || candidateIdOf(alert);
   const live = username ? latestLiveSessionFor(username, sessions) : null;
   if (alert.session_id) {
