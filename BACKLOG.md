@@ -171,24 +171,24 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
 **before** any build (THE ROADMAP RULE / capture-on-ask) so none can slip again.
 
 ### Candidate flow — lock / fullscreen / recording (one connected redesign)
-- ☐ **LT-1** (BUG) — Coding screen renders while NOT in fullscreen. After a manual
+- ◑ **LT-1** (BUG, code-complete `c3a0939` — needs browser test) — Coding screen renders while NOT in fullscreen. After a manual
   stop-share → re-share, the workspace/questions showed without fullscreen. **Hard
   rule:** code must NEVER render unless in fullscreen AND recording. (FLOW-1/T7 — the
   gate overlay exists but doesn't gate the re-share render path.)
-- ☐ **LT-2** — No-countdown re-entry state. When a candidate returns from an
+- ◑ **LT-2** (code-complete `6dd8507`+`c3a0939` — needs browser test) — No-countdown re-entry state. When a candidate returns from an
   exception (re-share, post-lock, came-from-another-state), show a fullscreen block
   "enter full screen to continue" with **no countdown** — don't count them into a
   surprise lock. Countdown applies only to a genuine mid-exam fullscreen exit.
-- ☐ **LT-3** (BUG) — Fullscreen-exit lock timer doesn't RESET on re-entry. First
+- ◑ **LT-3** (BUG, code-complete `6dd8507` — needs browser test) — Fullscreen-exit lock timer doesn't RESET on re-entry. First
   exit recovers fine; re-enter fullscreen; the *next* exit locks immediately — the
   deadline isn't reset when fullscreen is regained (enforcement.ts: phase not
   returning to idle / deadline reused across episodes).
-- ☐ **LT-4** — Don't give up screen-share when LOCKED. Preferred: keep recording AND
+- ◑ **LT-4** (code-complete `54ea1ef` — 15-min bounded record-through-lock; needs browser test) — Don't give up screen-share when LOCKED. Preferred: keep recording AND
   uploading while locked (we most want to see what they do during a lock); at minimum
   keep the screen-share stream alive (upload may pause). Today the recorder stops on
   lock. **This was yesterday's T7 ask — investigate why it was missed.** (FLOW-1
   record-through-lock, was deferred → pull in.)
-- ☐ **LT-5** — Re-express the WHOLE lock/fullscreen/recording flow as a simple,
+- ◑ **LT-5** (code-complete: spec `2abb31a` + B-I/II/III — needs browser test) — Re-express the WHOLE lock/fullscreen/recording flow as a simple,
   explicit state machine: enumerate the few screen states + the exact transition
   conditions. Umbrella over LT-1..LT-4. Design-first.
 
@@ -242,7 +242,7 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
 live code, after T1 (page-merge) was found silently dropped in the `e4ca2b9`
 from-scratch BACKLOG rewrite. Only the gaps are listed; everything else is BUILT or
 legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
-- ☐ **T1 (page-merge half)** — DROPPED + unbuilt. Merge browser-check + permission
+- ◑ **T1 (page-merge half)** (code-complete `c3a0939` — the originally-dropped item, now BUILT; needs browser test) — Merge browser-check + permission
   setup into ONE onboarding screen; acquire screen-share/cam/mic ONCE and carry the
   live streams forward instead of stop-and-re-ask (today BrowserPreflightGate grabs
   then stops the screen stream, PermissionsGate re-prompts). Copy-half fixed
@@ -250,7 +250,7 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
 - ◑ **T3** (code-complete `87457c5`) — Unlock-button still presumes fault ("I have fixed it"). Reword to a
   no-fault action ("Return to exam"/"Dismiss"); accidental triggers shouldn't admit
   fault. ~1-line in `AnomalyPanel.tsx` + test.
-- ☐ **T7** — Gate the unlock-code panel behind being in fullscreen (today it renders
+- ◑ **T7** (code-complete `c3a0939` — REVISED: no pre-gate; fullscreen enforced post-unlock via the render-gate, avoiding the BL-3 deadlock; needs browser test) — Gate the unlock-code panel behind being in fullscreen (today it renders
   on lock with no fullscreen precondition). Record-through-lock = LT-4.
 - ✅ **T10** (`bf8226c`) — Admin + invigilator copy never audited (COPY-1 swept candidate-side
   only). Sweep those strings.
@@ -266,6 +266,6 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
 
 ### Reopened (was ✅, but live-test/audit shows incomplete)
 - ◑ **ALERT-1** — dispute/suppress fix landed server-side (`a51f71a`, LT-11); needs browser test.
-- ⚠ **FLOW-1 / T7** — fullscreen render-gate + recovery-state issues (LT-1..LT-5);
-  record-through-lock pulled in (LT-4).
+- ◑ **FLOW-1 / T7** — fullscreen render-gate + recovery + record-through-lock all
+  built (B-I/II/III, through `54ea1ef`); needs browser test (LT-1..LT-5, LT-4).
 - ◑ **REC-4** — list-view chunk counts fixed to GCS ground-truth (`46ad737`, LT-7); needs browser test.
