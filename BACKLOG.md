@@ -201,7 +201,7 @@ Filed walking the deployed candidate + admin flows. All v1.1 active. Captured
   candidate ID are required"; (c) suppressed alerts still fire (red bar + new alerts
   keep generating). **ALERT-1 passes unit tests but does NOT work end-to-end —
   REOPEN ALERT-1, fix the live integration, browser-verify.**
-- ☐ **LT-12** — Alert → jump to the relevant chunk/playback at that exact timestamp.
+- ◑ **LT-12** (code-complete `719bbca` — deep-link floor shipped; needs browser test) — Alert → jump to the relevant chunk/playback at that exact timestamp.
   Ideal: a playback popup that jumps to the chunk with front/back scrubbing;
   acceptable fallback: deep-link to the evidence screen at that timestamp.
   Long-standing ask (≈ old #61; ALERT-2 claims "jump-to-chunk exists" — verify, it
