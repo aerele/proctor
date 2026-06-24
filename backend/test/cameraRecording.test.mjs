@@ -567,3 +567,77 @@ test("admin recording-sessions: rows include camera_chunk_count (0 for legacy do
   assert.equal(byId["s-rec-1"].camera_chunk_count, 6);
   assert.equal(byId["s-rec-legacy"].camera_chunk_count, 0);
 });
+
+// ---- LT-7: list views report the SAME ground-truth stored count as detail -----
+
+// The bug: a session that minted 587 screen URLs (chunk_count===587) but stored
+// 0 objects in GCS read 587 in the list while the detail card read 0. The list
+// rows must now report the GROUND-TRUTH stored count (countStoredChunks), so the
+// list and the detail card agree. Mirrors the REC-4 detail regression above.
+test("admin recording-sessions: row stored_chunk_count is the GCS object count, not the mint counter", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  // 587 mints (retry/drain inflation) but only ONE screen + ONE camera object stored.
+  seedSession(firestore, "s-lt7-rec", { chunk_count: 587, camera_chunk_count: 587 });
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-lt7-rec/screen/chunk-00000.webm").save("x");
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-lt7-rec/camera/chunk-00000.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/recording-sessions", headers: adminHeaders, query: {} }));
+  assert.equal(res.statusCode, 200);
+  const row = res.body.sessions.find((s) => s.session_id === "s-lt7-rec");
+  // Mint counter kept verbatim (back-compat / picker filter)...
+  assert.equal(row.chunk_count, 587);
+  // ...but the ground-truth stored count is what is REALLY in GCS — exactly what
+  // the detail card returns for the same session.
+  assert.equal(row.stored_chunk_count, 1);
+  assert.equal(row.stored_camera_chunk_count, 1);
+
+  // PROOF the list == detail: same session, same ground-truth number.
+  const detail = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-lt7-rec" } }));
+  assert.equal(detail.statusCode, 200);
+  assert.equal(row.stored_chunk_count, detail.body.session.stored_chunk_count);
+  assert.equal(row.stored_camera_chunk_count, detail.body.session.stored_camera_chunk_count);
+});
+
+// The sessions drill-down lists the SAME ground-truth count — but ONLY when the
+// drill-down asks for it (stored_counts=1). The 5s auto-poll / alerts status-join
+// call this endpoint WITHOUT the flag and must NOT pay the per-row GCS listing.
+test("admin sessions-list: stored_chunk_count reports the GCS count when stored_counts=1", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSession(firestore, "s-lt7-list", { chunk_count: 587, camera_chunk_count: 0 });
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-lt7-list/screen/chunk-00000.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/sessions-list",
+    headers: adminHeaders, query: { stored_counts: "1" } }));
+  assert.equal(res.statusCode, 200);
+  const row = res.body.sessions.find((s) => s.session_id === "s-lt7-list");
+  assert.equal(row.chunk_count, 587);          // mint counter kept verbatim
+  assert.equal(row.stored_chunk_count, 1);      // ground truth from GCS
+  assert.equal(row.stored_camera_chunk_count, 0);
+
+  // PROOF list == detail for the same session.
+  const detail = await call(makeReq({ method: "GET", path: "/api/admin/session-detail",
+    headers: adminHeaders, query: { session_id: "s-lt7-list" } }));
+  assert.equal(row.stored_chunk_count, detail.body.session.stored_chunk_count);
+});
+
+// The cheap path: WITHOUT stored_counts the auto-poll/status-join rows carry NO
+// stored_chunk_count (no GCS listing happened), so a consumer that renders counts
+// falls back to chunk_count exactly as before. This is what keeps the 5s poll off
+// the per-row GCS listing.
+test("admin sessions-list: omits stored_chunk_count when stored_counts is not requested", async () => {
+  const firestore = makeFakeFirestore();
+  const storage = makeFakeStorage();
+  __setClientsForTest({ firestore, storage });
+  seedSession(firestore, "s-lt7-cheap", { chunk_count: 587, camera_chunk_count: 0 });
+  await storage.bucket().file("contests/kec-2026/sessions/alice/s-lt7-cheap/screen/chunk-00000.webm").save("x");
+  const res = await call(makeReq({ method: "GET", path: "/api/admin/sessions-list",
+    headers: adminHeaders, query: {} }));
+  assert.equal(res.statusCode, 200);
+  const row = res.body.sessions.find((s) => s.session_id === "s-lt7-cheap");
+  assert.equal(row.chunk_count, 587);
+  assert.equal(row.stored_chunk_count, undefined);
+  assert.equal(row.stored_camera_chunk_count, undefined);
+});

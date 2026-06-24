@@ -348,6 +348,13 @@ export type RecordingSession = {
   chunk_count: number;
   /** F10.1: separate camera-stream chunk counter (absent on older backends). */
   camera_chunk_count?: number;
+  /** LT-7: ground-truth count of chunk objects actually in GCS (same source as
+   *  the detail card's stored_chunk_count). Present when the list was loaded with
+   *  ground-truth counts (the recording picker always; the sessions drill-down on
+   *  demand); absent on the cheap auto-poll path and on older backends — the row
+   *  then falls back to chunk_count, which over-counts retries/drains/failed PUTs. */
+  stored_chunk_count?: number;
+  stored_camera_chunk_count?: number;
   created_at: string;
   status: string;
   /** Real-data hardening (F-C): the session started anonymously on a contest that

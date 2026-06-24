@@ -1237,7 +1237,10 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-sm font-semibold text-ink">{candidateIdOf(s)}</span>
                         <span className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[10px] text-muted">
-                          <Video size={10} /> {s.chunk_count}
+                          {/* LT-7: ground-truth stored-chunk count (the objects really
+                              in GCS, matching the detail card); falls back to the mint
+                              chunk_count on older backends. */}
+                          <Video size={10} /> {s.stored_chunk_count ?? s.chunk_count}
                         </span>
                       </div>
                       <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-muted">

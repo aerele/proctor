@@ -103,11 +103,14 @@ import { groupIpEntries, summarizeIpEntries, type IpRow } from "./ipReport";
 
 export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "";
 // Eval-service base: the admin candidate-evaluation calls (contest-evaluate /
-// contest-evaluations / contest-evaluate-status, driven by the batch loop) go to
-// the SEPARATE proctor-eval Cloud Run service when VITE_EVAL_API_URL is set, so
-// the eval can be redeployed (P3 redesign) without touching proctor-api. UNSET =
-// fall back to apiBaseUrl, i.e. the exact current same-origin behavior — every
-// other route always uses apiBaseUrl, so this change is backward-compatible.
+// contest-evaluations / contest-evaluate-status, driven by the batch loop) AND
+// the Evaluation tab's embedded /eval-ui iframe point at the SEPARATE proctor-eval
+// Cloud Run service, so the eval can be redeployed (P3 redesign) without touching
+// proctor-api. VITE_EVAL_API_URL is REQUIRED in a production build — the build-config
+// guard (vite-plugin-build-config.ts) ABORTS a prod build when it is empty, because
+// the same-origin fallback below points at the CANDIDATE origin (the eval iframe
+// would load the candidate screen and "Run evaluation" would hit the wrong service).
+// The `?? apiBaseUrl` fallback is for dev (:5173, same-origin) only.
 export const evalApiBaseUrl = import.meta.env.VITE_EVAL_API_URL?.replace(/\/$/, "") ?? apiBaseUrl;
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 export const isDemoMode = demoMode;
@@ -824,6 +827,10 @@ export async function fetchRecordingSessions(password: string, contestSlug?: str
       contest_slug: s.contest_slug,
       chunk_count: s.chunk_count,
       camera_chunk_count: s.camera_chunk_count ?? 0,
+      // LT-7 demo parity: no mint over-count in the demo seeds, so the truthful
+      // stored count equals chunk_count (the real backend lists GCS to get it).
+      stored_chunk_count: s.chunk_count,
+      stored_camera_chunk_count: s.camera_chunk_count ?? 0,
       created_at: s.created_at,
       status: s.status
     }));
@@ -867,11 +874,15 @@ export type SessionsListResult = { sessions: RecordingSession[]; truncated: bool
 
 export async function fetchSessionsList(
   password: string,
-  opts: { status?: string; contestSlug?: string; room?: string }
+  opts: { status?: string; contestSlug?: string; room?: string; storedCounts?: boolean }
 ): Promise<SessionsListResult | null> {
   const status = opts.status || "";
   const contestSlug = opts.contestSlug || "";
   const room = opts.room || "";
+  // LT-7: only the on-demand drill-down (which renders a Chunks column) asks for
+  // ground-truth stored counts (stored_counts=1). The 5s auto-poll + alerts
+  // status-join leave it off so they never trigger a per-row GCS listing on a loop.
+  const storedCounts = opts.storedCounts === true;
   if (demoMode) {
     await wait(120);
     assertDemoAdmin(password);
@@ -912,6 +923,13 @@ export async function fetchSessionsList(
         contest_slug: session.contest_slug || "",
         chunk_count: session.chunk_count,
         camera_chunk_count: session.camera_chunk_count ?? 0,
+        // LT-7 demo parity: only attach the ground-truth stored count when the
+        // caller opted in (matching the real backend, which only lists GCS then);
+        // no mint over-count in the demo seeds, so stored == chunk_count.
+        ...(storedCounts ? {
+          stored_chunk_count: session.chunk_count,
+          stored_camera_chunk_count: session.camera_chunk_count ?? 0
+        } : {}),
         created_at: session.created_at,
         status: session.status || ""
       }));
@@ -922,6 +940,7 @@ export async function fetchSessionsList(
   if (status) query.set("status", status);
   if (contestSlug) query.set("contest_slug", contestSlug);
   if (room) query.set("room", room);
+  if (storedCounts) query.set("stored_counts", "1");
   const suffix = query.toString();
   try {
     const response = await request<RecordingSessionsResponse>(

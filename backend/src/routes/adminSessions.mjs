@@ -175,14 +175,38 @@ async function adminSessions(req) {
   return { sessions };
 }
 
+// LT-7 — GROUND-TRUTH stored chunk counts for a PAGE of list rows, reusing the
+// REC-4 per-session countStoredChunks (below) under BOUNDED concurrency. The
+// list views over-counted because they read the mint-time chunk_count counter
+// (which inflates on retries/drains/failed PUTs) while REC-4 had already pointed
+// the DETAIL view at the real GCS object count — so a session read 587 in the
+// list and 0 in the detail card for the same recording.
+//
+// Why a per-row listing and not a persisted count: a chunk PUT goes candidate →
+// GCS directly via the signed URL, so the backend never sees the upload land —
+// it only ever sees the mint (sessionTelemetry.mjs:163, BEFORE the PUT). There
+// is no PUT-completion hook to maintain a truthful stored counter on the doc, so
+// the only ground truth is listing the objects that exist. We bound the cost the
+// same way the evidence listing does: a PAGE-capped fan-out at concurrency 12
+// (NOT a per-session live listing on an auto-poll — see adminSessionsList).
+async function countStoredChunksForRows(docs) {
+  const counts = await mapWithConcurrency(docs, 12, (doc) => countStoredChunks(doc));
+  return docs.map((doc, i) => ({ doc, stored: counts[i] }));
+}
+
 // Screen-recording playback picker (admin): a LIGHTWEIGHT list of sessions that
 // actually have recorded chunks, so the console can present a username/session
-// picker WITHOUT a GCS listing or any signed URLs (those are resolved lazily via
-// adminSessions when one is chosen). We query the session collection, prefer docs
-// with chunk_count > 0, optionally scope to a contest, sort newest-first, and cap
-// the result. If the chunk_count filter would return nothing (e.g. legacy docs
-// that never tracked chunk_count), we fall back to ALL sessions so the picker is
-// never empty against older data.
+// picker. We query the session collection, prefer docs with chunk_count > 0,
+// optionally scope to a contest, sort newest-first, and cap the result. If the
+// chunk_count filter would return nothing (e.g. legacy docs that never tracked
+// chunk_count), we fall back to ALL sessions so the picker is never empty
+// against older data.
+//
+// LT-7: the picker is loaded ON TAB-OPEN / contest-change only (NOT auto-polled),
+// so it can afford the ground-truth stored-chunk listing for the page — the same
+// bounded fan-out class as the evidence view, fired on demand. The row's
+// chunk-count badge now reads stored_chunk_count (what is really in GCS), not the
+// inflated mint counter. chunk_count stays in the row for back-compat / fallback.
 async function adminRecordingSessions(req) {
   requireAdmin(req);
   const scope = await contestScopeOf(req.query?.contest_slug);
@@ -196,10 +220,12 @@ async function adminRecordingSessions(req) {
   const withChunks = allDocs.filter((doc) => Number(doc.chunk_count || 0) > 0);
   const source = withChunks.length ? withChunks : allDocs;
 
-  const sessions = source
+  const page = source
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
-    .slice(0, 500)
-    .map((doc) => ({
+    .slice(0, 500);
+  // LT-7: ground-truth stored counts for the page (bounded fan-out, on-demand).
+  const withStored = await countStoredChunksForRows(page);
+  const sessions = withStored.map(({ doc, stored }) => ({
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
       candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
@@ -211,8 +237,14 @@ async function adminRecordingSessions(req) {
       name: doc.name || "",
       room: doc.room || "",
       contest_slug: doc.contest_slug || "",
+      // Mint counter (legacy, back-compat): over-counts stored objects. Kept for
+      // back-compat / the picker's prefer-with-chunks filter above; the UI badge
+      // now reads stored_chunk_count.
       chunk_count: Number(doc.chunk_count || 0),
       camera_chunk_count: Number(doc.camera_chunk_count || 0),
+      // LT-7: GROUND-TRUTH stored chunk counts (same source as the detail card).
+      stored_chunk_count: stored.screen,
+      stored_camera_chunk_count: stored.camera,
       created_at: doc.created_at || "",
       status: doc.status || ""
     }));
@@ -234,6 +266,12 @@ async function adminSessionsList(req) {
   const scope = await contestScopeOf(req.query?.contest_slug);
   const room = normalizeRoomFilter(req.query?.room);
   const status = String(req.query?.status || "");
+  // LT-7: ground-truth stored-chunk counts are OPT-IN here. The on-demand drill-
+  // down (which renders a Chunks column) sets stored_counts=1; the 5s alerts/stats
+  // AUTO-POLL and the alerts status-join call this endpoint WITHOUT the flag and
+  // never render chunk counts, so they keep the cheap mint-count path and never
+  // pay a per-row GCS listing on a 5s loop (the fan-out hazard REC-4 flagged).
+  const wantStored = String(req.query?.stored_counts || "") === "1";
   const snapshot = await scopedQuery(getFirestore().collection(sessionCollection), scope)
     .limit(sessionsQueryLimit)
     .get();
@@ -271,8 +309,13 @@ async function adminSessionsList(req) {
   // back to the full action set; ended rows cut by the cap don't matter (an
   // ended session takes no session action anyway).
   const truncated = snapshot.docs.length >= sessionsQueryLimit || live.length > sessionsListPageLimit;
+  // LT-7: when the drill-down asked for ground-truth counts, list the page's
+  // objects in GCS under bounded concurrency (page-capped fan-out, NOT a poll);
+  // otherwise stored stays null and the row carries no stored_chunk_count (the
+  // frontend then falls back to the mint chunk_count exactly as before).
+  const storedByRow = wantStored ? await countStoredChunksForRows(page) : null;
   const sessions = page
-    .map((doc) => ({
+    .map((doc, i) => ({
       session_id: doc.session_id,
       hackerrank_username: doc.hackerrank_username || "",
       candidate_id: candidateOf(doc).id, // S-C dual-read adapter (F9 §1.2)
@@ -284,6 +327,13 @@ async function adminSessionsList(req) {
       contest_slug: doc.contest_slug || "",
       chunk_count: Number(doc.chunk_count || 0),
       camera_chunk_count: Number(doc.camera_chunk_count || 0),
+      // LT-7: GROUND-TRUTH stored chunk counts (same source as the detail card),
+      // present ONLY when stored_counts=1 was requested. Omitted on the cheap
+      // auto-poll path so the frontend falls back to chunk_count there.
+      ...(storedByRow ? {
+        stored_chunk_count: storedByRow[i].stored.screen,
+        stored_camera_chunk_count: storedByRow[i].stored.camera
+      } : {}),
       created_at: doc.created_at || "",
       status: doc.status || "",
       // F-C (real-data hardening): loud admin-visible signal — this session started

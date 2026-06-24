@@ -308,10 +308,14 @@ export function AdminApp() {
     try {
       const active = filters ?? alertFilters;
       const status = statusOverride ?? sessionsStatusFilter;
+      // LT-7: the drill-down renders a Chunks column, so it opts into the
+      // ground-truth stored-chunk counts (the auto-poll + status-join below do
+      // NOT — they never render counts and must stay off the per-row GCS listing).
       const list = await fetchSessionsList(password, {
         status,
         contestSlug: active.contest_slug,
-        room: active.room
+        room: active.room,
+        storedCounts: true
       });
       if (list === null) {
         setSessionsUnavailable(true);

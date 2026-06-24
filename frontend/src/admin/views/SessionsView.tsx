@@ -131,7 +131,11 @@ export function SessionsView({ sessions, loading, unavailable, statusFilter, onS
                   <td className="px-4 py-3">
                     <span className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-ink">{s.status}</span>
                   </td>
-                  <td className="px-4 py-3 font-mono text-muted">{s.chunk_count}</td>
+                  {/* LT-7: show the GROUND-TRUTH stored-chunk count (the real number
+                      of objects in GCS, matching the detail card) when the list was
+                      loaded with it; fall back to the mint chunk_count for the cheap
+                      auto-poll path / older backends. */}
+                  <td className="px-4 py-3 font-mono text-muted">{s.stored_chunk_count ?? s.chunk_count}</td>
                   <td className="px-4 py-3 text-xs text-muted">{s.created_at ? new Date(s.created_at).toLocaleString() : "—"}</td>
                   {statusFilter === "pending_approval" ? (
                     <td className="px-4 py-3">
