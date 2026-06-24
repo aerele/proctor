@@ -35,10 +35,14 @@ jobs:
         working-directory: frontend
         env:
           # CI build-check only — this bundle is never deployed. The build-config
-          # guard (vite-plugin-build-config.ts) requires the password hashes + API
-          # URL for any production build; provide placeholders so the compile-check
-          # passes. Real deploys bake the real values from .env.deploy.local and the
-          # guard aborts if they're missing.
+          # guard (vite-plugin-build-config.ts) requires the password hashes, the
+          # backend API URL, AND the eval-service URL for any production build;
+          # provide placeholders so the compile-check passes. Real deploys bake the
+          # real values from .env.deploy.local and the guard aborts if they're
+          # missing.
           ADMIN_PASSWORD: ci-build-check-placeholder
           INVIGILATOR_PASSWORD: ci-build-check-placeholder
           API_URL: https://ci-build-check.invalid
+          # EVAL_API_URL must be https:// — the guard's evalUrlHttpsError rejects a
+          # plaintext eval URL. Placeholder only; never reached at runtime in CI.
+          EVAL_API_URL: https://ci-build-check.invalid
