@@ -675,7 +675,7 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
                 onChange={(event) => void toggleSimplifiedRecovery(event.target.checked)}
               />
               <span>
-                <span className="font-medium text-ink">Simplified fullscreen recovery (no typing)</span> — when a candidate leaves fullscreen, the red recovery screen shows only a warning and the "Enter full screen again" button. The candidate does NOT have to type the acknowledgement sentence first. The exit limit and re-entry countdown are unchanged.
+                <span className="font-medium text-ink">Simplified fullscreen recovery (no typing)</span> — when a candidate leaves fullscreen, the red recovery screen shows only a warning and the "Re-enter fullscreen" button. The candidate does NOT have to type the acknowledgement sentence first. The exit limit and re-entry countdown are unchanged.
               </span>
             </label>
             <p className="mt-2 text-xs text-muted">Takes effect on in-progress sessions within ~15 seconds via the candidate heartbeat — no reload needed.</p>
@@ -716,11 +716,11 @@ function ContestDetail({ password, contest, bank, busy, runMutation, renderRoste
                 <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="number" min={5} max={300} placeholder="20" value={reentrySeconds} onChange={(event) => setReentrySeconds(event.target.value)} />
               </label>
               <label className="block">
-                <span className="text-xs font-medium uppercase tracking-wide text-muted">Full-screen exit limit</span>
+                <span className="text-xs font-medium uppercase tracking-wide text-muted">Fullscreen exit limit</span>
                 <input className="focus-ring mt-1 h-10 w-full rounded-md border border-line bg-white px-3 text-sm" type="number" min={1} max={10} placeholder="2" value={exitLimit} onChange={(event) => setExitLimit(event.target.value)} />
               </label>
             </div>
-            <p className="mt-2 text-xs text-muted">The countdown is how long the red exit screen waits before locking; the exit limit is how many full-screen exits are allowed before the session auto-locks. Blank = defaults (20s / 2). Clamped to 5–300s and 1–10. Takes effect on in-progress sessions within ~15s via the heartbeat.</p>
+            <p className="mt-2 text-xs text-muted">The countdown is how long the red exit screen waits before locking; the exit limit is how many fullscreen exits are allowed before the session auto-locks. Blank = defaults (20s / 2). Clamped to 5–300s and 1–10. Takes effect on in-progress sessions within ~15s via the heartbeat.</p>
 
             {/* G1 (v1.1): per-contest evidence-retention window. */}
             <label className="mt-3 block max-w-xs">

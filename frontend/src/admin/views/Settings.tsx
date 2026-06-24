@@ -465,7 +465,7 @@ export function ProctorAlertTypesSection({ settings, loading, message, onReload,
           <Bell size={20} />
           <div>
             <h2 className="text-2xl font-semibold">Proctor alert types</h2>
-            <p className="mt-1 text-sm text-muted">Enable or disable each proctor sure-shot and override its severity. Changes save immediately.</p>
+            <p className="mt-1 text-sm text-muted">Enable or disable each proctor alert type and override its severity. Changes save immediately.</p>
           </div>
         </div>
         <button className="focus-ring inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line px-4 text-sm font-medium disabled:opacity-50" onClick={onReload} disabled={loading}>
