@@ -65,22 +65,25 @@ describe("build-config baking (vite-plugin-build-config)", () => {
     expect(resolveValue(["VITE_API_BASE_URL", "API_URL"], "API_URL", envFile)).toBe("from-file");
   });
 
-  it("bakeBuildConfig hashes passwords AND bakes the API URL (trailing slash stripped)", () => {
+  it("bakeBuildConfig hashes passwords AND bakes the API + eval URLs (trailing slash stripped)", () => {
     writeFileSync(
       envFile,
       [
         "ADMIN_PASSWORD=admin-pw",
         "INVIGILATOR_PASSWORD=invig-pw",
-        "API_URL=https://proctor-api.example.run.app/"
+        "API_URL=https://proctor-api.example.run.app/",
+        "EVAL_API_URL=https://proctor-eval.example.run.app/"
       ].join("\n")
     );
     const cfg = bakeBuildConfig(envFile);
     expect(cfg.adminHash).toBe(sha256Hex("admin-pw"));
     expect(cfg.invigHash).toBe(sha256Hex("invig-pw"));
     expect(cfg.apiBaseUrl).toBe("https://proctor-api.example.run.app");
+    expect(cfg.evalApiUrl).toBe("https://proctor-eval.example.run.app");
     expect(process.env.VITE_ADMIN_PASSWORD_HASH).toBe(cfg.adminHash);
     expect(process.env.VITE_INVIGILATOR_PASSWORD_HASH).toBe(cfg.invigHash);
     expect(process.env.VITE_API_BASE_URL).toBe("https://proctor-api.example.run.app");
+    expect(process.env.VITE_EVAL_API_URL).toBe("https://proctor-eval.example.run.app");
   });
 
   it("bakeBuildConfig returns empty values (no env set) when everything is absent", () => {
@@ -88,8 +91,10 @@ describe("build-config baking (vite-plugin-build-config)", () => {
     expect(cfg.adminHash).toBe("");
     expect(cfg.invigHash).toBe("");
     expect(cfg.apiBaseUrl).toBe("");
+    expect(cfg.evalApiUrl).toBe("");
     expect(process.env.VITE_ADMIN_PASSWORD_HASH).toBeUndefined();
     expect(process.env.VITE_API_BASE_URL).toBeUndefined();
+    expect(process.env.VITE_EVAL_API_URL).toBeUndefined();
   });
 
   it("explicit VITE_* overrides are not clobbered", () => {

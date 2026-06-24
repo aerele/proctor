@@ -10,6 +10,12 @@
 //     password and compares to "").
 //   * VITE_API_BASE_URL empty  →  the app throws "VITE_API_BASE_URL is not
 //     configured." after login (it has no backend to call).
+//   * VITE_EVAL_API_URL empty  →  the admin Evaluation tab + "Run evaluation"
+//     fall back to the candidate origin (apiBaseUrl): the eval iframe loads the
+//     CANDIDATE screen instead of the proctor-eval /eval-ui, and the run-eval
+//     call hits the wrong service (or throws "not configured" when apiBaseUrl is
+//     also empty). The eval service is a SEPARATE Cloud Run deploy, so its URL
+//     must be baked too.
 //
 // THE FIX: resolve + bake ALL of this here, inside `vite build` itself, so it
 // can NEVER be skipped. Any production build:
@@ -70,6 +76,7 @@ export interface BuildConfig {
   adminHash: string;
   invigHash: string;
   apiBaseUrl: string;
+  evalApiUrl: string;
 }
 
 /**
@@ -94,14 +101,19 @@ export function bakeBuildConfig(envFile: string): BuildConfig {
   ).replace(/\/+$/, "");
   setIfUnset("VITE_API_BASE_URL", apiBaseUrl);
 
-  // Optional: route only the admin eval calls to the separate proctor-eval
-  // service. Unset = same-origin fallback to the proctor-api eval routes.
+  // REQUIRED: the separate proctor-eval Cloud Run service URL. It backs the
+  // admin Evaluation tab (embedded /eval-ui iframe) and the "Run evaluation"
+  // call. If it is empty the frontend falls back to apiBaseUrl (the candidate
+  // origin), so the eval iframe loads the CANDIDATE screen and the run-eval call
+  // hits the wrong service — the guard below ABORTS a prod build when it is
+  // missing. VITE_EVAL_API_URL or EVAL_API_URL from the environment, else
+  // EVAL_API_URL from .env.deploy.local. Strip any trailing slash.
   const evalApiUrl = (
-    resolveValue(["VITE_EVAL_API_URL"], "VITE_EVAL_API_URL", envFile) ?? ""
+    resolveValue(["VITE_EVAL_API_URL", "EVAL_API_URL"], "EVAL_API_URL", envFile) ?? ""
   ).replace(/\/+$/, "");
   setIfUnset("VITE_EVAL_API_URL", evalApiUrl);
 
-  return { adminHash, invigHash, apiBaseUrl };
+  return { adminHash, invigHash, apiBaseUrl, evalApiUrl };
 }
 
 function listJsFiles(dir: string): string[] {
@@ -149,13 +161,16 @@ export function buildConfigGuard(cfg: BuildConfig): Plugin {
       if (!cfg.adminHash) missing.push("ADMIN_PASSWORD (→ VITE_ADMIN_PASSWORD_HASH)");
       if (!cfg.invigHash) missing.push("INVIGILATOR_PASSWORD (→ VITE_INVIGILATOR_PASSWORD_HASH)");
       if (!cfg.apiBaseUrl) missing.push("API_URL (→ VITE_API_BASE_URL)");
+      if (!cfg.evalApiUrl) missing.push("EVAL_API_URL (→ VITE_EVAL_API_URL)");
       if (missing.length) {
         this.error(
           `[build-config] production build ABORTED: could not resolve ${missing.join(
             ", "
           )} from process.env or .env.deploy.local. Shipping these empty breaks prod ` +
             `(empty password hash → every admin/invigilator login fails; empty API base ` +
-            `URL → "VITE_API_BASE_URL is not configured" after login). Set the value(s) and rebuild.`
+            `URL → "VITE_API_BASE_URL is not configured" after login; empty eval base URL → ` +
+            `the Evaluation tab loads the candidate screen and "Run evaluation" hits the wrong ` +
+            `service). Set the value(s) and rebuild.`
         );
       }
     },
@@ -169,6 +184,7 @@ export function buildConfigGuard(cfg: BuildConfig): Plugin {
       if (!blob.includes(cfg.adminHash)) missing.push("VITE_ADMIN_PASSWORD_HASH");
       if (!blob.includes(cfg.invigHash)) missing.push("VITE_INVIGILATOR_PASSWORD_HASH");
       if (cfg.apiBaseUrl && !blob.includes(cfg.apiBaseUrl)) missing.push("VITE_API_BASE_URL");
+      if (cfg.evalApiUrl && !blob.includes(cfg.evalApiUrl)) missing.push("VITE_EVAL_API_URL");
       if (missing.length) {
         this.error(
           `[build-config] built bundle in ${dir} is MISSING ${missing.join(

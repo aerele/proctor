@@ -15,6 +15,9 @@ set -euo pipefail
 #   * asserts ADMIN_PASSWORD and INVIGILATOR_PASSWORD are set,
 #   * bakes sha256(ADMIN_PASSWORD)     -> VITE_ADMIN_PASSWORD_HASH,
 #   * bakes sha256(INVIGILATOR_PASSWORD) -> VITE_INVIGILATOR_PASSWORD_HASH,
+#   * bakes API_URL      -> VITE_API_BASE_URL  (the proctor-api backend),
+#   * bakes EVAL_API_URL -> VITE_EVAL_API_URL  (the separate proctor-eval service
+#     that backs the Evaluation tab /eval-ui iframe + the Run-evaluation call),
 #   * VERIFIES both hashes are actually present in the built bundle and ABORTS
 #     the deploy (exit 1) if either is missing — without the password hashes
 #     baked in, it must never deploy.
@@ -24,6 +27,7 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID first, e.g.: export PROJECT_ID=your-gcp-project-id}"
 REGION="${REGION:-asia-south1}"  # override with your chosen region
 API_URL="${API_URL:?Set API_URL to the deployed Cloud Function URL}"
+EVAL_API_URL="${EVAL_API_URL:?Set EVAL_API_URL to the deployed proctor-eval Cloud Run URL (backs the Evaluation tab /eval-ui iframe + the Run-evaluation call; baked as VITE_EVAL_API_URL)}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:?Set ADMIN_PASSWORD first (its sha256 is baked as VITE_ADMIN_PASSWORD_HASH)}"
 INVIGILATOR_PASSWORD="${INVIGILATOR_PASSWORD:?Set INVIGILATOR_PASSWORD first (its sha256 is baked as VITE_INVIGILATOR_PASSWORD_HASH)}"
 SERVICE_NAME="${SERVICE_NAME:-proctor-web}"
@@ -111,11 +115,13 @@ fi
 ADMIN_PASSWORD_HASH="$(printf '%s' "$ADMIN_PASSWORD" | sha256sum | awk '{print $1}')"
 INVIGILATOR_PASSWORD_HASH="$(printf '%s' "$INVIGILATOR_PASSWORD" | sha256sum | awk '{print $1}')"
 
-# VITE_EVAL_API_URL routes ONLY the admin eval calls (contest-evaluate*) to the
-# separate proctor-eval service when set; UNSET = empty = the frontend falls back
-# to the same-origin proctor-api eval routes (backward-compatible). Optional.
+# VITE_EVAL_API_URL points the admin Evaluation tab (embedded /eval-ui iframe) AND
+# the "Run evaluation" call at the SEPARATE proctor-eval Cloud Run service. It is
+# REQUIRED: if empty, the frontend falls back to the candidate origin, so the eval
+# tab loads the candidate screen and run-eval hits the wrong service. The in-build
+# guard (vite-plugin-build-config.ts) ABORTS the build when it is missing.
 VITE_API_BASE_URL="$API_URL" \
-  VITE_EVAL_API_URL="${VITE_EVAL_API_URL:-}" \
+  VITE_EVAL_API_URL="$EVAL_API_URL" \
   VITE_ADMIN_PASSWORD_HASH="$ADMIN_PASSWORD_HASH" \
   VITE_INVIGILATOR_PASSWORD_HASH="$INVIGILATOR_PASSWORD_HASH" \
   npm --workspace frontend run build
