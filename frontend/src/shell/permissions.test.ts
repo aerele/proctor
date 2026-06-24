@@ -10,6 +10,7 @@ import {
   permissionsReady, allPermissionsGranted, permissionsAttempted, permissionRetryable,
   permissionStatusLine, screenStatusFromErrorKind, screenShareFailureMessage,
   raceWithTimeout, primeClipboardWithTimeout, CLIPBOARD_PRIMER_TIMEOUT_MS,
+  checklistFromAcquiredMedia, hasLiveTrackOfKind,
   type PermissionChecklist, type PermissionKey, type PermissionStatus
 } from "./permissions";
 
@@ -237,5 +238,71 @@ describe("primeClipboardWithTimeout", () => {
   it("exposes a short default timeout (3-4s) so a hung prompt can't strand setup", () => {
     expect(CLIPBOARD_PRIMER_TIMEOUT_MS).toBeGreaterThanOrEqual(3000);
     expect(CLIPBOARD_PRIMER_TIMEOUT_MS).toBeLessThanOrEqual(4000);
+  });
+});
+
+// B1 / LT-2 / MA-4 (v1.1) — the ACQUIRE-ONCE skip logic. The browser-check stage
+// now performs the single, surface-guarded acquire and carries the live streams
+// up; checklistFromAcquiredMedia is the pure decision that marks the matching
+// items granted so runPermissionsSetup's guards short-circuit (NO second prompt).
+function fakeStream(kinds: Array<{ kind: "video" | "audio"; readyState?: "live" | "ended" }>): MediaStream {
+  const tracks = kinds.map((k) => ({ kind: k.kind, readyState: k.readyState ?? "live" }));
+  return {
+    getVideoTracks: () => tracks.filter((t) => t.kind === "video"),
+    getAudioTracks: () => tracks.filter((t) => t.kind === "audio")
+  } as unknown as MediaStream;
+}
+
+describe("hasLiveTrackOfKind", () => {
+  it("true for a live track of the requested kind", () => {
+    expect(hasLiveTrackOfKind(fakeStream([{ kind: "video" }]), "video")).toBe(true);
+    expect(hasLiveTrackOfKind(fakeStream([{ kind: "audio" }]), "audio")).toBe(true);
+  });
+  it("false for an ended track, a missing kind, or a null stream", () => {
+    expect(hasLiveTrackOfKind(fakeStream([{ kind: "video", readyState: "ended" }]), "video")).toBe(false);
+    expect(hasLiveTrackOfKind(fakeStream([{ kind: "audio" }]), "video")).toBe(false);
+    expect(hasLiveTrackOfKind(null, "video")).toBe(false);
+    expect(hasLiveTrackOfKind(undefined, "audio")).toBe(false);
+  });
+});
+
+describe("checklistFromAcquiredMedia — acquire-once skip logic (B1/LT-2)", () => {
+  it("a live screen marks screen granted (the hard gate is satisfied without a second prompt)", () => {
+    const next = checklistFromAcquiredMedia(initialPermissionChecklist, {
+      hasLiveScreen: true, hasLiveCamera: false, hasLiveMicrophone: false
+    });
+    expect(next.screen).toBe("granted");
+    // permissionsReady keys on screen === granted — so stage 2 (fullscreen) opens
+    // straight away with no re-acquire.
+    expect(permissionsReady(next)).toBe(true);
+  });
+
+  it("camera+mic granted from the carried stream mark both granted (no re-prompt)", () => {
+    const next = checklistFromAcquiredMedia(initialPermissionChecklist, {
+      hasLiveScreen: true, hasLiveCamera: true, hasLiveMicrophone: true
+    });
+    expect(next).toMatchObject({ screen: "granted", camera: "granted", microphone: "granted" });
+  });
+
+  it("mic-only grant marks microphone granted but leaves camera as-is (still re-promptable, never blocking)", () => {
+    const next = checklistFromAcquiredMedia(initialPermissionChecklist, {
+      hasLiveScreen: true, hasLiveCamera: false, hasLiveMicrophone: true
+    });
+    expect(next.microphone).toBe("granted");
+    expect(next.camera).toBe("pending"); // untouched — camera is optional
+  });
+
+  it("clipboard is NEVER auto-granted by the browser check (it has no stream) — stays for the primer", () => {
+    const next = checklistFromAcquiredMedia(initialPermissionChecklist, {
+      hasLiveScreen: true, hasLiveCamera: true, hasLiveMicrophone: true
+    });
+    expect(next.clipboard).toBe("pending");
+  });
+
+  it("never downgrades an already-granted item when a stream is absent", () => {
+    const next = checklistFromAcquiredMedia(allGranted, {
+      hasLiveScreen: false, hasLiveCamera: false, hasLiveMicrophone: false
+    });
+    expect(next).toEqual(allGranted);
   });
 });

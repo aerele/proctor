@@ -92,8 +92,8 @@ export function PermissionsGate({ checklist, busy, screenMessage, onRun, onRetry
         {supported ? (
           <>
             <p className="mt-3 text-sm leading-6 text-white/70">
-              First, set up screen sharing and permissions. Your browser will ask a few times —
-              choose your <span className="font-semibold text-white">Entire Screen</span> and allow each request.
+              Confirm your screen sharing and permissions. If anything below still needs setting up,
+              your browser will ask — choose your <span className="font-semibold text-white">Entire Screen</span> and allow each request.
               You enter fullscreen after this step, so nothing interrupts you once the exam begins.
             </p>
 

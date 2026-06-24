@@ -51,6 +51,35 @@ export function permissionsAttempted(checklist: PermissionChecklist): boolean {
   return PERMISSION_ORDER.some((key) => checklist[key] !== "pending");
 }
 
+// B1/LT-2 (v1.1): the acquire-once checklist patch. The browser-check stage now
+// performs the REAL surface-guarded acquire and carries the live streams up, so
+// when those streams arrive we mark the matching items granted WITHOUT another
+// prompt. Screen is the hard gate: a live screen track => "granted". Camera and
+// microphone are derived from the live track kinds on the cameraMic stream (a
+// mic-only grant marks microphone granted, camera pending — re-promptable, never
+// blocking). Clipboard is NOT acquired by the browser check (it has no stream),
+// so it is left untouched here and primed later in the permissions setup. Pure
+// so the acquire-once skip logic is vitest-tested without a real picker.
+export function checklistFromAcquiredMedia(
+  current: PermissionChecklist,
+  media: { hasLiveScreen: boolean; hasLiveCamera: boolean; hasLiveMicrophone: boolean }
+): PermissionChecklist {
+  return {
+    ...current,
+    screen: media.hasLiveScreen ? "granted" : current.screen,
+    camera: media.hasLiveCamera ? "granted" : current.camera,
+    microphone: media.hasLiveMicrophone ? "granted" : current.microphone
+  };
+}
+
+// Live-track helpers for checklistFromAcquiredMedia (kept here so the caller in
+// App.tsx passes a plain boolean shape and the derivation stays unit-testable).
+export function hasLiveTrackOfKind(stream: MediaStream | null | undefined, kind: "video" | "audio"): boolean {
+  if (!stream) return false;
+  const tracks = kind === "video" ? stream.getVideoTracks() : stream.getAudioTracks();
+  return tracks.some((t) => t.readyState === "live");
+}
+
 // denied => candidate can re-trigger the prompt; pending stays retryable so a
 // screen share killed between setup and start drops back to a retry button.
 // unavailable is a dead end (no API/device) — retrying cannot help.

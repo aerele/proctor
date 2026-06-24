@@ -17,13 +17,14 @@ import { clearSessionDrafts } from "../coding/problemSwitch";
 import { classifyEndAtChange, computeClockSkewMs, formatRemaining, recordingPreExamState, remainingMs, sessionElapsedAnchorMs, waitingRoomGate } from "../examTime";
 import { canShowSafeExit as computeSafeExit, drainBuffer, endPlanForDrain } from "./drainGate";
 import { candidateIdOf } from "../identity";
+import { candidateRenderDecision } from "./candidateRenderGate";
 import { normalizeOtpInput } from "../invigilator/gateLogic";
 import { MarkerLayer } from "../markers/MarkerLayer";
 import { EnforcementOverlay } from "../shell/EnforcementOverlay";
 import { ExamShellChrome } from "../shell/ExamShellChrome";
 import { candidateFormMode, candidateFormReady, rosterLookupErrorMessage, sessionStorageKeyFor } from "../shell/candidateRouting";
 import { awayBeaconActive, elapsedTimerActive, shellHeaderMode } from "../shell/examShell";
-import { allPermissionsGranted, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind } from "../shell/permissions";
+import { allPermissionsGranted, checklistFromAcquiredMedia, hasLiveTrackOfKind, initialPermissionChecklist, primeClipboardWithTimeout, screenShareFailureMessage, screenStatusFromErrorKind } from "../shell/permissions";
 import type { PermissionChecklist, PermissionKey } from "../shell/permissions";
 import { useEnforcement } from "../shell/useEnforcement";
 import { useExamShell } from "../shell/useExamShell";
@@ -42,6 +43,7 @@ import { EndRetryPanel } from "./panels/EndRetryPanel";
 import { EndTestPanel } from "./panels/EndTestPanel";
 import { EntryReviewPanel } from "./panels/EntryReviewPanel";
 import { FinishingOverlay } from "./panels/FinishingOverlay";
+import { FullscreenBlockNotice } from "./panels/FullscreenBlockNotice";
 import { HealthPanel } from "./panels/HealthPanel";
 import { IdentityCard } from "./panels/IdentityCard";
 import { ProctorHelpLine } from "./panels/ProctorHelpLine";
@@ -499,6 +501,9 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     gate,
     status,
     sessionId,
+    // B2/LT-5 (v1.1): the live fullscreen truth drives the require_fullscreen
+    // dispatch that arms/clears the no-countdown `fs_block` re-entry block.
+    fullscreen: shell.fullscreen,
     config: {
       reentrySeconds: enforcementPayload?.fullscreen_reentry_seconds ?? 20,
       exitLimit: enforcementPayload?.fullscreen_exit_limit ?? 2,
@@ -1971,6 +1976,44 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
       <Shell padTop={false}>
         <BrowserPreflightGate
           onPass={() => setPreflightPassed(true)}
+          onAcquired={(media) => {
+            // B1/LT-2 (v1.1): the browser check already performed the single,
+            // surface-guarded acquire — carry its LIVE streams straight into the
+            // recorder's acquired bag and mark the matching permissions granted,
+            // so runPermissionsSetup's guards (screen !== "granted" || !ref.screen,
+            // etc.) short-circuit and the candidate is NOT prompted a second time.
+            // MA-4: media.screen is entire-screen guaranteed (acquired via
+            // acquireScreenShareStream inside the probe runner).
+            if (media.screen) {
+              acquiredMediaRef.current.screen?.getTracks().forEach((t) => t.stop());
+              acquiredMediaRef.current.screen = media.screen;
+              // Re-arm the same setup-stage "killed before start" listener the
+              // direct acquire installs, so a share stopped between onboarding and
+              // beginRecording drops the screen status back to a retryable state.
+              media.screen.getVideoTracks()[0]?.addEventListener("ended", () => {
+                if (acquiredMediaRef.current.screen !== media.screen) return;
+                acquiredMediaRef.current.screen = null;
+                setPermissions((c) => ({ ...c, screen: "pending" }));
+                recordSetupEvent("setup_screen_share_ended");
+              });
+            }
+            if (media.cameraMic) {
+              acquiredMediaRef.current.cameraMic?.getTracks().forEach((t) => t.stop());
+              acquiredMediaRef.current.cameraMic = media.cameraMic;
+              acquiredMediaRef.current.cameraMicMode = media.cameraMicMode;
+            }
+            setPermissions((c) => checklistFromAcquiredMedia(c, {
+              hasLiveScreen: hasLiveTrackOfKind(media.screen, "video"),
+              hasLiveCamera: hasLiveTrackOfKind(media.cameraMic, "video"),
+              hasLiveMicrophone: hasLiveTrackOfKind(media.cameraMic, "audio")
+            }));
+            recordSetupEvent("setup_onboarding_acquired", {
+              screen: Boolean(media.screen),
+              camera: hasLiveTrackOfKind(media.cameraMic, "video"),
+              microphone: hasLiveTrackOfKind(media.cameraMic, "audio"),
+              display_surface: (media.screen?.getVideoTracks()[0]?.getSettings() as MediaTrackSettings & { displaySurface?: string })?.displaySurface || "unknown"
+            });
+          }}
           onResult={(verdict: PreflightVerdict, probeResults: ProbeResult[]) => {
             recordSetupEvent("browser_preflight", {
               passed: verdict.passed,
@@ -2051,6 +2094,44 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
     );
   }
 
+  // B2/MI-1 (v1.1 candidate-flow state machine): the FS_BLOCK render-gate. The
+  // workspace W1 below now requires `shell.fullscreen` (LT-1), so a recording,
+  // running candidate who is OUT of fullscreen must land on a calm
+  // "return to fullscreen" block — NOT the workspace, NOT a blank screen, NOT
+  // the classic fallback. This is reached after an exception we already handled
+  // (post-unlock: gate flips locked→running while out of fullscreen; post
+  // re-share; or any return-from-another-state). The `require_fullscreen`
+  // dispatch (driven declaratively inside useEnforcement on recording+running)
+  // has already moved the phase to `fs_block`, so `enforcementOverlay` renders
+  // the calm no-countdown card. We branch EXPLICITLY above W1 (rather than
+  // relying on the classic-fallback's overlay injection at :2173) to avoid a
+  // flash of the legacy fallback surface (MA-5). examGateActive (room gate) and
+  // the soft/waiting pre-T0 holds are handled by their own branches above; here
+  // we only catch the in-exam recording+running+!fullscreen case. The single
+  // source of truth for the in-exam render branches (W1 vs FS_BLOCK vs
+  // fall-through) is the pure candidateRenderDecision — so the code and its
+  // tests cannot drift. The room-gate / hold / waiting-room / locked / ended
+  // branches above already returned, so this only fires in-exam.
+  const renderDecision = candidateRenderDecision({
+    hasProblem,
+    status,
+    gate,
+    examGateActive,
+    examViewAllowed: recordingState?.examViewAllowed ?? false,
+    fullscreen: shell.fullscreen
+  });
+  if (renderDecision === "fullscreen_block") {
+    return (
+      <Shell padTop={shellPadTop}>
+        {shellChrome}
+        {enforcementOverlay}
+        {markerLayer}
+        {identity ? <IdentityCard identity={identity} /> : null}
+        <FullscreenBlockNotice onEnterFullscreen={shell.enterFullscreen} />
+      </Shell>
+    );
+  }
+
   // W1 — the exam itself: an own-editor session, actively recording, released
   // into the exam. The coding workspace IS the page. Everything else tucks
   // into the slim strip (W2 — proctoring-panel toggle + End test live there),
@@ -2059,7 +2140,11 @@ export function StudentApp({ pinned }: { pinned: PinnedContest | null }) {
   // (HackerRank-link) sessions and all waiting/error states keep the classic
   // proctoring-first layout below. #135: !waitingRoomActive keeps the pre-T0
   // take-home hold on the WaitingRoom branch above until T0.
-  if (hasProblem && status === "recording" && gate === "running" && !examGateActive && recordingState?.examViewAllowed) {
+  // LT-1 render-gate: the workspace renders ONLY when candidateRenderDecision
+  // returns "exam_workspace" — which requires fullscreen AND recording (plus
+  // hasProblem), regardless of enforcement phase (incl. the post-unlock
+  // `running` state). A not-fullscreen candidate took the FS_BLOCK branch above.
+  if (renderDecision === "exam_workspace") {
     return (
       <Shell padTop={shellPadTop} variant="exam">
         <ExamShellChrome

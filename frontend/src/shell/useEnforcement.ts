@@ -72,13 +72,17 @@ export function useEnforcement(opts: {
   status: SessionStatus;
   sessionId: string;
   config: EnforcementConfig;
+  // B2/LT-5 (v1.1): the candidate's CURRENT fullscreen truth (shell.fullscreen).
+  // Drives the require_fullscreen dispatch that arms/clears the no-countdown
+  // `fs_block` re-entry block on the return-from-exception transitions.
+  fullscreen: boolean;
   addEvent: (event: ProctorEvent) => void;
   /** Server confirmed a block-mode lock — App flips its gate to "locked". */
   onLocked: (lockedReason: string) => void;
   /** L1 episode resolved (phrase + fullscreen) — App restores the top bar. */
   onResolved: () => void;
 }): EnforcementApi {
-  const { gate, status, sessionId, config, addEvent, onLocked, onResolved } = opts;
+  const { gate, status, sessionId, config, fullscreen, addEvent, onLocked, onResolved } = opts;
 
   const [state, setState] = useState<EnforcementState>(() => readStoredEnforcement(sessionId));
   // Re-rendered each second while a countdown runs (state changes only on
@@ -273,6 +277,27 @@ export function useEnforcement(opts: {
     setState(released);
     writeStoredEnforcement(sessionIdRef.current, released);
   }, [gate]);
+
+  // B2/LT-5 (v1.1): the NO-COUNTDOWN re-entry block (`fs_block`). The host
+  // demands fullscreen — WITHOUT a countdown — on the return-from-exception
+  // transitions (post-unlock: gate flips locked→running while out of fullscreen;
+  // post re-share; any time the candidate is recording+running but not in
+  // fullscreen and NOT in a genuine violation episode). We drive it
+  // DECLARATIVELY here from the live (recording, gate, fullscreen) truth rather
+  // than as a one-shot host call, so it is race-free with the gate-left-locked
+  // reset above (both are effects keyed on `gate`; this reads the freshly-reset
+  // state via stateRef) and self-heals if the candidate bounces in and out.
+  //
+  // Safe to fire continuously: the reducer's require_fullscreen arm ONLY ever
+  // transitions idle↔fs_block (enforcement.ts) — it is a no-op under softMode,
+  // a no-op while a real blocking/alert_hold/locking episode is live, and a
+  // no-op once already in the right phase. A genuine fullscreen_exit (T-1) still
+  // wins the countdown: its arm overrides fs_block→blocking regardless of order.
+  const recordingRunning = status === "recording" && gate === "running";
+  useEffect(() => {
+    if (!recordingRunning) return;
+    dispatch({ kind: "require_fullscreen", fullscreen, nowMs: Date.now() });
+  }, [recordingRunning, fullscreen, gate, dispatch]);
 
   // Session over: release any phase, flush an open switch-away episode, and
   // drop the persisted state.

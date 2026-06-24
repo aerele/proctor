@@ -23,6 +23,24 @@
 
 import type { PreflightCapability, ProbeResult } from "./browserPreflight";
 import { PREFLIGHT_MATRIX } from "./browserPreflight";
+import {
+  SETUP_SCREEN_CONSTRAINTS,
+  acquireCameraMicrophone,
+  acquireScreenShareStream
+} from "../useProctorRecorder";
+
+// B1/MA-4 (v1.1): the live streams the ACTIVE probes acquire, carried up to the
+// onboarding gate so they are reused as the recording streams — no second
+// prompt (DEC-2/T1/LT-2). The screen stream is acquired via the SURFACE-GUARDED
+// acquireScreenShareStream (monitor-only), NOT the un-guarded probeScreenCapture,
+// so the reused recording stream can never be a tab/window share (MA-4).
+export type ActiveProbeMedia = {
+  screen: MediaStream | null;
+  cameraMic: MediaStream | null;
+  cameraMicMode: string | null;
+};
+
+export type ActiveProbeOutcome = { results: ProbeResult[]; media: ActiveProbeMedia };
 
 function result(capability: PreflightCapability, ok: boolean, detail?: string): ProbeResult {
   return { capability, ok, required: PREFLIGHT_MATRIX[capability].required, detail };
@@ -153,15 +171,70 @@ export async function probeCameraMic(): Promise<ProbeResult> {
 // clickable). Real builds always run the live anti-spoof probes.
 const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
 
-// Run the active (gesture-required) probes. Called from the "Check my browser"
-// button handler so getDisplayMedia/getUserMedia run on the user gesture.
-export async function runActiveProbes(): Promise<ProbeResult[]> {
+// B1/MA-4 (v1.1): the SURFACE-GUARDED screen acquire used by the onboarding
+// active probes. Unlike probeScreenCapture (which calls getDisplayMedia with NO
+// displaySurface guard and immediately stops the track), this enforces the
+// entire-screen surface via acquireScreenShareStream and KEEPS the live stream
+// so it is reused as the recording stream — one prompt, monitor-only. A
+// cancel/denial or a non-monitor surface is a screen_capture FAILURE (the
+// candidate re-runs the check); no live stream is returned.
+async function acquireScreenForOnboarding(): Promise<{ result: ProbeResult; stream: MediaStream | null }> {
+  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  if (!md || typeof md.getDisplayMedia !== "function") {
+    return { result: result("screen_capture", false, "Screen sharing is not supported by this browser."), stream: null };
+  }
+  try {
+    // The surface guard (displaySurface === "monitor") lives inside; a non-monitor
+    // share is stopped and rejected there before it can be observed/reused.
+    const stream = await acquireScreenShareStream(SETUP_SCREEN_CONSTRAINTS, () => undefined);
+    const hasVideo = stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].readyState !== "ended";
+    if (!hasVideo) {
+      stopStream(stream);
+      return { result: result("screen_capture", false, "Screen share returned no live video."), stream: null };
+    }
+    return { result: result("screen_capture", true), stream };
+  } catch {
+    // Cancel / denial / non-monitor surface (InvalidShareSurfaceError) all read
+    // as "can't establish the entire-screen capture" → block + re-run.
+    return { result: result("screen_capture", false, "Share your Entire Screen to continue (a single tab or window is not allowed)."), stream: null };
+  }
+}
+
+// B1 (v1.1): the OPTIONAL camera/mic acquire for onboarding — uses the same
+// non-throwing ladder the recorder uses and KEEPS the live stream for reuse.
+// Camera/mic stay optional (a missing webcam never blocks), so a null stream
+// with a granted/denied/unavailable status is normal.
+async function acquireCameraMicForOnboarding(): Promise<{ result: ProbeResult; stream: MediaStream | null; mode: string | null }> {
+  const acquired = await acquireCameraMicrophone(() => undefined);
+  const ok = acquired.camera === "granted" || acquired.microphone === "granted";
+  const detail = ok
+    ? (acquired.camera === "granted" ? undefined : "Microphone only (no camera).")
+    : "Camera and microphone unavailable.";
+  return { result: result("camera_mic", ok, detail), stream: acquired.stream, mode: acquired.captureMode };
+}
+
+// Run the active (gesture-required) probes AND acquire the live streams for
+// reuse. Called from the "Check my browser" button handler so
+// getDisplayMedia/getUserMedia run on the user gesture. B1/LT-2: the streams
+// returned here are carried into the recorder (no second prompt); B1/MA-4: the
+// screen stream is surface-guarded (entire-screen only).
+export async function runActiveProbes(): Promise<ActiveProbeOutcome> {
   if (demoMode) {
-    return [result("screen_capture", true, "Demo build — capture not exercised."), result("camera_mic", true)];
+    return {
+      results: [result("screen_capture", true, "Demo build — capture not exercised."), result("camera_mic", true)],
+      media: { screen: null, cameraMic: null, cameraMicMode: null }
+    };
   }
   // Screen first (the hard gate) so a cancel there short-circuits the camera
   // prompt — no point asking for the webcam if the screen can't be shared.
-  const screen = await probeScreenCapture();
-  const camera = await probeCameraMic();
-  return [screen, camera];
+  const screen = await acquireScreenForOnboarding();
+  if (!screen.result.ok) {
+    // Screen failed — never prompt for the camera, and carry no streams up.
+    return { results: [screen.result, result("camera_mic", false, "Skipped — share your screen first.")], media: { screen: null, cameraMic: null, cameraMicMode: null } };
+  }
+  const camera = await acquireCameraMicForOnboarding();
+  return {
+    results: [screen.result, camera.result],
+    media: { screen: screen.stream, cameraMic: camera.stream, cameraMicMode: camera.mode }
+  };
 }

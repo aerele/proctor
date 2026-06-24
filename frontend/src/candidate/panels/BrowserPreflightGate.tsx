@@ -20,13 +20,21 @@ import {
   type ProbeResult,
   type PreflightVerdict
 } from "../../shell/browserPreflight";
-import { runActiveProbes, runPassiveProbes } from "../../shell/browserPreflightProbe";
+import { runActiveProbes, runPassiveProbes, type ActiveProbeMedia } from "../../shell/browserPreflightProbe";
 
 type Phase = "idle" | "checking" | "done";
 
-export function BrowserPreflightGate({ onPass, onResult, takeHome, proctorPhone }: {
+export function BrowserPreflightGate({ onPass, onAcquired, onResult, takeHome, proctorPhone }: {
   /** Called once the preflight passes — the entry flow proceeds. */
   onPass: () => void;
+  /**
+   * B1/LT-2 (v1.1): the LIVE, surface-guarded streams the active probes
+   * acquired, handed up on a PASS so they are reused as the recording streams —
+   * no second prompt. Called BEFORE onPass so acquiredMediaRef is populated when
+   * the form/permissions stage takes over. The screen stream is entire-screen
+   * guaranteed (MA-4); cameraMic may be null (optional).
+   */
+  onAcquired?: (media: ActiveProbeMedia) => void;
   /** Telemetry hook: every completed verdict (pass or block) for the proctor. */
   onResult?: (verdict: PreflightVerdict, results: ProbeResult[]) => void;
   takeHome?: boolean;
@@ -46,7 +54,7 @@ export function BrowserPreflightGate({ onPass, onResult, takeHome, proctorPhone 
   const runCheck = async () => {
     setPhase("checking");
     const passive = runPassiveProbes();
-    const active = await runActiveProbes();
+    const { results: active, media } = await runActiveProbes();
     // Active results win for the capabilities they cover (screen_capture,
     // camera_mic); keep the passive ones for the rest.
     const byCap = new Map<string, ProbeResult>();
@@ -57,7 +65,19 @@ export function BrowserPreflightGate({ onPass, onResult, takeHome, proctorPhone 
     setVerdict(v);
     setPhase("done");
     onResult?.(v, merged);
-    if (v.passed) onPass();
+    if (v.passed) {
+      // B1/LT-2: hand the LIVE surface-guarded streams up BEFORE proceeding so
+      // they are reused as the recording streams (no second prompt). On a
+      // failure we stop nothing here — the streams (if any) were already stopped
+      // in the probe runner, and a non-passing verdict never reuses them.
+      onAcquired?.(media);
+      onPass();
+    } else {
+      // A blocking verdict (e.g. an optional-but-now-required gap) must not leak
+      // the live screen capture — stop anything the probes acquired.
+      media.screen?.getTracks().forEach((t) => t.stop());
+      media.cameraMic?.getTracks().forEach((t) => t.stop());
+    }
   };
 
   const blocked = phase === "done" && verdict !== null && !verdict.passed;
