@@ -116,6 +116,25 @@ export function bakeBuildConfig(envFile: string): BuildConfig {
   return { adminHash, invigHash, apiBaseUrl, evalApiUrl };
 }
 
+/**
+ * The eval service is a separate Cloud Run deploy and MUST be served over https —
+ * a plaintext baked URL would downgrade the Evaluation-tab iframe + "Run
+ * evaluation" calls (and is the shape of a deploy-misconfig / origin-confusion).
+ * Returns an error message when a NON-empty eval URL isn't https, else null.
+ * (Defense-in-depth from the v1.1-r2 security review; the empty case is already
+ * caught by the required-value guard.)
+ */
+export function evalUrlHttpsError(evalApiUrl: string): string | null {
+  if (evalApiUrl && !/^https:\/\//i.test(evalApiUrl)) {
+    return (
+      `[build-config] production build ABORTED: VITE_EVAL_API_URL must be https:// ` +
+      `(got "${evalApiUrl}"). The eval service is a Cloud Run deploy; a plaintext URL ` +
+      `downgrades the Evaluation tab iframe + "Run evaluation" calls. Use the https URL.`
+    );
+  }
+  return null;
+}
+
 function listJsFiles(dir: string): string[] {
   const out: string[] = [];
   let names: string[];
@@ -173,6 +192,8 @@ export function buildConfigGuard(cfg: BuildConfig): Plugin {
             `service). Set the value(s) and rebuild.`
         );
       }
+      const httpsErr = evalUrlHttpsError(cfg.evalApiUrl);
+      if (httpsErr) this.error(httpsErr);
     },
     closeBundle() {
       if (!isProd) return;

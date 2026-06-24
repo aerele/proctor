@@ -6,7 +6,8 @@ import {
   sha256Hex,
   readEnvFileValue,
   resolveValue,
-  bakeBuildConfig
+  bakeBuildConfig,
+  evalUrlHttpsError
 } from "../vite-plugin-build-config";
 
 const ENV_KEYS = [
@@ -95,6 +96,14 @@ describe("build-config baking (vite-plugin-build-config)", () => {
     expect(process.env.VITE_ADMIN_PASSWORD_HASH).toBeUndefined();
     expect(process.env.VITE_API_BASE_URL).toBeUndefined();
     expect(process.env.VITE_EVAL_API_URL).toBeUndefined();
+  });
+
+  it("evalUrlHttpsError rejects a plaintext eval URL, passes https, ignores empty", () => {
+    expect(evalUrlHttpsError("https://proctor-eval.example.run.app")).toBeNull();
+    expect(evalUrlHttpsError("")).toBeNull(); // empty is the required-value guard's job
+    expect(evalUrlHttpsError("http://proctor-eval.example.run.app")).toContain("must be https://");
+    expect(evalUrlHttpsError("ftp://x")).toContain("must be https://");
+    expect(evalUrlHttpsError("HTTPS://upper.example")).toBeNull(); // scheme is case-insensitive
   });
 
   it("explicit VITE_* overrides are not clobbered", () => {
