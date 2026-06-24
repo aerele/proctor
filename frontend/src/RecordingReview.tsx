@@ -50,6 +50,7 @@ import {
   type TypeFacet
 } from "./recordingTimeline";
 import { buildNotableEditorMarkers, type NotableEditorMarker } from "./notableEditorMarkers";
+import { pickTargetSession } from "./recordingSessionSelect";
 import type { AdminSessionDetail, Alert, AlertSeverity, EditorEventItem, RecordingSession, ReviewMineItem, ReviewVerdict, SessionEventItem, SubmissionEvent } from "./types";
 
 // localStorage key for the reviewer's own name so a refresh keeps them reviewing.
@@ -579,15 +580,12 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
         const response = await fetchAdminSessions(trimmed, password, contestScope, norm);
         const loaded = response.sessions ?? [];
         setSessions(loaded);
-        // Default to the newest session (sessions arrive newest-first from the
-        // backend; pick the max created_at defensively).
-        const newest = [...loaded].sort((a, b) =>
-          String(b.created_at || "").localeCompare(String(a.created_at || ""))
-        )[0];
-        const preferred = preferSessionId
-          ? loaded.find((s) => String(s.session_id) === preferSessionId)
-          : undefined;
-        const target = preferred ?? newest;
+        // LT-8: select the EXACT session the caller asked for (picker-row click
+        // or Sessions deep link both pass session_id), falling back to the newest
+        // session for a plain "load this student". pickTargetSession holds that
+        // rule so the "clicked attempt N loads attempt N, not the latest"
+        // guarantee is unit-tested without a DOM.
+        const target = pickTargetSession(loaded, preferSessionId);
         setSelectedSessionId(target ? String(target.session_id) : "");
         setTestStartInput(isoToLocalInput(target?.created_at));
         setCurrentPos(0);
@@ -1231,7 +1229,11 @@ export function RecordingReview({ password, contestSlug, deepLink, onDeepLinkCon
                     <button
                       key={s.session_id}
                       type="button"
-                      onClick={() => void loadUser(candidateIdOf(s), false, undefined, contestSlug || undefined, s.username_norm || undefined)}
+                      // LT-8: pass THIS row's exact session_id as preferSessionId
+                      // so clicking attempt N loads attempt N — not the student's
+                      // latest session. (The session dropdown already selects by
+                      // exact id; this gives the left-list row the same precision.)
+                      onClick={() => void loadUser(candidateIdOf(s), false, s.session_id ? String(s.session_id) : undefined, contestSlug || undefined, s.username_norm || undefined)}
                       className="focus-ring block w-full rounded-md border border-line bg-white/60 px-3 py-2 text-left hover:border-ink/40"
                     >
                       <div className="flex items-center justify-between gap-2">
