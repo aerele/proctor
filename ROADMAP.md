@@ -126,6 +126,11 @@ ships it moves from there into "Done" below.
   bring-up/tear-down). Parked behind a swap-able adapter. *(O6)*
 - **Managed limiter (Memorystore/Redis)** once scale exceeds the Firestore
   sharded-limiter ceiling. *(O7)*
+- **Eval-iframe `sandbox` hardening** — add a `sandbox` (e.g.
+  `allow-scripts allow-same-origin`) to the admin Evaluation-tab iframe. The
+  https-only build assertion half already shipped (`add9217`); the sandbox needs
+  eval-UI browser verification before it lands (could break the cross-origin
+  /eval-ui if scoped too tightly). *(v1.1-r2 security-review MINOR / DiD)*
 
 ### Housekeeping / open
 - **Candidate-visible leaderboard** (optional, per-contest toggle, HackerRank-style)
