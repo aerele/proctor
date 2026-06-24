@@ -252,13 +252,13 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
   fault. ~1-line in `AnomalyPanel.tsx` + test.
 - ☐ **T7** — Gate the unlock-code panel behind being in fullscreen (today it renders
   on lock with no fullscreen precondition). Record-through-lock = LT-4.
-- ☐ **T10** — Admin + invigilator copy never audited (COPY-1 swept candidate-side
+- ✅ **T10** (`bf8226c`) — Admin + invigilator copy never audited (COPY-1 swept candidate-side
   only). Sweep those strings.
 - ✅ **S5** (`0de7d3f`) — The anti-slip auditor is manual-only (`AGENTS.md` "reconcile at every
   release cut"). Build the **scripted reconcile gate**: diff prior IDs vs the docs,
   fail on any ID with no terminal disposition (BUILT/DEFERRED/DROPPED/FOLDED). This
   is what would have caught T1.
-- ⚠ **STUB-1 — overclaim.** Marked ✅ but only 3 of 11 known-bad stubs were patched
+- ✅ **STUB-1 — RESOLVED (Phase C; diffs in `local-notes/stub-diffs-2026-06-24.md`).** All deferred offenders fixed in the live dev bank (challenge-1/2 all langs + challenge-3..9 JS leg), 0 active sessions, status/hiddenTests preserved, re-GET+replay verified. Earlier overclaim: only 3 of 11 known-bad stubs were patched
   (live bank, repo-unverifiable self-report); challenge-1/2 + JS-undefined legs of
   challenge-3..9 are DEFERRED. Verify via a live GET of the 3 offenders; decide the 8.
 - → **T9** → `ROADMAP.md` v2 (DSL-driven stub generation — silently dropped, never
