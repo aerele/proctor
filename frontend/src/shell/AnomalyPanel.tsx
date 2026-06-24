@@ -6,14 +6,30 @@
 // panel that could sit scrolled out of view while the candidate worked deep in
 // the workspace — "the alert doesn't show up"). Same episode semantics as
 // before: lists the episode's friendly reason(s) with timestamps; exactly ONE
-// primary action ("I have fixed it — continue my test") that stays disabled until every restore
-// precondition holds. Re-enter fullscreen gets its own button (a fresh click
+// primary action ("Return to exam") that stays disabled until every restore
+// precondition holds. T3: that action is NO-FAULT — an accidental trigger lets
+// the candidate simply resume without admitting fault (the old "I have fixed it"
+// wording presumed the candidate broke something). LT-6: an OPTIONAL short
+// comment can be attached to the acknowledge; when present it is surfaced to the
+// proctor through the same onReportDispute channel the dispute path uses (a blank
+// comment sends nothing — pure acknowledge, unchanged behaviour).
+// Re-enter fullscreen gets its own button (a fresh click
 // is always a valid gesture). Share-restart is NEVER offered here — that stays
 // with ScreenShareErrorPanel (no duplicate CTA).
 
 import { AlertTriangle } from "lucide-react";
 import { useState } from "react";
 import type { AnomalyReason, RestorePreconditions } from "./examShell";
+
+/** LT-6: decide whether an optional acknowledge comment should be surfaced to the
+ *  proctor, and with what text. The comment is forwarded ONLY when it is non-blank
+ *  (after trimming) — a blank/whitespace-only comment yields null (nothing sent),
+ *  keeping the bare acknowledge byte-identical to the prior behaviour. Pure +
+ *  exported so the forwarding contract is unit-tested without a DOM. */
+export function ackCommentToForward(rawComment: string): string | null {
+  const trimmed = rawComment.trim();
+  return trimmed ? trimmed : null;
+}
 
 export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscreen, onReportDispute }: {
   reasons: AnomalyReason[];
@@ -32,8 +48,23 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
   // about the restore requirement).
   const [disputeOpen, setDisputeOpen] = useState(false);
   const [disputeSent, setDisputeSent] = useState(false);
+  // LT-6: the OPTIONAL acknowledge comment. Local-only text; on restore it is
+  // forwarded to the proctor via onReportDispute when non-blank (and only then).
+  const [ackComment, setAckComment] = useState("");
   const ready = preconditions.fullscreen && preconditions.visible && preconditions.recording;
   const disputedType = reasons[0]?.type ?? "";
+
+  // T3 + LT-6: the no-fault acknowledge. Always clears the banner via onRestore;
+  // if the candidate left an optional comment AND a proctor channel exists, the
+  // comment is surfaced to the proctor (blank ⇒ nothing sent — identical to the
+  // prior pure-acknowledge behaviour).
+  function handleRestore() {
+    const comment = ackCommentToForward(ackComment);
+    if (comment && onReportDispute) {
+      void Promise.resolve(onReportDispute(disputedType, comment));
+    }
+    onRestore();
+  }
 
   const pending: string[] = [];
   if (!preconditions.fullscreen) pending.push("re-enter fullscreen");
@@ -57,10 +88,27 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
           </ul>
           <p className="mt-1 text-xs leading-5 text-red-100">
             {ready
-              ? "All set — press “I have fixed it — continue my test” to resume."
+              ? "All set — press “Return to exam” to resume."
               : `To continue: ${pending.join(" · ")}.`}
           </p>
           {fsError ? <p className="text-xs font-semibold text-red-100">{fsError}</p> : null}
+          {/* LT-6: optional comment attached to the acknowledge. Quietly offered
+              (no fault implied) and only when a proctor channel exists to receive
+              it. A blank value sends nothing. */}
+          {onReportDispute ? (
+            <label className="mt-1.5 block text-xs font-normal text-red-100">
+              <span className="font-semibold">Add a comment (optional)</span>
+              <input
+                type="text"
+                value={ackComment}
+                onChange={(event) => setAckComment(event.target.value)}
+                maxLength={500}
+                placeholder="e.g. my screen flickered for a moment"
+                aria-label="Optional comment for your proctor"
+                className="mt-1 w-full max-w-md rounded-md border border-white/40 bg-red-800/50 px-2 py-1 text-sm font-normal text-white placeholder:text-red-200/80 focus-ring"
+              />
+            </label>
+          ) : null}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {!preconditions.fullscreen ? (
@@ -77,13 +125,13 @@ export function AnomalyPanel({ reasons, preconditions, onRestore, onEnterFullscr
           <button
             className="focus-ring rounded-md border-2 border-white/80 px-3.5 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!ready}
-            onClick={onRestore}
+            onClick={handleRestore}
           >
-            I have fixed it — continue my test
+            Return to exam
           </button>
-          {/* ALERT-1: the quieter dispute option. "I have fixed it — continue my
-              test" above is the acknowledge path; this raises a flag for a GENUINE software
-              fault. It never clears the banner. */}
+          {/* ALERT-1: the quieter dispute option. "Return to exam" above is the
+              no-fault acknowledge path (T3); this raises a flag for a GENUINE
+              software fault. It never clears the banner. */}
           {onReportDispute && !disputeSent ? (
             <button
               className="focus-ring rounded-md px-2 py-2 text-xs font-semibold text-red-100 underline underline-offset-2 hover:text-white"
