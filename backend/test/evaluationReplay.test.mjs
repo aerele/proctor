@@ -129,8 +129,13 @@ test("applyChange glitch detection when range disagrees with deletedLen", () => 
   // claim deletedLen=3 but range cols 1..2 (length 1) → glitch
   const r = applyChange(content, { insertedLen: 0, deletedLen: 3, text: "", startLine: 1, startCol: 1, endLine: 1, endCol: 2 });
   assert.equal(r.glitch, true);
-  // resync removes deletedLen=3 chars from start
-  assert.equal(r.content, "def");
+  // FAITHFUL LINE MODEL (EVAL-2): the (start,end) range Monaco gave is
+  // authoritative — we delete exactly that range (col 1..2 = "a") and only RAISE
+  // the glitch flag; we no longer "resync" by deleting deletedLen chars from the
+  // start. The old assertion (r.content === "def") encoded the flat-model resync
+  // that RELOCATED the edit — the exact behaviour that drifted/garbled real
+  // reconstructions. Glitch detection itself is unchanged (still true here).
+  assert.equal(r.content, "bcdef");
 });
 
 test("collapseWs collapses and trims", () => {

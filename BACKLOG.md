@@ -269,3 +269,24 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
 - ◑ **FLOW-1 / T7** — fullscreen render-gate + recovery + record-through-lock all
   built (B-I/II/III, through `54ea1ef`); needs browser test (LT-1..LT-5, LT-4).
 - ◑ **REC-4** — list-view chunk counts fixed to GCS ground-truth (`46ad737`, LT-7); needs browser test.
+
+## Live-test review — 2026-06-26 (foreign-paste false positives + activity-log noise)
+Owner re-reviewed candidate `REDACTED-ROSTER-ID`'s two `foreign_paste` flags; both are
+FALSE POSITIVES (his own typed-then-copied code). Root-caused (proven via the real
+`replaySession` on his 8.4k-event stream): the eval's **document reconstruction**
+garbles on real edit streams, so `isForeign` can't find self/on-page content. Full
+design + proof: [`docs/proposed/paste-detection-and-activity-log.md`](docs/proposed/paste-detection-and-activity-log.md).
+- ☐ **EVAL-2** — Fix the foreign-paste detector permanently. Replace the flat-offset
+  doc model (`evaluationReplay.mjs` `lineColToOffset`/`applyChange`/`TextBuffer`, which
+  clamps out-of-range positions and compounds drift) with a faithful line/column model
+  (proven to reconstruct the candidate's real code); also thread the problem
+  **statement + sample I/O** into `isForeign`'s on-page sources (`evaluation.mjs:205`
+  passes only stubs today) with a markdown-stripped statement variant. Add a candidate's
+  occupations + challenge-8 slices as regression fixtures (assert reconstruction = ground
+  truth AND not-foreign) + a genuine-external fixture that stays foreign. Re-run eval on
+  affected contests to clear historical FPs. Ships with backend deploy.
+- ☐ **LOG-1** — Activity log below the recording: classify neutral signals (the normal
+  paste marker, focus/blur, cursor bursts, …) as **info**, hidden by default, with a
+  **"Show info activities"** filter chip defaulting OFF (info shown only when toggled).
+  Raw telemetry stays logged; only prominence changes. Needs a UI code-map first
+  (`RecordingReview.tsx` / `notableEditorMarkers.ts`). Ships with frontend deploy.

@@ -49,22 +49,53 @@ export function lineColToOffset(content, line, col) {
   return pos;
 }
 
+// Max lines a single reconstruction edit may grow a buffer to. Real exam docs
+// are a few thousand lines at most; a referenced line beyond this is a corrupt /
+// pathological event, so we cap the growth (the edit then glitches) — this keeps
+// memory bounded and the replay linear even on a malformed stream. (EVAL-2
+// performance guard.)
+const MAX_RECON_LINES = 1_000_000;
+
+// Grow `content` (a plain string) so it has at least `target` lines, by
+// appending trailing newlines. O(newlines scanned to `target`); O(1) when the
+// document already has enough lines (the common case) and when target <= 1.
+function growToLineCount(content, target) {
+  if (target <= 1) return content;
+  const cap = target < MAX_RECON_LINES ? target : MAX_RECON_LINES;
+  let count = 1;
+  let idx = -1;
+  while (count < cap) {
+    idx = content.indexOf("\n", idx + 1);
+    if (idx === -1) return content + "\n".repeat(cap - count);
+    count++;
+  }
+  return content;
+}
+
 // Apply a Monaco content-change to a plain string `content` (used in tests and
-// the glitch check). Returns { content, glitch, startOff, endOff, removed }.
+// the glitch check). FAITHFUL LINE/COLUMN MODEL (EVAL-2): the change replaces
+// the (start,end) RANGE of the PRE-change document with `text`, GROWING the
+// document to the referenced line rather than clamping out-of-range positions to
+// content-end. The old flat-offset model clamped a beyond-content line onto the
+// last line; once any edit drifted, every later offset compounded the error,
+// garbling the reconstruction (and falsely flagging self-authored pastes as
+// foreign). `glitch` is now a PURE cross-check flag — set when the chars actually
+// in [start,end) differ from `deletedLen` (a genuine event inconsistency / tamper
+// signal) — and it no longer resyncs/relocates the edit. The range as given by
+// Monaco's (line,col) coordinates is authoritative.
+// Returns { content, glitch, startOff, endOff, removed }.
 export function applyChange(content, detail) {
   const text = typeof detail.text === "string" ? detail.text : "";
   const deletedLen = detail.deletedLen | 0;
-  const startOff = lineColToOffset(content, detail.startLine, detail.startCol);
-  let endOff = lineColToOffset(content, detail.endLine, detail.endCol);
+  const sl = Math.max(1, detail.startLine | 0);
+  const el = Math.max(1, detail.endLine | 0);
+  const grown = growToLineCount(content, el > sl ? el : sl);
+  const startOff = lineColToOffset(grown, detail.startLine, detail.startCol);
+  let endOff = lineColToOffset(grown, detail.endLine, detail.endCol);
   if (endOff < startOff) endOff = startOff;
-  const rangeLen = endOff - startOff;
-  let glitch = false;
-  if (rangeLen !== deletedLen) {
-    glitch = true;
-    endOff = Math.min(content.length, startOff + deletedLen);
-  }
-  const removed = content.slice(startOff, endOff);
-  const next = content.slice(0, startOff) + text + content.slice(endOff);
+  const glitch = endOff - startOff !== deletedLen;
+  const removed = grown.slice(startOff, endOff);
+  const next = grown.slice(0, startOff) + text + grown.slice(endOff);
   return { content: next, glitch, startOff, endOff, removed };
 }
 
@@ -120,28 +151,16 @@ class TextBuffer {
   _charAt(i) {
     return i < this._gapStart ? this._buf[i] : this._buf[i + (this._gapEnd - this._gapStart)];
   }
-  // 1-based (line,col) → clamped logical offset, computed by scanning the gap
-  // buffer directly (no full-string materialization). Counts newlines to reach
-  // the target line, then adds the clamped column.
-  _offsetForLineCol(line, col) {
-    const len = this._len;
-    const ln = Math.max(1, line | 0);
+  // 1-based column → clamped logical offset within the line that starts at
+  // `lineStart`. Clamps col to the line end by scanning only [lineStart, pos) for
+  // a newline (bounded by the requested column, not the whole line — keeps a long
+  // single line O(col) per edit, not O(line)).
+  _colOffset(lineStart, col) {
     const cl = Math.max(1, col | 0);
-    let offset = 0; // start of current line
-    let curLine = 1;
-    while (curLine < ln) {
-      const nl = this._indexOfNewline(offset);
-      if (nl === -1) return len;
-      offset = nl + 1;
-      curLine++;
-    }
-    let pos = offset + (cl - 1);
-    if (pos > len) pos = len;
+    let pos = lineStart + (cl - 1);
+    if (pos > this._len) pos = this._len;
     if (pos < 0) pos = 0;
-    // Clamp col to the line end: scan only the span [offset, pos) for a newline
-    // (bounded by the requested column, not the whole line) — this keeps a long
-    // single-line document from costing O(line) per edit.
-    const nl = this._indexOfNewline(offset, pos);
+    const nl = this._indexOfNewline(lineStart, pos);
     if (nl !== -1 && nl < pos) pos = nl;
     return pos;
   }
@@ -152,6 +171,65 @@ class TextBuffer {
       if (this._charAt(i) === "\n") return i;
     }
     return -1;
+  }
+  // Append `n` newlines at the logical END of the buffer.
+  _appendNewlines(n) {
+    if (n <= 0) return;
+    this._moveGapTo(this._len);
+    this._ensureGap(n);
+    for (let i = 0; i < n; i++) this._buf[this._gapStart++] = "\n";
+    this._len += n;
+    this._strValid = false;
+  }
+  // Append newlines to grow the document by `n` lines, capped so a corrupt edit
+  // referencing an absurd line can't blow up memory (it glitches instead).
+  _growLines(n) {
+    this._appendNewlines(n > MAX_RECON_LINES ? MAX_RECON_LINES : n);
+  }
+  // FAITHFUL LINE MODEL (EVAL-2): resolve a Monaco range
+  // (startLine,startCol)-(endLine,endCol) to logical [startOff, endOff] in ONE
+  // forward scan, GROWING the buffer with trailing newlines if it has fewer than
+  // `endLine` lines — so an edit on a line beyond the current content lands on a
+  // real line instead of being clamped onto the last one (the flat-offset drift
+  // bug). The single pass keeps a single-line edit (the common case) at one walk
+  // and never re-scans the prefix between the two lines. Returns [startOff, endOff].
+  _resolveRange(sl, sc, el, ec) {
+    // Monaco normalizes start<=end; guard a degenerate inverted range defensively.
+    if (el < sl) {
+      el = sl;
+      ec = sc;
+    }
+    // Walk to the start line, growing if it is beyond the current content.
+    let lineStart = 0;
+    let curLine = 1;
+    while (curLine < sl) {
+      const nl = this._indexOfNewline(lineStart);
+      if (nl === -1) {
+        this._growLines(sl - curLine);
+        curLine = sl;
+        lineStart = this._len;
+        break;
+      }
+      lineStart = nl + 1;
+      curLine++;
+    }
+    const startOff = this._colOffset(lineStart, sc);
+    // Continue forward from the start line to the end line (no prefix re-walk).
+    let endLineStart = lineStart;
+    while (curLine < el) {
+      const nl = this._indexOfNewline(endLineStart);
+      if (nl === -1) {
+        this._growLines(el - curLine);
+        curLine = el;
+        endLineStart = this._len;
+        break;
+      }
+      endLineStart = nl + 1;
+      curLine++;
+    }
+    let endOff = this._colOffset(endLineStart, ec);
+    if (endOff < startOff) endOff = startOff;
+    return [startOff, endOff];
   }
   toString() {
     if (this._strValid) return this._str;
@@ -167,15 +245,19 @@ class TextBuffer {
   apply(detail) {
     const text = typeof detail.text === "string" ? detail.text : "";
     const deletedLen = detail.deletedLen | 0;
-    const startOff = this._offsetForLineCol(detail.startLine, detail.startCol);
-    let endOff = this._offsetForLineCol(detail.endLine, detail.endCol);
-    if (endOff < startOff) endOff = startOff;
-    let glitch = false;
-    if (endOff - startOff !== deletedLen) {
-      glitch = true;
-      endOff = Math.min(this._len, startOff + deletedLen);
-    }
+    // Faithful line model: resolve the range, growing to the referenced line
+    // rather than clamping a beyond-content line onto the last line.
+    const sl = Math.max(1, detail.startLine | 0);
+    const sc = Math.max(1, detail.startCol | 0);
+    const el = Math.max(1, detail.endLine | 0);
+    const ec = Math.max(1, detail.endCol | 0);
+    const [startOff, endOff] = this._resolveRange(sl, sc, el, ec);
     const delCount = endOff - startOff;
+    // `glitch` is a PURE cross-check flag (genuine event inconsistency / tamper
+    // signal): the range Monaco gave is authoritative, so we delete [start,end)
+    // as-is and DO NOT resync to deletedLen (resyncing relocated the edit and was
+    // part of the reconstruction-drift bug). Preserves the tamper safety valve.
+    const glitch = delCount !== deletedLen;
     // Capture removed chars before mutating.
     let removed = "";
     if (delCount > 0) {
