@@ -116,8 +116,13 @@ ships it moves from there into "Done" below.
   and 0 after; answer the cold-start/warm-duration/scale questions. *(O1)*
 - **Re-arm per-contest evidence retention** (~4-day, carefully scoped so it never
   touches preserved live-test data). *(O2)*
-- **Billing visibility** — Cloud Billing API + billing-viewer grant + forward-only
-  BigQuery billing export. *(O3, #151)*
+- **Billing visibility / per-customer cost** — Cloud Billing API + billing-viewer
+  grant + forward-only BigQuery billing export. **Confirmed v2 (owner, 2026-06-26):**
+  not needed while internal; becomes necessary when Proctor ships as a **product**,
+  so we can attribute GCP spend **per customer** (per contest / org) and know the cost
+  of serving each. Forward-only export (billing data isn't backfilled), so set it up
+  *before* the first paying customer. Likely needs per-tenant labels on resources
+  (contest_slug / org) to slice the BigQuery export by customer. *(O3, was #151)*
 - **Split the candidate exam frontend** into its own deployable instance so eval
   can redeploy without risking the live exam path. *(O4)*
 - **In-browser run/submit via WASM** to offload Judge0 (with an anti-spoof /
