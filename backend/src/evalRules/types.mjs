@@ -27,7 +27,11 @@
 
 /**
  * @typedef {Object} Signal   one of:
- *   { kind:"flag", code, severity:"critical"|"warning"|"info", problem_id, evidence }
+ *   { kind:"flag", code, severity:"critical"|"warning"|"info", problem_id, evidence,
+ *     [unverified] }   // unverified:true marks a foreign paste whose problem
+ *                      // reconstruction was glitchy (EVAL-2 MAJOR-3): the flag is
+ *                      // emitted one severity notch lower and rendered with an
+ *                      // "unverified / reconstruction-unreliable" marker.
  *   { kind:"talent", field, value }        // honest_reach / first_attempt pid
  *   { kind:"integrity", field, value }     // e.g. telemetry_tampered=true,
  *                                          //      replay_mismatches=[...], artifacts={}

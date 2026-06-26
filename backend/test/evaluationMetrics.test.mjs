@@ -439,8 +439,8 @@ test("buildScorecard onPageByProblem: a genuine external paste STAYS foreign (no
   assert.equal(sc.integrity.foreign_pastes.length, 1, "external paste not on-page stays foreign");
 });
 
-// ---- EVAL-2: glitch gate on foreign pastes -----------------------------------
-test("buildScorecard GLITCH GATE on foreign paste: glitchy problem → unverified, not foreign", () => {
+// ---- EVAL-2 MAJOR-3: glitch tag on foreign pastes ----------------------------
+test("buildScorecard GLITCH TAG on foreign paste: glitchy problem STAYS foreign, tagged unreliable + downgraded", () => {
   const foreign = "def solve(n):\n  total=0\n  for i in range(n): total+=i*i\n  return total*2";
   // A delete on an empty buffer forces a reconstruction glitch on p1 (range
   // disagrees with deletedLen) BEFORE the foreign paste lands.
@@ -450,17 +450,26 @@ test("buildScorecard GLITCH GATE on foreign paste: glitchy problem → unverifie
   };
   const events = [glitchDelete, pasteEv("p1", 1000, foreign.length), replEv("p1", 1050, 0, foreign)];
   const sc = buildScorecard(baseInput({ editorEvents: events }));
-  assert.equal(sc.integrity.foreign_pastes.length, 0, "glitchy-problem paste is not confidently foreign");
-  assert.ok(Array.isArray(sc.integrity.unverified_pastes));
-  assert.equal(sc.integrity.unverified_pastes.length, 1, "degraded to unverified, not dropped");
-  assert.equal(sc.integrity.unverified_pastes[0].problem_id, "p1");
-  assert.equal(sc.integrity.unverified_pastes[0].reason, "reconstruction_unreliable");
-  assert.ok(!sc.flags.some((f) => f.code === "foreign_paste" || f.code === "foreign_paste_after_away"),
-    "no foreign-paste flag fires on a glitchy problem");
-  // Contrast: the SAME paste on a glitch-free problem IS foreign.
+  // EVAL-2 MAJOR-3: the paste is NEVER dropped into a silent side-list — it stays
+  // in foreign_pastes, tagged reconstruction_unreliable, and the side-list is gone.
+  assert.equal(sc.integrity.foreign_pastes.length, 1, "glitchy-problem paste stays in foreign_pastes, not dropped");
+  assert.equal(sc.integrity.foreign_pastes[0].problem_id, "p1");
+  assert.equal(sc.integrity.foreign_pastes[0].reconstruction_unreliable, true, "tagged as reconstruction-unreliable");
+  assert.ok(!Object.prototype.hasOwnProperty.call(sc.integrity, "unverified" + "_pastes"), "the silent side-list is removed");
+  // The D2 flag STILL fires (no longer silent) but at ONE LOWER severity, tagged.
+  const fpFlag = sc.flags.find((f) => f.code === "foreign_paste" || f.code === "foreign_paste_after_away");
+  assert.ok(fpFlag, "a foreign-paste flag still fires on a glitchy problem");
+  assert.equal(fpFlag.code, "foreign_paste", "no away episode here → plain foreign_paste");
+  assert.equal(fpFlag.severity, "info", "plain warning downgraded to info on unreliable reconstruction");
+  assert.equal(fpFlag.unverified, true, "flag carries the unverified tag");
+  assert.match(fpFlag.evidence, /reconstruction unreliable — unverified/, "evidence notes the unverified state");
+  // Contrast: the SAME paste on a glitch-free problem IS confidently foreign.
   const clean = buildScorecard(baseInput({ editorEvents: [pasteEv("p1", 1000, foreign.length), replEv("p1", 1050, 0, foreign)] }));
   assert.equal(clean.integrity.foreign_pastes.length, 1, "clean-problem paste stays foreign");
-  assert.equal(clean.integrity.unverified_pastes.length, 0);
+  assert.ok(!clean.integrity.foreign_pastes[0].reconstruction_unreliable, "clean paste is not tagged unreliable");
+  const cleanFlag = clean.flags.find((f) => f.code === "foreign_paste");
+  assert.equal(cleanFlag.severity, "warning", "glitch-free paste keeps full warning severity");
+  assert.ok(!cleanFlag.unverified, "glitch-free flag carries no unverified tag");
 });
 
 test("buildScorecard replay-vs-submission mismatch detect (D16b) → telemetry_tampered", () => {

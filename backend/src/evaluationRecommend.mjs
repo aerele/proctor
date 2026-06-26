@@ -202,14 +202,24 @@ const FLAG_INFO = {
 
 export function annotateFlag(flag) {
   const code = (flag && flag.code) || "";
-  const info = FLAG_INFO[code] || { label: code.replace(/_/g, " "), weak: (flag && flag.severity) !== "critical" };
+  const severity = (flag && flag.severity) || "info";
+  const unverified = flag && flag.unverified === true;
+  const info = FLAG_INFO[code] || { label: code.replace(/_/g, " "), weak: severity !== "critical" };
+  // EVAL-2 MAJOR-3: a reconstruction-unreliable foreign paste was DOWNGRADED one
+  // severity notch by the D2 rule. Its `weak` status must follow that lowered
+  // severity (severity!=="critical") rather than the static FLAG_INFO table —
+  // otherwise a downgraded foreign_paste_after_away (now "warning") would still
+  // read weak:false and over-weight the verdict. The UI renders the `unverified`
+  // marker as a small badge; the evidence string already carries the text note.
+  const weak = unverified ? severity !== "critical" : info.weak;
   return {
     code,
-    severity: (flag && flag.severity) || "info",
+    severity,
     problem_id: (flag && flag.problem_id) || null,
     evidence: (flag && flag.evidence) || "",
     label: info.label,
-    weak: info.weak,
+    weak,
+    unverified,
   };
 }
 
@@ -358,6 +368,14 @@ function genuineArcCount(card) {
 
 // How many FOREIGN pastes (code that appeared without being typed = externally
 // sourced) this card carries. A genuine origin has ZERO. Robust to a missing list.
+// NOTE (EVAL-2 MAJOR-3): this intentionally counts `reconstruction_unreliable`-tagged
+// pastes too (they now live in foreign_pastes). The D2 *severity* of such a paste is
+// downgraded, but the genuine-origin RESCUE is a leniency, so we withhold it
+// FAIL-CLOSED: a candidate with any uncertain would-be-foreign paste is not
+// auto-cleared as genuine-origin — a human decides. (Contrast deriveTiers'
+// confirmed-tier, which IS gated on !reconstruction_unreliable so the downgrade can't
+// silently CONFIRM.) Direction is safe: inducing a glitch can only block a rescue,
+// never grant one, so it can't be gamed.
 function foreignPasteCount(card) {
   const fp = (card && card.integrity && card.integrity.foreign_pastes) || [];
   return Array.isArray(fp) ? fp.length : 0;

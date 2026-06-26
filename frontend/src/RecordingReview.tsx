@@ -2207,8 +2207,10 @@ function ActivityLogPanel({
           {/* LOG-1: reveal neutral/info rows (the normal paste marker, focus/blur,
               fullscreen, clipboard, keystroke bursts). Default OFF — info is hidden
               on load so trivial signals don't clutter the log; toggling shows them.
-              Notable rows (alerts incl. confirmed-foreign pastes, submissions,
-              errors) are unaffected and always visible. */}
+              Notable rows (proctor alerts, submissions, errors) are unaffected and
+              always visible. A paste here is only a `notable_paste` info marker;
+              foreign-ness is an eval-side signal shown via the paste lane + the eval
+              scorecard, not a log alert. */}
           <LogFilterChip
             active={filters.showInfoActivities}
             label="Show info activities"

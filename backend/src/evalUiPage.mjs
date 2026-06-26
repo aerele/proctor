@@ -128,6 +128,7 @@ export const EVAL_UI_HTML = `<!doctype html>
   .flag .sev.info { color: var(--muted); background: #f1f5f9; }
   .flag .ftext .fl-label { font-weight: 560; }
   .flag .ftext .fl-weak { color: var(--warn); font-size: 11.5px; margin-left: 6px; }
+  .flag .ftext .fl-unverified { color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-line); font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .03em; padding: 1px 6px; border-radius: 6px; margin-left: 6px; white-space: nowrap; }
   .flag .ftext .fl-ev { color: var(--muted); font-size: 12px; margin-top: 1px; }
   .flag .ftext .fl-pid { color: var(--muted); font-size: 11.5px; }
   .nodossier { color: var(--muted); font-size: 13px; padding: 10px 0; }

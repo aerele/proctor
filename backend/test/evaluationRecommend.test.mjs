@@ -103,6 +103,22 @@ test("annotateFlag: weak vs conclusive marking", () => {
   assert.equal(annotateFlag(F("high_paste_ratio", "critical")).weak, false);
 });
 
+test("annotateFlag: EVAL-2 unverified flags keep downgraded weak + pass the tag through (UI badge data path)", () => {
+  // The owner's bar: a glitchy would-be-foreign paste must stay VISIBLE to the
+  // reviewer. The eval UI renders a .fl-unverified badge from `flag.unverified`, and
+  // the downgraded severity must drive `weak`. Guard that data contract so a future
+  // regression (dropping the field, or weak not following the downgrade) can't
+  // silently make a tagged foreign paste invisible / over-weighted.
+  const downAfterAway = annotateFlag({ code: "foreign_paste_after_away", severity: "warning", unverified: true, problem_id: "p1", evidence: "x (reconstruction unreliable — unverified)" });
+  assert.equal(downAfterAway.weak, true, "downgraded critical→warning reads weak");
+  assert.equal(downAfterAway.unverified, true, "tag passes through so the UI badge renders");
+  const downPlain = annotateFlag({ code: "foreign_paste", severity: "info", unverified: true });
+  assert.equal(downPlain.weak, true, "downgraded warning→info reads weak");
+  assert.equal(downPlain.unverified, true);
+  // A normal (non-unverified) flag carries no tag and keeps its table-driven weak.
+  assert.equal(annotateFlag(F("foreign_paste_after_away", "critical")).unverified, false);
+});
+
 test("report: counts, phantom filter", () => {
   const rep = computeRecommendationReport(COHORT, { contest_slug: "fixture-contest" });
   assert.equal(rep.counts.total_docs, 12);

@@ -303,18 +303,22 @@ function extractFeatures(input) {
   }
 
   // ---- foreign pastes (D2) ----
-  // GLITCH GATE (EVAL-2 — mirrors the replay_tamper safety valve): a paste is
-  // only asserted "confidently foreign" when its problem's reconstruction is
-  // glitch-free. On a glitchy problem the replayed beforeContent / cross-problem
-  // content is unreliable, so isForeign's "not seen earlier" answer can't be
+  // GLITCH TAG (EVAL-2 MAJOR-3 — owner override of the old silent side-list): a
+  // paste is only asserted "confidently foreign" when its problem's reconstruction
+  // is glitch-free. On a glitchy problem the replayed beforeContent / cross-problem
+  // content is unreliable, so isForeign's "not seen earlier" answer can't be fully
   // trusted — we cannot be sure the pasted text wasn't actually self / on-page.
-  // Such a paste is DEGRADED to `unverified_pastes` (reason
-  // reconstruction_unreliable), never silently dropped, and kept OUT of
-  // `foreign_pastes` so the D2 rule and the confirmed-tier after-away check only
-  // ever see confidently-foreign pastes. (glitchFree mirrors replayTamper:61-62.)
+  // The PRIOR design routed such a paste into a separate silent side-list that NO
+  // rule read, which let a cheater FORGE a glitch to silently dodge foreign-paste
+  // detection. Now every would-be-foreign paste STAYS in
+  // `foreign_pastes` (never dropped); when its problem is not glitch-free we TAG
+  // the record `reconstruction_unreliable: true`. The D2 rule emits a tagged flag
+  // one severity notch lower (see foreignPaste.mjs) and the confirmed-tier
+  // after-away check skips tagged pastes (see deriveTiers) — flagged, but
+  // de-weighted and visibly "unverified", not silenced. (glitchFree mirrors
+  // replayTamper:61-62.)
   const glitchFree = (pid) => (replay.problems[pid]?.glitches || 0) === 0;
   const foreign_pastes = [];
-  const unverified_pastes = [];
   for (const p of replay.pastes) {
     if (!p.foreign) continue;
     const after = awayCorrByPasteTs.has(`${p.problem_id}::${p.ts}`)
@@ -328,11 +332,8 @@ function extractFeatures(input) {
       after_away_ms: after,
       truncated: p.truncated === true,
     };
-    if (glitchFree(p.problem_id)) {
-      foreign_pastes.push(rec);
-    } else {
-      unverified_pastes.push({ ...rec, reason: "reconstruction_unreliable" });
-    }
+    if (!glitchFree(p.problem_id)) rec.reconstruction_unreliable = true;
+    foreign_pastes.push(rec);
   }
 
   // ---- per-problem submission stats ----
@@ -582,7 +583,6 @@ function extractFeatures(input) {
     cadence,
     awayCorr,
     foreign_pastes,
-    unverified_pastes,
     away_paste_correlations,
 
     // availability inputs (consumed by engine.buildAvail + replay_tamper rule)
@@ -670,12 +670,12 @@ export function buildScorecard(input) {
     typed_chars: f.totalTyped,
     pasted_chars: f.totalPasted,
     paste_ratio: round4(f.paste_ratio),
+    // foreign_pastes now carries BOTH confidently-foreign pastes and would-be-
+    // foreign pastes whose problem reconstruction has glitches (>0). The latter
+    // are tagged `reconstruction_unreliable: true` (EVAL-2 MAJOR-3) — kept here,
+    // never dropped, flagged at one-lower severity by the D2 rule. There is no
+    // separate silent side-list anymore.
     foreign_pastes: f.foreign_pastes,
-    // Pastes that WOULD be foreign but whose problem reconstruction has glitches
-    // (>0) — degraded from foreign to "unverified" (EVAL-2 glitch gate). Kept on
-    // the record (not dropped) so a reviewer can still see them, but NOT counted
-    // as confidently-foreign by any rule. Empty in the glitch-free common case.
-    unverified_pastes: f.unverified_pastes,
     away_paste_correlations: f.away_paste_correlations,
     cadence: f.cadence,
     zero_effort_solves,
@@ -706,6 +706,14 @@ export function buildScorecard(input) {
   };
 
   // cross_inputs for the cross-candidate pass (kept small & bounded).
+  // NOTE (EVAL-2 MAJOR-3): this reads the RAW replay foreign flag and is
+  // INTENTIONALLY not glitch-gated (unlike the single-candidate deriveTiers
+  // confirmed-tier). The cross-candidate pass matches this paste's TEXT against
+  // peers' submitted code — collusion evidence that is reconstruction-INDEPENDENT
+  // (the pasted text is captured directly, not reconstructed). A real peer-match
+  // is real collusion regardless of a glitch on this candidate's problem, so a
+  // `reconstruction_unreliable` paste must still feed peer matching; gating it
+  // would DROP a genuine collusion signal. (A forged glitch cannot dodge this.)
   const cross_inputs = buildCrossInputs({
     foreign_pastes: f.replay.pastes.filter((p) => p.foreign),
     replay: f.replay,
@@ -808,8 +816,13 @@ function deriveTiers({ flags, talent, integrity, coverage = {} }) {
   // foreign-paste after-away on an accepted problem. (Recurring-pair confirmation
   // is injected by applyCrossPatches; here we read the integrity flags.)
   const conclusiveRecurring = hasCode("recurring_pair_conclusive");
+  // Only a CONFIDENTLY-foreign (glitch-free) full-solution after-away paste
+  // confirms. A `reconstruction_unreliable`-tagged paste was downgraded by the D2
+  // rule (EVAL-2 MAJOR-3); honoring that downgrade, it must NOT re-escalate the
+  // integrity tier to "confirmed" here — otherwise the severity drop would be
+  // silently undone by this direct read of foreign_pastes.
   const fullSolnAfterAway = integrity.foreign_pastes.some(
-    (fp) => fp.after_away_ms != null && fp.len >= THRESHOLDS.FULL_SOLUTION_PASTE_LEN
+    (fp) => !fp.reconstruction_unreliable && fp.after_away_ms != null && fp.len >= THRESHOLDS.FULL_SOLUTION_PASTE_LEN
   );
   if (conclusiveRecurring) {
     // Code-similarity clone proof is independent of the interaction stream.

@@ -519,8 +519,15 @@ describe("filterTimelineLog", () => {
 
 // LOG-1: neutral/info entries (the normal paste marker, focus/blur, fullscreen,
 // clipboard, keystroke bursts) are hidden by default behind the "Show info
-// activities" chip; NOTABLE entries (alerts incl. confirmed-foreign pastes,
-// submissions, error/other events) are never info and always show.
+// activities" chip; NOTABLE entries (any alert, submissions, error/other events)
+// are never info and always show.
+//
+// NOTE: the `paste_detected` / "Foreign paste detected" ALERT used in the fixtures
+// below is SYNTHETIC — there is no such proctor event type in the live source (a
+// foreign paste is decided eval-side and shows via the eval scorecard + the
+// dedicated paste lane, not as a live-recording alert; see the corrected comments
+// in recordingTimeline.ts / RecordingReview.tsx). It stands in here purely to
+// exercise the generic invariant "an alert of ANY type is always notable".
 describe("info / notable classification (LOG-1)", () => {
   it("DEFAULT_LOG_FILTERS hides info by default (showInfoActivities === false)", () => {
     expect(DEFAULT_LOG_FILTERS.showInfoActivities).toBe(false);

@@ -70,6 +70,9 @@ function route(sig, collected) {
         severity: sig.severity,
         problem_id: sig.problem_id !== undefined ? sig.problem_id : null,
         evidence: sig.evidence,
+        // EVAL-2 MAJOR-3: carry the reconstruction-unreliable tag through so the
+        // recommendation/UI can render it. Only present when the rule sets it.
+        ...(sig.unverified === true ? { unverified: true } : {}),
       });
       break;
     case "talent":

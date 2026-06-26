@@ -56,8 +56,10 @@ export type TimelineLogFilters = {
   /** LOG-1: reveal neutral/info entries (the normal paste marker, focus/blur,
    * fullscreen, clipboard, keystroke bursts — see NEUTRAL_EVENT_TYPES). Default
    * false → info hidden on load; toggling the "Show info activities" chip reveals
-   * them. NEVER affects notable entries (alerts incl. confirmed-foreign pastes,
-   * submissions, error/other events) — those always show. */
+   * them. NEVER affects notable entries (proctor alerts, submissions, error/other
+   * events) — those always show. Note: a paste here is only a `notable_paste`
+   * marker (info); foreign-ness is decided eval-side and surfaces via the paste
+   * lane + the eval scorecard, not as a log alert. */
   showInfoActivities: boolean;
 };
 
@@ -138,12 +140,14 @@ const NOISE_EVENT_TYPES = new Set(["chunk_uploaded", "media_preview_play_error",
 // NORMAL editor paste / keystroke-burst markers (notable_paste / notable_burst,
 // folded in by buildTimelineLog). These are hidden by default behind the
 // "Show info activities" chip and revealed on toggle. CRUCIALLY this is a
-// per-EVENT-type allowlist, never a per-kind one: every ALERT (a confirmed-FOREIGN
-// paste surfaces as an alert), every submission/run, and every non-neutral event
-// (errors, IP change, screen-share/camera stops, …) is NOTABLE and therefore
-// always shown regardless of the flag. The normal paste marker IS info; a
-// confirmed-foreign paste stays notable via its alert. Raw telemetry is unchanged
-// (the underlying events are still logged) — only the default prominence shifts.
+// per-EVENT-type allowlist, never a per-kind one: every ALERT (proctor alerts —
+// tab-away, IP change, screen-share/camera stops, …), every submission/run, and
+// every non-neutral event is NOTABLE and therefore always shown regardless of the
+// flag. The normal paste marker IS info. Foreign-ness is NOT decided in this log:
+// it is an eval-side judgment, and a foreign paste surfaces via the dedicated
+// paste lane + the eval scorecard — here it is just a `notable_paste` info marker,
+// hidden by default. Raw telemetry is unchanged (the underlying events are still
+// logged) — only the default prominence shifts.
 const NEUTRAL_EVENT_TYPES = new Set<string>([
   "window_blur",
   "window_focus",
@@ -157,8 +161,9 @@ const NEUTRAL_EVENT_TYPES = new Set<string>([
 ]);
 
 // True when an entry is neutral/info (see NEUTRAL_EVENT_TYPES). ONLY event-kind
-// rows are ever info — alerts (incl. confirmed-foreign pastes) and submissions /
-// runs are always notable, so this never reclassifies them.
+// rows are ever info — proctor alerts and submissions / runs are always notable,
+// so this never reclassifies them. (A paste here is a `notable_paste` info marker;
+// its foreign-ness, if any, is an eval-side signal shown elsewhere, not an alert.)
 export function isInfoEntry(entry: TimelineLogEntry): boolean {
   return entry.kind === "event" && NEUTRAL_EVENT_TYPES.has(entry.type);
 }
@@ -438,8 +443,9 @@ export function filterTimelineLog(entries: TimelineLogEntry[], filters: Timeline
     // LOG-1: neutral/info rows (the normal paste marker, focus/blur, fullscreen,
     // clipboard, keystroke bursts) are hidden unless the reviewer opts in. This
     // gate only ever matches event-kind neutral types (see isInfoEntry), so
-    // NOTABLE rows — alerts (incl. confirmed-foreign pastes), submissions/runs,
-    // and non-neutral events — are never touched and always show.
+    // NOTABLE rows — proctor alerts, submissions/runs, and non-neutral events —
+    // are never touched and always show. (A paste is only a `notable_paste` info
+    // marker here; foreign-ness shows via the paste lane + eval scorecard.)
     if (!filters.showInfoActivities && isInfoEntry(entry)) return false;
     if (entry.kind === "alert") {
       if (!filters.alerts) return false;

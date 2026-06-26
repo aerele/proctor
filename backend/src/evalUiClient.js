@@ -346,6 +346,9 @@ function candidateRow(c, opts) {
         el("div", { class: "ftext" },
           el("div", null,
             el("span", { class: "fl-label", text: f.label }),
+            // EVAL-2 MAJOR-3: a reconstruction-unreliable foreign paste is kept but
+            // de-weighted; mark it visibly so a reviewer sees the "unverified" tag.
+            f.unverified ? el("span", { class: "fl-unverified", text: "unverified" }) : null,
             f.weak ? el("span", { class: "fl-weak", text: "· weak signal" }) : null,
           ),
           f.evidence ? el("div", { class: "fl-ev", text: f.evidence }) : null,
