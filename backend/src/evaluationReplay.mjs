@@ -49,24 +49,39 @@ export function lineColToOffset(content, line, col) {
   return pos;
 }
 
-// Max lines a single reconstruction edit may grow a buffer to. Real exam docs
-// are a few thousand lines at most; a referenced line beyond this is a corrupt /
-// pathological event, so we cap the growth (the edit then glitches) — this keeps
-// memory bounded and the replay linear even on a malformed stream. (EVAL-2
-// performance guard.)
-const MAX_RECON_LINES = 1_000_000;
+// Hard cap on the TOTAL line count of a reconstructed document (EVAL-2 / DoS
+// guard). Real exam docs are tiny — the largest observed live stream references
+// at most line 47 with documents <=47 lines — so any reference beyond this cap
+// is a corrupt / forged event. We NEVER grow the document past this many lines:
+// a reference beyond the cap clamps to the current content end (the safe O(1)
+// flat-offset behavior) and the edit glitches instead of growing. This bounds
+// both memory and time: replay stays linear even on a malicious stream that
+// spams absurd line numbers, and no single grow can be large enough to overflow
+// the call stack. The cap is far larger than any genuine exam document, so real
+// reconstructions (including their legitimate line growth) are unaffected.
+// 4096 is ~87x the largest observed real document (47 lines) — far beyond any
+// genuine exam answer — yet small enough that even a worst-case forged stream
+// (the documented ~200k-event ceiling, every event referencing a within-cap
+// line so each resolve walks the whole grown document) replays in ~3s, well
+// under the 10s perf budget. A line beyond the cap is O(1) (clamped, not walked).
+const MAX_RECON_LINES = 4096;
 
 // Grow `content` (a plain string) so it has at least `target` lines, by
 // appending trailing newlines. O(newlines scanned to `target`); O(1) when the
 // document already has enough lines (the common case) and when target <= 1.
+// A `target` beyond MAX_RECON_LINES is NOT grown — the caller's offset lookup
+// then clamps onto the content end (and the edit glitches), keeping the document
+// bounded. Equivalent to the buffer path's _resolveRange cap.
 function growToLineCount(content, target) {
   if (target <= 1) return content;
-  const cap = target < MAX_RECON_LINES ? target : MAX_RECON_LINES;
+  // Beyond the cap: refuse to grow. The edit's (line,col) then resolves past the
+  // end of `content` and clamps to content.length — the safe flat-offset model.
+  if (target > MAX_RECON_LINES) return content;
   let count = 1;
   let idx = -1;
-  while (count < cap) {
+  while (count < target) {
     idx = content.indexOf("\n", idx + 1);
-    if (idx === -1) return content + "\n".repeat(cap - count);
+    if (idx === -1) return content + "\n".repeat(target - count);
     count++;
   }
   return content;
@@ -75,11 +90,14 @@ function growToLineCount(content, target) {
 // Apply a Monaco content-change to a plain string `content` (used in tests and
 // the glitch check). FAITHFUL LINE/COLUMN MODEL (EVAL-2): the change replaces
 // the (start,end) RANGE of the PRE-change document with `text`, GROWING the
-// document to the referenced line rather than clamping out-of-range positions to
-// content-end. The old flat-offset model clamped a beyond-content line onto the
-// last line; once any edit drifted, every later offset compounded the error,
-// garbling the reconstruction (and falsely flagging self-authored pastes as
-// foreign). `glitch` is now a PURE cross-check flag — set when the chars actually
+// document to the referenced line (UP TO MAX_RECON_LINES) rather than clamping
+// out-of-range positions to content-end. The old flat-offset model clamped a
+// beyond-content line onto the last line; once any edit drifted, every later
+// offset compounded the error, garbling the reconstruction (and falsely flagging
+// self-authored pastes as foreign). A reference BEYOND the cap is treated as a
+// corrupt/forged event: it is NOT grown to (DoS guard), so it clamps to content
+// end and glitches — pathological-only, real exam docs stay far under the cap.
+// `glitch` is now a PURE cross-check flag — set when the chars actually
 // in [start,end) differ from `deletedLen` (a genuine event inconsistency / tamper
 // signal) — and it no longer resyncs/relocates the edit. The range as given by
 // Monaco's (line,col) coordinates is authoritative.
@@ -140,11 +158,16 @@ class TextBuffer {
   _ensureGap(n) {
     const gap = this._gapEnd - this._gapStart;
     if (gap >= n) return;
-    // Grow: insert extra slots at gapEnd.
+    // Grow: insert `grow` extra gap slots at gapEnd by REBUILDING the backing
+    // array. NB: do NOT use `splice(this._gapEnd, 0, ...filler)` — spreading a
+    // large filler as call arguments overflows the call stack (RangeError) once
+    // `grow` reaches ~10^5, which a single forged edit could trigger. `concat`
+    // flattens its array arguments WITHOUT spreading, so it grows the buffer
+    // safely at any size (one O(len) copy, amortized rare). The reconstruction
+    // cap keeps `grow` small in practice; this is the belt-and-suspenders bound.
     const grow = Math.max(n - gap, 1024, this._len >> 2);
     const filler = new Array(grow);
-    // splice is one O(len) move but happens rarely (amortized).
-    this._buf.splice(this._gapEnd, 0, ...filler);
+    this._buf = this._buf.slice(0, this._gapEnd).concat(filler, this._buf.slice(this._gapEnd));
     this._gapEnd += grow;
   }
   // Char at logical offset i (no gap move).
@@ -181,8 +204,12 @@ class TextBuffer {
     this._len += n;
     this._strValid = false;
   }
-  // Append newlines to grow the document by `n` lines, capped so a corrupt edit
-  // referencing an absurd line can't blow up memory (it glitches instead).
+  // Append newlines to grow the document by `n` lines. Callers (_resolveRange)
+  // only ever request a grow whose RESULTING total line count is <= the
+  // MAX_RECON_LINES cap (a reference beyond the cap clamps instead of growing),
+  // so the document can never exceed the cap. The `min` here is a defensive
+  // belt-and-suspenders bound on a single grow; combined with the de-spread
+  // _ensureGap it guarantees no grow can blow up memory or the call stack.
   _growLines(n) {
     this._appendNewlines(n > MAX_RECON_LINES ? MAX_RECON_LINES : n);
   }
@@ -192,19 +219,33 @@ class TextBuffer {
   // `endLine` lines — so an edit on a line beyond the current content lands on a
   // real line instead of being clamped onto the last one (the flat-offset drift
   // bug). The single pass keeps a single-line edit (the common case) at one walk
-  // and never re-scans the prefix between the two lines. Returns [startOff, endOff].
+  // and never re-scans the prefix between the two lines.
+  //
+  // DoS guard: growth is capped at MAX_RECON_LINES total lines. A reference at or
+  // below the cap grows normally (real exam docs are far under it); a reference
+  // BEYOND the cap is never grown to — it clamps to the content end and glitches.
+  // The `sl > MAX_RECON_LINES` fast path returns in O(1) WITHOUT walking, so a
+  // stream that spams absurd line numbers can't drag the scan to O(content) per
+  // event. Returns [startOff, endOff].
   _resolveRange(sl, sc, el, ec) {
     // Monaco normalizes start<=end; guard a degenerate inverted range defensively.
     if (el < sl) {
       el = sl;
       ec = sc;
     }
-    // Walk to the start line, growing if it is beyond the current content.
+    // Fast path: a start line beyond the cap can never exist (the document is
+    // capped at MAX_RECON_LINES lines), so the whole range clamps to content end.
+    // O(1) — no walk, no growth — which bounds time under an adversarial stream.
+    if (sl > MAX_RECON_LINES) {
+      return [this._len, this._len];
+    }
+    // Walk to the start line, growing (within the cap) if it is beyond content.
     let lineStart = 0;
     let curLine = 1;
     while (curLine < sl) {
       const nl = this._indexOfNewline(lineStart);
       if (nl === -1) {
+        // sl <= cap here (guarded above), so growing to it stays within bounds.
         this._growLines(sl - curLine);
         curLine = sl;
         lineStart = this._len;
@@ -214,20 +255,26 @@ class TextBuffer {
       curLine++;
     }
     const startOff = this._colOffset(lineStart, sc);
-    // Continue forward from the start line to the end line (no prefix re-walk).
-    let endLineStart = lineStart;
-    while (curLine < el) {
-      const nl = this._indexOfNewline(endLineStart);
-      if (nl === -1) {
-        this._growLines(el - curLine);
-        curLine = el;
-        endLineStart = this._len;
-        break;
+    // End line beyond the cap → clamp to content end (no growth, will glitch).
+    let endOff;
+    if (el > MAX_RECON_LINES) {
+      endOff = this._len;
+    } else {
+      // Continue forward from the start line to the end line (no prefix re-walk).
+      let endLineStart = lineStart;
+      while (curLine < el) {
+        const nl = this._indexOfNewline(endLineStart);
+        if (nl === -1) {
+          this._growLines(el - curLine);
+          curLine = el;
+          endLineStart = this._len;
+          break;
+        }
+        endLineStart = nl + 1;
+        curLine++;
       }
-      endLineStart = nl + 1;
-      curLine++;
+      endOff = this._colOffset(endLineStart, ec);
     }
-    let endOff = this._colOffset(endLineStart, ec);
     if (endOff < startOff) endOff = startOff;
     return [startOff, endOff];
   }
@@ -292,9 +339,24 @@ export function collapseWs(s) {
 // RAW statement is seeded alongside this variant, so the two together only ever
 // ADD non-foreign matches (a stricter substring set), never remove a real one.
 // (EVAL-2 Layer A.2.)
+// Defensive input bound for stripMarkdown (ReDoS guard). The link/image regexes
+// below backtrack O(n^2) on a long run of unmatched `[`. The sole caller passes
+// an ADMIN-authored problem statement (not candidate-reachable), so the worst
+// case is an admin self-DoS, but bound it anyway: a statement past this length
+// is far beyond any genuine problem statement (real ones are a few KB). Beyond
+// the bound we skip the syntax strip and return the input verbatim — the
+// foreign-paste matcher seeds the RAW statement alongside this variant, so the
+// only thing lost is Markdown-syntax normalization on an absurd input, never
+// correctness. collapseWs still normalizes whitespace downstream.
+const STRIP_MARKDOWN_MAX_LEN = 100_000;
+
 export function stripMarkdown(md) {
   if (!md) return "";
   let s = String(md);
+  // ReDoS guard: skip the backtracking-prone syntax strip on pathologically long
+  // input (see STRIP_MARKDOWN_MAX_LEN). Returning verbatim keeps behavior correct
+  // for the foreign-paste matcher (the RAW statement is seeded separately).
+  if (s.length > STRIP_MARKDOWN_MAX_LEN) return s;
   // Images / links: ![alt](url) and [text](url) → alt / text.
   s = s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
   // Reference-style links: [text][ref] → text.
