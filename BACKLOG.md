@@ -271,22 +271,21 @@ legitimately DEFERRED in `ROADMAP.md` (F2/F3/M2/R2/R3).
 - ◑ **REC-4** — list-view chunk counts fixed to GCS ground-truth (`46ad737`, LT-7); needs browser test.
 
 ## Live-test review — 2026-06-26 (foreign-paste false positives + activity-log noise)
-Owner re-reviewed candidate `REDACTED-ROSTER-ID`'s two `foreign_paste` flags; both are
-FALSE POSITIVES (his own typed-then-copied code). Root-caused (proven via the real
-`replaySession` on his 8.4k-event stream): the eval's **document reconstruction**
-garbles on real edit streams, so `isForeign` can't find self/on-page content. Full
+A live-test candidate's two `foreign_paste` flags were re-reviewed; both were FALSE
+POSITIVES (his own typed-then-copied code). Root-caused (proven via the real
+`replaySession` on his ~8.4k-event stream): the eval's **document reconstruction**
+garbled on real edit streams, so `isForeign` couldn't find self/on-page content. Full
 design + proof: [`docs/proposed/paste-detection-and-activity-log.md`](docs/proposed/paste-detection-and-activity-log.md).
-- ☐ **EVAL-2** — Fix the foreign-paste detector permanently. Replace the flat-offset
-  doc model (`evaluationReplay.mjs` `lineColToOffset`/`applyChange`/`TextBuffer`, which
-  clamps out-of-range positions and compounds drift) with a faithful line/column model
-  (proven to reconstruct the candidate's real code); also thread the problem
-  **statement + sample I/O** into `isForeign`'s on-page sources (`evaluation.mjs:205`
-  passes only stubs today) with a markdown-stripped statement variant. Add a candidate's
-  occupations + challenge-8 slices as regression fixtures (assert reconstruction = ground
-  truth AND not-foreign) + a genuine-external fixture that stays foreign. Re-run eval on
-  affected contests to clear historical FPs. Ships with backend deploy.
-- ☐ **LOG-1** — Activity log below the recording: classify neutral signals (the normal
-  paste marker, focus/blur, cursor bursts, …) as **info**, hidden by default, with a
-  **"Show info activities"** filter chip defaulting OFF (info shown only when toggled).
-  Raw telemetry stays logged; only prominence changes. Needs a UI code-map first
-  (`RecordingReview.tsx` / `notableEditorMarkers.ts`). Ships with frontend deploy.
+(Real candidate/session/contest IDs: gitignored `local-notes/paste-detector-regression-data.md`.)
+- ◑ **EVAL-2** — Foreign-paste detector fixed (code complete + triple-reviewed + tests
+  green; pending staged deploy + re-eval). Replaced the flat-offset doc model with a
+  faithful line/column model (`31d8101`); threaded the problem **statement + sample I/O**
+  (raw + markdown-stripped) into `isForeign`'s on-page sources + gated `foreign_paste` on
+  `glitchFree` → `unverified_pastes` (`8d52031`); DoS-hardened the growth; sanitized
+  real-slice + genuine-external regression fixtures. Re-run eval on affected contests to
+  clear historical FPs (scope = owner decision). Ships with backend deploy.
+- ◑ **LOG-1** — Activity-log info chip built (code complete + tests green; pending
+  frontend deploy + browser verify). Neutral signals (normal paste marker, focus/blur,
+  fullscreen, clipboard, cursor bursts) classified as **info**, hidden by default behind a
+  **"Show info activities"** chip defaulting OFF; alerts/foreign-paste/submissions always
+  shown; raw telemetry unchanged (`fab50e3`).
