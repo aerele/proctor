@@ -289,3 +289,22 @@ design + proof: [`docs/proposed/paste-detection-and-activity-log.md`](docs/propo
   fullscreen, clipboard, cursor bursts) classified as **info**, hidden by default behind a
   **"Show info activities"** chip defaulting OFF; alerts/foreign-paste/submissions always
   shown; raw telemetry unchanged (`fab50e3`).
+
+## Security hygiene — 2026-06-26 (Dependabot)
+- ✅ **uuid GHSA-w5hq-g745-h8pq (moderate)** — bumped uuid 8.3.2 / 9.0.1 → **11.1.1** via
+  override (advisory range is `< 11.1.1`; our usage is `v4()`-only so it was never
+  exploitable, but this clears the alert at source). Override added to **both** the root
+  (`9eff2cc`, fixes the repo lockfile Dependabot scans) **and** `backend/package.json`
+  (`c0cf055`) — the backend image is built standalone from `backend/`, so the root override
+  alone never reached the running container. `npm audit` → 0; 1108 tests green; deployed +
+  verified on **proctor-api** (uuid 11 in image, health-check green 9/9) and **proctor-eval**
+  (uuid 11 in image, Firestore read 200).
+- **esbuild GHSA-gv7w-rqvm-qjhr (high)** — **withdrawn advisory** (GitHub retracted it
+  2026-06-17) on a build-time-only tool not shipped in the prod nginx image. No code fix;
+  dismiss on the Dependabot UI (or it auto-clears).
+- ◑ **HARDEN-1 — reproducible backend image build.** `backend/Dockerfile` does `COPY
+  package*.json` + `npm install --omit=dev` with **no committed lockfile**, so each build
+  re-resolves latest-in-range and none of the root `overrides` (form-data, protobufjs,
+  esbuild, uuid) reach the image except where duplicated into `backend/package.json`. Switch
+  the image to a committed backend lockfile + `npm ci` so the deployed artifact exactly
+  matches the audited tree. (Root cause of why the uuid override needed duplicating.)
