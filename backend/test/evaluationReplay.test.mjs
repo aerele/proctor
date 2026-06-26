@@ -8,6 +8,7 @@ import {
   normalizedLineDistance,
   replaySession,
   isBareTemplate,
+  stripMarkdown,
 } from "../src/evaluationReplay.mjs";
 
 // Helpers to build events tersely.
@@ -304,6 +305,62 @@ test("extraSelfTexts and stubs make a paste benign", () => {
   out = replaySession([paste(P, 1000, blob.length, 1, 1), repl(P, 1050, "", blob, 1, 1, 1, 1)], { stubs: [blob] });
   rec = out.pastes.find((p) => p.len >= 40);
   assert.equal(rec.foreign, false);
+});
+
+// ---- EVAL-2 Layer A.2: on-page sources (statement + sample I/O) ----------------
+test("stripMarkdown removes markdown syntax, keeps prose", () => {
+  const md = "# Title\n\nReverse the **array** and print each `element` on a line.\nSee [docs](http://x).\n- bullet one\n> quoted note";
+  const plain = stripMarkdown(md);
+  assert.ok(!plain.includes("#"), "headings stripped");
+  assert.ok(!plain.includes("**"), "bold markers stripped");
+  assert.ok(!plain.includes("`"), "inline-code backticks stripped");
+  assert.ok(!plain.includes("](") && !plain.includes("http://x"), "link target stripped");
+  assert.ok(plain.includes("docs"), "link text kept");
+  assert.ok(plain.includes("Reverse the") && plain.includes("array") && plain.includes("element"), "prose kept");
+  assert.equal(stripMarkdown(""), "");
+});
+
+test("onPageTexts: pasting the problem statement is NOT foreign", () => {
+  const P = "p1";
+  const statement = "Given an array of N integers, output the maximum contiguous subarray sum (Kadane's algorithm).";
+  const paragraph = "output the maximum contiguous subarray sum (Kadane's algorithm).";
+  const events = [paste(P, 1000, paragraph.length, 1, 1), repl(P, 1050, "", paragraph, 1, 1, 1, 1)];
+  const foreign = replaySession(events, {});
+  assert.equal(foreign.pastes.find((p) => p.len >= 30).foreign, true, "foreign without onPage");
+  const out = replaySession(events, { onPageTexts: [statement] });
+  assert.equal(out.pastes.find((p) => p.len >= 30).foreign, false, "statement paste suppressed");
+});
+
+test("onPageTexts: pasting the MARKDOWN-STRIPPED (rendered) statement is NOT foreign", () => {
+  const P = "p1";
+  const md = "## Task\n\nReturn the **median** of the list using `nth_element`, then print it on its own line.";
+  // candidate pastes the RENDERED prose (no markdown punctuation).
+  const rendered = "Return the median of the list using nth_element, then print it on its own line.";
+  const events = [paste(P, 1000, rendered.length, 1, 1), repl(P, 1050, "", rendered, 1, 1, 1, 1)];
+  // raw markdown alone does NOT contain the rendered substring; the stripped variant does.
+  const out = replaySession(events, { onPageTexts: [md, stripMarkdown(md)] });
+  assert.equal(out.pastes.find((p) => p.len >= 30).foreign, false);
+});
+
+test("onPageTexts: pasting sample input / expected output is NOT foreign", () => {
+  const P = "p1";
+  const sampleInput = "5\n3 1 4 1 5\nthe quick brown fox jumps over";
+  const sampleExpected = "1 1 3 4 5 -- sorted ascending output row";
+  const evIn = [paste(P, 1000, sampleInput.length, 1, 1), repl(P, 1050, "", sampleInput, 1, 1, 1, 1)];
+  let out = replaySession(evIn, { onPageTexts: [sampleInput, sampleExpected] });
+  assert.equal(out.pastes.find((p) => p.len >= 30).foreign, false, "sample input suppressed");
+  const evExp = [paste(P, 1000, sampleExpected.length, 1, 1), repl(P, 1050, "", sampleExpected, 1, 1, 1, 1)];
+  out = replaySession(evExp, { onPageTexts: [sampleInput, sampleExpected] });
+  assert.equal(out.pastes.find((p) => p.len >= 30).foreign, false, "sample expected suppressed");
+});
+
+test("onPageTexts: a genuine external paste NOT on-page STAYS foreign (no over-suppression)", () => {
+  const P = "p1";
+  const statement = "Given an array of N integers, output the maximum contiguous subarray sum.";
+  const external = "def quicksort(a):\n  if len(a)<=1: return a\n  p=a[0]; return qs(lo)+[p]+qs(hi)";
+  const events = [paste(P, 1000, external.length, 1, 1), repl(P, 1050, "", external, 1, 1, 1, 1)];
+  const out = replaySession(events, { onPageTexts: [statement] });
+  assert.equal(out.pastes.find((p) => p.len >= 30).foreign, true);
 });
 
 test("truncated mega-paste prefix matching against self", () => {

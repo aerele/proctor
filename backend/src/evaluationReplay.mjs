@@ -282,6 +282,39 @@ export function collapseWs(s) {
   return String(s).replace(/\s+/g, " ").trim();
 }
 
+// Strip common Markdown SYNTAX down to plain prose so a candidate's paste of the
+// RENDERED problem statement (no backticks / heading-#/ emphasis-* / link syntax)
+// still matches the stored markdown source. Whitespace normalization is left to
+// collapseWs. Best-effort (NOT a full CommonMark parser): it removes link/image
+// syntax (keeping the visible text), fenced/inline code backticks (keeping the
+// code text), heading/blockquote/list markers, and emphasis/bold/strikethrough
+// markers. Over- or under-stripping is harmless for foreign-paste matching: the
+// RAW statement is seeded alongside this variant, so the two together only ever
+// ADD non-foreign matches (a stricter substring set), never remove a real one.
+// (EVAL-2 Layer A.2.)
+export function stripMarkdown(md) {
+  if (!md) return "";
+  let s = String(md);
+  // Images / links: ![alt](url) and [text](url) → alt / text.
+  s = s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
+  // Reference-style links: [text][ref] → text.
+  s = s.replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1");
+  // Fenced + inline code: drop the backticks, keep the inner text VERBATIM (no
+  // inserted space) so `nth_element` renders to nth_element, matching the paste.
+  s = s.replace(/`+/g, "");
+  // Heading / blockquote / list markers at line starts.
+  s = s.replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
+  s = s.replace(/^[ \t]*>[ \t]?/gm, "");
+  s = s.replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm, "");
+  // Emphasis / bold / strikethrough. Asterisks and ~~ are unambiguous markers.
+  s = s.replace(/(\*\*|\*|~~)/g, "");
+  // Underscores are emphasis ONLY at word boundaries — intraword underscores
+  // (snake_case identifiers) are literal in CommonMark, so keep them so the
+  // stripped prose still matches the rendered text the candidate sees.
+  s = s.replace(/(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])/g, "");
+  return s;
+}
+
 // Line-token Levenshtein normalized by max line count → 0..1.
 export function normalizedLineDistance(a, b) {
   const la = String(a == null ? "" : a).split("\n");
@@ -345,9 +378,14 @@ function lenWithinPair(insertedLen, pasteLen) {
 // is never separately added to the totals — the change's true insertedLen is
 // the source of truth; an UNPAIRED marker (no text-carrying change) contributes
 // its `len` to pasted_chars as a fallback.
-export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) {
+export function replaySession(events, { stubs = [], extraSelfTexts = [], onPageTexts = [] } = {}) {
   const collapsedStubs = stubs.map((s) => collapseWs(s)).filter((s) => s.length > 0);
   const collapsedExtraSelf = extraSelfTexts.map((s) => collapseWs(s)).filter((s) => s.length > 0);
+  // On-page sources (problem statement + sample I/O) the candidate legitimately
+  // SEES and may paste from; a paste already present here is NOT foreign. Kept
+  // SEPARATE from extraSelfTexts — fixed contest content, unlike a candidate's
+  // own submission, is always safe to treat as non-foreign. (EVAL-2 Layer A.2.)
+  const collapsedOnPage = onPageTexts.map((s) => collapseWs(s)).filter((s) => s.length > 0);
 
   const problems = new Map(); // pid → state
   function probState(pid) {
@@ -567,7 +605,7 @@ export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) 
           rec.len = insertedLen;
           rec.paired = true;
           rec.truncated = truncated;
-          rec.foreign = isForeign(text, beforeStr, st, problems, selfHistory, collapsedStubs, collapsedExtraSelf);
+          rec.foreign = isForeign(text, beforeStr, st, problems, selfHistory, collapsedStubs, collapsedExtraSelf, collapsedOnPage);
           // No burst/typed credit — it's a paste.
           continue;
         }
@@ -629,7 +667,7 @@ export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) 
       text: change.text,
       preview: change.collapsedText.slice(0, 200),
       paired: true,
-      foreign: isForeign(change.text, change.beforeStr, change.st, problems, selfHistory, collapsedStubs, collapsedExtraSelf),
+      foreign: isForeign(change.text, change.beforeStr, change.st, problems, selfHistory, collapsedStubs, collapsedExtraSelf, collapsedOnPage),
       truncated: change.truncated === true,
     };
     pastes.push(rec);
@@ -648,7 +686,7 @@ export function replaySession(events, { stubs = [], extraSelfTexts = [] } = {}) 
         text: change.text,
         preview: change.collapsedText.slice(0, 200),
         paired: false,
-        foreign: isForeign(change.text, change.beforeStr, change.st, problems, selfHistory, collapsedStubs, collapsedExtraSelf),
+        foreign: isForeign(change.text, change.beforeStr, change.st, problems, selfHistory, collapsedStubs, collapsedExtraSelf, collapsedOnPage),
         truncated: change.truncated === true,
       });
     } else {
@@ -897,8 +935,9 @@ export function isBareTemplate(collapsed) {
 //  - any other problem's current content (lazily collapsed + cached)
 //  - self-history (removed blobs)
 //  - any stub
+//  - any on-page source (problem statement + sample I/O — EVAL-2 Layer A.2)
 //  - any extraSelfText
-function isForeign(text, beforeContent, curSt, allProblems, selfHistory, collapsedStubs, collapsedExtraSelf) {
+function isForeign(text, beforeContent, curSt, allProblems, selfHistory, collapsedStubs, collapsedExtraSelf, collapsedOnPage = []) {
   const c = collapseWs(text);
   if (c.length < REPLAY.MIN_FOREIGN_PASTE_LEN) return false;
   // A bare language template (HR muscle-memory paste) carries zero talent /
@@ -916,6 +955,7 @@ function isForeign(text, beforeContent, curSt, allProblems, selfHistory, collaps
   }
   for (const h of selfHistory) if (h.includes(c)) return false;
   for (const s of collapsedStubs) if (s.includes(c)) return false;
+  for (const s of collapsedOnPage) if (s.includes(c)) return false;
   for (const s of collapsedExtraSelf) if (s.includes(c)) return false;
   return true;
 }

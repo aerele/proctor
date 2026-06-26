@@ -242,6 +242,10 @@ function extractFeatures(input) {
     shellEvents = [],
     problemPoints = {},
     stubsByProblem = {},
+    // onPageByProblem: per-problem on-page sources (statement + sample I/O) the
+    // candidate legitimately sees; flattened into the replay's foreign-paste
+    // check so a paste of on-page content is not flagged foreign (EVAL-2 A.2).
+    onPageByProblem = {},
     hardness = () => "easy",
     maxTotal = 0,
     clipboardEntries = [],
@@ -265,8 +269,17 @@ function extractFeatures(input) {
   }
   const extraSelfTexts = input.extraSelfTexts || [];
 
+  // Flatten the per-problem on-page sources into one list (mirrors allStubs).
+  // Global, like stubs: another problem's statement/sample I/O is just as safe a
+  // non-foreign source as a stub, and statements are problem-specific enough that
+  // cross-problem matches are negligible. (EVAL-2 Layer A.2.)
+  const allOnPage = [];
+  for (const pid of Object.keys(onPageByProblem)) {
+    for (const s of onPageByProblem[pid] || []) allOnPage.push(s);
+  }
+
   // ---- replay ----
-  const replay = replaySession(editorEvents, { stubs: allStubs, extraSelfTexts });
+  const replay = replaySession(editorEvents, { stubs: allStubs, extraSelfTexts, onPageTexts: allOnPage });
 
   // AVAILABILITY GATES (missing-data, 2026-06-19). A detector that needs a signal
   // must verify the signal is PRESENT; absent ⇒ inconclusive, never a flag. The
@@ -290,20 +303,36 @@ function extractFeatures(input) {
   }
 
   // ---- foreign pastes (D2) ----
+  // GLITCH GATE (EVAL-2 — mirrors the replay_tamper safety valve): a paste is
+  // only asserted "confidently foreign" when its problem's reconstruction is
+  // glitch-free. On a glitchy problem the replayed beforeContent / cross-problem
+  // content is unreliable, so isForeign's "not seen earlier" answer can't be
+  // trusted — we cannot be sure the pasted text wasn't actually self / on-page.
+  // Such a paste is DEGRADED to `unverified_pastes` (reason
+  // reconstruction_unreliable), never silently dropped, and kept OUT of
+  // `foreign_pastes` so the D2 rule and the confirmed-tier after-away check only
+  // ever see confidently-foreign pastes. (glitchFree mirrors replayTamper:61-62.)
+  const glitchFree = (pid) => (replay.problems[pid]?.glitches || 0) === 0;
   const foreign_pastes = [];
+  const unverified_pastes = [];
   for (const p of replay.pastes) {
     if (!p.foreign) continue;
     const after = awayCorrByPasteTs.has(`${p.problem_id}::${p.ts}`)
       ? awayCorrByPasteTs.get(`${p.problem_id}::${p.ts}`)
       : null;
-    foreign_pastes.push({
+    const rec = {
       problem_id: p.problem_id,
       ts: tsIso(p.ts),
       len: p.len,
       preview: (p.preview || "").slice(0, 200),
       after_away_ms: after,
       truncated: p.truncated === true,
-    });
+    };
+    if (glitchFree(p.problem_id)) {
+      foreign_pastes.push(rec);
+    } else {
+      unverified_pastes.push({ ...rec, reason: "reconstruction_unreliable" });
+    }
   }
 
   // ---- per-problem submission stats ----
@@ -553,6 +582,7 @@ function extractFeatures(input) {
     cadence,
     awayCorr,
     foreign_pastes,
+    unverified_pastes,
     away_paste_correlations,
 
     // availability inputs (consumed by engine.buildAvail + replay_tamper rule)
@@ -641,6 +671,11 @@ export function buildScorecard(input) {
     pasted_chars: f.totalPasted,
     paste_ratio: round4(f.paste_ratio),
     foreign_pastes: f.foreign_pastes,
+    // Pastes that WOULD be foreign but whose problem reconstruction has glitches
+    // (>0) — degraded from foreign to "unverified" (EVAL-2 glitch gate). Kept on
+    // the record (not dropped) so a reviewer can still see them, but NOT counted
+    // as confidently-foreign by any rule. Empty in the glitch-free common case.
+    unverified_pastes: f.unverified_pastes,
     away_paste_correlations: f.away_paste_correlations,
     cadence: f.cadence,
     zero_effort_solves,

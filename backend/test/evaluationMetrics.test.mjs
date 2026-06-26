@@ -409,6 +409,60 @@ test("buildScorecard foreign_paste_after_away → critical", () => {
   assert.ok(sc.flags.find((f) => f.code === "foreign_paste_after_away" && f.severity === "critical"));
 });
 
+// ---- EVAL-2 A.2: statement + sample I/O are on-page (not foreign) -------------
+test("buildScorecard onPageByProblem: pasting the problem statement is NOT foreign (A.2)", () => {
+  const statement = "Read N then N integers and print the maximum contiguous subarray sum (Kadane).";
+  const chunk = "print the maximum contiguous subarray sum (Kadane).";
+  const events = [pasteEv("p1", 1000, chunk.length), replEv("p1", 1050, 0, chunk)];
+  // Without onPage it would be foreign; with it threaded it is suppressed.
+  const without = buildScorecard(baseInput({ editorEvents: events }));
+  assert.equal(without.integrity.foreign_pastes.length, 1, "foreign without on-page");
+  const sc = buildScorecard(baseInput({ editorEvents: events, onPageByProblem: { p1: [statement] } }));
+  assert.equal(sc.integrity.foreign_pastes.length, 0, "statement paste is on-page, not foreign");
+});
+
+test("buildScorecard onPageByProblem: pasting sample input/expected is NOT foreign (A.2)", () => {
+  const sampleInput = "5\n3 1 4 1 5\nextra descriptive sample row text here";
+  const sampleExpected = "1 1 3 4 5 -- the sorted ascending sample output row";
+  const events = [pasteEv("p1", 1000, sampleExpected.length), replEv("p1", 1050, 0, sampleExpected)];
+  const sc = buildScorecard(
+    baseInput({ editorEvents: events, onPageByProblem: { p1: [sampleInput, sampleExpected] } })
+  );
+  assert.equal(sc.integrity.foreign_pastes.length, 0);
+});
+
+test("buildScorecard onPageByProblem: a genuine external paste STAYS foreign (no over-suppression, A.2)", () => {
+  const statement = "Read N then N integers and print the maximum contiguous subarray sum (Kadane).";
+  const external = "def quicksort(a):\n  if len(a)<=1: return a\n  p=a[0]; return qs(lo)+[p]+qs(hi)";
+  const events = [pasteEv("p1", 1000, external.length), replEv("p1", 1050, 0, external)];
+  const sc = buildScorecard(baseInput({ editorEvents: events, onPageByProblem: { p1: [statement] } }));
+  assert.equal(sc.integrity.foreign_pastes.length, 1, "external paste not on-page stays foreign");
+});
+
+// ---- EVAL-2: glitch gate on foreign pastes -----------------------------------
+test("buildScorecard GLITCH GATE on foreign paste: glitchy problem → unverified, not foreign", () => {
+  const foreign = "def solve(n):\n  total=0\n  for i in range(n): total+=i*i\n  return total*2";
+  // A delete on an empty buffer forces a reconstruction glitch on p1 (range
+  // disagrees with deletedLen) BEFORE the foreign paste lands.
+  const glitchDelete = {
+    type: "editor_delete", timestamp: tsAt(900), problem_id: "p1",
+    detail: { insertedLen: 0, deletedLen: 5, text: "", startLine: 3, startCol: 1, endLine: 3, endCol: 6 },
+  };
+  const events = [glitchDelete, pasteEv("p1", 1000, foreign.length), replEv("p1", 1050, 0, foreign)];
+  const sc = buildScorecard(baseInput({ editorEvents: events }));
+  assert.equal(sc.integrity.foreign_pastes.length, 0, "glitchy-problem paste is not confidently foreign");
+  assert.ok(Array.isArray(sc.integrity.unverified_pastes));
+  assert.equal(sc.integrity.unverified_pastes.length, 1, "degraded to unverified, not dropped");
+  assert.equal(sc.integrity.unverified_pastes[0].problem_id, "p1");
+  assert.equal(sc.integrity.unverified_pastes[0].reason, "reconstruction_unreliable");
+  assert.ok(!sc.flags.some((f) => f.code === "foreign_paste" || f.code === "foreign_paste_after_away"),
+    "no foreign-paste flag fires on a glitchy problem");
+  // Contrast: the SAME paste on a glitch-free problem IS foreign.
+  const clean = buildScorecard(baseInput({ editorEvents: [pasteEv("p1", 1000, foreign.length), replEv("p1", 1050, 0, foreign)] }));
+  assert.equal(clean.integrity.foreign_pastes.length, 1, "clean-problem paste stays foreign");
+  assert.equal(clean.integrity.unverified_pastes.length, 0);
+});
+
 test("buildScorecard replay-vs-submission mismatch detect (D16b) → telemetry_tampered", () => {
   // editor state at submit is SUBSTANTIVE (≥30 collapsed chars — the
   // empty-snapshot guard must not eat real tamper evidence) but the submission

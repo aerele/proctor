@@ -24,8 +24,32 @@ import {
   applyCrossPatches,
   identityKeyOf,
 } from "./evaluationMetrics.mjs";
-import { collapseWs } from "./evaluationReplay.mjs";
+import { collapseWs, stripMarkdown } from "./evaluationReplay.mjs";
 import { makeHardness } from "./evaluationClone.mjs";
+
+// On-page sources a candidate legitimately SEES and may paste from without it
+// being foreign: the problem STATEMENT (markdown — seed BOTH the raw source and
+// a markdown-stripped prose variant so a paste of either the source text or the
+// rendered text matches) and each sample test's INPUT / EXPECTED output (plain
+// text). Threaded into replaySession→isForeign as on-page sources, kept SEPARATE
+// from extraSelfTexts (the self-submission caveat does not apply to fixed
+// contest content). (EVAL-2 Layer A.2.)
+function buildOnPageTexts(problem) {
+  if (!problem) return [];
+  const out = [];
+  const statement = typeof problem.statement === "string" ? problem.statement : "";
+  if (statement) {
+    out.push(statement);
+    const stripped = stripMarkdown(statement);
+    if (stripped && stripped !== statement) out.push(stripped);
+  }
+  const samples = Array.isArray(problem.sampleTests) ? problem.sampleTests : [];
+  for (const t of samples) {
+    if (t && typeof t.input === "string" && t.input) out.push(t.input);
+    if (t && typeof t.expected === "string" && t.expected) out.push(t.expected);
+  }
+  return out;
+}
 
 // The meta doc id prefix — held out of the `evaluations` list by listEvaluations.
 const META_ID_PREFIX = "__meta::";
@@ -192,6 +216,7 @@ export function makeEvaluation(ctx) {
     const entries = contestProblemEntries(contest);
     const problemPoints = {};
     const stubsByProblem = {};
+    const onPageByProblem = {};
     let maxTotal = 0;
     const problemList = [];
     for (const entry of entries) {
@@ -203,6 +228,7 @@ export function makeEvaluation(ctx) {
       problemPoints[pid] = points;
       maxTotal += Number(points) || 0;
       stubsByProblem[pid] = problem && problem.stubs ? Object.values(problem.stubs) : [];
+      onPageByProblem[pid] = buildOnPageTexts(problem);
       problemList.push({ problem_id: pid });
     }
     // accepted-distinct-identity counts per problem → hardness buckets.
@@ -230,7 +256,7 @@ export function makeEvaluation(ctx) {
       }
     }
     const hardness = makeHardness(challenges);
-    return { problemPoints, stubsByProblem, maxTotal, hardness, problemList };
+    return { problemPoints, stubsByProblem, onPageByProblem, maxTotal, hardness, problemList };
   }
 
   // ---- identity universe ----------------------------------------------------
@@ -348,7 +374,7 @@ export function makeEvaluation(ctx) {
     const submissions = submissionsSnap.docs.map((d) => d.data());
     const sessions = sessionsSnap.docs.map((d) => d.data());
 
-    const { problemPoints, stubsByProblem, maxTotal, hardness, problemList } =
+    const { problemPoints, stubsByProblem, onPageByProblem, maxTotal, hardness, problemList } =
       await buildProblemContext(contest, submissions);
 
     // Group sessions + submissions by identity key.
@@ -467,6 +493,7 @@ export function makeEvaluation(ctx) {
         shellEvents,
         problemPoints,
         stubsByProblem,
+        onPageByProblem,
         hardness,
         maxTotal,
         clipboardEntries,
