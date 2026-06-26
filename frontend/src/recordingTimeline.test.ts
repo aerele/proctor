@@ -17,6 +17,7 @@ import {
   eventTypeFacets,
   filterTimelineLog,
   isDuringGap,
+  isInfoEntry,
   offsetSecFor,
   submissionScoreSummary,
   summarizeEventDetail
@@ -369,10 +370,12 @@ describe("buildTimelineLog", () => {
     expect(entries[0].detail).toBe("problem: two-sum");
     expect(entries[1].duringGap).toBe(true);
     // They survive the event-type filter the same way other event types do.
-    const onlyBurst = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, eventTypes: ["notable_burst"] });
+    // LOG-1: editor markers are now INFO (hidden by default), so reveal them with
+    // showInfoActivities to assert the event-type narrowing still isolates them.
+    const onlyBurst = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, eventTypes: ["notable_burst"] });
     expect(onlyBurst.map((e) => e.type)).toEqual(["notable_burst"]);
     // And the "events" kind toggle hides them with the rest of the event stream.
-    const noEvents = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, events: false });
+    const noEvents = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, events: false });
     expect(noEvents).toHaveLength(0);
   });
 });
@@ -389,21 +392,32 @@ describe("filterTimelineLog", () => {
     gaps: []
   });
 
-  it("defaults keep everything", () => {
-    expect(filterTimelineLog(entries, DEFAULT_LOG_FILTERS)).toHaveLength(4);
+  // LOG-1: the default now HIDES neutral/info rows (here the lone window_blur
+  // event), keeping every NOTABLE row (the two alerts + the submission). The
+  // "Show info activities" flag (showInfoActivities) reveals the info row.
+  it("defaults keep every notable entry and hide info (window_blur)", () => {
+    const def = filterTimelineLog(entries, DEFAULT_LOG_FILTERS);
+    expect(def.map((e) => e.kind)).toEqual(["alert", "alert", "submission"]);
+    expect(def.some((e) => e.type === "window_blur")).toBe(false);
+  });
+
+  it("showInfoActivities reveals the hidden info rows (everything visible)", () => {
+    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true })).toHaveLength(4);
   });
 
   it("kind toggles drop that stream", () => {
-    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, events: false }).map((e) => e.kind)).toEqual([
+    // events:false drops the event stream regardless of the info flag.
+    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, events: false }).map((e) => e.kind)).toEqual([
       "alert",
       "alert",
       "submission"
     ]);
-    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, alerts: false, submissions: false })).toHaveLength(1);
+    // With info revealed, alerts+submissions off leaves only the lone event.
+    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, alerts: false, submissions: false })).toHaveLength(1);
   });
 
   it("severity narrows alerts only (events/submissions unaffected)", () => {
-    const critOnly = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, severity: "critical" });
+    const critOnly = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, severity: "critical" });
     expect(critOnly.map((e) => e.id)).toEqual(["alert:a-crit", entries[2].id, entries[3].id]);
   });
 
@@ -414,12 +428,12 @@ describe("filterTimelineLog", () => {
     // "tab" is in the two alert labels ("Tab switched away").
     const tab = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "tab" });
     expect(tab.map((e) => e.kind)).toEqual(["alert", "alert"]);
-    // matches the raw event type too.
-    const byType = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "window_blur" });
+    // matches the raw event type too (window_blur is info → reveal it to search it).
+    const byType = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, query: "window_blur" });
     expect(byType.map((e) => e.kind)).toEqual(["event"]);
-    // case-insensitive; empty query is a no-op.
+    // case-insensitive; empty query is a no-op (info revealed keeps all 4).
     expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "TWO SUM" })).toHaveLength(1);
-    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, query: "   " })).toHaveLength(4);
+    expect(filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, query: "   " })).toHaveLength(4);
   });
 
   it("free-text query matches the submission score (counts + points in label/detail)", () => {
@@ -438,19 +452,20 @@ describe("filterTimelineLog", () => {
   });
 
   it("eventTypes narrows EVENTS only (empty set = all event types)", () => {
-    const onlyBlur = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, eventTypes: ["window_blur"] });
+    // window_blur is info → reveal it so the test exercises the event-type narrow.
+    const onlyBlur = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, eventTypes: ["window_blur"] });
     // the lone event survives; alerts + submission untouched.
     expect(onlyBlur.map((e) => e.kind)).toEqual(["alert", "alert", "event", "submission"]);
-    const noneMatch = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, eventTypes: ["clipboard_activity"] });
+    const noneMatch = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, eventTypes: ["clipboard_activity"] });
     expect(noneMatch.some((e) => e.kind === "event")).toBe(false);
     // alerts/submissions still present (event-type filter never touches them).
     expect(noneMatch.map((e) => e.kind)).toEqual(["alert", "alert", "submission"]);
   });
 
   it("alertTypes narrows ALERTS only (empty set = all alert types)", () => {
-    const onlyTabAway = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, alertTypes: ["tab_away"] });
+    const onlyTabAway = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, alertTypes: ["tab_away"] });
     expect(onlyTabAway.map((e) => e.kind)).toEqual(["alert", "alert", "event", "submission"]);
-    const noMatch = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, alertTypes: ["some_other_alert"] });
+    const noMatch = filterTimelineLog(entries, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, alertTypes: ["some_other_alert"] });
     expect(noMatch.some((e) => e.kind === "alert")).toBe(false);
     expect(noMatch.map((e) => e.kind)).toEqual(["event", "submission"]);
   });
@@ -477,7 +492,9 @@ describe("filterTimelineLog", () => {
     });
 
     it("event-type filter 'run' includes ONLY runs (events + submits dropped from the submission/event narrow)", () => {
-      const onlyRuns = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, eventTypes: ["run"] });
+      // window_blur is info → reveal it to assert a submission-type narrow leaves
+      // the (revealed) event stream untouched.
+      const onlyRuns = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, eventTypes: ["run"] });
       // The "run" key narrows the submission stream to runs AND leaves the event
       // stream untouched (selecting a submission type doesn't hide proctor events)
       // — but the submit submission is excluded.
@@ -492,10 +509,103 @@ describe("filterTimelineLog", () => {
     });
 
     it("toggling OFF the submissions kind drops both runs and submits", () => {
-      const noSubs = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, submissions: false });
+      // Reveal info so the lone (info) window_blur event is the expected remainder.
+      const noSubs = filterTimelineLog(mixed, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true, submissions: false });
       expect(noSubs.some((e) => e.kind === "submission")).toBe(false);
       expect(noSubs.map((e) => e.kind)).toEqual(["event"]);
     });
+  });
+});
+
+// LOG-1: neutral/info entries (the normal paste marker, focus/blur, fullscreen,
+// clipboard, keystroke bursts) are hidden by default behind the "Show info
+// activities" chip; NOTABLE entries (alerts incl. confirmed-foreign pastes,
+// submissions, error/other events) are never info and always show.
+describe("info / notable classification (LOG-1)", () => {
+  it("DEFAULT_LOG_FILTERS hides info by default (showInfoActivities === false)", () => {
+    expect(DEFAULT_LOG_FILTERS.showInfoActivities).toBe(false);
+  });
+
+  it("isInfoEntry: neutral event types are info; alerts/submissions/other events are NOT", () => {
+    const built = buildTimelineLog({
+      alerts: [
+        // A confirmed-FOREIGN paste surfaces as an ALERT — must be notable.
+        alert({ id: "fp", type: "paste_detected", title: "Foreign paste detected", severity: "warning", timestamp: "2026-06-05T09:02:00.000Z" })
+      ],
+      events: [
+        event({ type: "window_blur", timestamp: "2026-06-05T09:01:00.000Z" }),
+        event({ type: "clipboard_activity", timestamp: "2026-06-05T09:01:10.000Z" }),
+        // A non-neutral (error) event must stay notable.
+        event({ type: "recording_error", timestamp: "2026-06-05T09:01:20.000Z" })
+      ],
+      submissions: [submission({ submitted_at: "2026-06-05T09:03:00.000Z" })],
+      testStartMs: T0,
+      gaps: [],
+      editorMarkers: [
+        // The NORMAL (non-foreign) paste marker → info.
+        { kind: "paste", id: "paste:p:0@2026-06-05T09:01:30.000Z", timestamp: "2026-06-05T09:01:30.000Z", offsetSec: 90, chars: 40, problemId: "p", duringGap: false, label: "Paste · 40 chars" }
+      ]
+    });
+    const byType = (t: string) => built.find((e) => e.type === t)!;
+    expect(isInfoEntry(byType("window_blur"))).toBe(true);
+    expect(isInfoEntry(byType("clipboard_activity"))).toBe(true);
+    expect(isInfoEntry(byType("notable_paste"))).toBe(true); // the normal paste marker
+    expect(isInfoEntry(byType("recording_error"))).toBe(false); // error → notable
+    expect(isInfoEntry(byType("paste_detected"))).toBe(false); // alert (foreign) → notable
+    expect(isInfoEntry(byType("submit"))).toBe(false); // submission → notable
+  });
+
+  it("hides info when showInfoActivities=false, shows it when true; notable always shown", () => {
+    const built = buildTimelineLog({
+      alerts: [
+        alert({ id: "a-warn", type: "tab_away", title: "Tab switched away", severity: "warning", timestamp: "2026-06-05T09:02:00.000Z" }),
+        // A confirmed-FOREIGN paste, modeled as the alert it surfaces as.
+        alert({ id: "a-foreign", type: "paste_detected", title: "Foreign paste detected", severity: "warning", timestamp: "2026-06-05T09:02:30.000Z" })
+      ],
+      events: [event({ type: "window_blur", timestamp: "2026-06-05T09:01:00.000Z" })],
+      submissions: [],
+      testStartMs: T0,
+      gaps: [],
+      editorMarkers: [
+        { kind: "paste", id: "paste:p:0@2026-06-05T09:01:30.000Z", timestamp: "2026-06-05T09:01:30.000Z", offsetSec: 90, chars: 40, problemId: "p", duringGap: false, label: "Paste · 40 chars" }
+      ]
+    });
+
+    // Default (info OFF): the window_blur event + the normal paste marker are hidden;
+    // BOTH alerts (incl. the confirmed-foreign paste) remain.
+    const hidden = filterTimelineLog(built, DEFAULT_LOG_FILTERS);
+    expect(hidden.map((e) => e.id).sort()).toEqual(["alert:a-foreign", "alert:a-warn"]);
+    expect(hidden.some((e) => e.type === "window_blur")).toBe(false);
+    expect(hidden.some((e) => e.type === "notable_paste")).toBe(false);
+
+    // Info ON: the neutral rows appear alongside the (still-present) alerts.
+    const shown = filterTimelineLog(built, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true });
+    expect(shown.some((e) => e.type === "window_blur")).toBe(true);
+    expect(shown.some((e) => e.type === "notable_paste")).toBe(true);
+
+    // The confirmed-foreign paste ALERT + the alert show in BOTH states.
+    for (const f of [DEFAULT_LOG_FILTERS, { ...DEFAULT_LOG_FILTERS, showInfoActivities: true }]) {
+      const ids = filterTimelineLog(built, f).map((e) => e.id);
+      expect(ids).toContain("alert:a-foreign");
+      expect(ids).toContain("alert:a-warn");
+    }
+  });
+
+  it("a confirmed-foreign paste alert is never hidden even when its neutral paste marker is", () => {
+    // The SAME paste yields a neutral notable_paste marker (info) AND a foreign
+    // alert (notable). The marker hides by default; the alert never does.
+    const built = buildTimelineLog({
+      alerts: [alert({ id: "foreign", type: "paste_detected", title: "Foreign paste detected", severity: "critical", timestamp: "2026-06-05T09:01:30.000Z" })],
+      events: [],
+      submissions: [],
+      testStartMs: T0,
+      gaps: [],
+      editorMarkers: [
+        { kind: "large_paste", id: "large_paste:p:0@2026-06-05T09:01:30.000Z", timestamp: "2026-06-05T09:01:30.000Z", offsetSec: 90, chars: 412, problemId: "p", duringGap: false, label: "Large paste · 412 chars" }
+      ]
+    });
+    const def = filterTimelineLog(built, DEFAULT_LOG_FILTERS);
+    expect(def.map((e) => e.id)).toEqual(["alert:foreign"]); // marker hidden, alert kept
   });
 });
 

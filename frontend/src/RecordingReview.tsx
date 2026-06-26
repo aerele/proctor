@@ -2176,7 +2176,7 @@ function ActivityLogPanel({
 
   const hasTypeFilters = filters.eventTypes.length > 0 || filters.alertTypes.length > 0;
   const filtersActive = Boolean(filters.query.trim()) || hasTypeFilters || filters.severity ||
-    !filters.alerts || !filters.events || !filters.submissions;
+    !filters.alerts || !filters.events || !filters.submissions || filters.showInfoActivities;
 
   return (
     <div className="rounded-lg border border-line bg-panel p-4 shadow-subtle">
@@ -2203,6 +2203,16 @@ function ActivityLogPanel({
             active={filters.submissions}
             label={`Submissions ${counts.submissions}`}
             onClick={() => onFilters({ ...filters, submissions: !filters.submissions })}
+          />
+          {/* LOG-1: reveal neutral/info rows (the normal paste marker, focus/blur,
+              fullscreen, clipboard, keystroke bursts). Default OFF — info is hidden
+              on load so trivial signals don't clutter the log; toggling shows them.
+              Notable rows (alerts incl. confirmed-foreign pastes, submissions,
+              errors) are unaffected and always visible. */}
+          <LogFilterChip
+            active={filters.showInfoActivities}
+            label="Show info activities"
+            onClick={() => onFilters({ ...filters, showInfoActivities: !filters.showInfoActivities })}
           />
           <select
             className="focus-ring h-7 rounded-md border border-line bg-white px-2 text-xs text-ink disabled:opacity-50"
