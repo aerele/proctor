@@ -108,3 +108,15 @@ and owns the end-to-end result.)
 
 ## Project protocols
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- **Two `package-lock.json` files is INTENTIONAL — do not "consolidate", delete, or
+  merge them.** This repo is an npm workspace with the root `package-lock.json`, but
+  the backend Cloud Run image builds from `backend/` as a *standalone* package
+  (`npm ci` against its own committed `backend/package-lock.json` — see
+  `backend/Dockerfile`). npm ignores nested workspace locks, so the two coexist
+  safely and serve different jobs: **root lock = local dev + CI tree; backend lock =
+  the exact deployed-image tree** (carries `backend/package.json`'s overrides, e.g.
+  `uuid>=11.1.1`). They're identical today and kept honest by a CI step + a guard
+  test + Dependabot's `/backend` entry. When you change a backend dependency or
+  override, regenerate the backend lock **standalone** and commit it in the **same**
+  commit — procedure in `docs/DEPLOY.md` → "Backend deploy lockfile (reproducible
+  build — HARDEN-1)". Deleting/merging it breaks the reproducible image build.
