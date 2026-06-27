@@ -26,6 +26,19 @@ jobs:
       - name: Backend tests
         run: npm test --workspace backend
 
+      # The deployed backend image builds STANDALONE from backend/ (npm ci against
+      # the committed backend/package-lock.json — see backend/Dockerfile, HARDEN-1).
+      # CI's root `npm ci` above never exercises that lock, so validate it the exact
+      # way Cloud Build does: copy package.json + lock OUT of the workspace and run
+      # `npm ci` there. Fails the build if the two drift (e.g. a backend dep bumped
+      # without regenerating the lock) — caught pre-merge, not at deploy time.
+      - name: Verify backend deploy lockfile (standalone npm ci)
+        run: |
+          tmp="$(mktemp -d)"
+          cp backend/package.json backend/package-lock.json "$tmp/"
+          cd "$tmp"
+          npm ci --omit=dev
+
       - name: Frontend tests
         run: npx vitest run
         working-directory: frontend

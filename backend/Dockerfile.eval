@@ -14,8 +14,11 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev
+# Reproducible install — see backend/Dockerfile for the rationale. `npm ci` against
+# the committed package-lock.json installs the EXACT audited tree (incl. the
+# uuid>=11.1.1 override) and fails loudly on package.json/lock drift.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 COPY . .
 
 ENV PORT=8080

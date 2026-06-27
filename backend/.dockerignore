@@ -1,0 +1,6 @@
+# Keep the Docker build context lean and identical to the Cloud Build context
+# (backend/.gcloudignore). The image installs deps with `npm ci` (Dockerfile);
+# a stray local node_modules must never be COPYed over that layer.
+node_modules
+.git
+*.log

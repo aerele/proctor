@@ -302,9 +302,11 @@ design + proof: [`docs/proposed/paste-detection-and-activity-log.md`](docs/propo
 - **esbuild GHSA-gv7w-rqvm-qjhr (high)** — **withdrawn advisory** (GitHub retracted it
   2026-06-17) on a build-time-only tool not shipped in the prod nginx image. No code fix;
   dismiss on the Dependabot UI (or it auto-clears).
-- ◑ **HARDEN-1 — reproducible backend image build.** `backend/Dockerfile` does `COPY
-  package*.json` + `npm install --omit=dev` with **no committed lockfile**, so each build
-  re-resolves latest-in-range and none of the root `overrides` (form-data, protobufjs,
-  esbuild, uuid) reach the image except where duplicated into `backend/package.json`. Switch
-  the image to a committed backend lockfile + `npm ci` so the deployed artifact exactly
-  matches the audited tree. (Root cause of why the uuid override needed duplicating.)
+- ✅ **HARDEN-1 — reproducible backend image build.** Committed `backend/package-lock.json`
+  (standalone, pins uuid 11.1.1) + both Dockerfiles now `COPY package.json package-lock.json`
+  + `npm ci --omit=dev` (deterministic, fails closed on drift), so the deployed artifact
+  exactly matches an audited tree and carries `backend/package.json`'s overrides. Guard test
+  (`backendLockfileReproducible.test.mjs`) floors uuid + asserts the npm-ci property; CI runs
+  a standalone `npm ci` to catch lock/manifest drift pre-merge; `backend/.dockerignore` added;
+  regen procedure documented in `docs/DEPLOY.md`. Reviewed (4-lens adversarial). Deployed +
+  verified on proctor-api + proctor-eval.

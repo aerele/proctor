@@ -610,6 +610,34 @@ verified — immune to a `:latest` tag being moved by a concurrent build.
 
 ---
 
+## Backend deploy lockfile (reproducible build — HARDEN-1)
+
+The backend image is built **standalone** from `backend/` (`gcloud builds submit
+backend`), so it carries its **own committed `backend/package-lock.json`** and the
+Dockerfiles install with **`npm ci`** (deterministic; fails closed on drift). This
+is separate from the root workspace `package-lock.json` — npm ignores nested
+workspace locks, and the standalone lock is what reaches the container, so it must
+carry `backend/package.json`'s `overrides` (e.g. `uuid >= 11.1.1`).
+
+**When you change any backend dependency or override, regenerate the standalone lock
+in the same commit:**
+
+```bash
+# node 22, OUTSIDE the workspace so npm resolves backend/ as its own root:
+tmp="$(mktemp -d)"; cp backend/package.json "$tmp/"
+( cd "$tmp" && npm install --package-lock-only )
+cp "$tmp/package-lock.json" backend/package-lock.json
+git add backend/package.json backend/package-lock.json   # commit together
+```
+
+CI validates this on every push (`Verify backend deploy lockfile (standalone npm
+ci)` in `.github/workflows/ci.yml`) and the `backend/test/backendLockfileReproducible.test.mjs`
+guard floors uuid at 11.1.1; Dependabot's `/backend` entry tracks the lock's
+security updates. If `backend/package.json` and the lock drift, both CI and the
+Cloud Build `npm ci` fail — no half-resolved artifact ships.
+
+---
+
 ## Admin pre-flight health check
 
 `POST /api/admin/health-check` (admin-only, `x-admin-password` header) is the
